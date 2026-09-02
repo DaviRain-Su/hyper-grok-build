@@ -35,8 +35,8 @@ fn exact_cwd_takes_priority_over_same_repo() {
     assert_eq!(r.resolution_kind, LocalSessionResolutionKind::ExactCwd);
 }
 
-/// An `images/`-only stub in the exact cwd is skipped; resolution anchors to
-/// the real session in a sibling cwd. Mirrors the cross-dir resume bug.
+/// An `images/`-only stub in the exact cwd is skipped; resolution anchors to the real session in a sibling cwd.
+/// This mirrors the bug hit when resuming a session from a different directory.
 #[test]
 fn skips_images_only_stub_and_resolves_real_sibling() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -66,7 +66,6 @@ fn falls_back_to_same_repo_cwd_when_not_in_exact() {
     let exact_cwd = "/repo/main";
     let other_cwd = "/repo/worktree-1";
 
-    // Session only exists in other_cwd
     setup_session(&root, other_cwd, "sess-B");
 
     let result = resolve_local_session_for_repo_in_root("sess-B", &[exact_cwd, other_cwd], &root);
@@ -104,7 +103,6 @@ fn finds_restored_child_in_same_repo_different_cwd() {
     let exact_cwd = "/repo/main";
     let other_cwd = "/repo/worktree-2";
 
-    // Restored child only in other_cwd
     setup_child_session(&root, other_cwd, "restored-child", "remote-sess");
 
     let result =
@@ -143,7 +141,6 @@ fn direct_session_preferred_over_restored_child_in_same_cwd() {
 
     let result = resolve_local_session_for_repo_in_root("sess-X", &[cwd], &root);
     let r = result.unwrap();
-    // Direct match should win
     assert_eq!(r.session_id, "sess-X");
     assert_eq!(r.resolution_kind, LocalSessionResolutionKind::ExactCwd);
 }

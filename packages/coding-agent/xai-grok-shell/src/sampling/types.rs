@@ -1,25 +1,17 @@
-// Re-export all types from the standalone xai-grok-sampling-types crate.
-// This keeps all existing `crate::sampling::types::*` imports working.
+// This re-export keeps all existing `crate::sampling::types::*` imports working
 pub use xai_grok_sampling_types::types::*;
 
-// `CreateResponseWrapper` and `MessagesRequestWrapper` previously lived
-// here. They were moved into `xai-grok-sampling-types::types` (and
-// are re-exported above via the wildcard) so the new
-// `xai-grok-sampler` crate can reference them without a circular
-// dep on `xai-grok-shell`.
+// `CreateResponseWrapper` and `MessagesRequestWrapper` live in `xai-grok-sampling-types::types`, re-exported above via the wildcard
+// That placement lets the `xai-grok-sampler` crate reference them without a circular dep on `xai-grok-shell`
 
-// Tests for the types now live in xai-grok-sampling-types crate.
+// Tests for the types live in the xai-grok-sampling-types crate
 
 use xai_grok_tools::types::output::ImageContent as ToolsImageContent;
 
-/// Render an `ImageContent` produced by the read-file tool as a URL
-/// string suitable for an `image_url` content block: passes the
-/// explicit `uri` through if present, otherwise builds a
-/// `data:<mime>;base64,<data>` URI.
+/// Render an `ImageContent` produced by the read-file tool as a URL string suitable for an `image_url` content block.
+/// Passes the explicit `uri` through if present, otherwise builds a `data:<mime>;base64,<data>` URI.
 ///
-/// Lives in the shell (rather than `xai-grok-sampling-types` or
-/// `xai-grok-tools`) so neither of those crates needs to depend on
-/// `agent-client-protocol`.
+/// Lives in the shell (rather than `xai-grok-sampling-types` or `xai-grok-tools`) so neither crate needs a dep on `agent-client-protocol`.
 pub fn get_image_content_url(image_content: &ToolsImageContent) -> String {
     if let Some(uri) = &image_content.uri {
         uri.clone()

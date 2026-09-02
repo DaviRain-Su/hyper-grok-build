@@ -1,6 +1,5 @@
-//! Unit tests for [`super::manager::AuthManager`]. Extracted from
-//! `manager.rs` so the implementation reads top-to-bottom; wired in
-//! via `#[path = "manager_tests.rs"] mod tests;` in manager.rs.
+//! Unit tests for [`super::manager::AuthManager`].
+//! Extracted from `manager.rs` so the implementation reads top-to-bottom; wired in via `#[path = "manager_tests.rs"] mod tests;` in manager.rs.
 use super::*;
 use crate::auth::error::RefreshTokenError;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -13,6 +12,40 @@ fn make_auth(expires_at: Option<DateTime<Utc>>, create_time: DateTime<Utc>) -> G
         expires_at,
         ..GrokAuth::test_default()
     }
+}
+/// The one-read classification must match what split `current()` /
+/// `is_expired()` reads report for a stable credential, and `Valid` must
+/// carry the token so callers never re-read.
+#[test]
+fn cached_token_state_truth_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = AuthManager::new(dir.path(), GrokComConfig::default());
+    assert!(
+        matches!(mgr.cached_token_state(), CachedTokenState::Missing),
+        "no credential must classify Missing"
+    );
+    mgr.hot_swap(GrokAuth {
+        key: "expired".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt".into()),
+        expires_at: Some(Utc::now() - chrono::Duration::hours(1)),
+        ..GrokAuth::test_default()
+    });
+    assert!(
+        matches!(mgr.cached_token_state(), CachedTokenState::Expired),
+        "an expired credential must classify Expired"
+    );
+    mgr.hot_swap(GrokAuth {
+        key: "live".into(),
+        auth_mode: AuthMode::Oidc,
+        expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
+        ..GrokAuth::test_default()
+    });
+    let state = mgr.cached_token_state();
+    assert!(
+        matches!(&state, CachedTokenState::Valid(auth) if auth.key == "live"),
+        "a live credential must classify Valid and carry the token, got {state:?}"
+    );
 }
 #[test]
 fn expired_within_5min_buffer() {
@@ -171,9 +204,8 @@ fn new_scope_takes_precedence_over_legacy() {
     let current = mgr.current().expect("should find auth");
     assert_eq!(current.key, "new-key", "new scope should take precedence");
 }
-/// Regression test: a token within the 5-minute early-invalidation buffer
-/// must be invisible to `current()` (returns None) but visible to
-/// `expired_auth()` so that callers can attempt a silent refresh.
+/// A token inside the 5-minute early-invalidation buffer must be invisible to `current()` (returns None) but visible to `expired_auth()`.
+/// That lets callers attempt a silent refresh.
 #[test]
 fn near_expiry_token_invisible_to_current_visible_to_expired_auth() {
     let dir = tempfile::tempdir().unwrap();
@@ -403,8 +435,7 @@ async fn update_recovers_from_corrupt_auth_json_by_backing_up_old_file() {
         "backup must contain the original corrupt content, got: {backup_content}"
     );
 }
-/// Regression test: update() must preserve team fields from the OIDC flow
-/// when the proxy `/user` response does not include them.
+/// Regression test: update() must preserve team fields from the OIDC flow when the proxy `/user` response does not include them.
 #[tokio::test]
 async fn update_preserves_team_fields_when_proxy_omits_them() {
     let dir = tempfile::tempdir().unwrap();
@@ -475,8 +506,7 @@ async fn update_stores_team_token_under_base_scope() {
     );
     assert_eq!(store.get(&base_scope).unwrap().key, "team-token");
 }
-/// Logging in as personal must evict any existing team token
-/// (at most one OAuth session per issuer/client pair).
+/// Logging in as personal must evict any existing team token (at most one OAuth session per issuer/client pair).
 #[tokio::test]
 async fn team_login_then_personal_evicts_team_token() {
     let dir = tempfile::tempdir().unwrap();
@@ -511,9 +541,8 @@ async fn team_login_then_personal_evicts_team_token() {
     assert!(store.contains_key(&base_scope));
     assert_eq!(store.get(&base_scope).unwrap().key, "personal-token");
 }
-/// Regression test: clear() must only remove the current scope, not the
-/// legacy scope. Previously, logging in with OAuth would also delete the
-/// legacy `https://accounts.x.ai/sign-in` entry from auth.json.
+/// Regression test: clear() must only remove the current scope, not the legacy scope.
+/// Previously, logging in with OAuth would also delete the legacy `https://accounts.x.ai/sign-in` entry from auth.json.
 #[test]
 fn clear_does_not_remove_legacy_scope() {
     let dir = tempfile::tempdir().unwrap();
@@ -579,11 +608,9 @@ fn is_data_collection_disabled_matrix() {
         );
     }
 }
-/// Fail-direction contract of the two `AuthManager` collection predicates:
-/// `is_data_collection_disabled` fails open on missing credentials (legacy
-/// semantics shared by telemetry/sync gates), `allows_data_collection` fails
-/// closed (nothing may leave the machine while privacy state is unknown,
-/// e.g. after a mid-session `/logout`).
+/// Fail directions of the two `AuthManager` collection predicates.
+/// `is_data_collection_disabled` fails open on missing credentials, the legacy behavior the telemetry and sync gates share.
+/// `allows_data_collection` fails closed: nothing may leave the machine while privacy state is unknown, e.g. after a mid-session `/logout`.
 #[test]
 fn manager_collection_predicates_fail_directions() {
     let dir = tempfile::tempdir().unwrap();
@@ -704,10 +731,9 @@ fn try_use_disk_token_accepts_different_key_on_server_rejected() {
     let result = mgr.try_use_disk_token(Some(&disk_auth), RefreshReason::ServerRejected);
     assert_eq!(result.unwrap().key, "new-key");
 }
-/// Disk lagging memory (`update()` kept a mint after a failed disk write) is
-/// not a sibling rotation: a valid disk token minted BEFORE the live
-/// in-memory one must not clobber it — on ServerRejected that would restore
-/// the very bearer the caller is rejecting.
+/// Disk lagging memory (`update()` kept a mint after a failed disk write) is not a sibling rotation.
+/// A valid disk token minted BEFORE the live in-memory one must not clobber it.
+/// On ServerRejected that would restore the very bearer the caller is rejecting.
 #[test]
 fn try_use_disk_token_skips_disk_token_older_than_memory_mint() {
     let dir = tempfile::tempdir().unwrap();
@@ -734,11 +760,10 @@ fn try_use_disk_token_skips_disk_token_older_than_memory_mint() {
         assert_eq!(mgr.current().unwrap().key, "fresh-mint");
     }
 }
-/// The lagging-mint guard must hold when the in-memory bearer sits inside
-/// the early-invalidation buffer — the exact state that routes a refresh
-/// into the adopt paths. `current()` hides a buffered bearer, so a
-/// `current()`-gated guard was skipped in precisely that window and a
-/// lagging disk token could clobber the newest local mint.
+/// The lagging-mint guard must hold when the in-memory bearer sits inside the early-invalidation buffer.
+/// That is the exact state that routes a refresh into the adopt paths.
+/// `current()` hides a buffered bearer, so a `current()`-gated guard was skipped in precisely that window.
+/// A lagging disk token could then clobber the newest local mint.
 #[test]
 fn try_use_disk_token_lagging_guard_holds_for_buffered_in_memory_token() {
     let dir = tempfile::tempdir().unwrap();
@@ -766,10 +791,9 @@ fn try_use_disk_token_lagging_guard_holds_for_buffered_in_memory_token() {
         assert_eq!(mgr.current_or_expired().unwrap().key, "buffered-mint");
     }
 }
-/// `pick_up_sibling_token` routes through the shared enforcement point, so
-/// it refuses a lagging disk token instead of replacing a newer in-memory
-/// mint with it (previously it checked expiry + key only and wrote state
-/// directly).
+/// `pick_up_sibling_token` routes through the shared enforcement point.
+/// It refuses a lagging disk token instead of replacing a newer in-memory mint.
+/// Previously it checked only expiry and key and wrote state directly.
 #[test]
 fn pick_up_sibling_token_refuses_lagging_disk_token() {
     let dir = tempfile::tempdir().unwrap();
@@ -797,10 +821,8 @@ fn pick_up_sibling_token_refuses_lagging_disk_token() {
     );
     assert_eq!(mgr.current().unwrap().key, "fresh-mint");
 }
-/// Simulates the core scenario this PR fixes: an expired in-memory token
-/// where another process has already refreshed on disk. The manager should
-/// pick up the valid disk token via try_use_disk_token instead of
-/// attempting its own refresh.
+/// An expired in-memory token while another process has already refreshed on disk.
+/// The manager should pick up the valid disk token via try_use_disk_token instead of attempting its own refresh.
 #[tokio::test]
 async fn disk_refresh_wins_over_expired_in_memory() {
     let dir = tempfile::tempdir().unwrap();
@@ -870,8 +892,7 @@ impl TokenRefresher for FailingRefresher {
         )
     }
 }
-/// Record a permanent failure scoped to the auth manager's current (or expired)
-/// credential key, mirroring what `refresh_chain` does in production.
+/// Record a permanent failure scoped to the auth manager's current (or expired) credential key, mirroring what `refresh_chain` does in production.
 fn record_permanent_failure(
     auth_manager: &AuthManager,
     reason: crate::auth::error::RefreshTokenFailedReason,
@@ -883,10 +904,8 @@ fn record_permanent_failure(
         .unwrap_or_default();
     auth_manager.record_permanent_failure(key, reason.into());
 }
-/// A convoy member whose sibling already rotated the token must adopt it
-/// BEFORE contending the flock: with the flock held elsewhere for the whole
-/// call, `refresh_chain` still returns the sibling token promptly, with no
-/// IdP call.
+/// A process whose sibling already rotated the token must adopt it BEFORE contending the flock.
+/// With the flock held elsewhere for the whole call, `refresh_chain` still returns the sibling token promptly, with no IdP call.
 #[tokio::test]
 async fn refresh_chain_adopts_sibling_pre_lock_without_flock() {
     let dir = tempfile::tempdir().unwrap();
@@ -935,9 +954,8 @@ async fn refresh_chain_adopts_sibling_pre_lock_without_flock() {
         "a pure adoption must not reach the IdP"
     );
 }
-/// ServerRejected with the disk token identical to the rejected one must NOT
-/// adopt pre-lock: the caller needs a genuinely new credential, so it falls
-/// through to a locked mint.
+/// ServerRejected with the disk token identical to the rejected one must NOT adopt pre-lock.
+/// The caller needs a genuinely new credential, so it falls through to a locked mint.
 #[tokio::test]
 async fn refresh_chain_server_rejected_same_key_skips_pre_lock_adopt() {
     let dir = tempfile::tempdir().unwrap();
@@ -971,9 +989,8 @@ async fn refresh_chain_server_rejected_same_key_skips_pre_lock_adopt() {
         "a same-key disk token must mint under the flock"
     );
 }
-/// A buffered-expired sibling token on disk is not adoptable: the pre-lock
-/// check declines and the chain mints under the flock, so adoption can never
-/// hand back a token the next request would immediately re-refresh.
+/// A sibling token inside the expiry buffer is not adoptable: the pre-lock check declines and the chain mints under the flock.
+/// Adoption can then never hand back a token the next request would immediately re-refresh.
 #[tokio::test]
 async fn refresh_chain_pre_lock_adopt_ignores_expired_disk_token() {
     let dir = tempfile::tempdir().unwrap();
@@ -1013,10 +1030,9 @@ async fn refresh_chain_pre_lock_adopt_ignores_expired_disk_token() {
         "a buffered-expired disk token must not be adopted"
     );
 }
-/// Disk lagging memory must not be "adopted" pre-lock: with a live mint in
-/// memory and an older still-valid token on disk (`update()` disk write
-/// failed), `refresh_chain` returns the in-memory mint untouched instead of
-/// hot-swapping the older bearer back in.
+/// Disk lagging memory must not be "adopted" pre-lock.
+/// Here a live mint sits in memory and an older still-valid token sits on disk (`update()`'s disk write failed).
+/// `refresh_chain` returns the in-memory mint untouched instead of hot-swapping the older bearer back in.
 #[tokio::test]
 async fn refresh_chain_pre_lock_adopt_skips_disk_token_older_than_memory() {
     let dir = tempfile::tempdir().unwrap();
@@ -1058,11 +1074,9 @@ async fn refresh_chain_pre_lock_adopt_skips_disk_token_older_than_memory() {
         "neither adoption nor a mint may replace the fresher in-memory token"
     );
 }
-/// Same lagging-disk guard on its only reachable step-1c path: with a valid
-/// in-memory token, `PreRequest` short-circuits at step 1, so only
-/// `ServerRejected` carries a live mint into the pre-lock adopt. A
-/// different-key disk token minted well before the rejected one must not be
-/// adopted — the chain mints under the flock instead.
+/// Same lagging-disk guard on the only path that reaches it with a live mint.
+/// With a valid in-memory token `PreRequest` short-circuits at the recheck, so only `ServerRejected` carries a live mint into `AdoptBeforeLock`.
+/// A different-key disk token minted well before the rejected one must not be adopted; the chain mints under the flock instead.
 #[tokio::test]
 async fn refresh_chain_server_rejected_skips_lagging_disk_token_pre_lock() {
     let dir = tempfile::tempdir().unwrap();
@@ -1103,14 +1117,12 @@ async fn refresh_chain_server_rejected_skips_lagging_disk_token_pre_lock() {
         "a lagging disk token must not be adopted in place of the rejected mint"
     );
 }
-/// The bounded wrapper returns a transient error at the deadline WITHOUT
-/// dropping the mint: the spawned chain finishes afterwards, hot-swaps the
-/// minted token, and persists it to disk, so the rotated refresh token is
-/// never abandoned and siblings can adopt it.
+/// The bounded wrapper returns a transient error at the deadline WITHOUT dropping the mint.
+/// The spawned chain finishes afterwards, hot-swaps the minted token, and persists it to disk.
+/// The rotated refresh token is never abandoned and siblings can adopt it.
 #[tokio::test]
 async fn refresh_chain_bounded_times_out_without_dropping_mint() {
-    /// Signals just before returning `Success`, so the test can await the
-    /// mint's completion instead of polling on a scheduler-dependent clock.
+    /// Signals just before returning `Success`, so the test can await the mint's completion instead of polling on a scheduler-dependent clock.
     struct SlowSignallingRefresher {
         call_count: Arc<AtomicU32>,
         returning: Arc<tokio::sync::Notify>,
@@ -1185,10 +1197,9 @@ async fn refresh_chain_bounded_times_out_without_dropping_mint() {
         "exactly one IdP call: bounded return must not re-mint"
     );
 }
-/// With `inner == None` but a dead refresh-token on disk, the refresher still
-/// exchanges that disk RT. The verdict must be keyed on the
-/// credential actually tried (the disk RT), so repeated reactive refreshes
-/// short-circuit on it instead of hammering the IdP.
+/// With `inner == None` but a dead refresh token on disk, the refresher still exchanges that disk RT.
+/// The verdict must be keyed on the credential actually tried (the disk RT).
+/// Repeated reactive refreshes then short-circuit on it instead of hammering the IdP.
 #[tokio::test]
 async fn storm_cap_engages_with_empty_inner_and_dead_disk_refresh_token() {
     let dir = tempfile::tempdir().unwrap();
@@ -1225,12 +1236,9 @@ async fn storm_cap_engages_with_empty_inner_and_dead_disk_refresh_token() {
     );
 }
 /// Record/check consistency: in-mem and disk are DIFFERENT stale credentials.
-/// The refresher reports `tried_key = disk`; with a retain-path permanent
-/// (`ClientRejected`) credentials stay, so the verdict stays scoped to disk.
-/// Swapping the in-mem bearer must not re-open the IdP (a verdict mis-keyed to
-/// the in-mem bearer would read absent after the swap). The `tried_key == None`
-/// fallback (external-binary flow → `attempted_verdict_key`) is covered by
-/// `storm_cap_engages_with_empty_inner_and_dead_disk_refresh_token`.
+/// The refresher reports the disk key as `tried_key`; `ClientRejected` retains credentials, so the verdict stays scoped to disk.
+/// Swapping the in-mem bearer must not re-open the IdP (a verdict mis-keyed to the in-mem bearer would read absent after the swap).
+/// The `tried_key == None` fallback (external-binary flow) is covered by `storm_cap_engages_with_empty_inner_and_dead_disk_refresh_token`.
 #[tokio::test]
 async fn verdict_not_keyed_on_in_mem_bearer() {
     let dir = tempfile::tempdir().unwrap();
@@ -1303,13 +1311,10 @@ async fn verdict_not_keyed_on_in_mem_bearer() {
         "verdict keyed on the tried disk credential must survive an in-mem swap",
     );
 }
-/// Success → persist-failure → transient: a refresh that obtains a fresh token
-/// but cannot write it to disk must surface `Transient` AND still swap the
-/// in-memory bearer to the fresh token (the "always update in-memory even if the
-/// disk write failed" invariant — without it a disk hiccup strands the session).
-/// The write is failed deterministically (root-safe) via the path-scoped
-/// `WRITE_FAULT_PATH` injection in `storage.rs`; the auth.json read (file
-/// absent) and the file lock still succeed.
+/// A refresh that obtains a fresh token but cannot write it to disk must return `Transient` AND still swap the in-memory bearer to the fresh token.
+/// That is the "always update in-memory even if the disk write failed" invariant; without it a disk hiccup strands the session.
+/// The write is failed deterministically (root-safe) via the path-scoped `WRITE_FAULT_PATH` injection in `storage.rs`.
+/// The auth.json read (file absent) and the file lock still succeed.
 #[tokio::test]
 async fn refresh_persist_failure_is_transient_but_swaps_in_memory() {
     let dir = tempfile::tempdir().unwrap();
@@ -1440,8 +1445,7 @@ async fn auth_permanent_failure_stops_retries() {
     mgr.hot_swap(valid);
     assert_eq!(mgr.auth().await.unwrap().key, "new-valid-key");
 }
-/// auth() re-reads disk via pick_up_sibling_token and returns the
-/// sibling-written token when the in-memory token is stale.
+/// auth() re-reads disk via pick_up_sibling_token and returns the sibling-written token when the in-memory token is stale.
 #[tokio::test]
 async fn auth_legacy_session_picks_up_sibling_disk_token() {
     let dir = tempfile::tempdir().unwrap();
@@ -1498,12 +1502,9 @@ async fn refresh_chain_surfaces_transient_failure() {
         "TransientFailure should surface as a transient refresh error, got {err:?}"
     );
 }
-/// Regression: `current()` and `auth()` must agree on whether an
-/// expired API key is usable. Pre-fix, `current()` filtered with
-/// `!is_token_expired()` (returning None) while the `auth()`
-/// `TokenType::ApiKey` branch cloned the stale entry, so the UI saw
-/// "logged out" while downstream consumers (trace upload, MCP,
-/// embeddings) sent the stale key and hit 401.
+/// Regression: `current()` and `auth()` must agree on whether an expired API key is usable.
+/// Pre-fix, `current()` filtered with `!is_token_expired()` (returning None) while the `auth()` `TokenType::ApiKey` branch cloned the stale entry.
+/// The UI saw "logged out" while downstream consumers (trace upload, MCP, embeddings) sent the stale key and hit 401.
 #[tokio::test]
 async fn auth_returns_expired_api_key_consistently_with_current() {
     let dir = tempfile::tempdir().unwrap();
@@ -1555,15 +1556,12 @@ async fn auth_returns_expired_api_key_consistently_with_current() {
         Some("fresh-api-key")
     );
 }
-/// Regression: after a permanent refresh failure (e.g. `invalid_grant`),
-/// the proactive refresh task must back off rather than hammer
-/// `auth()` in a tight loop. Pre-fix, an expired token + cached
-/// PermanentFailure caused `sleep_dur=0` -> `auth()` -> error -> repeat.
+/// Regression: after a permanent refresh failure (e.g. `invalid_grant`), the proactive refresh task must back off.
+/// Pre-fix, an expired token with a cached PermanentFailure looped: `sleep_dur=0`, `auth()`, error, repeat.
 ///
-/// Verified by observing the loop's iteration counter directly: in a
-/// 300ms window we tolerate at most a few iterations (one for the
-/// initial failure-recording pass, then back-off). Pre-fix the
-/// counter would have been in the thousands.
+/// Verified by observing the loop's iteration counter directly.
+/// A 300ms window tolerates at most a few iterations (one initial failure-recording pass, then back-off).
+/// Pre-fix the counter would have been in the thousands.
 #[tokio::test]
 async fn proactive_refresh_backs_off_on_permanent_failure() {
     let dir = tempfile::tempdir().unwrap();
@@ -1611,21 +1609,11 @@ async fn proactive_refresh_backs_off_on_permanent_failure() {
     );
     cancel.cancel();
 }
-/// Regression: `start_proactive_refresh` must be
-/// idempotent. Calling it twice on the same `Arc<AuthManager>` was
-/// previously valid (no guard) and would `tokio::spawn` two
-/// background tasks racing on the same in-memory state.
+/// Regression: `start_proactive_refresh` must be idempotent.
+/// Without the guard a second call on the same `Arc<AuthManager>` would `tokio::spawn` two background tasks racing on the same in-memory state.
 ///
-/// Asserting on `proactive_iteration_count` is not a meaningful signal
-/// because the test fixture (ApiKey + expires_at: None) made every
-/// spawned task sleep for `BACKOFF_INTERVAL` immediately. With or
-/// without the guard the iteration counter stayed at 0, so that
-/// assertion was vacuous (removing the guard left the test passing). The
-/// fix is to assert on the new `proactive_start_count()` accessor,
-/// which is bumped *inside* the `compare_exchange` success branch
-/// in `start_proactive_refresh` -- so it is exactly 1 if the guard
-/// fires and N otherwise. This directly observes the invariant
-/// instead of inferring it from loop-iteration mechanics.
+/// `proactive_iteration_count` is vacuous here: the ApiKey fixture (`expires_at: None`) makes every task sleep for `BACKOFF_INTERVAL` immediately.
+/// `proactive_start_count()` is bumped inside the `compare_exchange` success branch, so it reads exactly 1 when the guard fires and N otherwise.
 #[tokio::test]
 async fn start_proactive_refresh_is_idempotent() {
     let dir = tempfile::tempdir().unwrap();
@@ -1655,8 +1643,7 @@ async fn start_proactive_refresh_is_idempotent() {
     );
     cancel.cancel();
 }
-/// Proactive path: near-expiry OIDC token -> background task fires
-/// refresh_chain(PreRequest) -> consumer sees fresh token.
+/// Proactive path: a near-expiry OIDC token makes the background task fire refresh_chain(PreRequest), and the consumer sees the fresh token.
 #[tokio::test]
 async fn proactive_refresh_and_consumer_see_fresh_token_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
@@ -1685,8 +1672,8 @@ async fn proactive_refresh_and_consumer_see_fresh_token_end_to_end() {
     assert_eq!(mgr.get_valid_token().await.unwrap(), "fresh-token");
     cancel.cancel();
 }
-/// Reactive path: expired OIDC token -> try_recover_unauthorized ->
-/// refresh_chain(ServerRejected) -> refresher -> consumer sees fresh token.
+/// Reactive path: an expired OIDC token goes through try_recover_unauthorized, refresh_chain(ServerRejected), and the refresher.
+/// The consumer sees the fresh token.
 #[tokio::test]
 async fn reactive_401_recovery_produces_fresh_token_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
@@ -1714,8 +1701,7 @@ async fn reactive_401_recovery_produces_fresh_token_end_to_end() {
     assert_eq!(call_count.load(Ordering::SeqCst), 1);
     assert_eq!(mgr.get_valid_token().await.unwrap(), "fresh-token");
 }
-/// Different disk RT with expired AT: demote to transient so a sibling's
-/// still-usable RT is not wiped by permanent clear.
+/// A different refresh token on disk with an expired access token: demote to transient so a sibling's still-usable RT is not wiped by permanent clear.
 #[tokio::test]
 async fn refresh_chain_demotes_when_disk_rt_differs_even_if_at_expired() {
     let dir = tempfile::tempdir().unwrap();
@@ -1779,16 +1765,12 @@ async fn refresh_chain_demotes_when_disk_rt_differs_even_if_at_expired() {
 }
 /// Regression test for the multi-process logout incident.
 ///
-/// This is the shape `OidcRefresher` actually emits in production: the tried
-/// credential is **fully attributed** (`tried_key` *and* `tried_refresh_token`
-/// are `Some`). The pre-existing demotion tests all built the outcome with
-/// `tried_key = None` — the external-binary shape — so they passed while the
-/// OIDC path was gated behind `tried_key.is_none()` and could never demote.
+/// This is the shape `OidcRefresher` actually emits in production: `tried_key` *and* `tried_refresh_token` are both `Some`.
+/// The pre-existing demotion tests all built the outcome with `tried_key = None` (the external-binary shape).
+/// They passed while the OIDC path was gated behind `tried_key.is_none()` and could never demote.
 ///
-/// Scenario: a sibling rotated the RT while our token exchange was in flight,
-/// so the IdP rejected the RT we spent. That is a lost race, not a revoked
-/// session: it must demote to transient and leave the sibling's credential on
-/// disk untouched.
+/// Scenario: a sibling rotated the RT while our token exchange was in flight, so the IdP rejected the RT we spent.
+/// That is a lost race, not a revoked session: it must demote to transient and leave the sibling's credential on disk untouched.
 #[tokio::test]
 async fn refresh_chain_demotes_when_attributed_tried_rt_differs_from_disk() {
     let dir = tempfile::tempdir().unwrap();
@@ -1853,9 +1835,8 @@ async fn refresh_chain_demotes_when_attributed_tried_rt_differs_from_disk() {
          sibling process until the user re-runs `grok login`",
     );
 }
-/// The demotion must *not* fire when disk still holds the very RT that was
-/// just rejected: nobody rotated, the session really is dead, and holding on
-/// to a known-revoked credential would loop forever.
+/// The demotion must *not* fire when disk still holds the very RT that was just rejected.
+/// Nobody rotated, the session really is dead, and holding on to a known-revoked credential would loop forever.
 #[tokio::test]
 async fn refresh_chain_still_discards_when_attributed_tried_rt_matches_disk() {
     let dir = tempfile::tempdir().unwrap();
@@ -1903,8 +1884,7 @@ async fn refresh_chain_still_discards_when_attributed_tried_rt_matches_disk() {
         "a genuine revocation must still record a verdict",
     );
 }
-/// Disk-first invalid_grant must not wipe an untried in-memory successor RT
-/// (mem-ahead-of-disk after a failed persist of a successful rotation).
+/// Disk-first invalid_grant must not wipe an untried in-memory successor RT (memory ahead of disk after a failed persist of a successful rotation).
 #[tokio::test]
 async fn permanent_rtr_clears_only_the_tried_side_when_rts_diverge() {
     let dir = tempfile::tempdir().unwrap();
@@ -1969,7 +1949,7 @@ async fn permanent_rtr_clears_only_the_tried_side_when_rts_diverge() {
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
-/// Retain-path permanent (ClientRejected) still graces a soft-expired wire-valid AT.
+/// A permanent verdict that retains credentials (ClientRejected) still graces an AT inside the expiry buffer but valid on the wire.
 #[tokio::test]
 async fn client_rejected_graces_soft_expired_access_token() {
     let dir = tempfile::tempdir().unwrap();
@@ -2012,7 +1992,7 @@ async fn client_rejected_graces_soft_expired_access_token() {
         "ClientRejected must retain credentials",
     );
 }
-/// Escalated permanent `Other` retains AT+RT (only RefreshTokenRejected discards).
+/// Escalated permanent `Other` retains the AT and RT (only RefreshTokenRejected discards).
 #[tokio::test]
 async fn permanent_other_retains_credentials() {
     let dir = tempfile::tempdir().unwrap();
@@ -2184,11 +2164,9 @@ async fn refresh_chain_demotes_to_transient_when_disk_rt_differs_and_at_valid() 
         "refresher must not be called when disk has a valid token"
     );
 }
-/// Regression: after `clear()` the verdict must *read as absent*
-/// — nothing drops it explicitly; it is scoped to the cleared credential and
-/// reads through as `None` once that credential is gone — so subsequent
-/// `auth()` reports the more useful `NotLoggedIn` (rather than the stale
-/// `invalid_grant` from the just-cleared session).
+/// Regression: after `clear()` the verdict must *read as absent*.
+/// Nothing drops it explicitly; it is scoped to the cleared credential and reads through as `None` once that credential is gone.
+/// Subsequent `auth()` then reports the more useful `NotLoggedIn` rather than the stale `invalid_grant` from the just-cleared session.
 #[tokio::test]
 async fn permanent_failure_reads_absent_after_clear_so_auth_reports_not_logged_in() {
     let dir = tempfile::tempdir().unwrap();
@@ -2243,12 +2221,10 @@ async fn permanent_failure_reads_absent_after_clear_so_auth_reports_not_logged_i
         "auth() after clear_in_memory must not re-hit a dead RT, got: {err:?}",
     );
 }
-/// `PERMANENT_FAILURE_TTL` means "5 *real* minutes", not "5 awake minutes":
-/// a recoverable permanent failure cached just before a system suspend must
-/// expire while the machine sleeps. The monotonic clock pauses across suspend,
-/// so expiry is judged on both clocks (see `ScopedRefreshFailure::recorded_at`)
-/// — this simulates the suspend by rewinding only the wall-clock arm and
-/// asserts the failure no longer short-circuits `auth()` on wake.
+/// `PERMANENT_FAILURE_TTL` means "5 *real* minutes", not "5 awake minutes".
+/// A recoverable permanent failure cached just before a system suspend must expire while the machine sleeps.
+/// The monotonic clock pauses across suspend, so expiry is judged on both clocks (see `ScopedRefreshFailure::recorded_at`).
+/// This simulates the suspend by rewinding only the wall-clock arm and asserts the failure no longer short-circuits `auth()` on wake.
 #[tokio::test]
 async fn permanent_failure_expires_on_wall_clock_across_sleep() {
     let dir = tempfile::tempdir().unwrap();
@@ -2279,9 +2255,8 @@ async fn permanent_failure_expires_on_wall_clock_across_sleep() {
         "has_permanent_failure must agree with permanent_failure()",
     );
 }
-/// When a user has an OIDC session (auth.json) AND a model with api_key
-/// in config.toml, the OIDC token must still be refreshable. auth()
-/// checks TokenType (from AuthManager), not the global auth_method_id.
+/// When a user has an OIDC session (auth.json) AND a model with api_key in config.toml, the OIDC token must still be refreshable.
+/// auth() checks TokenType (from AuthManager), not the global auth_method_id.
 #[tokio::test]
 async fn oidc_refresh_not_blocked_by_model_api_key() {
     let dir = tempfile::tempdir().unwrap();
@@ -2310,7 +2285,7 @@ async fn oidc_refresh_not_blocked_by_model_api_key() {
     assert_eq!(result.unwrap().key, "fresh-token");
     assert_eq!(call_count.load(Ordering::SeqCst), 1);
 }
-/// Permanent-failure cached -> backs off (>= BACKOFF_INTERVAL, plus jitter).
+/// A cached permanent failure backs off (at least BACKOFF_INTERVAL, plus jitter).
 #[test]
 fn compute_proactive_sleep_permanent_failure_returns_backoff() {
     let dir = tempfile::tempdir().unwrap();
@@ -2336,9 +2311,7 @@ fn compute_proactive_sleep_permanent_failure_returns_backoff() {
         "expected backoff + jitter, got {sleep:?}"
     );
 }
-/// Non-refreshable types (LegacySession, ApiKey, None) -> BACKOFF_INTERVAL
-/// even when expires_at is past. This is the gate the original
-/// test failed to exercise.
+/// Non-refreshable types (LegacySession, ApiKey, None) get BACKOFF_INTERVAL even when expires_at is past.
 #[test]
 fn compute_proactive_sleep_non_refreshable_returns_backoff() {
     let dir = tempfile::tempdir().unwrap();
@@ -2373,9 +2346,8 @@ fn compute_proactive_sleep_non_refreshable_returns_backoff() {
     assert_eq!(mgr.token_type(), TokenType::None);
     assert_eq!(compute_proactive_sleep(&mgr), BACKOFF_INTERVAL);
 }
-/// Sleep gate raised -> BACKOFF_INTERVAL even for a refreshable token past
-/// its expiry. Without this gate `refresh_chain` defers every attempt while
-/// the proactive loop spins at `sleep_dur=0` (the busy-loop).
+/// A raised sleep gate returns BACKOFF_INTERVAL even for a refreshable token past its expiry.
+/// Without this gate `refresh_chain` defers every attempt while the proactive loop spins at `sleep_dur=0` (the busy-loop).
 #[test]
 fn compute_proactive_sleep_sleep_gated_returns_backoff() {
     let dir = tempfile::tempdir().unwrap();
@@ -2406,10 +2378,9 @@ fn compute_proactive_sleep_sleep_gated_returns_backoff() {
         "sleep gate must back the proactive loop off instead of busy-looping"
     );
 }
-/// Dark wake -> BACKOFF_INTERVAL while a wire-valid token can still be served:
-/// `refresh_chain` defers that case, so the loop must back off rather than spin
-/// at `sleep_dur=0` against the deferral. Once nothing usable can be served the
-/// deferral stops and so does the backoff — both arms are asserted below.
+/// Dark wake returns BACKOFF_INTERVAL while a wire-valid token can still be served.
+/// `refresh_chain` defers that case, so the loop must back off rather than spin at `sleep_dur=0` against the deferral.
+/// Once nothing usable can be served the deferral stops and so does the backoff; both arms are asserted below.
 #[test]
 fn compute_proactive_sleep_dark_wake_returns_backoff() {
     let dir = tempfile::tempdir().unwrap();
@@ -2452,8 +2423,8 @@ fn compute_proactive_sleep_dark_wake_returns_backoff() {
         "dark wake must not delay recovery when no usable token can be served"
     );
 }
-/// No refresher configured -> BACKOFF_INTERVAL even for refreshable
-/// types. This is the startup-race guard.
+/// With no refresher configured the sleep is BACKOFF_INTERVAL even for refreshable types.
+/// This is the startup-race guard.
 #[test]
 fn compute_proactive_sleep_no_refresher_returns_backoff() {
     let dir = tempfile::tempdir().unwrap();
@@ -2471,8 +2442,7 @@ fn compute_proactive_sleep_no_refresher_returns_backoff() {
     assert!(mgr.refresher.read().is_none());
     assert_eq!(compute_proactive_sleep(&mgr), BACKOFF_INTERVAL);
 }
-/// Refreshable type + no `expires_at` -> BACKOFF_INTERVAL (the
-/// "external binary that doesn't return expiry" case).
+/// A refreshable type with no `expires_at` gets BACKOFF_INTERVAL (the "external binary that doesn't return expiry" case).
 #[test]
 fn compute_proactive_sleep_refreshable_no_expiry_returns_backoff() {
     let dir = tempfile::tempdir().unwrap();
@@ -2493,9 +2463,9 @@ fn compute_proactive_sleep_refreshable_no_expiry_returns_backoff() {
     assert_eq!(mgr.token_type(), TokenType::ExternalBinary);
     assert_eq!(compute_proactive_sleep(&mgr), BACKOFF_INTERVAL);
 }
-/// Refreshable type + `Some(past)` and gates pass -> the floor sleep
-/// (refresh on the next pass; floored so the adopt/skip fast paths can't
-/// spin). This is the "happy path" the gates don't block.
+/// A refreshable type with `Some(past)` and gates passing gets the floor sleep.
+/// It refreshes on the next pass; the floor keeps the adopt/skip fast paths from spinning.
+/// This is the "happy path" the gates don't block.
 #[test]
 fn compute_proactive_sleep_refreshable_past_expiry_returns_floor() {
     let dir = tempfile::tempdir().unwrap();
@@ -2517,10 +2487,8 @@ fn compute_proactive_sleep_refreshable_past_expiry_returns_floor() {
     assert_eq!(mgr.token_type(), TokenType::OidcSession);
     assert_eq!(compute_proactive_sleep(&mgr), PROACTIVE_MIN_SLEEP);
 }
-/// Refreshable type + `Some(future)` and gates pass -> sleep_dur ~=
-/// expires_at - buffer (positive, <= delta). We use a 1-hour horizon
-/// and assert the result is in a sane range rather than an exact value
-/// (executor scheduling jitter).
+/// A refreshable type with `Some(future)` and gates passing sleeps roughly `expires_at - buffer` (positive, at most the delta).
+/// A 1-hour horizon and a sane-range assert absorb executor scheduling jitter rather than pinning an exact value.
 #[test]
 fn compute_proactive_sleep_refreshable_future_expiry_returns_delta() {
     let dir = tempfile::tempdir().unwrap();
@@ -2546,9 +2514,8 @@ fn compute_proactive_sleep_refreshable_future_expiry_returns_delta() {
         "expected ~55min, got {dur:?}",
     );
 }
-/// `permanent_failure` cache auto-expires after `PERMANENT_FAILURE_TTL`,
-/// so a misclassified transient IdP error (e.g. `invalid_client` during
-/// an OAuth client rotation) doesn't permanently log the user out.
+/// The `permanent_failure` cache auto-expires after `PERMANENT_FAILURE_TTL`.
+/// A misclassified transient IdP error (e.g. `invalid_client` during an OAuth client rotation) then doesn't permanently log the user out.
 #[tokio::test]
 async fn permanent_failure_expires_after_ttl() {
     let dir = tempfile::tempdir().unwrap();
@@ -2583,14 +2550,11 @@ async fn permanent_failure_expires_after_ttl() {
         "RefreshTokenRejected must stay sticky past the TTL",
     );
 }
-/// The sticky verdict is exempt from BOTH TTL clocks — the monotonic arm
-/// (awake time) AND the wall arm (real time across a suspend, added by the
-/// sleep-straddle fix). A revoked refresh token never self-heals with time:
-/// re-pinging the IdP with it can only fail again, so no amount of aging on
-/// either clock may expire the verdict. Only a credential change heals it —
-/// the scoped read-through pinned by the `hot_swap` phase below. This is a
-/// composition guard: the sticky/non-sticky split and the wall-clock arm
-/// landed separately, so neither parent change could test their intersection.
+/// The sticky verdict is exempt from BOTH TTL clocks: the monotonic arm (awake time) AND the wall arm (real time across a suspend).
+/// A revoked refresh token never self-heals with time: re-pinging the IdP with it can only fail again.
+/// No amount of aging on either clock may expire the verdict.
+/// Only a credential change heals it, the scoped read-through pinned by the `hot_swap` phase below.
+/// The sticky/non-sticky split and the wall-clock arm landed separately, so this test pins their intersection.
 #[tokio::test]
 async fn sticky_verdict_survives_both_clocks_but_not_a_credential_change() {
     if std::time::Instant::now()
@@ -2638,9 +2602,8 @@ async fn sticky_verdict_survives_both_clocks_but_not_a_credential_change() {
         "stickiness must not outlive the credential it is scoped to",
     );
 }
-/// The verdict is scoped to the credential that produced it: swapping in a
-/// different credential makes it read through as absent, with no explicit
-/// clear.
+/// The verdict is scoped to the credential that produced it.
+/// Swapping in a different credential makes it read through as absent, with no explicit clear.
 #[tokio::test]
 async fn permanent_failure_is_scoped_to_its_credential() {
     let dir = tempfile::tempdir().unwrap();
@@ -2667,11 +2630,9 @@ async fn permanent_failure_is_scoped_to_its_credential() {
         "verdict must not apply to a different credential",
     );
 }
-/// The verdict is about the *refresh* token: `auth()` must serve a cached
-/// access token that is still within its real `expires_at` (buffer-expired
-/// but wire-valid) despite a permanent verdict scoped to that credential,
-/// without consulting the refresher. Once the same credential passes real
-/// expiry, the bypass no longer applies and the permanent error surfaces.
+/// The verdict is about the *refresh* token.
+/// `auth()` must serve a buffer-expired but wire-valid access token despite a permanent verdict on that credential, without consulting the refresher.
+/// Once the same credential passes real expiry, the bypass no longer applies and the permanent error surfaces.
 #[tokio::test]
 async fn auth_serves_wire_valid_token_despite_permanent_verdict() {
     let dir = tempfile::tempdir().unwrap();
@@ -2734,11 +2695,9 @@ async fn auth_serves_wire_valid_token_despite_permanent_verdict() {
         "the cached verdict must keep short-circuiting the refresher",
     );
 }
-/// Refresh-failure grace: when the in-memory token is in the 5-min
-/// early-invalidation buffer AND `refresh_chain` fails, `auth()`
-/// returns the cached token if it's still within its real `expires_at`.
-/// The user doesn't see a chat-turn failure for an IdP blip during
-/// the buffer window.
+/// Refresh-failure grace: the in-memory token is in the 5-min early-invalidation buffer AND `refresh_chain` fails.
+/// `auth()` returns the cached token if it's still within its real `expires_at`.
+/// The user doesn't see a chat-turn failure for an IdP blip during the buffer window.
 #[tokio::test]
 async fn auth_returns_cached_token_when_refresh_fails_within_real_expiry() {
     let dir = tempfile::tempdir().unwrap();
@@ -2847,14 +2806,9 @@ async fn update_writes_disk_before_user_enrichment() {
     assert_eq!(enriched.user_id, "enriched-user-id");
     server.abort();
 }
-/// Regression: back-to-back `update()` calls with different
-/// `refresh_token`s must converge to the LATEST token on disk, even
-/// though both spawned enrichment tasks read-modify-write disk
-/// concurrently. This locks the property the spawn-task file lock
-/// buys us; without it, the next "drop the lock for performance"
-/// PR silently regresses (an interleaved enrichment write can
-/// resurrect the older `refresh_token`, re-opening the
-/// `invalid_grant` race).
+/// Regression: back-to-back `update()` calls with different `refresh_token`s must converge to the LATEST token on disk.
+/// Both spawned enrichment tasks read-modify-write disk concurrently; the spawn-task file lock is what keeps them ordered.
+/// Without it an interleaved enrichment write can resurrect the older `refresh_token`, re-opening the `invalid_grant` race.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn enrichment_task_preserves_interleaved_token_rotation() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2916,11 +2870,9 @@ async fn enrichment_task_preserves_interleaved_token_rotation() {
     assert_eq!(final_state.user_id, "stable-user");
     server.abort();
 }
-/// Regression for the user-switch abort path: if disk's `user_id`
-/// changes during an in-flight `/user` call (a different user
-/// signed in via a sibling process), the spawned enrichment must
-/// abort cleanly rather than overlay a previous user's
-/// team/org/profile fields onto the new user's entry.
+/// Regression for the user-switch abort path: disk's `user_id` changes during an in-flight `/user` call.
+/// That happens when a different user signs in via a sibling process.
+/// The spawned enrichment must abort cleanly rather than overlay a previous user's team/org/profile fields onto the new user's entry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn enrichment_aborts_when_disk_user_changes_mid_flight() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2994,18 +2946,13 @@ async fn enrichment_aborts_when_disk_user_changes_mid_flight() {
     }
     server.abort();
 }
-/// Regression: on initial Team-principal login, the OIDC flow
-/// stamps `auth.user_id = team_id` as a placeholder so telemetry
-/// can distinguish teams immediately (see `extract_user_info` in
-/// `oidc.rs`). The `/user` enrichment then returns the *real*
-/// user_id and must overlay it onto disk -- this is the entire
-/// point of the enrichment call for Team logins. Earlier revisions
-/// of this PR compared `disk.user_id` against `user_info.user_id`
-/// and treated this legitimate placeholder->real swap as a
-/// concurrent user-switch, throwing away the email / team_name /
-/// org fields. The guard now compares against the user_id we
-/// *wrote* (`auth.user_id`), which matches disk on the bootstrap
-/// path and only diverges when a sibling actually stomped.
+/// Regression: on initial Team-principal login the OIDC flow stamps `auth.user_id = team_id` as a placeholder.
+/// Telemetry can then distinguish teams immediately (see `extract_user_info` in `oidc.rs`).
+/// The `/user` enrichment returns the *real* user_id and must overlay it onto disk; that is the entire point for Team logins.
+/// Comparing `disk.user_id` against `user_info.user_id` treated this legitimate placeholder swap as a concurrent user-switch.
+/// That wiped the email, team_name, and org fields.
+/// The guard instead compares against the user_id we *wrote* (`auth.user_id`).
+/// That matches disk on bootstrap and only diverges when a sibling actually stomped.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn enrichment_overlays_team_login_placeholder_user_id() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3082,15 +3029,10 @@ async fn enrichment_overlays_team_login_placeholder_user_id() {
     assert_eq!(enriched.team_id.as_deref(), Some("team-xyz"));
     server.abort();
 }
-/// Type-system invariant: `apply_user_info_enrichment` must NEVER
-/// touch `key`, `refresh_token`, `expires_at`, `oidc_issuer`,
-/// `oidc_client_id`, `auth_mode`, `create_time`, or
-/// `has_grok_code_access`. The `&mut GrokAuth` signature already
-/// enforces this at the type level (you cannot construct a fresh
-/// auth from a `UserInfo` -- there's no `From` impl), but a unit
-/// test pins the exact list of preserved fields so a future
-/// contributor adding a token-like field to both `GrokAuth` and
-/// `UserInfo` is forced to look here.
+/// `apply_user_info_enrichment` must NEVER touch the token and provenance fields:
+/// `key`, `refresh_token`, `expires_at`, `oidc_issuer`, `oidc_client_id`, `auth_mode`, `create_time`, `has_grok_code_access`.
+/// The `&mut GrokAuth` signature enforces this at the type level (you cannot construct a fresh auth from a `UserInfo`; there's no `From` impl).
+/// A unit test pins the exact list so a contributor adding a token-like field to both `GrokAuth` and `UserInfo` is forced to look here.
 #[test]
 fn apply_user_info_enrichment_preserves_token_fields() {
     let mut disk = GrokAuth {
@@ -3174,8 +3116,7 @@ async fn current_api_key_async_drives_refresh_chain() {
     assert_eq!(call_count.load(Ordering::SeqCst), 1);
 }
 /// Regression: empty or corrupt auth.json must be recoverable on login.
-/// Previously the guard in `update()` would skip the disk write on any
-/// non-NotFound error, leaving a working in-memory session but a broken file.
+/// Previously the guard in `update()` would skip the disk write on any non-NotFound error, leaving a working in-memory session but a broken file.
 #[tokio::test]
 async fn update_recovers_from_empty_auth_json() {
     let dir = tempfile::tempdir().unwrap();
@@ -3244,9 +3185,8 @@ async fn update_recovers_from_whitespace_only_auth_json() {
     let on_disk = std::fs::read_to_string(&auth_path).unwrap();
     assert!(on_disk.contains("ws-token"), "credential must be persisted");
 }
-/// The demotion — and therefore whether a dozen processes keep their
-/// credentials — rests entirely on this comparison, so pin its three cases
-/// directly rather than only through the refresh chain.
+/// The demotion, and therefore whether a dozen processes keep their credentials, rests entirely on this comparison.
+/// Pin its three cases directly rather than only through the refresh chain.
 #[test]
 fn refresh_token_superseded_needs_a_successor_on_disk() {
     assert!(
@@ -3263,8 +3203,7 @@ fn refresh_token_superseded_needs_a_successor_on_disk() {
          rejection must be honored rather than demoted into a retry loop"
     );
 }
-/// Expired disk AT with different RT is still treated as a sibling RT
-/// (may still be refreshable; must not be wiped by permanent clear).
+/// An expired disk AT with a different RT is still treated as a sibling RT (may still be refreshable; must not be wiped by permanent clear).
 #[tokio::test]
 async fn sibling_different_rt_with_expired_at_is_still_sibling() {
     let dir = tempfile::tempdir().unwrap();
@@ -3327,10 +3266,8 @@ async fn sibling_different_rt_with_valid_at_is_treated_as_live() {
         "valid disk token with different RT must be treated as live sibling"
     );
 }
-/// Regression: refresh_chain(ServerRejected) must bypass the "double-check"
-/// early return when the in-memory token is still valid (not expired).
-/// Without this, a JWT that is time-valid but missing a subscription claim
-/// (post-purchase) is returned as-is and the IdP is never contacted.
+/// Regression: refresh_chain(ServerRejected) must bypass the "double-check" early return when the in-memory token is still valid (not expired).
+/// Without this, a JWT that is time-valid but missing a subscription claim (post-purchase) is returned as-is and the IdP is never contacted.
 #[tokio::test]
 async fn refresh_chain_server_rejected_bypasses_valid_token_double_check() {
     let dir = tempfile::tempdir().unwrap();
@@ -3377,10 +3314,9 @@ async fn refresh_chain_server_rejected_bypasses_valid_token_double_check() {
         "in-memory token must be updated to the refreshed one"
     );
 }
-/// When two tasks both get 401 and call refresh_chain(ServerRejected)
-/// concurrently, the second caller must return the already-refreshed token
-/// without contacting the IdP again. This prevents the double-refresh race
-/// where the second caller sends a rotated refresh token → invalid_grant.
+/// Two tasks both get 401 and call refresh_chain(ServerRejected) concurrently.
+/// The second caller must return the already-refreshed token without contacting the IdP again.
+/// This prevents the double-refresh race where the second caller sends a rotated refresh token and gets invalid_grant.
 #[tokio::test]
 async fn refresh_chain_server_rejected_concurrent_skips_redundant_refresh() {
     let dir = tempfile::tempdir().unwrap();
@@ -3424,8 +3360,7 @@ async fn refresh_chain_server_rejected_concurrent_skips_redundant_refresh() {
          return the already-refreshed token via the double-check guard"
     );
 }
-/// Counterpart: refresh_chain(PreRequest) with a valid token must
-/// short-circuit and NOT call the refresher.
+/// Counterpart: refresh_chain(PreRequest) with a valid token must short-circuit and NOT call the refresher.
 #[tokio::test]
 async fn refresh_chain_pre_request_short_circuits_on_valid_token() {
     let dir = tempfile::tempdir().unwrap();
@@ -3540,13 +3475,11 @@ async fn enrich_auth_inline_unreachable_server_leaves_auth_unchanged() {
     assert_eq!(auth.user_id, before.user_id);
     assert!(!auth.is_data_collection_disabled());
 }
-/// `jsonwebtoken` needs a process-level CryptoProvider; tests that encode
-/// JWTs can't rely on another test having installed it first.
+/// `jsonwebtoken` needs a process-level CryptoProvider; tests that encode JWTs can't rely on another test having installed it first.
 fn ensure_crypto_provider() {
     let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
 }
-/// A signed (HS256) access token carrying a `Team` principal, matching the
-/// shape `peek_access_token_principal` extracts in production.
+/// A signed (HS256) access token carrying a `Team` principal, matching the shape `peek_access_token_principal` extracts in production.
 fn team_jwt(principal_id: &str) -> String {
     ensure_crypto_provider();
     jsonwebtoken::encode(
@@ -3595,8 +3528,8 @@ fn oidc_session_for_team(principal_id: &str) -> GrokAuth {
         ..GrokAuth::test_default()
     }
 }
-/// The repro: a wrong-team session persisted to disk (e.g. logged in before
-/// the pin was deployed) must be cleared at construction, not silently loaded.
+/// The repro: a wrong-team session persisted to disk (e.g. logged in before the pin was deployed).
+/// It must be cleared at construction, not silently loaded.
 #[test]
 fn new_clears_wrong_team_token_loaded_from_disk() {
     let dir = tempfile::tempdir().unwrap();
@@ -3632,8 +3565,7 @@ fn new_keeps_matching_team_token_loaded_from_disk() {
     assert_eq!(mgr.current().map(|a| a.key), Some(tok.key));
     assert!(dir.path().join("auth.json").exists());
 }
-/// `auth()` (the wire-bound chokepoint used by pager / MCP /
-/// `try_ensure_fresh_auth`) rejects and clears a wrong-team cached token.
+/// `auth()` (the wire-bound chokepoint used by pager / MCP / `try_ensure_fresh_auth`) rejects and clears a wrong-team cached token.
 #[tokio::test]
 async fn auth_rejects_and_clears_wrong_team_cached_token() {
     let dir = tempfile::tempdir().unwrap();
@@ -3667,8 +3599,7 @@ async fn auth_accepts_matching_team_cached_token() {
     assert_eq!(mgr.current().map(|a| a.key.clone()), Some(tok.key.clone()));
     assert_eq!(mgr.auth().await.unwrap().key, tok.key);
 }
-/// No pin configured: any team is accepted (the enforcement is opt-in and
-/// must not affect default deployments).
+/// No pin configured: any team is accepted (the enforcement is opt-in and must not affect default deployments).
 #[tokio::test]
 async fn no_pin_accepts_any_team_cached_token() {
     let dir = tempfile::tempdir().unwrap();
@@ -3681,8 +3612,8 @@ async fn no_pin_accepts_any_team_cached_token() {
     assert_eq!(mgr.current().map(|a| a.key.clone()), Some(tok.key.clone()));
     assert_eq!(mgr.auth().await.unwrap().key, tok.key);
 }
-/// A token that silently refreshes into a wrong-team principal is rejected by
-/// `auth()` (the wrapper gates refresh results, not just the cached fast path).
+/// A token that silently refreshes into a wrong-team principal is rejected by `auth()`.
+/// The wrapper gates refresh results, not just the cached fast path.
 #[tokio::test]
 async fn auth_rejects_token_refreshed_into_wrong_team() {
     struct WrongTeamRefresher {
@@ -3720,8 +3651,7 @@ async fn auth_rejects_token_refreshed_into_wrong_team() {
         "refreshed wrong-team token must be rejected, got {err:?}"
     );
 }
-/// A sibling-written wrong-team token picked up by `force_reload_from_disk`
-/// (relay reconnect) is cleared, not just hidden.
+/// A sibling-written wrong-team token picked up by `force_reload_from_disk` (relay reconnect) is cleared, not just hidden.
 #[test]
 fn force_reload_clears_wrong_team_token() {
     let dir = tempfile::tempdir().unwrap();
@@ -3742,12 +3672,10 @@ fn force_reload_clears_wrong_team_token() {
         "force_reload must clear auth.json on a pin violation"
     );
 }
-/// A real incident in miniature: a live in-memory OIDC session (RT
-/// present, no permanent_failure) while `auth.json` transiently reads as
-/// missing — e.g. the first read right after wake-from-sleep resolves the path
-/// to `ENOENT`. The refresh token may exist nowhere else, so the reload must
-/// RETAIN it, not discard it (the discard previously kicked off a
-/// 401 -> reactive refresh -> suspend-straddle -> invalid_grant cascade).
+/// A real incident in miniature: a live in-memory OIDC session (RT present, no permanent_failure) while `auth.json` transiently reads as missing.
+/// E.g. the first read right after wake-from-sleep resolves the path to `ENOENT`.
+/// The refresh token may exist nowhere else, so the reload must RETAIN it, not discard it.
+/// The discard previously cascaded: 401, reactive refresh, suspend straddle, invalid_grant.
 #[test]
 fn force_reload_retains_live_rt_on_transient_file_missing() {
     let dir = tempfile::tempdir().unwrap();
@@ -3776,9 +3704,8 @@ fn force_reload_retains_live_rt_on_transient_file_missing() {
     assert_eq!(retained.key, "live-session");
     assert_eq!(retained.refresh_token.as_deref(), Some("live-rt"));
 }
-/// Contrast with the retain case: once a `permanent_failure` is cached the RT
-/// is known-dead, so a persistent FileMissing must drop it (and clear the
-/// permanent_failure with it) so the next request reports `NotLoggedIn`.
+/// Contrast with the retain case: once a `permanent_failure` is cached the RT is known-dead.
+/// A persistent FileMissing must drop it (and clear the permanent_failure with it) so the next request reports `NotLoggedIn`.
 #[tokio::test]
 async fn force_reload_drops_rt_when_permanent_failure_set() {
     let dir = tempfile::tempdir().unwrap();
@@ -3814,9 +3741,8 @@ async fn force_reload_drops_rt_when_permanent_failure_set() {
         AuthError::NotLoggedIn
     ));
 }
-/// A readable `auth.json` that simply lacks our scope is the trustworthy
-/// "logged out / scope removed" signal (distinct from a missing file), so the
-/// in-memory credentials are dropped even though an RT is present.
+/// A readable `auth.json` that lacks our scope is the trustworthy "logged out / scope removed" signal (distinct from a missing file).
+/// The in-memory credentials are dropped even though an RT is present.
 #[test]
 fn force_reload_drops_creds_on_entry_missing() {
     let dir = tempfile::tempdir().unwrap();
@@ -3845,8 +3771,7 @@ fn force_reload_drops_creds_on_entry_missing() {
         "scope absent on a readable auth.json is a real logout -> drop",
     );
 }
-/// When disk holds a fresh token for our scope, the reload adopts it on the
-/// first read (no retry) — the healthy path is unchanged.
+/// When disk holds a fresh token for our scope, the reload adopts it on the first read (no retry); the healthy path is unchanged.
 #[test]
 fn force_reload_adopts_fresh_disk_token() {
     let dir = tempfile::tempdir().unwrap();
@@ -3873,8 +3798,7 @@ fn force_reload_adopts_fresh_disk_token() {
     mgr.force_reload_from_disk_with(RELOAD_RETRY_TRIES, StdDuration::ZERO);
     assert_eq!(mgr.current().unwrap().key, "fresh-from-disk");
 }
-/// A token carrying `principal_id` without `principal_type` is matched on the
-/// id alone: the pinned team is accepted, not falsely rejected.
+/// A token carrying `principal_id` without `principal_type` is matched on the id alone: the pinned team is accepted, not falsely rejected.
 #[tokio::test]
 async fn pin_matches_principal_id_without_principal_type() {
     let dir = tempfile::tempdir().unwrap();
@@ -3894,8 +3818,7 @@ async fn pin_matches_principal_id_without_principal_type() {
     );
     assert!(mgr.auth().await.is_ok());
 }
-/// A cached `AuthMode::ApiKey` session is rejected under the kill switch (here
-/// implied by a team pin), and honored when it's off.
+/// A cached `AuthMode::ApiKey` session is rejected under the kill switch (here implied by a team pin), and honored when it's off.
 #[tokio::test]
 async fn cached_api_key_session_rejected_when_api_key_auth_disabled() {
     let api_key_session = || GrokAuth {
@@ -3968,7 +3891,7 @@ async fn shared_api_key_provider_resolves_live_bearer() {
         "provider must follow the manager's refresh chain rather than snapshot at startup"
     );
 }
-/// No OAuth session → env or auth.json `xai::api_key` for voice/tools.
+/// With no OAuth session, voice/tools fall back to env or the auth.json `xai::api_key`.
 #[tokio::test]
 #[serial_test::serial]
 async fn shared_api_key_provider_static_fallthrough() {
@@ -4105,8 +4028,7 @@ async fn shared_api_key_provider_sync_falls_through_when_session_expired() {
         Some("static-after-expiry")
     );
 }
-/// A session inside the early-invalidation buffer is still wire-valid and
-/// must beat a static key on the sync path.
+/// A session inside the early-invalidation buffer is still wire-valid and must beat a static key on the sync path.
 #[tokio::test]
 #[serial_test::serial]
 async fn shared_api_key_provider_sync_buffered_session_beats_static() {
@@ -4130,8 +4052,7 @@ async fn shared_api_key_provider_sync_buffered_session_beats_static() {
     let provider = super::SharedAuthKeyProvider(mgr);
     assert_eq!(provider.current_api_key().as_deref(), Some("buffered-oidc"));
 }
-/// Auth.json create, rewrite (including same-length, caught by the inode in
-/// the memo stamp), and logout must all invalidate the disk static-key memo.
+/// Auth.json create, rewrite (including same-length, caught by the inode in the memo stamp), and logout must all invalidate the disk static-key memo.
 #[tokio::test]
 #[serial_test::serial]
 async fn shared_api_key_provider_disk_memo_follows_rewrites() {
@@ -4298,18 +4219,15 @@ async fn sleep_gate_defers_refresh_without_calling_idp() {
         "the IdP refresher must NOT be called while the sleep gate is raised"
     );
 }
-/// A sleep-deferred refresh must not poison auth state: the deferral is a
-/// typed transient (retryable on wake), maps to no `manual_auth` reason (a
-/// lid close must never count as a forced re-login in the KPI), and records
-/// no permanent-failure verdict — even after more deferred attempts than the
-/// refresher-level escalation budget tolerates (the transient-blip budget
-/// lives in the refresher, which a deferral never reaches).
+/// A sleep-deferred refresh must not poison auth state.
+/// The deferral is a typed transient, retryable on wake.
+/// It maps to no `manual_auth` reason: a lid close must never count as a forced re-login in the KPI.
+/// It records no permanent-failure verdict, even after more deferred attempts than the refresher-level escalation budget tolerates.
+/// The transient-blip budget lives in the refresher, which a deferral never reaches.
 ///
-/// Coverage depth: the gate is raised before the chain starts, so this drives
-/// the step-3a deferral. The step-3c pre-IdP re-check (gate raised inside the
-/// 3a→3c race window) returns the identical transient error and touches the
-/// same state, but is not deterministically reachable without production test
-/// hooks, so it is pinned only indirectly by these assertions.
+/// Coverage depth: the gate is raised before the chain starts, so this drives the `DeferForPowerState` deferral.
+/// The second gate check just before the IdP call returns the identical transient error and touches the same state.
+/// That check is not deterministically reachable without production test hooks, so these assertions pin it only indirectly.
 #[tokio::test]
 async fn sleep_deferred_refresh_is_transient_no_kpi_no_verdict() {
     let dir = tempfile::tempdir().unwrap();
@@ -4362,8 +4280,7 @@ async fn sleep_deferred_refresh_is_transient_no_kpi_no_verdict() {
         "a sleep-deferred recovery must not emit the manual_auth event",
     );
 }
-/// Dark wake defers a refresh only while a *wire-valid* token can still be
-/// served — then the deferral costs nothing but latency.
+/// Dark wake defers a refresh only while a *wire-valid* token can still be served; then the deferral costs nothing but latency.
 #[tokio::test]
 async fn dark_wake_defers_refresh_while_a_live_token_can_be_served() {
     let dir = tempfile::tempdir().unwrap();
@@ -4404,11 +4321,9 @@ async fn dark_wake_defers_refresh_while_a_live_token_can_be_served() {
          possible re-sleep"
     );
 }
-/// The inverse, and the one field logs caught: with **no** usable token, a
-/// dark-wake deferral guarantees the caller 401s instead of merely delaying it.
-/// A machine doing background work with the lid shut (leader mode + subagents)
-/// accumulated hundreds of 401s across hours of continuous dark wake while
-/// every recovery refresh was deferred. Refresh must proceed in that state.
+/// The inverse, and the one field logs caught: with **no** usable token, a dark-wake deferral guarantees the caller 401s instead of merely delaying it.
+/// A machine doing background work with the lid shut (leader mode with subagents) accumulated hundreds of 401s across hours of continuous dark wake.
+/// Every recovery refresh was deferred; refresh must proceed in that state.
 #[tokio::test]
 async fn dark_wake_does_not_defer_when_no_usable_token() {
     let dir = tempfile::tempdir().unwrap();
@@ -4430,8 +4345,7 @@ async fn dark_wake_does_not_defer_when_no_usable_token() {
     );
     assert_eq!(call_count.load(Ordering::SeqCst), 1);
 }
-/// A 401 recovery is never deferred for dark wake: the server already rejected
-/// what we hold, so deferring can only prolong the failure.
+/// A 401 recovery is never deferred for dark wake: the server already rejected what we hold, so deferring can only prolong the failure.
 #[tokio::test]
 async fn dark_wake_does_not_defer_server_rejected_recovery() {
     let dir = tempfile::tempdir().unwrap();
@@ -4462,11 +4376,9 @@ async fn dark_wake_does_not_defer_server_rejected_recovery() {
     );
     assert_eq!(call_count.load(Ordering::SeqCst), 1);
 }
-/// A machine stuck reporting a *continuous* dark wake (e.g. an interactive Mac
-/// with no display) must not defer refresh forever — once the deferral budget
-/// (`DARK_WAKE_DEFER_MAX`) is exhausted, one refresh is forced through. Without
-/// this bound the user reaches the same logged-out state the dark-wake guard
-/// was added to prevent.
+/// A machine stuck reporting a *continuous* dark wake (e.g. an interactive Mac with no display) must not defer refresh forever.
+/// Once the deferral budget (`DARK_WAKE_DEFER_MAX`) is exhausted, one refresh is forced through.
+/// Without this bound the user reaches the same logged-out state the dark-wake guard was added to prevent.
 #[tokio::test]
 async fn dark_wake_defer_forces_refresh_after_max() {
     let dir = tempfile::tempdir().unwrap();
@@ -4512,11 +4424,10 @@ async fn dark_wake_defer_forces_refresh_after_max() {
         "forcing a refresh through must reset the defer budget"
     );
 }
-/// A `DidWake` (`SYSTEM_HAS_POWERED_ON`) event must not reset the dark-wake
-/// defer budget while the system is *still* in a dark wake — macOS can deliver
-/// powered-on events for dark wakes, and resetting then would stop the budget
-/// from ever exhausting, so the forced refresh would never run. Only a genuine
-/// full wake clears it.
+/// A `DidWake` (`SYSTEM_HAS_POWERED_ON`) event must not reset the dark-wake defer budget while the system is *still* in a dark wake.
+/// macOS can deliver powered-on events for dark wakes.
+/// Resetting then would stop the budget from ever exhausting, so the forced refresh would never run.
+/// Only a genuine full wake clears it.
 #[test]
 fn dark_wake_defer_budget_survives_powered_on_during_dark_wake() {
     let dir = tempfile::tempdir().unwrap();
@@ -4544,10 +4455,8 @@ fn dark_wake_defer_budget_survives_powered_on_during_dark_wake() {
         "a full wake must clear the defer budget"
     );
 }
-/// The `power_listener_started` guard in `is_dark_wake` must short-circuit to
-/// `false` when no OS power listener was started (headless / server), so
-/// those processes never treat the OS power state as a dark wake. Exercises the
-/// guard directly (no dark-wake override installed).
+/// The `power_listener_started` guard in `is_dark_wake` must short-circuit to `false` when no OS power listener was started (headless / server).
+/// Those processes never treat the OS power state as a dark wake; this exercises the guard directly (no dark-wake override installed).
 #[test]
 #[serial_test::serial(force_dark_wake_env)]
 fn is_dark_wake_false_when_power_listener_not_started() {
@@ -4559,11 +4468,9 @@ fn is_dark_wake_false_when_power_listener_not_started() {
         "is_dark_wake must be false when the power listener was never started"
     );
 }
-/// `GROK_AUTH_FORCE_DARK_WAKE` forces the dark-wake answer for manual and
-/// integration testing — read BEFORE the `power_listener_started` check,
-/// because a headless run never starts the listener and the override
-/// exists precisely so such a run can drive the dark-wake paths against a
-/// real binary.
+/// `GROK_AUTH_FORCE_DARK_WAKE` forces the dark-wake answer for manual and integration testing.
+/// It is read BEFORE the `power_listener_started` check: a headless run never starts the listener.
+/// The override exists precisely so such a run can drive the dark-wake paths against a real binary.
 #[test]
 #[serial_test::serial(force_dark_wake_env)]
 fn is_dark_wake_env_override_forces_both_states() {
@@ -4634,11 +4541,10 @@ async fn sleep_gate_auto_expires_after_max() {
         "auto-expiry must also lower the gate so a stale state can't linger"
     );
 }
-/// Regression test for the dual-clock backstop: a gate that straddled a real
-/// system sleep must auto-expire even though the monotonic clock is still
-/// fresh, because the wall clock advanced past the bound during sleep. Before
-/// the wall-clock arm this gate stayed shut and an expired token reached the
-/// server — the 401 this fix targets.
+/// Regression test for the dual-clock backstop.
+/// A gate that straddled a real system sleep must auto-expire even though the monotonic clock is still fresh.
+/// The wall clock advanced past the bound during sleep.
+/// Before the wall-clock arm this gate stayed shut and an expired token reached the server, the 401 this fix targets.
 #[tokio::test]
 async fn sleep_gate_auto_expires_when_wall_clock_passes_during_sleep() {
     let dir = tempfile::tempdir().unwrap();
@@ -4718,8 +4624,7 @@ async fn sleep_gate_lets_in_flight_refresh_complete() {
         "in-flight counter must be balanced after completion"
     );
 }
-/// With nothing in flight, the sleep-ack hold must return promptly so the OS
-/// suspend is never delayed unnecessarily.
+/// With nothing in flight, the sleep-ack hold must return promptly so the OS suspend is never delayed unnecessarily.
 #[test]
 fn sleep_ack_hold_returns_immediately_when_nothing_in_flight() {
     let dir = tempfile::tempdir().unwrap();
@@ -4736,8 +4641,7 @@ fn sleep_ack_hold_returns_immediately_when_nothing_in_flight() {
         "no in-flight refresh must not delay the suspend; waited {waited:?}"
     );
 }
-/// The sleep-ack hold must unblock as soon as the in-flight refresh drains,
-/// well before the bound — this is the straddle the fix prevents.
+/// The sleep-ack hold must unblock as soon as the in-flight refresh drains, well before the bound; this is the straddle the fix prevents.
 #[test]
 fn sleep_ack_hold_releases_when_in_flight_refresh_drains() {
     let dir = tempfile::tempdir().unwrap();
@@ -4765,9 +4669,8 @@ fn sleep_ack_hold_releases_when_in_flight_refresh_drains() {
     );
     assert_eq!(mgr.refresh_in_flight.load(Ordering::SeqCst), 0);
 }
-/// A refresh that never drains must not pin the machine awake: the hold is
-/// bounded and returns at the deadline, leaving the refresh running (never
-/// aborted) for the existing straddle telemetry to catch.
+/// A refresh that never drains must not pin the machine awake.
+/// The hold is bounded and returns at the deadline, leaving the refresh running (never aborted) for the existing straddle telemetry to catch.
 #[test]
 fn sleep_ack_hold_times_out_when_refresh_never_drains() {
     let dir = tempfile::tempdir().unwrap();
@@ -4832,12 +4735,10 @@ fn manual_auth_reason_maps_terminal_and_skips_non_forcing() {
     assert_eq!(manual_auth_reason(&AuthError::NotLoggedIn), None);
     assert_eq!(manual_auth_reason(&AuthError::ApiKeyAuthDisabled), None);
 }
-/// Truth table for `relay_should_cancel`: the relay gives up on any terminal
-/// auth failure — including `ApiKeyAuthDisabled`, which is deliberately out of
-/// the `manual_auth` KPI's scope — and keeps reconnecting through transient
-/// blips, absent credentials, and the self-healing permanent reasons (those
-/// age out via the TTL, so cancelling on them would orphan a session that
-/// recovers minutes later).
+/// Truth table for `relay_should_cancel`.
+/// The relay gives up on any terminal auth failure, including `ApiKeyAuthDisabled` (deliberately outside the `manual_auth` KPI's scope).
+/// It keeps reconnecting through transient blips, absent credentials, and the self-healing permanent reasons.
+/// Those age out via the TTL, so cancelling on them would orphan a session that recovers minutes later.
 #[test]
 fn relay_should_cancel_gives_up_only_on_terminal_failures() {
     use crate::auth::error::RefreshTokenFailedReason as Reason;
@@ -4913,8 +4814,7 @@ async fn manual_auth_capture_attributes_and_recorder_debounces() {
     assert!(healing.last_token_for_test().is_none());
 }
 /// End-to-end: `next()` emits only for a user-facing, in-scope terminal failure.
-/// A credential with no refresh authority terminates with
-/// `ServerRejectedNoRecovery` without a refresher.
+/// A credential with no refresh authority terminates with `ServerRejectedNoRecovery` without a refresher.
 #[tokio::test]
 async fn manual_auth_emits_only_for_user_facing_source() {
     use crate::auth::recovery::RecoverySource;
@@ -4967,10 +4867,8 @@ async fn manual_auth_emits_only_for_user_facing_source() {
         .await;
     assert!(api.manual_auth_last_token().is_none());
 }
-/// A refreshable credential with no sticky verdict must NOT demand a manual
-/// `/login` — this is the authority the sampler consults before painting the
-/// pager's re-auth banner, and the post-wake network gap must classify as
-/// self-healing.
+/// A refreshable credential with no sticky verdict must NOT demand a manual `/login`.
+/// This is the authority the sampler consults before painting the pager's re-auth banner, and the post-wake network gap must classify as self-healing.
 #[tokio::test]
 async fn requires_manual_reauth_false_for_refreshable_credential() {
     let dir = tempfile::tempdir().unwrap();
@@ -4998,8 +4896,7 @@ async fn requires_manual_reauth_false_for_refreshable_credential() {
         "a recoverable Other verdict must not demand /login"
     );
 }
-/// A sticky `RefreshTokenRejected` verdict (IdP revoked the RT) is fixable
-/// only by `/login`; likewise a manager with no refresh authority at all.
+/// A sticky `RefreshTokenRejected` verdict (IdP revoked the RT) is fixable only by `/login`; likewise a manager with no refresh authority at all.
 #[tokio::test]
 async fn requires_manual_reauth_true_for_sticky_verdict_and_no_refresher() {
     let dir = tempfile::tempdir().unwrap();
@@ -5030,9 +4927,8 @@ async fn requires_manual_reauth_true_for_sticky_verdict_and_no_refresher() {
         "a sticky RefreshTokenRejected verdict must demand /login"
     );
 }
-/// Treating a failed provider run as self-healing is what let an expired
-/// credential in and then 401'd every turn. The verdict still ages out, so a
-/// later launch gets to retry the provider.
+/// Treating a failed provider run as self-healing is what let an expired credential in and then 401'd every turn.
+/// The verdict still ages out, so a later launch gets to retry the provider.
 #[tokio::test]
 async fn requires_manual_reauth_true_after_external_provider_refresh_failed() {
     let dir = tempfile::tempdir().unwrap();
@@ -5074,11 +4970,9 @@ fn external_provider_config() -> GrokComConfig {
         ..GrokComConfig::default()
     }
 }
-/// The proactive loop's failure backoff: zero before any failure (schedule is
-/// purely expiry-driven), grows with consecutive failures, and is capped so a
-/// long outage still retries at the regular cadence. Guards against the
-/// zero-delay spin that burned the OIDC escalation budget while post-wake
-/// Wi-Fi was still associating.
+/// The proactive loop's failure backoff: zero before any failure (the schedule is purely expiry-driven).
+/// It grows with consecutive failures and is capped so a long outage still retries at the regular cadence.
+/// It guards against the zero-delay spin that burned the OIDC escalation budget while post-wake Wi-Fi was still associating.
 #[test]
 fn proactive_failure_backoff_shape() {
     assert_eq!(
@@ -5380,11 +5274,9 @@ fn devbox_manager(dir: &std::path::Path, key: &str) -> Arc<AuthManager> {
 }
 /// The credential the caller already knows is dead can never be the answer.
 ///
-/// `try_devbox_recovery` short-circuits on whatever `current()` holds, to
-/// catch a sibling task that refreshed while we waited on `refresh_lock`.
-/// Told nothing about the rejected bearer it used to return that bearer, so
-/// on a devbox every 401 against a still-locally-valid token reported
-/// "recovered" and the turn resubmitted it until its retry budget ran out.
+/// `try_devbox_recovery` short-circuits on whatever `current()` holds, to catch a sibling task that refreshed while we waited on `refresh_lock`.
+/// When it was told nothing about the rejected bearer it returned that same bearer.
+/// On a devbox every 401 against a still-locally-valid token then reported "recovered" and the turn resubmitted it until its retry budget ran out.
 #[tokio::test]
 async fn devbox_recovery_never_re_serves_the_credential_it_was_given_up_on() {
     let dir = tempfile::tempdir().unwrap();
@@ -5401,9 +5293,8 @@ async fn devbox_recovery_never_re_serves_the_credential_it_was_given_up_on() {
         "recovery must not report success with the rejected bearer, got {outcome:?}"
     );
 }
-/// The double-check still does its job: a credential that is *not* the one
-/// the caller gave up on means a sibling task refreshed, so take it and skip
-/// the mint.
+/// The double-check still does its job.
+/// A credential that is *not* the one the caller gave up on means a sibling task refreshed, so take it and skip the mint.
 #[tokio::test]
 async fn devbox_recovery_short_circuits_on_a_credential_someone_else_landed() {
     let dir = tempfile::tempdir().unwrap();

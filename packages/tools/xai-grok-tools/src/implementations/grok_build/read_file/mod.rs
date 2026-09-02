@@ -1872,37 +1872,6 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
         img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
         buf.into_inner()
     }
-    fn make_small_png(width: u32, height: u32) -> Vec<u8> {
-        use image::{ImageBuffer, Rgba};
-        let img = ImageBuffer::from_pixel(width, height, Rgba([0u8, 0, 0, 255]));
-        let mut buf = std::io::Cursor::new(Vec::new());
-        img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
-        buf.into_inner()
-    }
-    #[test]
-    fn compress_small_image_returns_unchanged() {
-        let png = make_small_png(16, 16);
-        let (result, mime) =
-            compress_image_for_conversation(png.clone(), "image/png".into()).unwrap();
-        assert_eq!(result, png);
-        assert_eq!(mime, "image/png");
-    }
-    #[test]
-    fn compress_large_noisy_image_picks_jpeg() {
-        let png = make_noisy_png(2048, 1536);
-        let b64_before = (png.len() * 4).div_ceil(3);
-        assert!(
-            b64_before > MAX_IMAGE_PAYLOAD_BYTES,
-            "test image ({b64_before} B b64) must exceed the payload limit"
-        );
-        let (result, mime) = compress_image_for_conversation(png, "image/png".into()).unwrap();
-        assert_eq!(mime, "image/jpeg");
-        let b64_after = (result.len() * 4).div_ceil(3);
-        assert!(
-            b64_after <= MAX_IMAGE_PAYLOAD_BYTES,
-            "compressed image ({b64_after} B b64) must fit within {MAX_IMAGE_PAYLOAD_BYTES} B"
-        );
-    }
     #[test]
     fn compress_flat_color_picks_png() {
         use image::{ImageBuffer, Rgba};

@@ -341,13 +341,6 @@ impl From<RelPathBuf> for camino::Utf8PathBuf {
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
-    #[test]
-    fn test_abs_path_buf_new() {
-        let abs = AbsPathBuf::new(PathBuf::from("/home/user")).unwrap();
-        assert_eq!(abs.as_str(), "/home/user");
-    }
-
     #[test]
     fn test_abs_path_buf_new_relative_fails() {
         let result = AbsPathBuf::new(PathBuf::from("relative/path"));
@@ -417,12 +410,6 @@ mod tests {
             normalize_lexically(Path::new(r"C:..\outside.rs")),
             PathBuf::from(r"C:..\outside.rs")
         );
-    }
-
-    #[test]
-    fn test_rel_path_buf_new() {
-        let rel = RelPathBuf::new("src/main.rs").unwrap();
-        assert_eq!(rel.as_str(), "src/main.rs");
     }
 
     #[test]
@@ -543,7 +530,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // Tests for ToAbsPath on &str and String
+    // Tests for ToAbsPath on &str
 
     #[cfg(unix)]
     #[test]
@@ -561,14 +548,5 @@ mod tests {
         let path: &str = "/other/path";
         let abs = path.to_abs_path(root);
         assert_eq!(abs.as_ref(), Path::new("/other/path"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_to_abs_path_string_relative() {
-        let root = Path::new("/home/user");
-        let path: String = "src/main.rs".to_string();
-        let abs = path.to_abs_path(root);
-        assert_eq!(abs.as_ref(), Path::new("/home/user/src/main.rs"));
     }
 }

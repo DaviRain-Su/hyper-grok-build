@@ -1,20 +1,15 @@
 //! Skill, plugin, project-config, and permissions discovery.
 //!
-//! Phase 3a delegates to the existing discovery implementations in
-//! `xai-grok-agent` and `xai-grok-tools` rather than duplicating them.
-//! The workspace stores configuration on [`WorkspaceShared`] and the
-//! [`MpscChannel`] methods call these helpers to return real data
-//! instead of `Value::Null` stubs.
+//! Delegates to the existing discovery implementations in `xai-grok-agent` and `xai-grok-tools` rather than duplicating them.
+//! The workspace stores configuration on [`WorkspaceShared`] and the [`MpscChannel`] methods call these helpers.
 //!
-//! Re-exports [`AgentsMdTracker`] from `xai-grok-tools` for external
-//! consumers that need per-session project-instruction tracking.
+//! Re-exports [`AgentsMdTracker`] from `xai-grok-tools` for external consumers that need per-session project-instruction tracking.
 
 use std::path::Path;
 
 use serde_json::Value;
 
-// Re-export AgentsMdTracker so consumers can reference it via the
-// workspace crate without a direct xai-grok-tools dependency.
+// Re-export AgentsMdTracker so consumers can reference it via the workspace crate without a direct xai-grok-tools dependency
 pub use xai_grok_tools::types::agents_md_tracker::AgentsMdTracker;
 
 // Re-export the config types that callers pass into WorkspaceConfig.
@@ -28,17 +23,12 @@ pub use xai_grok_agent::prompt::skills::SkillsConfig;
 
 /// Discover skills visible from the workspace root.
 ///
-/// Delegates to [`xai_grok_agent::prompt::skills::list_skills`] with
-/// the workspace's `root_cwd` and the caller-supplied `SkillsConfig`.
+/// Delegates to [`xai_grok_agent::prompt::skills::list_skills`] with the workspace's `root_cwd` and the caller-supplied `SkillsConfig`.
 /// Returns each [`SkillInfo`] serialized to a `serde_json::Value`.
-///
-/// The underlying `list_skills` implementation performs filesystem
-/// I/O (stat + read for each SKILL.md) and does not hold any async
-/// locks across `.await` points, so contention is not a concern.
+/// `list_skills` stats and reads each SKILL.md but holds no async locks across `.await` points, so contention is not a concern.
 pub async fn discover_skills(root_cwd: &Path, config: &SkillsConfig) -> Vec<Value> {
     let cwd_str = root_cwd.to_string_lossy();
-    // Workspace discovery is out of scope for per-vendor compat gating;
-    // use the all-on default to preserve prior behavior.
+    // Workspace discovery does no per-vendor compat gating; pass the all-on default
     let skills = xai_grok_agent::prompt::skills::list_skills(
         Some(&cwd_str),
         config,
@@ -97,17 +87,9 @@ pub async fn discover_agents_md(root_cwd: &Path) -> Vec<Value> {
 
 /// Discover plugins visible from the workspace root.
 ///
-/// Delegates to [`xai_grok_agent::plugins::discover_plugins`] with
-/// the workspace's `root_cwd` and the caller-supplied
-/// [`PluginDiscoveryConfig`] and [`PluginTrustStore`].
-///
-/// Since [`DiscoveredPlugin`] does not derive `Serialize`, each
-/// plugin is converted to a JSON object with the essential fields
-/// that downstream consumers need (name, scope, root, trusted,
-/// has_skills, has_hooks, has_mcp).
-///
-/// `project_trusted` is the folder-trust verdict for `root_cwd`, threaded into
-/// discovery to gate Project-scope plugins.
+/// Delegates to [`xai_grok_agent::plugins::discover_plugins`].
+/// [`DiscoveredPlugin`] does not derive `Serialize`, so each plugin is converted to a JSON object with the fields downstream consumers need.
+/// `project_trusted` is the folder-trust verdict for `root_cwd`, threaded into discovery to gate Project-scope plugins.
 pub fn discover_plugins(
     root_cwd: &Path,
     config: &PluginDiscoveryConfig,
@@ -149,14 +131,14 @@ pub fn discover_plugins(
 
 /// Load the project config from `<root_cwd>/.grok/config.toml`.
 ///
-/// Returns `Value::Null` if the file does not exist or cannot be
-/// parsed. Non-fatal errors are logged.
+/// Returns `Value::Null` if the file does not exist or cannot be parsed.
+/// Non-fatal errors are logged.
 pub fn load_project_config(root_cwd: &Path) -> Value {
     let config_path = root_cwd.join(".grok").join("config.toml");
     match xai_grok_config::load_config_file(&config_path) {
         Ok(toml::Value::Table(ref t)) if t.is_empty() => {
-            // The config loader returns an empty table when the file
-            // does not exist. Normalize to Null for callers.
+            // The config loader returns an empty table when the file does not exist
+            // Normalize to Null for callers
             Value::Null
         }
         Ok(toml_val) => toml_to_json(&toml_val),
@@ -171,10 +153,7 @@ pub fn load_project_config(root_cwd: &Path) -> Value {
     }
 }
 
-/// Convert a `toml::Value` to a `serde_json::Value`.
-///
-/// TOML's type system is close to JSON's. The main difference is
-/// TOML's `Datetime` type which maps to a JSON string.
+/// TOML maps onto JSON directly except `Datetime`, which becomes a JSON string.
 fn toml_to_json(v: &toml::Value) -> Value {
     match v {
         toml::Value::String(s) => Value::String(s.clone()),
@@ -199,23 +178,18 @@ fn toml_to_json(v: &toml::Value) -> Value {
 
 /// Load the effective permission configuration for the workspace.
 ///
-/// Delegates to
-/// [`resolution::resolve_permissions_with_provenance`] which
-/// merges rules from requirements.toml, managed-settings.json,
-/// managed_config.toml, config.toml, and `.claude/settings.json`.
-///
-/// `project_trusted` gates project-tier permission sources (same contract as
-/// env/hooks/plugins). Hub/cloud callers outside the local folder-trust model
-/// should pass `true`.
-///
-/// Returns a JSON object with `sources`, `loaded` (rule count), and
-/// `skipped` (unrecognized rules). Returns `Value::Null` if no
-/// permission sources are configured.
+/// Delegates to [`resolution::resolve_permissions_with_provenance`].
+/// It merges rules from requirements.toml, managed-settings.json, managed_config.toml, config.toml, and `.claude/settings.json`.
+/// `project_trusted` gates project-tier permission sources (same contract as env/hooks/plugins).
+/// Hub/cloud callers outside the local folder-trust model should pass `true`.
+/// Returns a JSON object with `sources`, `loaded` (rule count), and `skipped` (unrecognized rules).
+/// Returns `Value::Null` if no permission sources are configured.
 pub async fn load_permissions(root_cwd: &Path, project_trusted: bool) -> Value {
     use crate::permission::resolution;
 
-    let Some(resolved) =
-        resolution::resolve_permissions_with_provenance(root_cwd, project_trusted).await
+    let Some(resolved) = resolution::resolve_permissions_with_provenance(root_cwd, project_trusted)
+        .await
+        .resolved
     else {
         return Value::Null;
     };
@@ -254,8 +228,7 @@ mod tests {
 
     // Note: `list_skills` also discovers user-scoped skills from
     // `~/.grok/skills/`, so on a developer machine the result may be
-    // non-empty even for an empty workspace. Tests below check for
-    // specific skills rather than asserting emptiness.
+    // non-empty even for an empty workspace. Tests below check for specific skills rather than asserting emptiness.
 
     #[tokio::test]
     async fn discover_skills_finds_skill_md() {
@@ -332,10 +305,8 @@ mod tests {
 
     #[test]
     fn agent_config_file_wire_matches_workspace_types_mirror() {
-        // The RPC serializes grok-build's AgentConfigFile and the remote
-        // consumer deserializes the workspace-types mirror; pin the cross-crate
-        // serde shape so a rename/attr drift on either side can't silently
-        // break discovery.
+        // The RPC serializes grok-build's AgentConfigFile and the remote consumer deserializes the workspace-types mirror
+        // Pin the cross-crate serde shape so a rename/attr drift on either side can't silently break discovery
         let src = xai_grok_agent::prompt::agents_md::AgentConfigFile {
             file_name: "AGENTS.md".to_string(),
             file_path: "/repo/AGENTS.md".to_string(),
@@ -534,20 +505,18 @@ mod tests {
 
     // ---- Permissions tests ----
 
-    // Note: `resolve_permissions_with_provenance` checks system-managed
-    // settings and requirements.toml from the global config, so on a
-    // developer machine with Grok installed it may return non-Null even
-    // for a temp directory. Both branches assert a concrete condition.
+    // Note: `resolve_permissions_with_provenance` checks system-managed settings and requirements.toml from the global config
+    // On a developer machine with Grok installed it may return non-Null even for a temp directory
+    // Both branches assert a concrete condition
 
     #[tokio::test]
     async fn load_permissions_returns_valid_json() {
         let tmp = tempfile::tempdir().unwrap();
         let result = load_permissions(tmp.path(), true).await;
-        // Result is either Null (no sources) or an object with
-        // sources, loaded, and skipped fields. Both branches assert
-        // a definite pass criterion.
+        // Result is either Null (no sources) or an object with sources, loaded, and skipped fields
+        // Both branches assert a definite pass criterion
         if result.is_null() {
-            // No permission sources on this machine — Null is correct.
+            // No permission sources on this machine; Null is correct
             assert_eq!(result, Value::Null, "expected Null for empty workspace");
         } else {
             assert!(result["sources"].is_array(), "sources should be an array");
@@ -559,8 +528,7 @@ mod tests {
     #[tokio::test]
     async fn load_permissions_with_settings_file_returns_object() {
         let tmp = tempfile::tempdir().unwrap();
-        // Create a minimal .claude/settings.json with a permission rule
-        // so the test always exercises the non-null path.
+        // Create a minimal .claude/settings.json with a permission rule so the test always exercises the non-null path
         let claude_dir = tmp.path().join(".claude");
         fs::create_dir_all(&claude_dir).unwrap();
         fs::write(

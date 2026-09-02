@@ -355,9 +355,13 @@ impl AgentView {
         self.minimal_btw_lifecycle = None;
         self.btw_focused = false;
         self.clear_btw_drag_state();
+        // Panel gone: drop the held highlight. Scroll only cancels an in-flight drag.
+        self.clear_btw_owned_selection();
         InputOutcome::Changed
     }
 
+    /// Cancel an in-flight `/btw` text drag. Does not drop a finished highlight.
+    /// Selection coordinates are content-relative, so scroll does not make them stale.
     pub(super) fn clear_btw_drag_state(&mut self) {
         let is_btw = self
             .pending_text_drag

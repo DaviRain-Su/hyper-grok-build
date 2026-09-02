@@ -5,8 +5,18 @@ use super::spawn::{
     inject_subagent_completed_prompt, join_worker_task, present_child_completion,
     should_auto_wake_subagent, will_wake_for, AutoWakeInputs, InjectParams,
 };
+use super::prompt_turn_receipt::{
+    PromptTurnReceiptDisposition, PromptTurnSettlementInput,
+    reduce_prompt_turn_settlement,
+};
 use super::attempt_runner::{
-    canonical_total_tokens, record_subagent_usage, usage_is_incomplete,
+    OneTurnAttemptInput, canonical_total_tokens, record_subagent_usage,
+    run_one_turn_attempt, usage_is_incomplete,
+};
+use super::handle_request::{
+    CHILD_ACTOR_ACK_TIMEOUT, PARENT_ACK_TIMEOUT, child_actor_query,
+    mark_child_usage_not_applied_with_fallback, reparent_surviving_child_tasks,
+    resolve_child_model, take_child_streaming_partial, take_child_turn_messages,
 };
 use crate::test_support::lsp_runtime::{ctx_with_toggle, test_gateway_with_receiver};
 use xai_grok_subagent_resolution::resolve_effective_overrides;
@@ -154,9 +164,428 @@ async fn usage_ack_precedes_terminal_presentation() {
             })
         ));
 }
+/// Regression: reads of the child session's own actors (chat state,
+/// signals) must not park teardown when the child thread is synchronously
+/// blocked — the actors share its current-thread runtime — and must
+/// degrade to the cheap fallback in bounded time.
+#[tokio::test(start_paused = true)]
+async fn child_actor_query_is_bounded_when_the_actor_never_answers() {
+    let tokens = tokio::time::timeout(
+            20 * CHILD_ACTOR_ACK_TIMEOUT,
+            child_actor_query("test_query", std::future::pending::<u64>(), 7),
+        )
+        .await
+        .expect("child-actor queries must complete in bounded time");
+    assert_eq!(tokens, 7, "a starved query must degrade to the fallback");
+}
+/// Regression: a wedged child actor that never answers `TakeTurnMessages`
+/// must not park teardown ahead of the bounded upload set, and the
+/// timed-out take must surface as the recorded miss, not an empty turn.
+#[tokio::test(start_paused = true)]
+async fn turn_message_take_is_bounded_and_records_the_wedge() {
+    let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    let taken = tokio::time::timeout(
+            std::time::Duration::from_secs(3600),
+            take_child_turn_messages(&cmd_tx, deadline),
+        )
+        .await
+        .expect("the take must be bounded under a wedged child actor");
+    assert!(matches!(
+            taken,
+            crate::upload::turn::TurnMessages::Missing(
+                crate::upload::turn::MissingTurnMessages::TakeTimedOut
+            )
+        ));
+}
+/// The dead-actor takes — command channel closed, or responder dropped
+/// without an answer — are recorded misses, not genuinely empty turns.
+#[tokio::test(start_paused = true)]
+async fn turn_message_take_records_the_miss_when_the_actor_is_gone() {
+    use crate::upload::turn::{MissingTurnMessages, TurnMessages};
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    let (closed_tx, closed_rx) = mpsc::unbounded_channel();
+    drop(closed_rx);
+    let taken = take_child_turn_messages(&closed_tx, deadline).await;
+    assert!(
+            matches!(
+                taken,
+                TurnMessages::Missing(MissingTurnMessages::ChannelDropped)
+            ),
+            "a closed command channel must not pass for an empty turn"
+        );
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+    let actor = tokio::spawn(async move {
+        match cmd_rx.recv().await {
+            Some(SessionCommand::TakeTurnMessages { respond_to }) => drop(respond_to),
+            _ => panic!("expected TakeTurnMessages"),
+        }
+    });
+    let taken = take_child_turn_messages(&cmd_tx, deadline).await;
+    actor.await.expect("actor task");
+    assert!(
+            matches!(
+                taken,
+                TurnMessages::Missing(MissingTurnMessages::ChannelDropped)
+            ),
+            "a dropped responder must not pass for an empty turn"
+        );
+}
+/// A real `SessionHandle` whose child-session actors never answer: the
+/// command channel is held open but unserviced and the signals actor is
+/// never run — the shape a tool synchronously blocking the child session
+/// thread leaves behind. The receiver and actor must stay alive so sends
+/// succeed but never get answered.
+fn wedged_child_handle() -> (
+    SessionHandle,
+    mpsc::UnboundedReceiver<SessionCommand>,
+    crate::session::signals::SessionSignalsActor,
+) {
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+    let (hunk_event_tx, _hunk_event_rx) = mpsc::unbounded_channel();
+    let hunk_tracker_handle = xai_hunk_tracker::HunkTrackerActor::spawn(
+        "test".to_string(),
+        PathBuf::from("/tmp"),
+        hunk_event_tx,
+        xai_hunk_tracker::TrackingMode::AllDirty,
+        CancellationToken::new(),
+    );
+    let (signals_handle, signals_actor) = crate::session::signals::SessionSignalsActor::new();
+    let handle = SessionHandle {
+        cmd_tx,
+        persistence_tx,
+        current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        active_work: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+        info: SessionInfo {
+            id: acp::SessionId::new("test"),
+            cwd: "/tmp".to_string(),
+        },
+        max_turns: None,
+        resolved_tool_overrides: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
+        spawn_snapshot: crate::session::SpawnSnapshot {
+            applied_tool_overrides: None,
+            scheduler_background_loops: true,
+        },
+        hunk_tracker_handle,
+        chat_state_handle: xai_chat_state::ChatStateHandle::noop(),
+        signals_handle,
+        gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        status_line_enabled: std::sync::Arc::new(
+            std::sync::atomic::AtomicBool::new(false),
+        ),
+        mcp_servers: vec![],
+        initial_client_mcp_servers: vec![],
+        display_cwd: None,
+        feedback_manager: std::sync::Arc::new(
+            crate::session::feedback_manager::FeedbackManager::local_only("test"),
+        ),
+        upload_queue: std::sync::Arc::new(std::sync::OnceLock::new()),
+        upload_failures_since_success: std::sync::Arc::new(
+            std::sync::atomic::AtomicU64::new(0),
+        ),
+        tool_context: crate::tools::ToolContext::new_local_context(
+            xai_grok_paths::AbsPathBuf::new(PathBuf::from("/tmp")).unwrap(),
+            std::sync::Arc::new(
+                xai_grok_workspace::file_system::LocalFs::new(PathBuf::from("/tmp")),
+            ),
+            std::sync::Arc::new(crate::terminal::LocalTerminalRunner),
+        ),
+        model_id: acp::ModelId::new("test-model"),
+        reasoning_effort: None,
+        yolo_mode: false,
+        origin_client: None,
+        code_nav_enabled: false,
+        ask_user_question_enabled: true,
+        non_interactive: false,
+        plan_mode: std::sync::Arc::new(
+            parking_lot::Mutex::new(
+                crate::session::plan_mode::PlanModeTracker::new(PathBuf::from("/tmp")),
+            ),
+        ),
+        force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        permission_handle: xai_grok_workspace::permission::PermissionHandle::allow_all(),
+        attribution_callback: None,
+        agent_name: "grok-build".to_string(),
+        managed_mcp_proxy_base_url: String::new(),
+        session_default_agent_profile: None,
+        allowed_subagent_types: None,
+        hook_registry: None,
+        workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),
+        terminal_backend: None,
+        tools_notification_handle: None,
+        scheduler_handle: None,
+    };
+    (handle, cmd_rx, signals_actor)
+}
+/// Regression: a cancel that cannot read the child's signals (wedged
+/// actor) must fail closed — "no answer" is not "no work done" — so the
+/// usage fold marks the parent's bill incomplete instead of folding a
+/// clean ledger over the cancelled turn's in-flight sampling.
+#[tokio::test(start_paused = true)]
+async fn cancelled_attempt_fails_closed_when_the_signals_read_never_answers() {
+    let (child_handle, _cmd_rx, _signals_actor) = wedged_child_handle();
+    let cancel_token = CancellationToken::new();
+    cancel_token.cancel();
+    let request = auto_wake_test_request("cancel-wedge");
+    let outcome = tokio::time::timeout(
+            20 * CHILD_ACTOR_ACK_TIMEOUT,
+            run_one_turn_attempt(OneTurnAttemptInput {
+                child_handle: &child_handle,
+                request: &request,
+                worktree_path: None,
+                task_prompt_text: "task",
+                inherited_tool_overrides: None,
+                gcs_bucket_url: None,
+                gcs_upload_method: None,
+                cancel_token,
+                child_run_started_at: std::time::Instant::now(),
+                prompt_admitted: tokio::sync::oneshot::channel().0,
+            }),
+        )
+        .await
+        .expect(
+            "a cancelled attempt must complete in bounded time under a wedged child",
+        );
+    assert!(outcome.result.cancelled);
+    assert!(
+            outcome.cancellation_may_hide_usage,
+            "an unanswered signals read must not pass for 'no work done'"
+        );
+}
+/// Regression: a wedged child actor must not park teardown on the
+/// streaming-capture take; the capture is skipped in bounded time.
+#[tokio::test(start_paused = true)]
+async fn streaming_partial_take_is_bounded_when_the_child_actor_is_wedged() {
+    let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    let capture = tokio::time::timeout(
+            std::time::Duration::from_secs(3600),
+            take_child_streaming_partial(
+                &cmd_tx,
+                deadline,
+                "prompt-1".into(),
+                false,
+                None,
+            ),
+        )
+        .await
+        .expect("the streaming take must be bounded under a wedged child actor");
+    assert!(capture.is_none(), "a timed-out take skips the capture");
+}
+/// Regression: the resolved-model read for turn_result.json must degrade
+/// to the configured model id in bounded time under a wedged child actor.
+#[tokio::test(start_paused = true)]
+async fn resolved_model_read_is_bounded_and_falls_back_to_configured() {
+    let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    let resolved = tokio::time::timeout(
+            std::time::Duration::from_secs(3600),
+            resolve_child_model(&cmd_tx, deadline, Some("configured-model".into())),
+        )
+        .await
+        .expect("the model read must be bounded under a wedged child actor");
+    assert_eq!(resolved.as_deref(), Some("configured-model"));
+}
+/// Regression: a completed child's usage fold must not park forever behind
+/// a parent actor that never services `cmd_rx`; that leaked the child's
+/// session thread, fs watchers, and fds.
+#[tokio::test(start_paused = true)]
+async fn usage_fold_is_bounded_when_parent_never_services_commands() {
+    let (parent_cmd_tx, _parent_cmd_rx) = mpsc::unbounded_channel();
+    let by_model = vec![(
+            "test-model".to_string(),
+            xai_chat_state::UsageTotals {
+                input_tokens: 10,
+                ..Default::default()
+            },
+        )];
+    let folded = tokio::time::timeout(
+            20 * PARENT_ACK_TIMEOUT,
+            record_subagent_usage(
+                Some(&parent_cmd_tx),
+                Some(by_model),
+                Some("parent-prompt".to_string()),
+                false,
+            ),
+        )
+        .await
+        .expect("usage fold must complete in bounded time under a starved parent");
+    assert!(
+            !folded,
+            "an unacked fold must report a miss so the sticky fallback marks the bill incomplete"
+        );
+}
+/// Regression: when the parent never acks, the usage-not-applied mark must
+/// fall through to the coordinator's report-level sticky in bounded time.
+#[tokio::test(start_paused = true)]
+async fn usage_not_applied_mark_falls_back_to_coordinator_when_parent_is_starved() {
+    let (parent_cmd_tx, _parent_cmd_rx) = mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let mark = mark_child_usage_not_applied_with_fallback(
+        Some(&parent_cmd_tx),
+        &event_tx,
+        "parent-sess",
+        Some("prompt-1".to_string()),
+    );
+    let coordinator = async {
+        let event = event_rx.recv().await.expect("coordinator fallback event");
+        let SubagentEvent::MarkUsageNotApplied(req) = event else {
+            panic!("expected MarkUsageNotApplied");
+        };
+        assert_eq!(req.parent_session_id, "parent-sess");
+        assert_eq!(req.prompt_id, "prompt-1");
+        let _ = req.respond_to.send(());
+    };
+    tokio::time::timeout(
+            20 * PARENT_ACK_TIMEOUT,
+            async { tokio::join!(mark, coordinator) },
+        )
+        .await
+        .expect(
+            "usage-not-applied mark must complete in bounded time under a starved parent",
+        );
+}
+/// A parent that acks the mark in time owns it: the coordinator fallback
+/// must not fire (a double mark would double-report the sticky).
+#[tokio::test]
+async fn usage_not_applied_mark_skips_coordinator_when_parent_acks() {
+    let (parent_cmd_tx, mut parent_cmd_rx) = mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let mark = mark_child_usage_not_applied_with_fallback(
+        Some(&parent_cmd_tx),
+        &event_tx,
+        "parent-sess",
+        Some("prompt-1".to_string()),
+    );
+    let parent = async {
+        match parent_cmd_rx.recv().await.expect("parent mark command") {
+            SessionCommand::MarkSubagentUsageNotApplied { respond_to, .. } => {
+                let _ = respond_to.send(());
+            }
+            _ => panic!("expected MarkSubagentUsageNotApplied"),
+        }
+    };
+    tokio::join!(mark, parent);
+    assert!(
+            event_rx.try_recv().is_err(),
+            "a parent-acked mark must not also mark the coordinator sticky"
+        );
+}
+/// With no parent command channel the mark goes straight to the
+/// coordinator's report-level sticky.
+#[tokio::test]
+async fn usage_not_applied_mark_goes_straight_to_coordinator_without_parent() {
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let mark = mark_child_usage_not_applied_with_fallback(
+        None,
+        &event_tx,
+        "parent-sess",
+        Some("prompt-1".to_string()),
+    );
+    let coordinator = async {
+        let event = event_rx.recv().await.expect("coordinator fallback event");
+        let SubagentEvent::MarkUsageNotApplied(req) = event else {
+            panic!("expected MarkUsageNotApplied");
+        };
+        assert_eq!(req.parent_session_id, "parent-sess");
+        assert_eq!(req.prompt_id, "prompt-1");
+        let _ = req.respond_to.send(());
+    };
+    tokio::join!(mark, coordinator);
+}
+/// Terminal backend whose actor never answers — models a parent terminal
+/// actor starved by a busy turn.
+struct StarvedTerminal;
+#[async_trait::async_trait]
+impl xai_grok_tools::computer::types::TerminalBackend for StarvedTerminal {
+    async fn run(
+        &self,
+        _request: xai_grok_tools::computer::types::TerminalRunRequest,
+    ) -> Result<
+        xai_grok_tools::computer::types::TerminalRunResult,
+        xai_grok_tools::computer::types::ComputerError,
+    > {
+        std::future::pending().await
+    }
+    async fn run_background(
+        &self,
+        _request: xai_grok_tools::computer::types::TerminalRunRequest,
+    ) -> Result<
+        xai_grok_tools::computer::types::BackgroundHandle,
+        xai_grok_tools::computer::types::ComputerError,
+    > {
+        std::future::pending().await
+    }
+    async fn get_task(
+        &self,
+        _task_id: &str,
+    ) -> Option<xai_grok_tools::computer::types::TaskSnapshot> {
+        std::future::pending().await
+    }
+    async fn kill_task(
+        &self,
+        _task_id: &str,
+    ) -> xai_grok_tools::computer::types::KillOutcome {
+        std::future::pending().await
+    }
+    async fn wait_for_completion(
+        &self,
+        _task_id: &str,
+        _timeout: Option<std::time::Duration>,
+    ) -> Option<xai_grok_tools::computer::types::TaskSnapshot> {
+        std::future::pending().await
+    }
+    async fn list_tasks(&self) -> Vec<xai_grok_tools::computer::types::TaskSnapshot> {
+        std::future::pending().await
+    }
+    async fn reparent_notifications(
+        &self,
+        _old_owner_session_id: &str,
+        _new_owner_session_id: &str,
+        _new_handle: xai_grok_tools::notification::types::ToolNotificationHandle,
+        _backend_weak: std::sync::Weak<
+            dyn xai_grok_tools::computer::types::TerminalBackend,
+        >,
+    ) {
+        std::future::pending().await
+    }
+}
+/// Regression: the goal-task snapshot and the notification reparent must
+/// not park a completed child before Shutdown when the parent terminal
+/// actor never answers; a timed-out snapshot skips goal-turn tagging
+/// instead of sending a partial record.
+#[tokio::test(start_paused = true)]
+async fn reparent_is_bounded_when_terminal_actor_never_answers() {
+    let parent_tb: std::sync::Arc<
+        dyn xai_grok_tools::computer::types::TerminalBackend,
+    > = std::sync::Arc::new(StarvedTerminal);
+    let notif_handle = xai_grok_tools::notification::types::ToolNotificationHandle::noop();
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+    tokio::time::timeout(
+            20 * PARENT_ACK_TIMEOUT,
+            reparent_surviving_child_tasks(
+                &parent_tb,
+                &notif_handle,
+                Some(&cmd_tx),
+                "child-sess",
+                "parent-sess",
+                false,
+            ),
+        )
+        .await
+        .expect("teardown must reach Shutdown under a starved terminal actor");
+    assert!(
+            cmd_rx.try_recv().is_err(),
+            "a timed-out list_tasks must not record goal-turn task ids"
+        );
+}
 /// Invariant: resolving a subagent applies the parent session's
 /// `--tools`/`--disallowed-tools`/`--permission-mode` — driven through
 /// `resolve_agent_definition` so the spawn path can't skip them.
+/// Invariant: resolving a subagent applies the parent session's `--tools`/`--disallowed-tools`/`--permission-mode`.
+/// They flow through `resolve_agent_definition` so the spawn path can't skip them.
 #[tokio::test]
 async fn subagent_inherits_session_cli_overrides() {
     use xai_grok_agent::config::{AgentDefinition, PermissionMode};
@@ -187,12 +616,11 @@ async fn subagent_inherits_session_cli_overrides() {
     assert_eq!(def.disallowed_tools, vec!["write"]);
     assert_eq!(def.permission_mode, PermissionMode::AcceptEdits);
 }
-/// `permissionMode: bypassPermissions` is downgraded to `Default` under the
-/// pin and honored without it; other modes and plugin stripping unaffected.
 #[test]
 fn subagent_bypass_permission_mode_gated_by_policy_pin() {
     use xai_grok_agent::config::PermissionMode;
-    const PIN: &str = xai_grok_workspace::permission::resolution::YOLO_PIN_REASON_REQUIREMENTS;
+    const PIN: &str = xai_grok_workspace::permission::resolution::YoloPinReason::DisableBypassPermissionsMode
+        .message();
     assert_eq!(
             resolve_subagent_permission_mode(PermissionMode::BypassPermissions, false, None),
             PermissionMode::BypassPermissions,
@@ -210,10 +638,8 @@ fn subagent_bypass_permission_mode_gated_by_policy_pin() {
             PermissionMode::Default,
         );
 }
-/// Persisted⇒stamped chokepoint for the subagent emitter: the
-/// `SessionCommand` persist hop and the live broadcast must carry the
-/// SAME `eventId`, minted before the fork (divergent or missing ids
-/// degrade cursor reconnects to full replays or re-applied lines).
+/// The subagent emitter's persist hop (`SessionCommand`) and live broadcast must carry the SAME `eventId`, minted before the fork.
+/// Divergent or missing ids degrade cursor reconnects to full replays or re-applied lines.
 #[tokio::test]
 async fn emit_subagent_notification_stamps_one_event_id_on_both_paths() {
     use crate::test_support::lsp_runtime::test_gateway_with_receiver;
@@ -864,6 +1290,72 @@ fn auto_wake_test_request(id: &str) -> SubagentRequest {
     }
 }
 #[test]
+fn completed_followup_wakes_parent_with_exactly_one_prompt() {
+    let (gateway, _gateway_rx) = test_gateway_with_receiver();
+    let (parent_cmd_tx, mut parent_cmd_rx) = mpsc::unbounded_channel();
+    let folded = reduce_prompt_turn_settlement(PromptTurnSettlementInput {
+        result: SubagentResult {
+            subagent_id: "sa-followup".into(),
+            child_session_id: "sa-followup".into(),
+            turns: 2,
+            ..Default::default()
+        },
+        disposition: PromptTurnReceiptDisposition::Completed,
+        final_receipt: Some(Ok(crate::session::commands::ok_end_turn(1, None))),
+        final_text: "follow-up result".to_string(),
+        was_cancelled: false,
+    });
+    assert!(folded.result.success);
+    assert!(!folded.result.cancelled);
+    let completion = ChildCompletion {
+        request: auto_wake_test_request("sa-followup"),
+        result: folded.result,
+        completion_data: ShellCompletionData {
+            auto_wake_enabled: true,
+            parent_cmd_tx: Some(parent_cmd_tx),
+            task_output_tool_name: "get_command_or_subagent_output".into(),
+            spawned_notification_emitted: true,
+            ..Default::default()
+        },
+        disposition: CompletionDisposition {
+            foreground_delivered: false,
+            backgrounded: true,
+            waiter_delivered: false,
+            explicitly_killed: false,
+            should_surface: true,
+        },
+    };
+    let will_wake = will_wake_for(&completion);
+    assert!(will_wake);
+    present_child_completion(completion, &gateway, will_wake);
+    let mut finish_count = 0;
+    let mut prompt_count = 0;
+    while let Ok(command) = parent_cmd_rx.try_recv() {
+        match command {
+            SessionCommand::XaiSessionNotification {
+                notification: SessionNotification {
+                    update: SessionUpdate::SubagentFinished {
+                        status,
+                        turns,
+                        will_wake,
+                        ..
+                    },
+                    ..
+                },
+            } => {
+                assert_eq!((status.as_str(), turns, will_wake), ("completed", 2, true));
+                finish_count += 1;
+            }
+            SessionCommand::Prompt { prompt_id, .. } => {
+                assert!(prompt_id.starts_with("subagent-completed-"));
+                prompt_count += 1;
+            }
+            _ => panic!("unexpected parent command"),
+        }
+    }
+    assert_eq!((finish_count, prompt_count), (1, 1));
+}
+#[test]
 fn inject_subagent_completed_prompt_sends_prompt_and_marks_delivered() {
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
     let reservations = xai_grok_tools::reminders::task_completion::TaskCompletionReservations::default();
@@ -1423,7 +1915,7 @@ fn resume_vs_fork_helper_shapes_differ() {
             ConversationItem::user("prior subagent work"),
             ConversationItem::assistant("done"),
         ];
-    let resumed = resume_initial_context(resume_items.clone());
+    let resumed = resume_initial_context(resume_items.clone(), false);
     let forked = forked_initial_context(resume_items);
     assert_eq!(resumed.source, InitialContextSource::Resumed);
     assert_eq!(forked.source, InitialContextSource::Forked);
@@ -1712,7 +2204,10 @@ async fn bootstrap_no_fork_is_new() {
             &child,
             Path::new("/tmp"),
             "m",
-            128_000,
+            super::resume_window::ResumeWindowPolicy {
+                context_window: 128_000,
+                auto_compact_threshold_percent: 85,
+            },
         )
         .await;
     match out {
@@ -1741,7 +2236,10 @@ async fn bootstrap_fork_without_parent_fails_open() {
             &child,
             Path::new("/tmp"),
             "m",
-            128_000,
+            super::resume_window::ResumeWindowPolicy {
+                context_window: 128_000,
+                auto_compact_threshold_percent: 85,
+            },
         )
         .await;
     match out {
@@ -1781,7 +2279,10 @@ async fn bootstrap_fork_live_parent_chat_state_is_forked_with_marker() {
             &child,
             Path::new("/tmp"),
             "m",
-            128_000,
+            super::resume_window::ResumeWindowPolicy {
+                context_window: 128_000,
+                auto_compact_threshold_percent: 85,
+            },
         )
         .await;
     match out {
@@ -1867,6 +2368,7 @@ async fn copy_session_data_preserves_parent_chat_history() {
                 copy_plan_state: false,
                 copy_plan_mode_state: false,
                 copy_signals: false,
+                copy_usage: false,
                 copy_tool_state: false,
                 fork_filter: true,
                 ..Default::default()
@@ -2064,12 +2566,10 @@ fn describe_subagent_type_unknown_returns_sorted_available() {
         other => panic!("expected Unknown, got {other:?}"),
     }
 }
-/// Regression: on the DEFAULT grok-build host —
-/// the primary `/goal` host — the `general-purpose` toolset's only
-/// file-mutator is `search_replace` (`ToolKind::Edit`); the `write`
-/// tool (`ToolKind::Write`) is injection-only and absent from the
-/// pre-injection describe probe. The planner gate must therefore key on
-/// the Edit-class capability, which this asserts is present.
+/// Regression guard for the DEFAULT grok-build host, the primary `/goal` host.
+/// There the only `general-purpose` tool that edits files is `search_replace` (`ToolKind::Edit`).
+/// The `write` tool (`ToolKind::Write`) is only injected later, so the pre-injection describe probe never lists it.
+/// The planner gate must therefore key on the Edit capability.
 #[test]
 fn describe_default_host_general_purpose_has_edit_not_write() {
     use xai_grok_tools::types::tool::ToolKind;
@@ -2092,9 +2592,8 @@ fn describe_default_host_general_purpose_has_edit_not_write() {
             "the injection-only `write` tool must NOT be in the pre-injection probe",
         );
 }
-/// Requirement 3 (fail-open trigger): an `agent_type` that does not resolve
-/// to a harness `AgentDefinition` reports `Unknown`, which the `/goal`
-/// resolver maps to a `ToolsetUnknown` fail-open to the session harness.
+/// An `agent_type` that does not resolve to a harness `AgentDefinition` reports `Unknown`.
+/// The `/goal` resolver maps that to a `ToolsetUnknown` fail-open to the session harness.
 #[test]
 fn goal_harness_override_unresolvable_returns_unknown() {
     let ctx = ctx_with_toggle(HashMap::new());
@@ -2109,9 +2608,8 @@ fn goal_harness_override_unresolvable_returns_unknown() {
         }
     }
 }
-/// The model fallback only fires for a strict harness: a custom profile
-/// running a stock/vision model leaves subagents on the default harness, so
-/// they keep native image input.
+/// The model fallback only fires for a strict harness.
+/// A custom profile running a stock/vision model leaves subagents on the default harness, so they keep native image input.
 #[test]
 fn subagent_keeps_default_flavor_when_parent_model_is_non_strict() {
     use xai_grok_agent::config::BuiltinAgentName;
@@ -2245,8 +2743,7 @@ async fn run_promote_cancel_with_worktree(
         ));
     assert!(result.cancelled);
 }
-/// A pending cancel removes a freshly-created worktree but preserves a
-/// resumed child worktree owned by its source.
+/// A pending cancel removes a freshly-created worktree but preserves a resumed child worktree owned by its source.
 #[tokio::test]
 async fn cancel_pending_at_promote_removes_fresh_worktree_preserves_resumed() {
     xai_test_utils::require_git!();
@@ -2475,6 +2972,7 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
             show_model_fingerprint: false,
             stream_tool_calls: None,
             laziness_detector: crate::agent::config::LazinessDetectorPerModelConfig::default(),
+            variants: Vec::new(),
         },
         api_key: None,
         env_key: None,

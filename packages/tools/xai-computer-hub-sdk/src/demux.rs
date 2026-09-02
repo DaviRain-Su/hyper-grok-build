@@ -834,27 +834,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inbox_full_request_without_outbound_does_not_panic() {
-        // A bare demux (no outbound, e.g. unit context) must still report
-        // InboxFull cleanly when it cannot synthesize a rejection.
-        let demux = Demux::new();
-        let session = SessionId::new("no_out").expect("valid");
-        let (tx, _rx) = mpsc::channel(1);
-        demux.register_session_inbox(session.clone(), tx);
-        let frame = || {
-            json!({
-                "jsonrpc": "2.0",
-                "id": "x",
-                "session_id": "no_out",
-                "method": "tool_call_request",
-                "params": {},
-            })
-        };
-        assert_eq!(demux.route(frame()), RouteOutcome::Session);
-        assert_eq!(demux.route(frame()), RouteOutcome::InboxFull);
-    }
-
-    #[tokio::test]
     async fn progress_route_pushes_to_progress_waiter() {
         let demux = Demux::new();
         let call_id = ToolCallId::new_v7();

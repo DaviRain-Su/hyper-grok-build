@@ -1,10 +1,10 @@
-//! Core telemetry tracking — product events + Mixpanel.
+//! Core telemetry tracking: product events and Mixpanel.
 //!
-//! All calls route through [`track`]. Precedence: env > config > remote config > default.
+//! All calls route through [`track`].
+//! Precedence: env overrides config, config overrides remote config, remote config overrides the default.
 //!
-//! Extracted from `xai-grok-shell::agent::telemetry::track`. The HTTP client is
-//! injected via [`init`]/[`init_if_needed`] so this crate avoids depending on
-//! shell's `User-Agent` builder (which couples to the `permission` module).
+//! The HTTP client is injected via [`init`]/[`init_if_needed`].
+//! That keeps this crate from depending on shell's `User-Agent` builder, which couples to the `permission` module.
 
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -19,12 +19,7 @@ use crate::session_ctx::EmitterOrigin;
 /// Event property map shared by all telemetry modules.
 pub type Metadata = serde_json::Map<String, serde_json::Value>;
 
-/// Derive the analytics `event_value` from the full wire `event_name` by stripping
-/// whichever [`EmitterOrigin`] prefix it carries (`grok-shell-` /
-/// `grok-workspace-`). Unprefixed names pass through unchanged. Kept in
-/// lockstep with [`EmitterOrigin::event_prefix`] via [`EmitterOrigin::ALL`],
-/// so shell events keep their historical stripped value and workspace events
-/// collapse to the same bare suffix.
+/// Strips the [`EmitterOrigin`] prefix so shell events keep their historical `event_value` and workspace events collapse to the same bare suffix.
 fn event_value(event_name: &str) -> &str {
     for origin in EmitterOrigin::ALL {
         if let Some(suffix) = event_name.strip_prefix(origin.event_prefix()) {
@@ -34,12 +29,11 @@ fn event_value(event_name: &str) -> &str {
     event_name
 }
 
-/// Product-analytics `$insert_id`: unique per emit, ≤36 bytes, `[A-Za-z0-9-]`.
+/// Product-analytics `$insert_id`: unique per emit, at most 36 bytes, `[A-Za-z0-9-]`.
 ///
-/// Do not put the event name in this field. The analytics sink truncates to 36
-/// chars and rejects most other characters; a name-prefixed id either collapses
-/// to a constant (long names → per-user same-second dedup) or is dropped and
-/// regenerated (shorter names with `:`). A bare UUID always validates.
+/// Do not put the event name in this field: the sink truncates to 36 chars and rejects most other characters.
+/// A truncated name-prefixed id collapses to a constant and dedups a user's same-second events; one with `:` is dropped and regenerated.
+/// A bare UUID always validates.
 fn product_analytics_insert_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
@@ -118,9 +112,8 @@ impl TelemetryClient {
     }
 }
 
-/// Normalize a subscription tier string to a consistent lowercase_underscore
-/// format for Mixpanel. Handles both CCP display names ("SuperGrok Heavy")
-/// and JWT-derived keys ("supergrok_heavy").
+/// Normalize a subscription tier string to a consistent lowercase_underscore format for Mixpanel.
+/// Handles both CCP display names ("SuperGrok Heavy") and JWT-derived keys ("supergrok_heavy").
 fn normalize_tier(tier: &str) -> String {
     match tier {
         "SuperGrok Heavy" | "supergrok_heavy" => "supergrok_heavy",
@@ -131,7 +124,7 @@ fn normalize_tier(tier: &str) -> String {
         "X Premium" | "x_premium" => "x_premium",
         "X Basic" | "x_basic" => "x_basic",
         "Free" | "free" => "free",
-        // Team / console API keys — dedicated Mixpanel segment, not free.
+        // Team and console API keys get a dedicated Mixpanel segment rather than counting as free
         "API Key" | "api_key" => "api_key",
         other => return other.to_ascii_lowercase().replace(' ', "_"),
     }
@@ -141,7 +134,7 @@ fn normalize_tier(tier: &str) -> String {
 static TELEMETRY_CLIENT: OnceLock<Mutex<Option<TelemetryClient>>> = OnceLock::new();
 
 /// Returns `true` when telemetry mode is `Enabled`.
-/// Used by `log_event` — product analytics events only fire in `Enabled` mode.
+/// Used by `log_event`; product analytics events only fire in `Enabled` mode.
 pub fn is_enabled() -> bool {
     TELEMETRY_CLIENT
         .get()
@@ -150,7 +143,7 @@ pub fn is_enabled() -> bool {
 }
 
 /// Returns `true` when telemetry mode is `Enabled` or `SessionMetrics`.
-/// Used by `session_metrics` — lifecycle events fire in both modes.
+/// Used by `session_metrics`; lifecycle events fire in both modes.
 pub fn is_session_metrics_enabled() -> bool {
     TELEMETRY_CLIENT
         .get()
@@ -277,17 +270,17 @@ pub const RESERVED_EVENT_KEYS: &[&str] = &[
     "footprint_bytes",
     "memory_limit_bytes",
     "uptime_secs",
-    "sessions_active",
-    "subagents_active",
-    "compaction_active",
-    "mcp_servers_connected",
-    "turns_active",
-    "workflow_runs_active",
+    crate::activity::SESSIONS_ACTIVE_KEY,
+    crate::activity::SUBAGENTS_ACTIVE_KEY,
+    crate::activity::COMPACTIONS_ACTIVE_KEY,
+    crate::activity::MCP_SERVERS_CONNECTED_KEY,
+    crate::activity::TURNS_ACTIVE_KEY,
+    crate::activity::WORKFLOW_RUNS_ACTIVE_KEY,
     "session_id",
     "turn_number",
 ];
 
-/// Core telemetry emitter. Routes to product events + Mixpanel.
+/// Core telemetry emitter. Routes to product events and Mixpanel.
 pub async fn track(event_name: &str, request_id: &str, ctx: &UserContext, mut metadata: Metadata) {
     let lock = TELEMETRY_CLIENT.get_or_init(|| Mutex::new(None));
     let client = {
@@ -364,7 +357,6 @@ pub async fn track(event_name: &str, request_id: &str, ctx: &UserContext, mut me
         let time_secs = chrono::Utc::now().timestamp();
         let insert_id = product_analytics_insert_id();
 
-        // Convert serde_json::Map to HashMap for mixpanel
         let mut props: std::collections::HashMap<String, serde_json::Value> =
             metadata.into_iter().collect();
         props.insert("distinct_id".into(), json!(user_id));
@@ -389,8 +381,8 @@ pub async fn track(event_name: &str, request_id: &str, ctx: &UserContext, mut me
     }
 }
 
-/// Resolved mode of the initialized client, `None` when off. Lets a parent
-/// hand its mode to a spawned child that cannot re-resolve remote settings.
+/// Resolved mode of the initialized client, `None` when off.
+/// Lets a parent pass its mode to a spawned child that cannot re-resolve remote settings.
 pub fn current_mode() -> Option<TelemetryMode> {
     let lock = TELEMETRY_CLIENT.get_or_init(|| Mutex::new(None));
     let guard = lock.lock().unwrap_or_else(|err| err.into_inner());
@@ -399,9 +391,8 @@ pub fn current_mode() -> Option<TelemetryMode> {
 
 /// Sync the user's Mixpanel profile once per init. Fire-and-forget.
 ///
-/// Only runs in [`TelemetryMode::Enabled`]. SessionMetrics mode may emit
-/// lifecycle events via [`track`], but must not write Mixpanel people
-/// profiles (`engage`).
+/// Only runs in [`TelemetryMode::Enabled`].
+/// SessionMetrics mode may emit lifecycle events via [`track`], but must not write Mixpanel people profiles (`engage`).
 pub fn sync_profile() {
     let lock = TELEMETRY_CLIENT.get_or_init(|| Mutex::new(None));
     let client = {
@@ -412,8 +403,7 @@ pub fn sync_profile() {
         }
     };
 
-    // The single profile-sync gate: reads the installed client's mode, so every
-    // caller (and any init race) resolves against what was actually installed.
+    // The single profile-sync gate: reads the installed client's mode, so every caller (and any init race) resolves against what was installed
     if !client.mode.is_enabled() {
         return;
     }
@@ -450,15 +440,12 @@ pub fn sync_profile() {
 
 /// Initialize telemetry client. Safe to call multiple times.
 ///
-/// - `Disabled` → no client
-/// - `SessionMetrics` → client active (only `session_metrics::*` events fire)
-/// - `Enabled` → client active (all events fire)
+/// - `Disabled`: no client
+/// - `SessionMetrics`: client active (only `session_metrics::*` events fire)
+/// - `Enabled`: client active (all events fire)
 ///
-/// `shell_version` is stamped into every event payload as `shell_version`
-/// (legacy field name preserved for analytics continuity); shell passes its
-/// own `CARGO_PKG_VERSION`. `http_client` is owned by the caller (typically
-/// shell's `shared_client()`) so the shared TLS-warmed pool is reused for
-/// telemetry posts.
+/// `shell_version` is stamped into every event payload (legacy field name kept for analytics continuity); shell passes its `CARGO_PKG_VERSION`.
+/// `http_client` is owned by the caller (typically shell's `shared_client()`) so the shared TLS-warmed pool is reused for telemetry posts.
 pub fn init(
     config: TelemetryConfig,
     mode: TelemetryMode,
@@ -491,9 +478,8 @@ pub fn init(
     sync_profile();
 }
 
-/// Re-initialize the telemetry client if it was not created at startup
-/// (e.g. because auth was not yet available). No-op when the client
-/// is already set, so safe to call unconditionally after auth succeeds.
+/// Re-initialize the telemetry client if it was not created at startup (e.g. because auth was not yet available).
+/// No-op when the client is already set, so safe to call unconditionally after auth succeeds.
 pub fn init_if_needed(
     config: TelemetryConfig,
     mode: TelemetryMode,
@@ -532,8 +518,7 @@ pub fn init_if_needed(
 mod tests {
     use super::*;
 
-    /// Shell events must still strip to their bare suffix, byte-for-byte
-    /// identical to the previous `strip_prefix("grok-shell-")` behavior.
+    /// Shell events must still strip to their bare suffix, byte-for-byte identical to the previous `strip_prefix("grok-shell-")` behavior.
     #[test]
     fn event_value_strips_shell_prefix() {
         assert_eq!(event_value("grok-shell-turn"), "turn");
@@ -549,13 +534,11 @@ mod tests {
         assert_eq!(event_value("grok-workspace-turn"), "turn");
     }
 
-    /// SessionMetrics must not attempt Mixpanel profile engage — sync_profile
-    /// is a no-op unless mode is fully Enabled.
+    /// SessionMetrics must not attempt Mixpanel profile engage; sync_profile is a no-op unless mode is fully Enabled.
     #[test]
     fn sync_profile_is_noop_in_session_metrics_mode() {
-        // No tokio runtime here BY DESIGN: if the gate wrongly falls through,
-        // sync_profile's tokio::spawn panics and fails this test. Converting
-        // this to #[tokio::test] would silently turn it into theater.
+        // No tokio runtime here on purpose: if the gate wrongly falls through, sync_profile's tokio::spawn panics and fails this test
+        // Under #[tokio::test] the spawn would succeed and the test would pass even with the gate broken
         assert!(
             tokio::runtime::Handle::try_current().is_err(),
             "this test must run without a tokio runtime"
@@ -570,8 +553,7 @@ mod tests {
         }
         let _clear = ClearClient;
 
-        // Mixpanel configured, but no events endpoint: the global must never
-        // carry a live funnel out of this test.
+        // Mixpanel configured, but no events endpoint: the global must never carry a client that can post real events out of this test
         let cfg = TelemetryConfig {
             mixpanel_enabled: true,
             mixpanel_token: Some("test-token".into()),
@@ -599,23 +581,20 @@ mod tests {
         assert!(!is_enabled(), "product analytics must stay off");
     }
 
-    /// Names without a known emitter prefix pass through unchanged (preserves
-    /// the old `unwrap_or(event_name)` fallback).
+    /// Names without a known emitter prefix pass through unchanged.
     #[test]
     fn event_value_passes_through_unprefixed() {
         assert_eq!(event_value("turn"), "turn");
         assert_eq!(event_value(""), "");
     }
 
-    /// Only the leading emitter prefix is stripped; a suffix that itself looks
-    /// like another prefix is left intact.
+    /// Only the leading emitter prefix is stripped; a suffix that itself looks like another prefix is left intact.
     #[test]
     fn event_value_strips_only_leading_prefix() {
         assert_eq!(event_value("grok-shell-workspace-x"), "workspace-x");
     }
 
-    /// The stripper recovers the bare suffix for every origin the emitter can
-    /// produce — ties `event_value` to `EmitterOrigin::event_prefix`.
+    /// The stripper recovers the bare suffix for every origin the emitter can produce, tying `event_value` to `EmitterOrigin::event_prefix`.
     #[test]
     fn event_value_round_trips_every_emitter_prefix() {
         for origin in EmitterOrigin::ALL {
@@ -624,9 +603,8 @@ mod tests {
         }
     }
 
-    /// Mixpanel `subscription_tier` must be a stable snake_case key. Free
-    /// users arrive as CCP display `"Free"` or JWT-fallback `"free"`; both
-    /// must land as `"free"` (not omitted / not `"Free"`).
+    /// Mixpanel `subscription_tier` must be a stable snake_case key.
+    /// Free users arrive as CCP display `"Free"` or JWT-fallback `"free"`; both must land as `"free"`.
     #[test]
     fn normalize_tier_maps_display_and_claim_names() {
         assert_eq!(normalize_tier("Free"), "free");
@@ -640,13 +618,14 @@ mod tests {
         assert_eq!(normalize_tier("SuperGrok Lite"), "supergrok_lite");
         assert_eq!(normalize_tier("SuperGrok Plus"), "supergrok_plus");
         assert_eq!(normalize_tier("supergrok_plus"), "supergrok_plus");
-        // API key is a dedicated Mixpanel segment — never free.
+        // API key is a dedicated Mixpanel segment, never free
         assert_eq!(normalize_tier("API Key"), "api_key");
         assert_eq!(normalize_tier("api_key"), "api_key");
     }
 
-    /// Every reserved key comes from serializing the structs that own the
-    /// wire names, so the const cannot drift from them.
+    /// Enrichment and session keys derive from the struct that owns them;
+    /// activity-gauge keys are defined in their domain crates and enumerated at
+    /// runtime, so they are reserved here explicitly. The const must cover all.
     #[test]
     fn reserved_event_keys_derive_from_the_serialized_schema() {
         let enrichment = EventEnrichment {
@@ -679,12 +658,15 @@ mod tests {
             .cloned()
             .collect();
         expected.extend(
-            serde_json::to_value(crate::activity::ActivitySnapshot::read())
-                .unwrap()
-                .as_object()
-                .unwrap()
-                .keys()
-                .cloned(),
+            [
+                crate::activity::SESSIONS_ACTIVE_KEY,
+                crate::activity::SUBAGENTS_ACTIVE_KEY,
+                crate::activity::COMPACTIONS_ACTIVE_KEY,
+                crate::activity::MCP_SERVERS_CONNECTED_KEY,
+                crate::activity::TURNS_ACTIVE_KEY,
+                crate::activity::WORKFLOW_RUNS_ACTIVE_KEY,
+            ]
+            .map(String::from),
         );
         expected.extend(["session_id".to_string(), "turn_number".to_string()]);
 
@@ -698,13 +680,9 @@ mod tests {
         assert_eq!(reserved, expected);
     }
 
-    /// `event_value`'s first-match-wins over `EmitterOrigin::ALL` is only
-    /// correct because the emitter prefixes are mutually exclusive: no origin's
-    /// `event_prefix()` is a prefix of another's. If that invariant ever broke
-    /// (e.g. a future `"grok-shell-ext-"` origin), an earlier `ALL` entry could
-    /// strip a shorter prefix first and yield the wrong `event_value`. Pin the
-    /// invariant so adding such a variant fails the suite rather than silently
-    /// corrupting analytics.
+    /// `event_value`'s first-match-wins over `EmitterOrigin::ALL` is only correct because no origin's `event_prefix()` is a prefix of another's.
+    /// A future origin like `"grok-shell-ext-"` would let an earlier `ALL` entry strip the shorter prefix first and yield the wrong `event_value`.
+    /// Pin the invariant so adding such a variant fails the suite rather than silently corrupting analytics.
     #[test]
     fn emitter_prefixes_are_mutually_exclusive() {
         for a in EmitterOrigin::ALL {

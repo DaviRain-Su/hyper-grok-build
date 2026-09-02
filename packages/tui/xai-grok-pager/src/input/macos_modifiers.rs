@@ -1,9 +1,8 @@
 //! Native macOS modifier key detection via CoreGraphics.
 //!
-//! Side-channels around the PTY directly accessing CoreGraphics.
+//! Reads modifier state straight from the OS rather than from the PTY's key events.
 
-// CoreGraphics CGEventSourceFlagsState — returns the current global
-// modifier flags without requiring any special permissions.
+// CoreGraphics CGEventSourceFlagsState returns the current global modifier flags without requiring any special permissions
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
     fn CGEventSourceFlagsState(stateID: i32) -> u64;

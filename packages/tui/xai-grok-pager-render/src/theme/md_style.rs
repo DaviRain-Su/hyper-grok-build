@@ -1,19 +1,13 @@
-//! Theme-aware markdown rendering style.
-//!
 //! Defines the `MarkdownStyle` used by agent message and thinking blocks.
-//! Colors come from the `md_*` fields on the current [`Theme`], which are
-//! already quantized to the terminal's color capability level.
+//! Colors come from the `md_*` fields on the current [`Theme`], which are already quantized to the terminal's color capability level.
 
 use anstyle::{Ansi256Color, AnsiColor, Color, Style};
 use xai_grok_markdown::MarkdownStyle;
 
-/// Convert `ratatui::style::Color` → `anstyle::Color` (type conversion only).
+/// Convert `ratatui::style::Color` to `anstyle::Color`.
 ///
-/// Quantization is already handled by [`Theme::current()`], so this just
-/// bridges the two color types.
-///
-/// Returns `None` for `Reset`: `anstyle::Color` has no "terminal default"
-/// variant, and downstream an unset color renders as the terminal default.
+/// [`Theme::current()`] already handles quantization, so this just bridges the two color types.
+/// Returns `None` for `Reset`: `anstyle::Color` has no "terminal default" variant, and downstream an unset color renders as the terminal default.
 fn to_anstyle(c: ratatui::style::Color) -> Option<Color> {
     Some(match c {
         ratatui::style::Color::Reset => return None,
@@ -49,7 +43,6 @@ fn bg(c: ratatui::style::Color) -> Style {
     Style::new().bg_color(to_anstyle(c))
 }
 
-/// Convert `ratatui::style::Modifier` flags to `anstyle::Style` effects.
 fn modifier_to_anstyle(m: ratatui::style::Modifier) -> Style {
     let mut s = Style::new();
     if m.contains(ratatui::style::Modifier::BOLD) {
@@ -73,7 +66,6 @@ fn modifier_to_anstyle(m: ratatui::style::Modifier) -> Style {
     s
 }
 
-/// Build heading inner styles from theme colors and per-level modifiers.
 fn heading_inner_styles(
     colors: [ratatui::style::Color; 6],
     mods: [ratatui::style::Modifier; 6],
@@ -91,15 +83,13 @@ fn heading_inner_styles(
     })
 }
 
-/// Build heading outer styles (dimmed + hidden, for syntax markers).
+/// Build heading outer styles (dimmed and hidden, for syntax markers).
 fn heading_outer_styles(colors: [ratatui::style::Color; 6]) -> [Style; 6] {
     colors.map(|c| fg(c).dimmed().hidden())
 }
 
-/// Get the theme-aware markdown style.
-///
-/// Built fresh from [`Theme::current()`] on each call. Both the theme
-/// construction and style mapping are trivial struct copies.
+/// The style is built fresh from [`Theme::current()`] on each call.
+/// Both the theme construction and style mapping are trivial struct copies.
 pub fn style() -> MarkdownStyle {
     build_style()
 }
@@ -135,9 +125,8 @@ fn build_style() -> MarkdownStyle {
         strikethrough_outer: Style::new().dimmed().hidden(),
         inline_code_inner: fg(theme.md_code).bold(),
         inline_code_outer: fg(theme.md_code).dimmed().hidden(),
-        // Selection-side bar detection (xai-grok-pager scrollback/blocks/
-        // quote_bar.rs quote_bar_style) mirrors this exact style; its
-        // end-to-end tests fail if this line changes.
+        // The selection-side bar detection in xai-grok-pager (scrollback/blocks/quote_bar.rs, `quote_bar_style`) mirrors this exact style
+        // Its end-to-end tests fail if this line changes
         blockquote_outer: fg(theme.md_muted).dimmed(),
         task_checked: fg(theme.md_task_checked),
         task_unchecked: fg(theme.md_task_unchecked).dimmed(),
@@ -161,9 +150,8 @@ fn build_style() -> MarkdownStyle {
 mod tests {
     use super::*;
 
-    /// Regression: `Reset` used to fall back to a concrete `AnsiColor::White`
-    /// (ANSI-7 silver), which rendered Reset-themed markdown washed-out gray
-    /// on light terminals and broke the `NO_COLOR` opt-out.
+    /// Regression: `Reset` used to fall back to a concrete `AnsiColor::White` (ANSI-7 silver).
+    /// That rendered Reset-themed markdown washed-out gray on light terminals and broke the `NO_COLOR` opt-out.
     #[test]
     fn reset_maps_to_no_color() {
         assert_eq!(to_anstyle(ratatui::style::Color::Reset), None);
@@ -171,8 +159,7 @@ mod tests {
         assert_eq!(bg(ratatui::style::Color::Reset).get_bg_color(), None);
     }
 
-    /// Spot checks around the Gray/DarkGray naming mismatch between ratatui
-    /// and anstyle.
+    /// Spot checks around the Gray/DarkGray naming mismatch between ratatui and anstyle.
     #[test]
     fn named_colors_map_concretely() {
         assert_eq!(

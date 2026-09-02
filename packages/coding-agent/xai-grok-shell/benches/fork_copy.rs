@@ -1,6 +1,5 @@
-//! Throughput benchmark for `StorageAdapter::copy_session_data` over a
-//! synthesized production-shaped session; the peak-RSS bound lives in
-//! `tests/test_fork_copy_memory.rs`.
+//! Measures the throughput of `StorageAdapter::copy_session_data` over a synthesized session shaped like production data.
+//! The bound on peak RSS is checked in `tests/test_fork_copy_memory.rs`.
 //!
 //! Run: `cargo bench -p xai-grok-shell --bench fork_copy`
 //! Size override: `FORK_BENCH_MB=64 cargo bench ...` (default 16 MB).

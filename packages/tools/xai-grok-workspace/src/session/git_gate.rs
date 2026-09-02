@@ -1,13 +1,11 @@
-//! Process-wide duty-cycle gate for in-process git status/diff walks.
+//! Process-wide gate for in-process git status/diff walks.
 //!
-//! libgit2 `statuses()` / diffs `pread` the same ODB packs under a process mutex;
-//! concurrent walks on a shallow monorepo pin CPU and tens of GB of footprint.
-//! Identical in-flight work is joined and a short snapshot is reused so client
-//! spam cannot start a second pack walk. Waiter timeout does not cancel or
-//! detach the walk: this `run()` returns timeout and later callers join the
-//! same inflight; a late `Ok` becomes the snapshot. A walk that finishes
-//! under a bumped epoch is retried once; further bumps return the last
-//! completed result so `run()` cannot loop without bound.
+//! libgit2 `statuses()` and diffs `pread` the same ODB packs under a process mutex.
+//! Concurrent walks on a shallow monorepo pin CPU and tens of GB of footprint.
+//! Identical in-flight work is joined and a short snapshot is reused so client spam cannot start a second pack walk.
+//! Waiter timeout does not cancel or detach the walk: this `run()` returns timeout and later callers join the same inflight.
+//! A late `Ok` becomes the snapshot.
+//! A walk that finishes under a bumped epoch is retried once; further bumps return the last completed result so `run()` cannot loop without bound.
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -437,9 +435,8 @@ impl GitGate {
         F: Fn() -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<T>> + Send + 'static,
     {
-        // libgit2 statuses/diffs are not cooperative; aborting this task would
-        // drop the ODB permit while spawn_blocking still preads packs. Waiters
-        // time out locally; the walk stays attached to the slot until it ends.
+        // libgit2 statuses/diffs are not cooperative; aborting this task would drop the ODB permit while spawn_blocking still preads packs
+        // Waiters time out locally; the walk stays attached to the slot until it ends
         let this = self.clone();
         tokio::spawn(async move {
             let mut publisher = InflightPublisher {

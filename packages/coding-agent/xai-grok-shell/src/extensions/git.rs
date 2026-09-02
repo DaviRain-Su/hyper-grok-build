@@ -1,15 +1,9 @@
-//! Git extension API layer.
+//! Each method resolves its git root from an explicit `gitRoot`, falling back to a session lookup via `sessionId`.
+//! The work itself is delegated to the pure functions in `session::git::*`.
 //!
-//! Routing: prefers explicit `gitRoot`, falls back to session lookup via `sessionId`.
-//! Business logic delegated to `session::git::*` pure functions.
-//!
-//! **Phase 4 design note**: Git/JJ functions (`git_cli`, `status`,
-//! `detect_vcs_kind`, `find_git_root_from_path`, etc.) are stateless
-//! utilities that take a `&Path` and shell out to `git`/`jj`. They do
-//! not access workspace state and therefore remain direct calls rather
-//! than routing through `WorkspaceChannel`. The channel's VCS stubs
-//! (`git_status`, `git_diff`, etc.) are reserved for future stateful
-//! operations (e.g. cached VCS state, cross-session conflict detection).
+//! Git and JJ helpers (`git_cli`, `status`, `detect_vcs_kind`, `find_git_root_from_path`, etc.) take a `&Path` and shell out to `git` or `jj`.
+//! They do not touch workspace state, so they stay direct calls rather than routing through `WorkspaceChannel`.
+//! The channel's VCS stubs (`git_status`, `git_diff`, etc.) are reserved for stateful operations (cached VCS state, cross-session conflict detection).
 use super::{Empty, ExtResult, parse_params, to_ext_response, to_ext_response_partial};
 use crate::agent::MvpAgent;
 use crate::session::ExtMethodResult;
@@ -204,7 +198,6 @@ pub(crate) struct GitCurrentCommitRequest {
     #[serde(default)]
     pub git_root: Option<String>,
 }
-/// Request for x.ai/git/checkout_commit extension method.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GitCheckoutCommitRequest {

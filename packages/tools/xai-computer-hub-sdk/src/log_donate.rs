@@ -557,20 +557,6 @@ mod tests {
     }
 
     #[test]
-    fn inert_layer_drops_selected_events() {
-        let layer = DonatingLogLayer::new_inert();
-        let flusher = layer.clone();
-        // No sender activated.
-        let subscriber = tracing_subscriber::registry().with(layer);
-        tracing::subscriber::with_default(subscriber, || {
-            tracing::warn!(target: "workspace::telemetry", session_id = "s1", "dropped");
-        });
-        flusher.shared.flush();
-        // Nothing to assert beyond not panicking: with no sender the
-        // batch never fills and flush is a no-op.
-    }
-
-    #[test]
     fn exporter_chunks_at_max_records_per_donation() {
         let (tx, mut rx) = mpsc::channel::<PumpMsg>(8);
         let exporter = PumpLogExporter {

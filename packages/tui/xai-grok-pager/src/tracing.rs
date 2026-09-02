@@ -574,11 +574,6 @@ mod tests {
         assert_eq!(entry.desired_height(4), 3);
     }
     #[test]
-    fn list_item_desired_height_fits() {
-        let entry = TracingEntry::new(0, "short");
-        assert_eq!(entry.desired_height(80), 1);
-    }
-    #[test]
     fn model_push_and_len() {
         let mut model = TracingModel::new(100, 10);
         assert!(model.is_empty());

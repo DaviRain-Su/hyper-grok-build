@@ -834,17 +834,24 @@ mod tests {
         assert!(taken.is_none());
     }
 
+    /// Fixture child killed on drop ([`xai_tty_utils::KillOnDrop`]): an
+    /// assertion failure between spawn and the explicit kill must not leak
+    /// the predecessor (the SIGTERM-immune bash loop would otherwise run
+    /// forever). `kill` is SIGKILL, so it also ends the trap-armed fixture.
+    #[cfg(target_os = "linux")]
+    use xai_tty_utils::KillOnDrop as FixtureChild;
+
     /// Spawn a long-sleeping child to stand in for a predecessor process.
     #[cfg(target_os = "linux")]
-    #[allow(clippy::disallowed_methods)] // test fixture; the test kills it
-    fn spawn_predecessor() -> Child {
-        Command::new("sleep")
-            .arg("300")
+    #[allow(clippy::disallowed_methods)] // test fixture; killed on drop
+    fn spawn_predecessor() -> FixtureChild {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("300")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn sleep")
+            .stderr(Stdio::null());
+        xai_tty_utils::detach_std_command(&mut cmd);
+        FixtureChild::new(cmd.spawn().expect("spawn sleep"))
     }
 
     /// Wait (bounded) for a child to exit; returns true if it did.
@@ -930,18 +937,18 @@ mod tests {
         // A predecessor that ignores the graceful signal: only the SIGKILL escalation can end it
         // It touches a marker once the trap is installed so the test cannot signal it during bash startup
         let trap_ready = dir.path().join("trap-ready");
-        #[allow(clippy::disallowed_methods)] // test fixture; the test kills it
-        let mut child = Command::new("bash")
-            .arg("-c")
+        let mut cmd = Command::new("bash");
+        cmd.arg("-c")
             .arg(format!(
                 "trap '' TERM; touch {}; while true; do sleep 1; done",
                 trap_ready.display()
             ))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn stubborn child");
+            .stderr(Stdio::null());
+        xai_tty_utils::detach_std_command(&mut cmd);
+        #[allow(clippy::disallowed_methods)] // test fixture; killed on drop
+        let mut child = FixtureChild::new(cmd.spawn().expect("spawn stubborn child"));
         let trap_deadline = Instant::now() + Duration::from_secs(5);
         while !trap_ready.exists() {
             assert!(Instant::now() < trap_deadline, "child never set its trap");

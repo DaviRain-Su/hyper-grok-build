@@ -1,4 +1,4 @@
-//! Standalone voice debug harness: mic → streaming STT → transcript.
+//! Standalone voice debug harness: capture the mic, stream to STT, print the transcript.
 //!
 //! ```bash
 //! export XAI_API_KEY=...
@@ -12,9 +12,8 @@ use xai_grok_voice::{
 };
 
 fn main() -> anyhow::Result<()> {
-    // Hidden mic-capture helper intercept (macOS): the capture backend
-    // re-execs the current binary — here, voice-probe itself. Runs before any
-    // runtime/TLS init so the capture child stays minimal.
+    // Hidden mic-capture helper intercept (macOS): the capture backend re-execs the current binary, here voice-probe itself
+    // It runs before any runtime/TLS init so the capture child stays minimal
     if let Some(code) = xai_grok_voice::maybe_run_capture_subprocess() {
         std::process::exit(code);
     }
@@ -125,8 +124,7 @@ fn parse_args(argv: Vec<String>) -> Args {
 }
 
 fn load_config(path: Option<&std::path::Path>) -> VoiceConfig {
-    // The probe has no shell config stack; env is the resolved fallback
-    // (config table still beats it, matching the pager's precedence).
+    // The probe has no shell config stack; env is the resolved fallback (config table still beats it, matching the pager's precedence)
     let env_base = std::env::var("GROK_XAI_API_BASE_URL").ok();
     if let Some(path) = path
         && let Ok(raw) = std::fs::read_to_string(path)

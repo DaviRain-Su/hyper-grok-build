@@ -4,6 +4,7 @@ pub mod claude_settings;
 mod exec_risk;
 mod gate_preflight;
 mod hub_permission;
+pub mod managed_policy;
 mod manager;
 mod policy;
 mod prompter;
@@ -64,7 +65,7 @@ pub use manager::{
     AUTO_DENY_CONSECUTIVE_LIMIT, AUTO_DENY_TOTAL_LIMIT, PermissionHandle,
     always_allow_scope_persists, default_always_allow_scope, default_always_deny_scope,
     minimum_always_allow_scope, reasons, spawn_permission_manager,
-    spawn_permission_manager_with_hub,
+    spawn_permission_manager_with_hub, spawn_permission_manager_with_pin,
 };
 pub use policy::{
     CompiledPolicy, bash_glob_is_catchall, bash_pattern_is_broad, bash_pattern_matches_command,

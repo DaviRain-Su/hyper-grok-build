@@ -1,7 +1,6 @@
-//! Image-strip persistence policy (`acp_session_impl/image_strip.rs`):
-//! which `ImagesStripped` events may rewrite stored history, the deferred
-//! persist that waits for the stripped retry's `Completed`, and the user
-//! notifications for both the request-local and the durable case.
+//! Image-strip persistence policy (`acp_session_impl/image_strip.rs`).
+//! Covers which `ImagesStripped` events may rewrite stored history and the deferred persist that waits for the stripped retry's `Completed`.
+//! Also covers the user notifications for both the request-local and the durable case.
 
 use std::sync::Arc;
 
@@ -53,9 +52,9 @@ fn drain_gateway_debug(
     out
 }
 
-/// The deferred apply runs as a detached local task with nothing to join,
-/// and several callers assert absence afterwards; that needs a window, not
-/// a completion signal. Yield to the LocalSet for a wall-clock bound.
+/// The deferred apply runs as a detached local task with nothing to join, and several callers assert absence afterwards.
+/// That needs a window, not a completion signal.
+/// Yield to the LocalSet for a wall-clock bound.
 async fn settle() {
     let _ = tokio::time::timeout(std::time::Duration::from_millis(100), async {
         loop {
@@ -65,9 +64,8 @@ async fn settle() {
     .await;
 }
 
-/// Wait until the stored conversation satisfies `cond`, bounded by wall
-/// clock; on timeout returns the last-read conversation so the caller's
-/// assertion fails showing the real state.
+/// Wait until the stored conversation satisfies `cond`, bounded by wall clock.
+/// On timeout returns the last-read conversation so the caller's assertion fails showing the real state.
 async fn wait_for_conversation(
     actor: &SessionActor,
     cond: impl Fn(&[ConversationItem]) -> bool,
@@ -177,9 +175,8 @@ async fn heuristic_images_stripped_does_not_rewrite_history() {
         .await;
 }
 
-/// The durable path: a server-confirmed single-image strip is buffered on
-/// `ImagesStripped` (history untouched), persisted when the stripped
-/// retry's `Completed` proves it helped, and the user is told only then.
+/// The durable path: a server-confirmed single-image strip is buffered on `ImagesStripped` (history untouched).
+/// It is persisted when the stripped retry's `Completed` proves it helped, and the user is told only then.
 #[tokio::test(flavor = "current_thread")]
 async fn server_rejected_strip_persists_only_after_completed() {
     let local = tokio::task::LocalSet::new();
@@ -242,8 +239,7 @@ async fn server_rejected_strip_persists_only_after_completed() {
 }
 
 /// A drain timeout retains request-scoped strip state across turn boundaries.
-/// The late completion must still persist its own buffered strip without
-/// consuming or mutating the newer request's ownership.
+/// The late completion must still persist its own buffered strip without consuming or mutating the newer request's ownership.
 #[tokio::test(flavor = "current_thread")]
 async fn timed_out_strip_survives_new_turn_until_late_completed() {
     let local = tokio::task::LocalSet::new();
@@ -272,12 +268,10 @@ async fn timed_out_strip_survives_new_turn_until_late_completed() {
                 .expect("timed-out request remains owned")
                 .take();
 
-            // The next turn keeps only timeout-owned durable work, then clears
-            // ordinary stream ownership before registering its own request.
+            // The next turn keeps only timeout-owned durable work, then clears ordinary stream ownership before registering its own request
             actor.retain_timed_out_image_strips_for_new_turn();
             actor.turn_stream_drained.lock().clear();
-            // A second turn boundary must not erase a strip already marked as
-            // timeout-owned while its terminal event is still in flight.
+            // A second turn boundary must not erase a strip already marked as timeout-owned while its terminal event is still in flight
             actor.retain_timed_out_image_strips_for_new_turn();
             let newer = RequestId::from("req-newer-turn");
             own_request(&actor, &newer);
@@ -321,10 +315,9 @@ async fn timed_out_strip_survives_new_turn_until_late_completed() {
         .await;
 }
 
-/// Rewind can commit after `Completed` detaches persistence but before the
-/// LocalSet schedules it. The detached task must acquire rewrite ownership
-/// before claiming URLs, so a waiting successful rewind clears queued work
-/// while preserving the restored image and emitting no stale note.
+/// Rewind can commit after `Completed` detaches persistence but before the LocalSet schedules it.
+/// The detached task must acquire rewrite ownership before claiming URLs.
+/// A waiting successful rewind then clears queued work while preserving the restored image and emitting no stale note.
 #[tokio::test(flavor = "current_thread")]
 async fn rewind_cancels_detached_image_strip_before_it_runs() {
     let local = tokio::task::LocalSet::new();
@@ -698,9 +691,8 @@ async fn pending_strip_bound_preserves_detached_and_new_url_entries() {
         .await;
 }
 
-/// A timeout can happen before the ordered event drainer reaches
-/// `ImagesStripped`. The timeout placeholder must admit that late event and
-/// its following `Completed`, while still keeping all other late events stale.
+/// A timeout can happen before the ordered event drainer reaches `ImagesStripped`.
+/// The timeout placeholder must admit that late event and its following `Completed`, while still keeping all other late events stale.
 #[tokio::test(flavor = "current_thread")]
 async fn timed_out_strip_survives_when_images_stripped_is_still_queued() {
     let local = tokio::task::LocalSet::new();
@@ -773,9 +765,8 @@ async fn timed_out_strip_survives_when_images_stripped_is_still_queued() {
         .await;
 }
 
-/// A strip that does not reach `Applied` must still tell the user the
-/// answer was produced without the image; it just must not claim the
-/// stored conversation changed.
+/// A strip that does not reach `Applied` must still tell the user the answer was produced without the image.
+/// It just must not claim the stored conversation changed.
 #[tokio::test(flavor = "current_thread")]
 async fn non_applied_strip_outcome_still_notifies_the_user() {
     let local = tokio::task::LocalSet::new();
@@ -786,8 +777,7 @@ async fn non_applied_strip_outcome_still_notifies_the_user() {
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let actor =
                 Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
-            // Nothing seeded: the buffered URL matches no stored image, so
-            // the apply resolves as `NoMatch` rather than `Applied`.
+            // Nothing seeded: the buffered URL matches no stored image, so the apply resolves as `NoMatch` rather than `Applied`
             let rid = RequestId::from("req-no-match");
             own_request(&actor, &rid);
 
@@ -814,8 +804,7 @@ async fn non_applied_strip_outcome_still_notifies_the_user() {
         .await;
 }
 
-/// A strip that did not rescue the turn proves nothing: `Failed` drops the
-/// buffer and stored history keeps its images.
+/// A strip that did not rescue the turn proves nothing: `Failed` drops the buffer and stored history keeps its images.
 #[tokio::test(flavor = "current_thread")]
 async fn server_rejected_strip_dropped_when_retry_fails() {
     let local = tokio::task::LocalSet::new();
@@ -837,8 +826,7 @@ async fn server_rejected_strip_dropped_when_retry_fails() {
                     StripReason::ServerRejected,
                 ))
                 .await;
-            // The drop must be wired through the event handler itself,
-            // deleting the Failed arm's call must fail this test.
+            // The drop must be wired through the event handler itself; deleting the Failed arm's call must fail this test
             actor
                 .handle_sampling_event(SamplingEvent::Failed {
                     request_id: rid.clone(),
@@ -858,9 +846,8 @@ async fn server_rejected_strip_dropped_when_retry_fails() {
         .await;
 }
 
-/// Blame is judged on unique URLs: two DISTINCT stripped images are
-/// ambiguous and stay request-local; the same image stored twice is one
-/// suspect and persists (both occurrences).
+/// Blame is judged on unique URLs: two DISTINCT stripped images are ambiguous and stay request-local.
+/// The same image stored twice is one suspect and persists (both occurrences).
 #[tokio::test(flavor = "current_thread")]
 async fn multi_image_blame_is_judged_on_unique_urls() {
     let local = tokio::task::LocalSet::new();
@@ -894,8 +881,7 @@ async fn multi_image_blame_is_judged_on_unique_urls() {
                 "ambiguous blame must not delete stored images: {conv:?}"
             );
 
-            // The same URL twice (attached in two turns): one suspect,
-            // persists, removing both stored occurrences.
+            // The same URL twice (attached in two turns): one suspect, persists, removing both stored occurrences
             seed_image(&actor, PERSIST_GATE_IMAGE_URI).await;
             let rid = RequestId::from("req-duplicate");
             own_request(&actor, &rid);

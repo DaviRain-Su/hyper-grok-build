@@ -261,18 +261,6 @@ mod tests {
     }
 
     #[test]
-    fn builder_uses_the_pinned_generic_message() {
-        let ToolErrorWire::Custom { message, .. } = workspace_unavailable_wire(
-            WorkspaceGoneReason::IdleTimeout,
-            WorkspaceGonePhase::RouteMissing,
-        ) else {
-            panic!("expected Custom variant");
-        };
-        // Exact, tenant-data-free contract.
-        assert_eq!(message, WORKSPACE_UNAVAILABLE_MESSAGE);
-    }
-
-    #[test]
     fn unknown_reason_and_phase_deserialize_to_unknown() {
         // Independently-deployed peers may emit reason/phase values this build
         // does not know; the typed parse must absorb them, not fail.

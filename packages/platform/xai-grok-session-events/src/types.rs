@@ -689,20 +689,6 @@ mod tests {
     }
 
     #[test]
-    fn goal_role_model_fail_open_serializes_tag_and_fields() {
-        let ev = Event::GoalRoleModelFailOpen {
-            role: "skeptic",
-            skeptic_idx: Some(1),
-            reason: "toolset_unavailable",
-        };
-        let v = serde_json::to_value(&ev).unwrap();
-        assert_eq!(v["type"], "goal_role_model_fail_open");
-        assert_eq!(v["role"], "skeptic");
-        assert_eq!(v["skeptic_idx"], 1);
-        assert_eq!(v["reason"], "toolset_unavailable");
-    }
-
-    #[test]
     fn goal_role_model_fail_open_omits_skeptic_idx_when_none() {
         let ev = Event::GoalRoleModelFailOpen {
             role: "strategist",

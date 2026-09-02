@@ -436,7 +436,8 @@ pub fn render_turn_status(
         .saturating_sub(spinner_width)
         .saturating_sub(phase_timer_width)
         .saturating_sub(min_gap)
-        .saturating_sub(right_width);
+        .saturating_sub(right_width)
+        .saturating_sub(2);
 
     // ── Render left side: spinner + label (truncated) + phase_timer + queued_hint ──
     let mut left_spans: Vec<Span<'static>> = Vec::with_capacity(5);
@@ -657,9 +658,23 @@ fn compute_activity(
             "Compacting…".to_string(),
             false,
         ),
-        (AgentState::TurnRunning, Some(TurnActivity::Retrying { attempt, .. })) => (
+        (
+            AgentState::TurnRunning,
+            Some(TurnActivity::Retrying {
+                attempt,
+                max_retries,
+                reason,
+                error_type,
+            }),
+        ) => (
             Style::default().fg(theme.warning),
-            format!("Retrying (attempt {attempt})…"),
+            crate::app::error_display::format_retry_activity_label(
+                *attempt,
+                *max_retries,
+                reason,
+                error_type.as_deref(),
+                crate::app::error_display::RetryLabelStyle::Status,
+            ),
             false,
         ),
         (AgentState::TurnRunning, Some(TurnActivity::WritingToolCall(writing))) => (

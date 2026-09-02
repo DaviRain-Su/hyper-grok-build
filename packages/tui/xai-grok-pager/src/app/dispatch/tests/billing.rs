@@ -27,18 +27,13 @@ fn agent_qv(app: &AppView) -> &crate::views::question_view::QuestionViewState {
         .unwrap()
 }
 
-/// Extract the last-pushed `CreditLimitBlock` from agent 0 scrollback.
-fn last_credit_limit_block(
-    app: &AppView,
-    idx: usize,
-) -> &crate::scrollback::blocks::CreditLimitBlock {
-    let agent = app.agents.get(&AgentId(0)).unwrap();
-    if let crate::scrollback::block::RenderBlock::CreditLimit(ref blk) =
-        agent.scrollback.entry(idx).unwrap().block
-    {
-        blk
-    } else {
-        panic!("expected CreditLimit block at index {idx}");
+fn test_stashed_prompt(text: &str) -> crate::app::agent::InFlightPrompt {
+    crate::app::agent::InFlightPrompt {
+        text: text.into(),
+        images: Vec::new(),
+        scrollback_entry: crate::scrollback::EntryId::new(0),
+        combined_scrollback_entries: Vec::new(),
+        chip_elements: Vec::new(),
     }
 }
 
@@ -116,6 +111,206 @@ fn credit_limit_retry_preserves_image_submission_state() {
 }
 
 #[test]
+fn credit_limit_recheck_keeps_stash_when_showing_upsell() {
+    let mut app = test_app_with_agent();
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .credit_limit_stashed_prompt = Some(test_stashed_prompt("retry me"));
+
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::CreditLimitRecheckComplete {
+            agent_id: AgentId(0),
+            meta: None,
+        }),
+        &mut app,
+    );
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert!(agent.question_view.is_some());
+    assert_eq!(
+        agent
+            .credit_limit_stashed_prompt
+            .as_ref()
+            .map(|p| p.text.as_str()),
+        Some("retry me")
+    );
+}
+
+#[test]
+fn credit_limit_recheck_drops_stash_when_user_moved_on() {
+    let mut app = test_app_with_agent();
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.credit_limit_stashed_prompt = Some(test_stashed_prompt("retry me"));
+        agent.session.enqueue_prompt("new prompt".into());
+    }
+
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::CreditLimitRecheckComplete {
+            agent_id: AgentId(0),
+            meta: None,
+        }),
+        &mut app,
+    );
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert!(agent.credit_limit_stashed_prompt.is_none());
+    assert!(
+        agent.question_view.is_none(),
+        "moved-on must not open the upsell"
+    );
+}
+
+#[test]
+fn sending_a_new_prompt_clears_credit_limit_stash() {
+    let mut app = test_app_with_agent();
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .credit_limit_stashed_prompt = Some(test_stashed_prompt("retry me"));
+
+    let _ = dispatch_send_prompt(&mut app, "something new".into());
+    assert!(
+        app.agents
+            .get(&AgentId(0))
+            .unwrap()
+            .credit_limit_stashed_prompt
+            .is_none()
+    );
+}
+
+#[test]
+fn send_prompt_now_clears_credit_limit_stash() {
+    let mut app = test_app_with_agent();
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .credit_limit_stashed_prompt = Some(test_stashed_prompt("retry me"));
+
+    let _ = dispatch(
+        Action::SendPromptNow {
+            text: "steer it".into(),
+            images: Vec::new(),
+        },
+        &mut app,
+    );
+    assert!(
+        app.agents
+            .get(&AgentId(0))
+            .unwrap()
+            .credit_limit_stashed_prompt
+            .is_none()
+    );
+}
+
+#[test]
+fn retry_credit_limit_prompt_resubmits_stash() {
+    let mut app = test_app_with_agent();
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .credit_limit_stashed_prompt = Some(test_stashed_prompt("retry me"));
+
+    let effects = dispatch(Action::RetryCreditLimitPrompt, &mut app);
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::SendPrompt { text, .. } if text == "retry me"
+        )),
+        "expected SendPrompt, got {effects:?}"
+    );
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert!(agent.credit_limit_stashed_prompt.is_none());
+    assert_eq!(
+        agent
+            .session
+            .in_flight_prompt
+            .as_ref()
+            .map(|p| p.text.as_str()),
+        Some("retry me")
+    );
+    let has_retry_line = (0..agent.scrollback.len()).any(|i| {
+        matches!(
+            &agent.scrollback.entry(i).unwrap().block,
+            crate::scrollback::block::RenderBlock::System(sys)
+                if sys.text.contains("Trying again")
+        )
+    });
+    assert!(has_retry_line, "expected retry system line");
+}
+
+#[test]
+fn retry_credit_limit_prompt_toasts_when_stash_empty() {
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::RetryCreditLimitPrompt, &mut app);
+    assert!(effects.is_empty(), "expected no send, got {effects:?}");
+    let toast = app.agents[&AgentId(0)]
+        .toast
+        .as_ref()
+        .map(|(m, _)| m.as_str());
+    assert_eq!(toast, Some("No prompt to retry."));
+    let has_system = (0..app.agents[&AgentId(0)].scrollback.len()).any(|i| {
+        matches!(
+            &app.agents[&AgentId(0)].scrollback.entry(i).unwrap().block,
+            crate::scrollback::block::RenderBlock::System(sys)
+                if sys.text.contains("No prompt to retry")
+        )
+    });
+    assert!(has_system, "minimal mode has no toast; need a system line");
+}
+
+#[test]
+fn credit_limit_translate_retry_option_dispatches_retry() {
+    use crate::app::agent_view::translate_local_submit_for_test;
+    use crate::app::app_view::InputOutcome;
+    use crate::views::question_view::QuestionSelection;
+
+    let mut app = test_app_with_agent();
+    open_upsell_qa(&mut app, CreditLimitUpsellMode::UnifiedCredits);
+    let mut qv = app
+        .agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .question_view
+        .take()
+        .expect("expected credit-limit upsell modal");
+    qv.selections[0] = QuestionSelection::Single(Some(2));
+    let kind = qv
+        .local_kind
+        .take()
+        .expect("open_credit_limit_upsell sets local_kind");
+    match translate_local_submit_for_test(&qv, kind, false) {
+        InputOutcome::Action(Action::RetryCreditLimitPrompt) => {}
+        other => panic!("expected RetryCreditLimitPrompt, got {other:?}"),
+    }
+}
+
+#[test]
+fn credit_limit_translate_max_tier_retry_is_second_option() {
+    use crate::app::agent_view::translate_local_submit_for_test;
+    use crate::app::app_view::InputOutcome;
+    use crate::views::question_view::QuestionSelection;
+
+    let mut app = test_app_with_agent();
+    open_upsell_max_card(&mut app, CreditLimitUpsellMode::UnifiedCredits);
+    let mut qv = app
+        .agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .question_view
+        .take()
+        .expect("expected credit-limit upsell modal");
+    qv.selections[0] = QuestionSelection::Single(Some(1));
+    let kind = qv
+        .local_kind
+        .take()
+        .expect("open_credit_limit_upsell sets local_kind");
+    match translate_local_submit_for_test(&qv, kind, false) {
+        InputOutcome::Action(Action::RetryCreditLimitPrompt) => {}
+        other => panic!("expected RetryCreditLimitPrompt, got {other:?}"),
+    }
+}
+
+#[test]
 fn is_max_tier_positive_match() {
     assert!(is_max_tier(Some("supergrok_heavy")));
     assert!(is_max_tier(Some("SuperGrok Heavy")));
@@ -146,18 +341,23 @@ fn is_max_tier_rejects_partial_matches() {
 }
 
 #[test]
-fn upsell_non_max_shows_qa_with_two_options() {
+fn upsell_non_max_shows_qa_with_retry_option() {
     let mut app = test_app_with_agent();
     open_upsell_qa(
         &mut app,
         CreditLimitUpsellMode::LegacyPayg { enabled: false },
     );
     let q = &agent_qv(&app).questions[0];
-    assert_eq!(q.options.len(), 2);
+    assert_eq!(q.options.len(), 3);
     assert_eq!(q.options[0].label, "Upgrade tier");
     assert_eq!(q.options[0].id.as_deref(), Some(UPSELL_URL_UPGRADE));
     assert_eq!(q.options[1].label, "Pay as you go");
     assert_eq!(q.options[1].id.as_deref(), Some(UPSELL_URL_PAYG));
+    assert_eq!(q.options[2].label, "Try Again");
+    assert_eq!(
+        q.options[2].id.as_deref(),
+        Some(crate::app::dispatch::CREDIT_LIMIT_RETRY_OPTION_ID)
+    );
 }
 
 #[test]
@@ -168,8 +368,9 @@ fn upsell_non_max_payg_on_shows_increase_label() {
         CreditLimitUpsellMode::LegacyPayg { enabled: true },
     );
     let q = &agent_qv(&app).questions[0];
-    assert_eq!(q.options.len(), 2);
+    assert_eq!(q.options.len(), 3);
     assert_eq!(q.options[1].label, "Increase limit");
+    assert_eq!(q.options[2].label, "Try Again");
 }
 
 #[test]
@@ -270,19 +471,29 @@ fn upsell_non_max_unified_shows_buy_credits() {
         q.options[1].description,
         "Purchase credits to keep using Grok Build"
     );
+    assert_eq!(q.options[2].label, "Try Again");
 }
 
 #[test]
-fn upsell_max_unified_card_mentions_purchasing() {
+fn upsell_max_unified_qa_omits_upgrade() {
     let mut app = test_app_with_agent();
     let before = agent_scrollback_len(&app);
     open_upsell_max_card(&mut app, CreditLimitUpsellMode::UnifiedCredits);
-    let blk = last_credit_limit_block(&app, before);
     assert_eq!(
-        blk.action,
-        crate::scrollback::blocks::CreditLimitCardAction::PurchaseCredits
+        agent_scrollback_len(&app),
+        before,
+        "max-tier upsell must not push a scrollback card"
     );
-    assert!(blk.heading.contains("weekly limit"));
+    let q = &agent_qv(&app).questions[0];
+    assert!(q.question.contains("weekly limit"));
+    assert_eq!(q.options.len(), 2);
+    assert_eq!(q.options[0].label, "Buy more credits");
+    assert_eq!(q.options[0].id.as_deref(), Some(UPSELL_URL_PAYG));
+    assert_eq!(q.options[1].label, "Try Again");
+    assert_eq!(
+        q.options[1].id.as_deref(),
+        Some(crate::app::dispatch::CREDIT_LIMIT_RETRY_OPTION_ID)
+    );
 }
 
 #[test]
@@ -393,7 +604,7 @@ fn upsell_non_max_idempotent_when_question_view_already_open() {
     );
     assert!(app.agents.get(&AgentId(0)).unwrap().question_view.is_some());
 
-    // The second call is a no-op: an already-open question view is never displaced
+    // Second call should be a no-op (open_credit_limit_upsell returns if a modal is already open).
     let before = agent_scrollback_len(&app);
     open_upsell_qa(
         &mut app,
@@ -407,87 +618,79 @@ fn upsell_non_max_idempotent_when_question_view_already_open() {
 }
 
 #[test]
-fn upsell_max_tier_pushes_scrollback_card_payg_off() {
+fn upsell_max_tier_opens_qa_without_upgrade_payg_off() {
     let mut app = test_app_with_agent();
     let before = agent_scrollback_len(&app);
     open_upsell_max_card(
         &mut app,
         CreditLimitUpsellMode::LegacyPayg { enabled: false },
     );
-    assert!(
-        app.agents.get(&AgentId(0)).unwrap().question_view.is_none(),
-        "max-tier should NOT open the question modal"
-    );
-    assert_eq!(agent_scrollback_len(&app), before + 1);
-    let blk = last_credit_limit_block(&app, before);
-    assert!(blk.heading.contains("credit limit"));
-    assert_eq!(
-        blk.action,
-        crate::scrollback::blocks::CreditLimitCardAction::EnablePayg
-    );
-    assert_eq!(blk.url, UPSELL_URL_PAYG);
+    assert!(app.agents.get(&AgentId(0)).unwrap().question_view.is_some());
+    assert_eq!(agent_scrollback_len(&app), before);
+    let q = &agent_qv(&app).questions[0];
+    assert!(q.question.contains("credit limit"));
+    assert_eq!(q.options.len(), 2);
+    assert_eq!(q.options[0].label, "Pay as you go");
+    assert_eq!(q.options[0].id.as_deref(), Some(UPSELL_URL_PAYG));
+    assert_eq!(q.options[1].label, "Try Again");
 }
 
 #[test]
-fn upsell_max_tier_pushes_scrollback_card_payg_on() {
+fn upsell_max_tier_opens_qa_without_upgrade_payg_on() {
     let mut app = test_app_with_agent();
-    let before = agent_scrollback_len(&app);
     open_upsell_max_card(
         &mut app,
         CreditLimitUpsellMode::LegacyPayg { enabled: true },
     );
-    assert!(app.agents.get(&AgentId(0)).unwrap().question_view.is_none());
-    assert_eq!(agent_scrollback_len(&app), before + 1);
-    let blk = last_credit_limit_block(&app, before);
-    assert!(blk.heading.contains("spending cap"));
-    assert_eq!(
-        blk.action,
-        crate::scrollback::blocks::CreditLimitCardAction::IncreasePaygLimit
-    );
-    assert_eq!(blk.url, UPSELL_URL_PAYG);
+    let q = &agent_qv(&app).questions[0];
+    assert!(q.question.contains("spending cap"));
+    assert_eq!(q.options.len(), 2);
+    assert_eq!(q.options[0].label, "Increase limit");
+    assert_eq!(q.options[1].label, "Try Again");
 }
 
 #[test]
-fn upsell_max_tier_does_not_open_question_view() {
+fn upsell_max_tier_opens_question_view() {
     let mut app = test_app_with_agent();
     open_upsell_max_card(
         &mut app,
         CreditLimitUpsellMode::LegacyPayg { enabled: false },
     );
     assert!(
-        app.agents.get(&AgentId(0)).unwrap().question_view.is_none(),
-        "max-tier should use inline card, not question modal"
+        app.agents.get(&AgentId(0)).unwrap().question_view.is_some(),
+        "max-tier should use the question modal"
     );
 }
 
 #[test]
-fn upsell_max_tier_scrollback_card_url_is_payg() {
+fn upsell_max_tier_buy_url_is_payg() {
     let mut app = test_app_with_agent();
-    let before = agent_scrollback_len(&app);
-    open_upsell_max_card(
-        &mut app,
-        CreditLimitUpsellMode::LegacyPayg { enabled: false },
-    );
-    assert_eq!(last_credit_limit_block(&app, before).url, UPSELL_URL_PAYG);
-}
-
-#[test]
-fn upsell_max_tier_not_idempotent_pushes_multiple_cards() {
-    let mut app = test_app_with_agent();
-    let before = agent_scrollback_len(&app);
-    // Max-tier path doesn't guard against duplicates; each call pushes a new inline card
-    open_upsell_max_card(
-        &mut app,
-        CreditLimitUpsellMode::LegacyPayg { enabled: false },
-    );
     open_upsell_max_card(
         &mut app,
         CreditLimitUpsellMode::LegacyPayg { enabled: false },
     );
     assert_eq!(
-        agent_scrollback_len(&app),
-        before + 2,
-        "max-tier path pushes a card on every call"
+        agent_qv(&app).questions[0].options[0].id.as_deref(),
+        Some(UPSELL_URL_PAYG)
+    );
+}
+
+#[test]
+fn upsell_max_tier_idempotent_when_question_view_already_open() {
+    let mut app = test_app_with_agent();
+    open_upsell_max_card(
+        &mut app,
+        CreditLimitUpsellMode::LegacyPayg { enabled: false },
+    );
+    let first_id = agent_qv(&app).tool_call_id.clone();
+    open_upsell_max_card(
+        &mut app,
+        CreditLimitUpsellMode::LegacyPayg { enabled: false },
+    );
+    assert_eq!(
+        agent_qv(&app).tool_call_id,
+        first_id,
+        "second call must not replace the open modal"
     );
 }
 
@@ -1102,6 +1305,7 @@ fn free_usage_failure_opens_paywall_modal() {
                 attempt: 1,
                 max_retries: 2,
                 reason: "429 Too Many Requests".into(),
+                error_type: None,
             }),
             &mut agent.session,
             &mut agent.scrollback,
@@ -1445,6 +1649,7 @@ fn credit_limit_upsell_submit_shows_url_when_browser_unavailable() {
         choices: vec![
             xai_grok_telemetry::events::CreditLimitChoice::UpgradeTier,
             xai_grok_telemetry::events::CreditLimitChoice::PurchaseCredits,
+            xai_grok_telemetry::events::CreditLimitChoice::RetryLastPrompt,
         ],
     };
     let InputOutcome::Action(Action::OpenUrl(url)) =

@@ -1,17 +1,14 @@
 //! `grok update` is a recovery command: a config failure must not block it.
 //!
-//! Hermetic: a local server serves the binary's own version as the channel
-//! pointer, so a healthy run exits 0 ("already up to date") and a corrupt
-//! config must too — reintroducing a config `?` fails exactly that run.
-//! The pointer must equal the current version: the installer converges in
-//! both directions, so an older pointer triggers a downgrade attempt.
+//! A local server serves the binary's own version as the channel pointer, so a healthy run exits 0 ("already up to date").
+//! A run with a corrupt config must exit 0 too; reintroducing a config `?` fails exactly that run.
+//! The pointer must equal the current version: the installer converges in both directions, so an older pointer triggers a downgrade attempt.
 
 use std::io::{Read, Write};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
-/// Resolve the pager binary like the PTY harness: `PAGER_BINARY` under
-/// Bazel (runfiles-relative), else cargo's compile-time constant.
+/// Resolve the pager binary like the PTY harness: `PAGER_BINARY` under Bazel (runfiles-relative), else cargo's compile-time constant.
 fn pager_binary() -> std::path::PathBuf {
     if let Ok(p) = std::env::var("PAGER_BINARY") {
         return std::path::absolute(&p)
@@ -22,7 +19,7 @@ fn pager_binary() -> std::path::PathBuf {
         .expect("PAGER_BINARY is unset and this build is not `cargo test`")
 }
 
-/// Local base answering every request with the channel pointer body.
+/// Spawn a local server that answers every request with the channel pointer body.
 fn spawn_pointer_server(body: Arc<Mutex<String>>) -> (std::net::TcpListener, String) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -62,8 +59,7 @@ fn run_update(base: &str, config_toml: &str, extra_args: &[&str]) -> std::proces
         .expect("spawn grok update")
 }
 
-/// The valid run proves the environment resolves to success, so a nonzero
-/// corrupt run can only mean a config failure aborted the update.
+/// The valid run proves the environment resolves to success, so a nonzero corrupt run can only mean a config failure aborted the update.
 #[test]
 fn corrupt_config_never_changes_update_outcome() {
     let body = Arc::new(Mutex::new("0.0.1".to_owned()));

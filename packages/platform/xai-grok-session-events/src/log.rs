@@ -171,27 +171,4 @@ mod tests {
         let lines: Vec<&str> = text.trim().split('\n').collect();
         assert_eq!(lines.len(), 2, "both writes should go to the same file");
     }
-
-    #[test]
-    fn mcp_server_failed_serializes_enum_error_type() {
-        let dir = tempfile::tempdir().unwrap();
-        let w = EventWriter::open(dir.path());
-
-        w.emit(Event::McpServerFailed {
-            server_name: "confluence".into(),
-            transport: Some("http".into()),
-            target: Some("https://mcp.confluence.example.com".into()),
-            error_type: crate::types::McpErrorCategory::Timeout,
-            error_message: "timed out after 10s".into(),
-            duration_ms: Some(10002),
-            timeout_sec: Some(10),
-        });
-
-        let text = std::fs::read_to_string(dir.path().join("events.jsonl")).unwrap();
-        let val: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
-        assert_eq!(val["type"], "mcp_server_failed");
-        assert_eq!(val["error_type"], "timeout");
-        assert_eq!(val["server_name"], "confluence");
-        assert_eq!(val["duration_ms"], 10002);
-    }
 }

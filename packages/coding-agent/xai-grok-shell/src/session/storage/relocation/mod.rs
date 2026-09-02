@@ -1,12 +1,7 @@
 //! Point-in-time candidate view of local session storage.
 //!
-//! This module once carried a journaled, durable session-relocation
-//! transaction (stage → publish → commit, with rollback and crash recovery),
-//! but no production path ever wrote a relocation journal, so the transaction
-//! machinery was deleted. What remains is the directory scanner that resolves
-//! session directories under the sessions root (`<encoded-cwd>/<session-id>/`
-//! buckets), which backed the (always journal-free) candidate selection all
-//! along.
+//! Resolves session directories under the sessions root (`<encoded-cwd>/<session-id>/` buckets).
+//! The journaled relocation transaction this module was named for never ran in production and was deleted.
 
 use std::collections::HashMap;
 use std::fs;
@@ -78,9 +73,8 @@ impl RelocationView {
         })
     }
 
-    /// Session directories with a persisted `summary.json`, optionally
-    /// restricted to `cwd`. A session id present under multiple cwd buckets
-    /// is ambiguous and skipped.
+    /// Session directories with a persisted `summary.json`, optionally restricted to `cwd`.
+    /// A session id present under multiple cwd buckets is ambiguous and skipped.
     pub(crate) fn session_dirs(&self, cwd: Option<&str>) -> Result<Vec<PathBuf>> {
         let cwd_parent = cwd.map(|cwd| {
             self.sessions_root

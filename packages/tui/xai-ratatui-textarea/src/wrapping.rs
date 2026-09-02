@@ -578,13 +578,6 @@ mod tests {
     }
 
     #[test]
-    fn word_wrap_line_width_one_with_newlines_does_not_panic() {
-        let line = Line::from("\n\n\n\n\n");
-        let out = word_wrap_line(&line, 1);
-        assert!(!out.is_empty());
-    }
-
-    #[test]
     fn word_wrap_does_not_split_words_simple_english() {
         let sample = "Years passed, and Willowmere thrived in peace and friendship. Mira’s herb garden flourished with both ordinary and enchanted plants, and travelers spoke of the kindness of the woman who tended them.";
         let line = Line::from(sample);

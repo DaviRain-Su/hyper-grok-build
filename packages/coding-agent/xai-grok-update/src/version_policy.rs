@@ -1,5 +1,5 @@
-//! Startup enforcement of the version policy. The hard `required_*` bounds gate
-//! startup; `minimum`/`maximum` are updater-only. Every knob fails open.
+//! The hard `required_*` bounds gate startup; `minimum`/`maximum` are updater-only.
+//! Every knob fails open.
 
 use crate::version::get_installed_grok_version;
 use semver::Version;
@@ -22,8 +22,7 @@ pub(crate) enum VersionPolicyError {
     TargetBelowFloor { target: String, minimum: String },
 }
 
-/// Fails open: a contradictory range or an unparseable running version yields
-/// `InRange`.
+/// Fails open: a contradictory range or an unparseable running version yields `InRange`.
 fn evaluate_required_range(current_version: &str, policy: &VersionPolicy) -> RequiredRangeDecision {
     if policy.has_contradictory_required_range() {
         warn!(
@@ -57,8 +56,8 @@ fn evaluate_required_range(current_version: &str, policy: &VersionPolicy) -> Req
     RequiredRangeDecision::InRange
 }
 
-/// Reject an explicit `--version` pin below the hard floor. A pin above the
-/// ceiling is allowed so a too-new install can recover.
+/// Reject an explicit `--version` pin below the hard floor.
+/// A pin above the ceiling is allowed so a too-new install can recover.
 pub(crate) fn check_install_target(
     policy: &VersionPolicy,
     target: &str,

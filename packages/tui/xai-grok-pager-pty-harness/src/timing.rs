@@ -1,13 +1,11 @@
 //! Layer 2b: Frame timing via VTE parser.
 //!
-//! Detects frame boundaries from synchronized-update markers
-//! (`CSI ? 2026 h/l`) emitted by crossterm's `BeginSynchronizedUpdate` /
-//! `EndSynchronizedUpdate`, and records wall-clock timing for each frame.
+//! Detects frame boundaries from synchronized-update markers (`CSI ? 2026 h/l`) and records wall-clock timing for each frame.
+//! Crossterm emits the markers via `BeginSynchronizedUpdate`/`EndSynchronizedUpdate`.
 
 use std::time::{Duration, Instant};
 
-// Use `vte` re-exported from `alacritty_terminal` (via ptyctl) instead of
-// a separate direct dependency.
+// Use `vte` re-exported from `alacritty_terminal` (via ptyctl) instead of a separate direct dependency
 use alacritty_terminal::vte;
 
 /// Timing data for a single rendered frame.
@@ -19,11 +17,7 @@ pub struct FrameTiming {
     pub chars: usize,
 }
 
-/// Parses raw PTY output for synchronized-update frame boundaries and
-/// records per-frame timing data.
-///
-/// Composes a `vte::Parser` with an internal `FrameTimingHandler` that
-/// implements `vte::Perform`.
+/// Parses raw PTY output for synchronized-update frame boundaries and records per-frame timing data.
 pub struct FrameTimingParser {
     vte_parser: vte::Parser,
     handler: FrameTimingHandler,
@@ -42,7 +36,6 @@ impl FrameTimingParser {
         self.vte_parser.advance(&mut self.handler, bytes);
     }
 
-    /// Return all recorded frame timings.
     pub fn timings(&self) -> &[FrameTiming] {
         &self.handler.timings
     }
@@ -52,7 +45,6 @@ impl FrameTimingParser {
         self.handler.timings.len() as u64
     }
 
-    /// Reset all recorded timing data.
     pub fn reset(&mut self) {
         self.handler.timings.clear();
         self.handler.frame_start = None;

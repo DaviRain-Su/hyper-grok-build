@@ -1,11 +1,9 @@
 //! Per-request transport for server-reported doom-loop signals.
 //!
-//! The wire shapes and tolerant parsers live in
-//! [`xai_grok_sampling_types::doom_loop`]; this module only moves the parsed
-//! signals across the layer boundary: the Layer-1 SSE decoder in
-//! [`crate::client`] records them as raw payloads arrive, and the Layer-2
-//! transform in [`crate::stream::responses`] drains them into the final
-//! `ConversationResponse`.
+//! The wire shapes and tolerant parsers live in [`xai_grok_sampling_types::doom_loop`].
+//! This module only moves the parsed signals across the layer boundary.
+//! The Layer-1 SSE decoder in [`crate::client`] records them as raw payloads arrive.
+//! The Layer-2 transform in [`crate::stream::responses`] drains them into the final `ConversationResponse`.
 
 use std::sync::{Arc, Mutex};
 
@@ -17,12 +15,10 @@ use xai_grok_sampling_types::doom_loop::{
 pub(crate) const MAX_COLLECTED_DOOM_LOOP_SIGNALS: usize = 64;
 pub(crate) const MAX_DOOM_LOOP_SIGNAL_BYTES: usize = 256;
 
-/// Cheap-to-clone accumulator shared between the SSE decode closure and the
-/// stream transform of one request attempt. Created fresh per attempt so
-/// signals from a failed attempt can never leak into the next one. Carries
-/// the policy so the stream transform can judge confidence for the
-/// mid-stream abort; the retry loop disarms the abort once the recovery
-/// budget is spent so the final attempt completes and can be accepted.
+/// Cheap-to-clone accumulator shared between the SSE decode closure and the stream transform of one request attempt.
+/// Created fresh per attempt so signals from a failed attempt can never leak into the next one.
+/// Carries the policy so the stream transform can judge confidence for the mid-stream abort.
+/// The retry loop disarms the abort once the recovery budget is spent so the final attempt completes and can be accepted.
 #[derive(Clone, Debug, Default)]
 pub struct DoomLoopSignalCollector {
     inner: Arc<Mutex<CollectorState>>,
@@ -54,8 +50,7 @@ impl DoomLoopSignalCollector {
         }
     }
 
-    /// While armed: the raw labels of the confident signals recorded so far
-    /// (non-draining), or `None` when there is nothing to act on.
+    /// While armed: the raw labels of the confident signals recorded so far (non-draining), or `None` when there is nothing to act on.
     pub(crate) fn abort_triggers(&self) -> Option<Vec<String>> {
         let state = self.inner.lock().ok()?;
         if state.abort_disarmed {
@@ -65,15 +60,13 @@ impl DoomLoopSignalCollector {
         (!confident.is_empty()).then_some(confident)
     }
 
-    /// Inspect a raw SSE frame. Returns `true` when the frame is the
-    /// non-standard `response.doom_loop_check` event — by its SSE `event:`
-    /// name or its payload `type` — which the caller must swallow;
-    /// forwarding it would fail typed deserialization. Reported triggers
-    /// (mid-stream or on the terminal response object) are recorded,
-    /// deduplicated by raw label. Never fails.
+    /// Inspect a raw SSE frame.
+    /// Returns `true` when the frame is the non-standard `response.doom_loop_check` event (by its SSE `event:` name or its payload `type`).
+    /// The caller must swallow such a frame; forwarding it would fail typed deserialization.
+    /// Reported triggers (mid-stream or on the terminal response object) are recorded, deduplicated by raw label.
+    /// Never fails.
     pub(crate) fn absorb(&self, event_name: &str, data: &str) -> bool {
-        // The name check keeps a check event with an unparseable payload
-        // from ever reaching the typed parser.
+        // The name check keeps a check event with an unparseable payload from ever reaching the typed parser
         let named = event_name == DOOM_LOOP_CHECK_EVENT_TYPE;
         let (signals, swallow) = match peek_doom_loop(data) {
             DoomLoopPeek::CheckEvent(signals) => (signals, true),
@@ -105,9 +98,8 @@ impl DoomLoopSignalCollector {
         let Ok(mut state) = self.inner.lock() else {
             return;
         };
-        // Cumulative sets are re-sent as they grow; the raw label is the
-        // stable identity. Bound at the wire collector so no downstream event
-        // or response can carry an oversized detector payload.
+        // Cumulative sets are re-sent as they grow; the raw label is the stable identity
+        // The size bound sits here at the wire collector so no downstream event or response can carry an oversized detector payload
         for signal in signals {
             if state.signals.len() >= MAX_COLLECTED_DOOM_LOOP_SIGNALS {
                 break;
@@ -148,8 +140,7 @@ mod tests {
         assert_eq!(signals[0].kind, DoomLoopSignalKind::TailRepetition(4));
     }
 
-    /// Servers that omit the SSE `event:` name are still handled by the
-    /// payload `type` check.
+    /// Servers that omit the SSE `event:` name are still handled by the payload `type` check.
     #[test]
     fn absorb_swallows_check_event_without_sse_name() {
         let collector = DoomLoopSignalCollector::default();
@@ -193,9 +184,8 @@ mod tests {
         assert!(collector.take().is_empty());
     }
 
-    /// A frame with the check event's SSE name but an unparseable payload
-    /// (non-JSON, or JSON without the `type` tag) must still be swallowed —
-    /// forwarding it would fail the typed parse and the whole attempt.
+    /// A frame with the check event's SSE name but an unparseable payload (non-JSON, or JSON without the `type` tag) must still be swallowed.
+    /// Forwarding it would fail the typed parse and the whole attempt.
     #[test]
     fn named_event_with_garbage_payload_still_swallowed() {
         let collector = DoomLoopSignalCollector::default();
@@ -234,8 +224,7 @@ mod tests {
         );
     }
 
-    /// `abort_triggers` fires only on confident signals, does not drain, and
-    /// goes quiet once disarmed (the spent-budget attempt must complete).
+    /// `abort_triggers` fires only on confident signals, does not drain, and goes quiet once disarmed (the spent-budget attempt must complete).
     #[test]
     fn abort_triggers_requires_confidence_and_honors_disarm() {
         let confident = r#"{"type":"response.doom_loop_check","doom_loop_check":{"triggers":["tail_repetition:8@thinking"]}}"#;

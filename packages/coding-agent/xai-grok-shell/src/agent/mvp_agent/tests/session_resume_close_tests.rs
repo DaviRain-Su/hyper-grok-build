@@ -1,6 +1,5 @@
-//! Unit-level resume and close: request translation, kind resolution, and
-//! close ordering. Protocol behavior is asserted on the wire in
-//! `tests/acp_session_setup_wire.rs`.
+//! Unit-level resume and close: request translation, kind resolution, and close ordering.
+//! Protocol behavior is asserted on the wire in `tests/acp_session_setup_wire.rs`.
 use crate::agent::mvp_agent::session_lifecycle::{
     CLOSE_INTAKE_WAIT, CLOSE_TOTAL_BUDGET, CloseOutcome,
 };
@@ -45,9 +44,8 @@ fn expected_load(meta: serde_json::Value) -> acp::LoadSessionRequest {
     .mcp_servers(mcp_servers())
     .meta(meta_of(meta))
 }
-/// The load path drops these, so resume must refuse rather than pretend. The
-/// message is asserted because a test agent has several ways to reach
-/// `invalid_params`, and the generic code alone passes without the guard.
+/// The load path drops these, so resume must refuse rather than pretend.
+/// The message is asserted because a test agent has several ways to reach `invalid_params`, and the generic code alone passes without the guard.
 #[test]
 fn resume_refuses_additional_directories_it_cannot_honor() {
     super::run_local_for_bridge_test(|| async {
@@ -63,9 +61,8 @@ fn resume_refuses_additional_directories_it_cannot_honor() {
         assert_eq!(err.data, Some(json!(RESUME_REFUSES_EXTRA_DIRS)));
     });
 }
-/// Every input crossed with both methods, because the interesting cases are the
-/// interactions: an explicit `_meta` request outranks resume's defaults, and the
-/// agent's own `restore_code` does not reach resume at all.
+/// Every input is crossed with both methods, because the interesting cases are the interactions.
+/// An explicit `_meta` request outranks resume's defaults, and the agent's own `restore_code` does not reach resume at all.
 #[test]
 fn attach_policy_gives_resume_no_replay_and_no_unasked_checkout() {
     let policy = |op, meta: serde_json::Value, agent_restore_code| {
@@ -110,8 +107,7 @@ fn attach_policy_gives_resume_no_replay_and_no_unasked_checkout() {
         "load takes both from the client when the client states them"
     );
 }
-/// The translation carries shape, not policy: a client's `_meta` reaches the
-/// load path unedited now that intent rides on `AttachOperation`.
+/// The translation carries shape, not policy: a client's `_meta` reaches the load path unedited now that intent is carried on `AttachOperation`.
 #[test]
 fn resume_translation_does_not_rewrite_client_meta() {
     assert_eq!(
@@ -121,9 +117,8 @@ fn resume_translation_does_not_rewrite_client_meta() {
         expected_load(json!({ "noReplay": false, "x.ai/restore_code": true })),
     );
 }
-/// A chat load rebuilds the session under the same id, so a close waiting on
-/// intake can find a live replacement with a client attached. Closing by id
-/// alone ends that replacement; this pins that it does not.
+/// A chat load rebuilds the session under the same id, so a close waiting on intake can find a live replacement with a client attached.
+/// Closing by id alone ends that replacement; this pins that it does not.
 #[test]
 fn close_does_not_free_a_session_that_replaced_its_target() {
     super::run_local_for_bridge_test(|| async {
@@ -153,9 +148,8 @@ fn close_does_not_free_a_session_that_replaced_its_target() {
         );
     });
 }
-/// `attach_session` sweeps before it drains. The thread here is the evicted
-/// actor's, and the sweep's not-resident branch would drop it out from under
-/// the drain about to wait on it.
+/// `attach_session` sweeps before it drains.
+/// The thread here is the evicted actor's, and the sweep's not-resident branch would drop it out from under the drain about to wait on it.
 #[test]
 fn the_sweep_leaves_an_evicted_session_mid_attach() {
     super::run_local_for_bridge_test(|| async {
@@ -172,9 +166,8 @@ fn the_sweep_leaves_an_evicted_session_mid_attach() {
         );
     });
 }
-/// The other half: once the session is resident again, a finished thread
-/// means the actor died. Skipping the reap there leaves the attach reusing a
-/// dead channel and reporting success.
+/// The other half: once the session is resident again, a finished thread means the actor died.
+/// Skipping the reap there leaves the attach reusing a dead channel and reporting success.
 #[test]
 fn the_sweep_still_reaps_a_resident_session_whose_actor_died_mid_attach() {
     super::run_local_for_bridge_test(|| async {
@@ -194,9 +187,8 @@ fn the_sweep_still_reaps_a_resident_session_whose_actor_died_mid_attach() {
         );
     });
 }
-/// The drain exists for a session that was evicted and is still flushing. A
-/// resident session's thread is the actor this attach reuses, so it never
-/// finishes, and draining it spends the whole budget on every reconnect.
+/// The drain exists for a session that was evicted and is still flushing.
+/// A resident session's thread is the actor this attach reuses, so it never finishes, and draining it spends the whole budget on every reconnect.
 #[test]
 fn attaching_to_a_resident_session_does_not_wait_on_its_live_thread() {
     use acp::Agent as _;
@@ -223,8 +215,7 @@ fn attaching_to_a_resident_session_does_not_wait_on_its_live_thread() {
         drop(stop_tx);
     });
 }
-/// The load guard publishes `Attaching`, so it must retire it: left set, a
-/// failed attach stays transitional and its thread is never reaped.
+/// The load guard publishes `Attaching`, so it must retire it: left set, a failed attach stays transitional and its thread is never reaped.
 #[test]
 fn a_failed_attach_leaves_no_trace() {
     super::run_local_for_bridge_test(|| async {
@@ -252,8 +243,8 @@ fn a_failed_attach_leaves_no_trace() {
         );
     });
 }
-/// A load registers its handle and then keeps running. Closing on handle
-/// presence alone frees the session out from under the rest of that load.
+/// A load registers its handle and then keeps running.
+/// Closing on handle presence alone frees the session out from under the rest of that load.
 #[test]
 fn close_waits_for_an_in_flight_load_to_settle() {
     super::run_local_for_bridge_test(|| async {
@@ -272,9 +263,8 @@ fn close_waits_for_an_in_flight_load_to_settle() {
         assert!(!agent.is_resident(&sid));
     });
 }
-/// Concurrent attaches capture each other's `Attaching`, so the displaced
-/// `Working` is unrecoverable from the capture; the guard must ask the handle.
-/// Recording `IdleResident` here would misreport a running turn.
+/// Concurrent attaches capture each other's `Attaching`, so the displaced `Working` is unrecoverable from the capture.
+/// The guard must ask the handle; recording `IdleResident` here would misreport a running turn.
 #[test]
 fn an_attach_over_a_running_turn_settles_back_to_working() {
     super::run_local_for_bridge_test(|| async {
@@ -294,8 +284,8 @@ fn an_attach_over_a_running_turn_settles_back_to_working() {
         );
     });
 }
-/// A second load supersedes the first. The older guard must not retire the
-/// state the newer attach is still relying on.
+/// A second load supersedes the first.
+/// The older guard must not retire the state the newer attach is still relying on.
 #[test]
 fn a_superseded_load_leaves_the_newer_attach_attaching() {
     super::run_local_for_bridge_test(|| async {
@@ -311,9 +301,9 @@ fn a_superseded_load_leaves_the_newer_attach_attaching() {
         );
     });
 }
-/// The other half of the ordering contract: the wait is bounded. A prompt whose
-/// intake preamble stalls, on an auth refresh say, must not hold the close open
-/// with it. Time is paused, so this pins the timeout rather than sleeping on it.
+/// The other half of the ordering contract: the wait is bounded.
+/// A prompt whose intake preamble stalls, on an auth refresh say, must not hold the close open with it.
+/// Time is paused, so this pins the timeout rather than sleeping on it.
 #[test]
 fn close_gives_up_on_an_intake_that_stalls() {
     use acp::Agent as _;
@@ -341,9 +331,8 @@ fn close_gives_up_on_an_intake_that_stalls() {
         );
     });
 }
-/// Every stage stalled at once must still answer within [`CLOSE_TOTAL_BUDGET`],
-/// not settle + intake + drain stacked end to end. Time is paused; reverting
-/// the `stage_budget` shrinking fails the elapsed assertion.
+/// Every stage stalled at once must still answer within [`CLOSE_TOTAL_BUDGET`], not settle, intake, and drain stacked end to end.
+/// Time is paused; reverting the `stage_budget` shrinking fails the elapsed assertion.
 #[test]
 fn close_answers_within_the_aggregate_budget() {
     super::run_local_for_bridge_test(|| async {
@@ -374,8 +363,7 @@ fn close_answers_within_the_aggregate_budget() {
         drop(stop_tx);
     });
 }
-/// The response carries what the close did, so a caller can see the quiet
-/// cases (`notResident`, `superseded`) without reading agent logs.
+/// The response carries what the close did, so a caller can see the quiet cases (`notResident`, `superseded`) without reading agent logs.
 #[test]
 fn close_reports_its_outcome_in_response_meta() {
     use acp::Agent as _;
@@ -398,8 +386,7 @@ fn close_reports_its_outcome_in_response_meta() {
     });
 }
 /// Close must not let `Cancel` overtake the prompt it is meant to cancel.
-/// Holding the lock stands in for a prompt mid-intake: pending while held,
-/// resolved once released.
+/// Holding the lock stands in for a prompt mid-intake: pending while held, resolved once released.
 #[test]
 fn close_orders_behind_prompt_intake() {
     use acp::Agent as _;
@@ -436,10 +423,9 @@ fn close_orders_behind_prompt_intake() {
         );
     });
 }
-/// Presence stores thread and live together, but Stage A shims still accept
-/// independent writes. Reverting `set_live` to drop the thread (or `set_thread`
-/// to ignore an existing live bit) breaks the unload-then-drain path:
-/// disconnect records Dormant and keeps the actor thread for reconnect.
+/// Presence stores thread and live together, but the shims still accept independent writes.
+/// Reverting `set_live` to drop the thread (or `set_thread` to ignore an existing live bit) breaks the unload-then-drain path.
+/// Disconnect records Dormant and keeps the actor thread for reconnect.
 #[test]
 fn presence_shims_keep_thread_across_live_writes() {
     super::run_local_for_bridge_test(|| async {
@@ -461,8 +447,7 @@ fn presence_shims_keep_thread_across_live_writes() {
     });
 }
 /// `release` used to set `live = None` while keeping a running thread.
-/// Folding that into `Evicted` must still report no live state, or roster
-/// readers start seeing a ghost Dormant/Closed for a session that closed.
+/// Folding that into `Evicted` must still report no live state, or roster readers start seeing a ghost Dormant/Closed for a session that closed.
 #[test]
 fn release_keeps_a_running_thread_without_a_live_bit() {
     super::run_local_for_bridge_test(|| async {
@@ -495,9 +480,8 @@ fn release_keeps_a_running_thread_without_a_live_bit() {
         drop(stop_tx);
     });
 }
-/// `settle_attach` must restore a displaced Working turn, not the Attaching the
-/// second guard captured. Reverting settle-from-handle to prior_live only
-/// records IdleResident here.
+/// `settle_attach` must restore a displaced Working turn, not the Attaching the second guard captured.
+/// Reverting settle-from-handle to prior_live only records IdleResident here.
 #[test]
 fn settle_attach_restores_displaced_working() {
     super::run_local_for_bridge_test(|| async {
@@ -520,9 +504,9 @@ fn settle_attach_restores_displaced_working() {
         );
     });
 }
-/// Successful spawn leaves Resident before the guard drops. settle_attach must
-/// not take that presence away. Reverting it to always `take()` drops the
-/// handle on every successful load.
+/// Successful spawn leaves Resident before the guard drops.
+/// settle_attach must not take that presence away.
+/// Reverting it to always `take()` drops the handle on every successful load.
 #[test]
 fn settle_attach_is_a_noop_once_the_session_is_already_resident() {
     super::run_local_for_bridge_test(|| async {
@@ -543,11 +527,9 @@ fn settle_attach_is_a_noop_once_the_session_is_already_resident() {
         );
     });
 }
-/// A reconnect attach parks the running actor thread in `displaced` and
-/// settles via guard drop with the cloned handle still present. Reverting
-/// settle_attach's settle-from-handle branch to keep only Attaching's own
-/// thread (and drop `displaced`) loses that record, so the sweep cannot reap
-/// a crash and drains have nothing to wait on.
+/// A reconnect attach parks the running actor thread in `displaced` and settles via guard drop with the cloned handle still present.
+/// Reverting settle_attach's settle-from-handle branch to keep only Attaching's own thread (and drop `displaced`) loses that record.
+/// The sweep then cannot reap a crash and drains have nothing to wait on.
 #[test]
 fn fail_attach_keeps_the_displaced_running_thread() {
     super::run_local_for_bridge_test(|| async {
@@ -576,11 +558,9 @@ fn fail_attach_keeps_the_displaced_running_thread() {
         drop(stop_tx);
     });
 }
-/// A cold load registers the handle and records IdleResident while the load
-/// guard is still alive. Reverting `set_live` to replace presence wholesale
-/// retires Attaching at actor spawn, so `wait_for_load_to_settle` returns
-/// early and `session_load_in_flight` goes false in the
-/// handle-registered/bridge-empty window.
+/// A cold load registers the handle and records IdleResident while the load guard is still alive.
+/// Reverting `set_live` to replace presence wholesale retires Attaching at actor spawn.
+/// `wait_for_load_to_settle` then returns early, and `session_load_in_flight` goes false while the handle is registered but the bridge is empty.
 #[test]
 fn set_live_does_not_retire_an_in_flight_attach() {
     super::run_local_for_bridge_test(|| async {
@@ -610,10 +590,9 @@ fn set_live_does_not_retire_an_in_flight_attach() {
         );
     });
 }
-/// Client-disconnect eviction writes Working against a still-resident
-/// session. Reverting `set_live` to replace presence wholesale erases a
-/// racing attach's waiter, so close and history-load stop waiting at the
-/// disconnect write instead of at load completion.
+/// Client-disconnect eviction writes Working against a still-resident session.
+/// Reverting `set_live` to replace presence wholesale erases a racing attach's waiter.
+/// Close and history-load then stop waiting at the disconnect write instead of at load completion.
 #[test]
 fn disconnect_eviction_does_not_erase_a_mid_attach() {
     super::run_local_for_bridge_test(|| async {
@@ -644,10 +623,8 @@ fn disconnect_eviction_does_not_erase_a_mid_attach() {
         );
     });
 }
-/// An unload mid-attach shuts the actor down through the Attaching copy of
-/// its handle, so the displaced resident's channel is closed by settle time.
-/// Reverting the closed-channel demotion in `settle_attach` restores a
-/// resident nobody hosts.
+/// An unload mid-attach shuts the actor down through the Attaching copy of its handle, so the displaced resident's channel is closed by settle time.
+/// Reverting the closed-channel demotion in `settle_attach` restores a resident nobody hosts.
 #[test]
 fn a_settled_attach_does_not_resurrect_an_unloaded_resident() {
     super::run_local_for_bridge_test(|| async {
@@ -670,8 +647,8 @@ fn a_settled_attach_does_not_resurrect_an_unloaded_resident() {
         );
     });
 }
-/// Internal spellings must not round-trip from a client. Reverting
-/// `from_client` to a full parse maps them to internal variants and fails this.
+/// Internal spellings must not round-trip from a client.
+/// Reverting `from_client` to a full parse maps them to internal variants and fails this.
 #[test]
 fn a_client_cannot_spell_internal_cancel_triggers() {
     use crate::session::CancelTrigger;
@@ -684,10 +661,9 @@ fn a_client_cannot_spell_internal_cancel_triggers() {
     assert_eq!(CancelTrigger::from_client("esc"), CancelTrigger::Esc);
     assert_eq!(CancelTrigger::from_client("ctrl_c"), CancelTrigger::CtrlC);
 }
-/// The attach adopts the incoming actor's thread on Attaching's own slot; a
-/// settle that produced nothing must hand it to `release`, which keeps a
-/// running thread for the sweep. Reverting the Evicted hand-off in
-/// `settle_attach`'s empty branch drops it.
+/// The attach adopts the incoming actor's thread on Attaching's own slot.
+/// A settle that produced nothing must hand it to `release`, which keeps a running thread for the sweep.
+/// Reverting the Evicted hand-off in `settle_attach`'s empty branch drops it.
 #[test]
 fn a_settled_attach_keeps_the_thread_it_adopted() {
     super::run_local_for_bridge_test(|| async {
@@ -709,9 +685,8 @@ fn a_settled_attach_keeps_the_thread_it_adopted() {
         drop(stop_tx);
     });
 }
-/// A client disconnect must not unload a session an attach is rebuilding: the
-/// handle it would shut down is the attach's copy. Reverting the
-/// `is_attaching` gate in `handle_evict_sessions` unloads it.
+/// A client disconnect must not unload a session an attach is rebuilding: the handle it would shut down is the attach's copy.
+/// Reverting the `is_attaching` gate in `handle_evict_sessions` unloads it.
 #[test]
 fn disconnect_does_not_unload_a_session_mid_attach() {
     super::run_local_for_bridge_test(|| async {

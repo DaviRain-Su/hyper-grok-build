@@ -402,6 +402,8 @@ pub fn start_minimal_btw(v: &mut AgentView, question: String) -> uuid::Uuid {
         request_id: Some(request_id),
         revision: uuid::Uuid::new_v4(),
     });
+    // Same overlay identity as the previous Done panel; drop its highlight before replace.
+    v.clear_btw_owned_selection();
     v.btw_state = Some(crate::views::btw_overlay::BtwOverlayState::Loading { question });
     v.btw_focused = false;
     request_id
@@ -459,12 +461,14 @@ pub fn clear_minimal_btw(v: &mut AgentView) {
     v.last_btw_selection_model = Default::default();
     v.hit_btw_close.clear();
     clear_btw_drag_state(v);
+    v.clear_btw_owned_selection();
 }
 
 /// Clear text-drag state only when it belongs to the minimal `/btw` surface.
 ///
 /// Kept in this file rather than widening the viewer module's private helper.
 /// Minimal already owns this lifecycle reset and is the only cross-module caller.
+/// Does not drop a finished highlight; panel replace/dismiss must clear that separately.
 fn clear_btw_drag_state(v: &mut AgentView) {
     let is_btw = v
         .pending_text_drag

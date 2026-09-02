@@ -1,8 +1,7 @@
 //! `x.ai/interject` extension handler.
 //!
-//! Queues a mid-turn interjection into the active session's pending
-//! interjection buffer.  The session actor drains it at the next safe
-//! point in `process_conversation_turn`.
+//! Queues a mid-turn interjection into the active session's pending interjection buffer.
+//! The session actor drains it at the next safe point in `process_conversation_turn`.
 
 use agent_client_protocol as acp;
 
@@ -17,18 +16,18 @@ struct InterjectRequest {
     text: String,
     #[serde(default)]
     interjection_id: Option<String>,
-    /// Optional structured blocks (text + images) from image-capable
-    /// clients; absent = legacy text-only wire shape (empty after default).
+    /// Optional structured blocks (text and images) from image-capable clients.
+    /// Absent means the legacy text-only wire shape (empty after default).
     #[serde(default)]
     content: Vec<acp::ContentBlock>,
 }
 
 /// Split a `content` array into the model-safe text and the image blocks.
 ///
-/// The Text block (when present and non-empty) is the client's REWRITTEN
-/// text — failed-orphan placeholders stripped, `[Image #N: <path>]` paths
-/// dropped — and must win over the raw `text` param, which exists for
-/// legacy clients and display. Returns `(text_override, images)`.
+/// The Text block (when present and non-empty) is the client's REWRITTEN text.
+/// The rewrite strips failed-orphan placeholders and drops `[Image #N: <path>]` paths.
+/// It must win over the raw `text` param, which exists for legacy clients and display.
+/// Returns `(text_override, images)`.
 fn split_content(content: Vec<acp::ContentBlock>) -> (Option<String>, Vec<acp::ImageContent>) {
     let text_override = content.iter().find_map(|block| match block {
         acp::ContentBlock::Text(tb) if !tb.text.trim().is_empty() => Some(tb.text.clone()),
@@ -37,12 +36,11 @@ fn split_content(content: Vec<acp::ContentBlock>) -> (Option<String>, Vec<acp::I
     (text_override, crate::session::image_blocks(content))
 }
 
-/// Handle `x.ai/interject` — queue a mid-turn user interjection.
+/// Handle `x.ai/interject`: queue a mid-turn user interjection.
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let req: InterjectRequest = parse_params(args)?;
     let sid: acp::SessionId = req.session_id.clone().into();
-    // Load-race-tolerant: an interjection racing a reconnect-replayed
-    // `session/load` (leader restart) waits for the load instead of failing.
+    // An interjection racing a reconnect-replayed `session/load` (leader restart) waits for the load instead of failing
     let session_handle = agent.session_handle_waiting_for_load(&sid).await;
     let Some(session) = session_handle else {
         return Err(
@@ -66,8 +64,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 mod tests {
     use super::*;
 
-    /// Legacy wire shape (no `content`) parses byte-identically: text-only,
-    /// zero images, no text override.
+    /// Legacy wire shape (no `content`) parses byte-identically: text-only, zero images, no text override.
     #[test]
     fn parse_without_content_is_legacy_text_only() {
         let req: InterjectRequest = serde_json::from_value(serde_json::json!({
@@ -83,9 +80,8 @@ mod tests {
         assert!(images.is_empty());
     }
 
-    /// `content` with text + image blocks parses; the images are extracted
-    /// and the Text block (the client's rewritten, path-stripped text)
-    /// overrides the raw `text` param.
+    /// `content` with text and image blocks parses; the images are extracted.
+    /// The Text block (the client's rewritten, path-stripped text) overrides the raw `text` param.
     #[test]
     fn parse_with_content_extracts_images_and_prefers_block_text() {
         let req: InterjectRequest = serde_json::from_value(serde_json::json!({
@@ -108,8 +104,7 @@ mod tests {
         assert_eq!(images[0].data, "aGVsbG8=");
     }
 
-    /// Garbage `content` fails the whole parse (strict, like other params)
-    /// instead of silently dropping attachments.
+    /// Garbage `content` fails the whole parse (strict, like other params) instead of silently dropping attachments.
     #[test]
     fn parse_with_garbage_content_is_an_error() {
         let result: Result<InterjectRequest, _> = serde_json::from_value(serde_json::json!({

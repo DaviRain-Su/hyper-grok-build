@@ -1,4 +1,4 @@
-//! Replay of records earlier builds wrote, asserted on what reaches the client.
+//! Replays records earlier builds wrote and asserts on what reaches the client.
 
 use agent_client_protocol as acp;
 use serde_json::Value;
@@ -7,9 +7,8 @@ use super::MvpAgent;
 use crate::tools::task_completed_frame::FRAME_MAX_BYTES;
 use xai_acp_lib::{AcpAgentGatewaySender as GatewaySender, AcpClientMessage};
 
-/// The record is built from the real notification type, so renaming a field
-/// the refit looks up by name fails this test rather than silently putting
-/// oversized lines back on the wire.
+/// The record is built from the real notification type.
+/// Renaming a field the refit looks up by name then fails this test rather than silently putting oversized lines back on the wire.
 #[tokio::test]
 async fn replay_shrinks_an_oversized_completion() {
     let (agent, mut rx) = build_agent_with_gateway();
@@ -81,8 +80,7 @@ fn replay_line(record: &Value) -> String {
     serde_json::json!({ "method": "_x.ai/session/update", "params": record }).to_string()
 }
 
-/// The branch a plain resume takes: `_meta` is added to the record, so the fit
-/// has to happen after that and not before.
+/// The branch a plain resume takes: `_meta` is added to the record, so the fit has to happen after that and not before.
 #[tokio::test]
 async fn a_marked_replay_is_fitted_after_its_metadata_is_added() {
     let (agent, mut rx) = build_agent_with_gateway();
@@ -106,8 +104,7 @@ async fn a_marked_replay_is_fitted_after_its_metadata_is_added() {
     assert!(params.contains("isReplay"));
 }
 
-/// A completion nothing can shrink is dropped, because sending it is what
-/// closes the connection.
+/// A completion nothing can shrink is dropped, because sending it is what closes the connection.
 #[tokio::test]
 async fn replay_drops_a_completion_nothing_can_shrink() {
     let (agent, mut rx) = build_agent_with_gateway();
@@ -180,8 +177,7 @@ async fn parent_replay_does_not_emit_meta_less_unfinished_tool_call() {
     );
 }
 
-/// Stale-task reconciliation on a cold load builds its completion from a
-/// recorded command of any size, so its line is measured like the rest.
+/// Stale-task reconciliation on a cold load builds its completion from a recorded command of any size, so its line is measured like the rest.
 #[tokio::test]
 async fn a_stale_task_completion_is_frame_bounded() {
     let (agent, mut rx) = build_agent_with_gateway();

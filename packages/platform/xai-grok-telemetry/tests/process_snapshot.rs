@@ -52,9 +52,8 @@ async fn a_gated_emit_takes_no_snapshot_and_the_second_snapshot_reports_cpu() {
         );
     }
 
-    // A sub-floor read must not advance the baseline: the next derived
-    // window spans back to the last DERIVED window, across the sub-floor
-    // read, never just since the previous snapshot.
+    // A sub-floor read must not advance the baseline
+    // The next derived window spans back to the last DERIVED window, across the sub-floor read, never just since the previous snapshot
     #[cfg(unix)]
     {
         let mut last_derived_end = Instant::now();

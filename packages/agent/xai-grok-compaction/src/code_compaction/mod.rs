@@ -41,9 +41,7 @@ pub use compact::{
 pub use config::{
     DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT, FullReplaceConfig, MIN_SUMMARY_SEED_CHARS,
 };
-pub use failure::{
-    FailureKind, classify_http_status, classify_stream_event_error, is_context_length_error,
-};
+pub use failure::is_context_length_error;
 pub use observer::{FullReplaceAttemptOutcome, FullReplaceObserver};
 pub use prompt::{
     SELF_SUMMARIZATION_PROMPT, SummaryPromptKind, build_summary_prompt, build_summary_prompt_kind,

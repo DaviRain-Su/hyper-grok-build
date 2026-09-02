@@ -45,7 +45,7 @@ pub use actor::state::{
 pub use commands::{ModelMetadata, StrictAppendAck, StrictAppendError};
 pub use compaction_mode::CompactionMode;
 pub use events::ChatStateEvent;
-pub use handle::ChatStateHandle;
+pub use handle::{ChatStateHandle, ChatStateMailboxClosed};
 pub use persistence::{
     ChatPersistence, MockChatPersistence, MockPersistenceReceiver, NullChatPersistence,
     PersistenceRecord, StripOutcome,

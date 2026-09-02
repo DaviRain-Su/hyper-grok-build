@@ -102,8 +102,7 @@ pub(crate) fn entrypoint() -> Option<Entrypoint> {
 
 static RELEASE_CHANNEL: OnceLock<ReleaseChannel> = OnceLock::new();
 
-/// The updater owns the channel truth but depends on this crate, so entry
-/// points pass the channel in.
+/// The updater is the source of truth for the channel but depends on this crate, so entry points pass the channel in.
 pub fn set_release_channel(channel: ReleaseChannel) {
     if channel == ReleaseChannel::Unknown {
         return;

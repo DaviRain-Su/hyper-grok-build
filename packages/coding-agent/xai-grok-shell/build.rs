@@ -16,18 +16,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Declare our custom cfg to the compiler so cfg(bundle_rg) is recognized by lints
     println!("cargo:rustc-check-cfg=cfg(bundle_rg)");
 
-    // Decide whether to bundle: path override OR release build. Bail before
-    // touching the filesystem so debug `cargo check` needs no environment.
+    // Bundle when a path override is set or this is a release build
+    // Bail before touching the filesystem so debug `cargo check` needs no environment
     let path_override = env::var("GROK_SHELL_BUNDLE_RG_PATH").ok();
     let is_release = env::var("PROFILE").as_deref() == Ok("release");
     if path_override.is_none() && !is_release {
         return Ok(());
     }
 
-    // In Bazel builds, write into OUT_DIR (which is writable) rather than
-    // XAI_ROOT/target/tmp (which is read-only inside the sandbox). Outside
-    // Bazel, prefer XAI_ROOT's shared cache dir (monorepo behavior) and fall
-    // back to OUT_DIR for standalone checkouts where XAI_ROOT is not a thing.
+    // In Bazel builds, write into OUT_DIR; XAI_ROOT/target/tmp is read-only inside the sandbox
+    // Outside Bazel, prefer XAI_ROOT's shared cache dir and fall back to OUT_DIR for standalone checkouts where XAI_ROOT is unset
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
     let in_bazel = is_bazel_build(&manifest_dir);
     let gen_dir = if in_bazel {
@@ -40,14 +38,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     fs::create_dir_all(&gen_dir)?;
 
-    // Skip auto-bundling on Windows: ripgrep ships .zip there (not .tar.gz)
-    // and we do not yet have a zip-extraction path. Returning here BEFORE
-    // emitting `cargo:rustc-cfg=bundle_rg` keeps the include_bytes! macros
-    // gated on cfg(bundle_rg) compiled-out, so the runtime falls back to
-    // `rg` on PATH (see src/util/ripgrep.rs::rg_path). Users install via
-    // `winget install BurntSushi.ripgrep.MSVC` or `scoop install ripgrep`.
-    // An explicit GROK_SHELL_BUNDLE_RG_PATH still bundles on Windows (the
-    // override path below copies any binary regardless of target).
+    // Skip auto-bundling on Windows: ripgrep ships .zip archives there and this script only extracts .tar.gz
+    // Returning before `cargo:rustc-cfg=bundle_rg` keeps the include_bytes! macros compiled out
+    // The runtime then falls back to `rg` on PATH (see src/util/ripgrep.rs::rg_path)
+    // Users install via `winget install BurntSushi.ripgrep.MSVC` or `scoop install ripgrep`
+    // An explicit GROK_SHELL_BUNDLE_RG_PATH still bundles on Windows; the override branch below copies any binary regardless of target
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os == "windows" && path_override.is_none() {
         return Ok(());
@@ -61,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         gen_dir.display()
     );
 
-    // If a local rg binary is provided, copy it directly (skips target check).
+    // If a local rg binary is provided, copy it directly and skip the target check
     if let Some(path) = path_override {
         let dest = gen_dir.join(format!("rg-{}-override.bin", RG_VER));
         println!("cargo:rustc-env=GROK_SHELL_RG_TARGET=override");
@@ -96,10 +91,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dest = gen_dir.join(format!("rg-{}-{}.bin", RG_VER, asset_triple));
     let _ = fs::remove_file(&dest);
 
-    // Download base is overridable so sandboxed/offline CI can point at an
-    // internal mirror (e.g. GROK_SHELL_RG_DOWNLOAD_BASE=http://<mirror>/github/
-    // BurntSushi/ripgrep/releases/download). Defaults to the public GitHub
-    // releases URL.
+    // The download base is overridable so sandboxed or offline CI can point at an internal mirror; it defaults to the public GitHub releases URL
+    // Example: GROK_SHELL_RG_DOWNLOAD_BASE=http://<mirror>/github/BurntSushi/ripgrep/releases/download
     let download_base = env::var("GROK_SHELL_RG_DOWNLOAD_BASE")
         .unwrap_or_else(|_| "https://github.com/BurntSushi/ripgrep/releases/download".to_string());
     let url = format!(

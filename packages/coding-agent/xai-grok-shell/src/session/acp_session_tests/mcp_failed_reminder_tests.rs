@@ -1,5 +1,5 @@
-//! Failure-episode dedupe for the "MCP servers that failed to connect"
-//! section of the MCP system-reminder (semantics: `McpAnnounced::failed`).
+//! Each failure episode is announced once in the "MCP servers that failed to connect" section of the MCP system-reminder.
+//! `McpAnnounced::failed` tracks which episodes were announced.
 
 use super::support::*;
 use super::*;
@@ -11,8 +11,7 @@ fn http_server(name: &str) -> acp::McpServer {
     )
 }
 
-/// Simulate what a background snapshot refresh does: mark dirty, then run
-/// the injector (turn-start / agentic-loop path).
+/// Simulate what a background snapshot refresh does: mark dirty, then run the injector (the path taken at turn start and in the agentic loop).
 async fn refresh_and_inject(actor: &SessionActor) {
     actor
         .mcp_reminder_dirty
@@ -31,9 +30,8 @@ async fn failed_reminders(actor: &SessionActor) -> Vec<String> {
         .collect()
 }
 
-/// Connect `name` from the injector's point of view: present in the tool
-/// metadata snapshot (→ `connected_server_summaries`) with its failure
-/// state cleared, mirroring the real registration path.
+/// Connect `name` from the injector's point of view, mirroring the real registration path.
+/// The server appears in the tool metadata snapshot (which feeds `connected_server_summaries`) with its failure state cleared.
 async fn connect_server(actor: &SessionActor, name: &str) {
     {
         let mut snapshot = actor.tool_metadata_snapshot.lock().unwrap();
@@ -79,8 +77,7 @@ async fn failed_server_announced_once_per_episode() {
             refresh_and_inject(&actor).await;
             let reminders = failed_reminders(&actor).await;
             assert_eq!(reminders.len(), 1, "{reminders:?}");
-            // Control characters in the failure detail must not forge extra
-            // reminder lines, and the HTTP retry hint is rendered.
+            // Control characters in the failure detail must not forge extra reminder lines, and the HTTP retry hint is rendered
             assert!(
                 reminders[0]
                     .contains("dead (\"boom - forged\" — retries automatically on next tool call)"),
@@ -89,14 +86,12 @@ async fn failed_server_announced_once_per_episode() {
             );
             assert!(!reminders[0].contains("\n- forged"), "{}", reminders[0]);
 
-            // Background retries re-mark the reminder dirty without any
-            // state change: the same episode must not re-announce.
+            // Background retries re-mark the reminder dirty without any state change: the same episode must not re-announce
             refresh_and_inject(&actor).await;
             refresh_and_inject(&actor).await;
             assert_eq!(failed_reminders(&actor).await.len(), 1);
 
-            // A non-auth reason change within the episode is not
-            // re-announced.
+            // A non-auth reason change within the episode is not re-announced
             actor.mcp_state.lock().await.record_init_failure(
                 "dead",
                 false,
@@ -105,8 +100,7 @@ async fn failed_server_announced_once_per_episode() {
             refresh_and_inject(&actor).await;
             assert_eq!(failed_reminders(&actor).await.len(), 1);
 
-            // The episode is persisted so a resumed session doesn't
-            // re-announce it either.
+            // The episode is persisted so a resumed session doesn't re-announce it either
             let mut persisted_failed = None;
             while let Ok(msg) = persistence_rx.try_recv() {
                 if let PersistenceMsg::AnnouncementState(state) = msg {
@@ -122,9 +116,9 @@ async fn failed_server_announced_once_per_episode() {
         .await;
 }
 
-/// Escalation to auth-required is the one reason change that re-announces
-/// (once): it needs user action, and it invalidates a previously announced
-/// "retries automatically" hint. Later flips back and forth stay silent.
+/// Escalation to auth-required is the one reason change that re-announces (once).
+/// It needs user action, and it invalidates a previously announced "retries automatically" hint.
+/// Later flips back and forth stay silent.
 #[tokio::test(flavor = "current_thread")]
 async fn auth_escalation_reannounces_once() {
     let local = tokio::task::LocalSet::new();
@@ -157,7 +151,7 @@ async fn auth_escalation_reannounces_once() {
                 reminders[1]
             );
 
-            // Further auth <-> non-auth flips within the episode stay silent.
+            // Further flips between auth and non-auth within the episode stay silent
             {
                 let mut state = actor.mcp_state.lock().await;
                 state.auth_required.remove("dead");
@@ -172,8 +166,7 @@ async fn auth_escalation_reannounces_once() {
             refresh_and_inject(&actor).await;
             assert_eq!(failed_reminders(&actor).await.len(), 2);
 
-            // A server announced as auth-required from the start never
-            // re-announces on flips either.
+            // A server announced as auth-required from the start never re-announces on flips either
             {
                 let mut state = actor.mcp_state.lock().await;
                 state.configs.push(http_server("oauth"));
@@ -193,10 +186,8 @@ async fn auth_escalation_reannounces_once() {
         .await;
 }
 
-/// No-record servers are skipped while init has not completed (including
-/// the config-change `NotStarted` window), so the episode's one
-/// announcement is never the placeholder; after init the placeholder is
-/// the legitimate fallback for an unrecorded crash.
+/// Servers with no failure record are skipped while init has not completed (including the config-change `NotStarted` window).
+/// So the episode's one announcement is never the placeholder; after init the placeholder is the legitimate fallback for an unrecorded crash.
 #[test]
 fn classify_defers_placeholder_reason_until_init_completes() {
     use super::mcp_failed_reminder::classify_failed_servers;
@@ -228,8 +219,7 @@ fn classify_collects_facts_and_sorts() {
 
     let (failed, _) = classify_failed_servers(&state, &connected);
     assert_eq!(failed.len(), 2, "{failed:?}");
-    // Sorted by name; non-auth HTTP failures retry on use while auth
-    // failures need the user; the config identity distinguishes servers.
+    // Sorted by name; non-auth HTTP failures retry on use while auth failures need the user; the config identity distinguishes servers
     assert_eq!(failed[0].name, "a-dead");
     assert_eq!(failed[0].detail.as_deref(), Some("boom"));
     assert_eq!(failed[0].class, AnnouncedFailure::Transport);
@@ -271,7 +261,7 @@ fn render_failed_section_composes_and_sanitizes_reason_lines() {
             true,
         ),
         entry("oauth", None, AnnouncedFailure::AuthRequired, false),
-        // Nothing legible left falls back to the generic reason.
+        // When nothing legible is left, the entry falls back to the generic reason
         entry(
             "blank",
             Some("\u{200B}\u{00AD}"),
@@ -288,10 +278,8 @@ fn render_failed_section_composes_and_sanitizes_reason_lines() {
     );
 }
 
-/// A server whose retry handshake is in flight is skipped from the section,
-/// its episode survives the retry, and a never-announced server is not
-/// announced with a placeholder reason while init is settling — its one
-/// announcement waits for the real cause.
+/// A server whose retry handshake is in flight is skipped from the section, and its episode survives the retry.
+/// A server that was never announced is not given a placeholder reason while init is in progress; its one announcement waits for the real cause.
 #[tokio::test(flavor = "current_thread")]
 async fn handshaking_and_init_windows_defer_announcements() {
     let local = tokio::task::LocalSet::new();
@@ -309,9 +297,8 @@ async fn handshaking_and_init_windows_defer_announcements() {
             refresh_and_inject(&actor).await;
             assert_eq!(failed_reminders(&actor).await.len(), 1);
 
-            // A retry marks "dead" handshaking (clearing its failure state);
-            // "fresh" is configured with no failure record while init is in
-            // progress. Neither announces.
+            // A retry marks "dead" handshaking (clearing its failure state); "fresh" is configured with no failure record while init is in progress
+            // Neither announces
             {
                 let mut state = actor.mcp_state.lock().await;
                 assert!(state.try_start_init(), "fixture must enter Starting");
@@ -325,9 +312,8 @@ async fn handshaking_and_init_windows_defer_announcements() {
             refresh_and_inject(&actor).await;
             assert_eq!(failed_reminders(&actor).await.len(), 1);
 
-            // The retry fails with a different cause: same episode for
-            // "dead" (no re-announcement); "fresh" now has a real cause and
-            // announces with it.
+            // The retry fails with a different cause: "dead" stays in the same episode, so no re-announcement
+            // "fresh" now has a real cause and announces with it
             {
                 let mut state = actor.mcp_state.lock().await;
                 state.mark_server_ready("dead");
@@ -347,9 +333,8 @@ async fn handshaking_and_init_windows_defer_announcements() {
         .await;
 }
 
-/// Rewind wiring: a committed conversation rewind re-arms failure episodes
-/// (the truncated turns may have carried the failure reminder) and marks
-/// the MCP reminder dirty.
+/// A committed conversation rewind re-arms failure episodes and marks the MCP reminder dirty.
+/// The truncated turns may have carried the failure reminder.
 #[tokio::test(flavor = "current_thread")]
 async fn rewind_rearms_failed_server_announcements() {
     use crate::session::{RewindMode, RewindRequest};
@@ -405,8 +390,8 @@ async fn rewind_rearms_failed_server_announcements() {
         .await;
 }
 
-/// Compaction drops prior reminders from context, so the post-compaction
-/// re-arm must make the next injection re-announce still-down servers.
+/// Compaction drops prior reminders from context.
+/// The post-compaction re-arm must make the next injection re-announce servers that are still down.
 #[tokio::test(flavor = "current_thread")]
 async fn rearm_reannounces_still_failed_servers() {
     let local = tokio::task::LocalSet::new();
@@ -451,8 +436,7 @@ async fn recovery_rearms_the_announcement() {
             refresh_and_inject(&actor).await;
             assert_eq!(failed_reminders(&actor).await.len(), 1);
 
-            // Server connects: the episode ends (the delta reminder for the
-            // new connection is separate and not counted here).
+            // The server connects and the episode ends (the reminder about the new connection is separate and not counted here)
             connect_server(&actor, "flaky").await;
             refresh_and_inject(&actor).await;
             assert_eq!(failed_reminders(&actor).await.len(), 1);
@@ -493,8 +477,8 @@ async fn removing_the_server_from_config_ends_the_episode() {
             refresh_and_inject(&actor).await;
             assert_eq!(failed_reminders(&actor).await.len(), 1);
 
-            // Removed from config: episode ends. Re-adding (still broken)
-            // is a fresh episode and announces again.
+            // Removing the server from config ends the episode
+            // Re-adding it (still broken) starts a fresh episode and announces again
             actor.mcp_state.lock().await.configs.clear();
             refresh_and_inject(&actor).await;
             assert_eq!(failed_reminders(&actor).await.len(), 1);

@@ -1,5 +1,4 @@
-//! Forwards recorded session updates back to a loading client, fitting
-//! completion records written before the size limit existed.
+//! Forwards recorded session updates back to a loading client, fitting completion records written before the size limit existed.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -11,14 +10,13 @@ use super::{MvpAgent, mark_as_replay, stamp_meta_value};
 use crate::session::storage::ReplayToolCollapser;
 
 /// Max in-flight `forward_with_completion` receivers during cold resume.
-/// Unbounded enqueue + sync pager apply peaks the pager at multi-GB on huge
-/// sessions; this keeps ACP apply roughly windowed.
+/// Unbounded enqueue with sync pager apply peaks the pager at multi-GB on huge sessions; this keeps ACP apply roughly windowed.
 pub(super) const REPLAY_COMPLETION_WINDOW: usize = 64;
 
 type ReplayCompletionRx = tokio::sync::oneshot::Receiver<xai_acp_lib::AcpResult<()>>;
 
-/// Sliding window of replay completion receivers. Awaits the oldest when full
-/// so at most [`REPLAY_COMPLETION_WINDOW`] notifications sit un-acked.
+/// Sliding window of replay completion receivers.
+/// Awaits the oldest when full so at most [`REPLAY_COMPLETION_WINDOW`] notifications sit un-acked.
 pub(super) struct ReplayCompletionDrain {
     pending: VecDeque<ReplayCompletionRx>,
     forwarded: usize,
@@ -54,9 +52,8 @@ impl ReplayCompletionDrain {
 }
 
 impl MvpAgent {
-    /// Records written before completions were bounded can still be too long
-    /// for a client to read. `None` drops one that cannot be shrunk, which
-    /// costs a completion event but keeps the connection.
+    /// Records written before completions were bounded can still be too long for a client to read.
+    /// `None` drops one that cannot be shrunk, which costs a completion event but keeps the connection.
     fn fitted_replay_params(
         params: Box<serde_json::value::RawValue>,
     ) -> Option<Box<serde_json::value::RawValue>> {
@@ -75,18 +72,16 @@ impl MvpAgent {
         }
     }
 
-    /// Forward one raw JSONL replay line. Returns the completion receiver when
-    /// a notification was actually sent.
+    /// Forward one raw JSONL replay line.
+    /// Returns the completion receiver when a notification was actually sent.
     ///
     /// Dispatches by on-disk method name:
-    /// - ACP updates (`"session/update"`) → typed `SessionNotification` for correct
-    ///   TUI dispatch (direct dispatch preserves Rust types, not method strings).
-    /// - xAI updates (`"_x.ai/session/update"`) → `ExtNotification`.
+    /// - ACP updates (`"session/update"`) become a typed `SessionNotification` for correct TUI dispatch.
+    ///   Direct dispatch preserves Rust types, not method strings.
+    /// - xAI updates (`"_x.ai/session/update"`) become an `ExtNotification`.
     ///
-    /// When `mark_replay` is true, the notification is tagged with
-    /// `_meta.isReplay: true` so the client knows it's historical data.
-    /// Cursor-based reconnects set this to false for events after the cursor
-    /// so the client processes them as live updates.
+    /// When `mark_replay` is true, the notification is tagged with `_meta.isReplay: true` so the client knows it's historical data.
+    /// Cursor-based reconnects set this to false for events after the cursor so the client processes them as live updates.
     pub(super) fn forward_raw_replay_line(
         &self,
         line: &str,
@@ -114,10 +109,9 @@ impl MvpAgent {
         let is_xai = method == "_x.ai/session/update";
 
         if is_xai {
-            // The fast-path forwards raw params with no `_meta` round-trip, so it
-            // can stamp nothing. When a `target_client_id` is present we MUST take
-            // the injection path instead, otherwise the replay would lose the
-            // target and the leader would broadcast it to every subscriber.
+            // The fast-path forwards raw params with no `_meta` round-trip, so it can stamp nothing
+            // When a `target_client_id` is present we MUST take the injection path instead
+            // Otherwise the replay would lose the target and the leader would broadcast it to every subscriber
             if target_client_id.is_none() && !mark_replay {
                 if let Ok(owned) =
                     serde_json::value::RawValue::from_string(raw_params.get().to_owned())
@@ -140,8 +134,7 @@ impl MvpAgent {
             if let Some(obj) = params.as_object_mut() {
                 let meta = obj.entry("_meta").or_insert_with(|| serde_json::json!({}));
                 if let Some(m) = meta.as_object_mut() {
-                    // `isReplay` only applies to historical replay events, not the
-                    // post-cursor live deltas that reach this path when a target is set.
+                    // `isReplay` only applies to historical replay events, not the post-cursor live deltas that reach this path when a target is set
                     if mark_replay {
                         m.insert("isReplay".to_string(), serde_json::json!(true));
                     }
@@ -184,9 +177,8 @@ impl MvpAgent {
         if mark_replay {
             mark_as_replay(&mut notification.meta, persist_data);
         }
-        // Stamp the leader unicast target regardless of mark_replay so the
-        // leader routes both historical and post-cursor live deltas only to
-        // the loading client.
+        // Stamp the leader unicast target regardless of mark_replay
+        // The leader then routes both historical and post-cursor live deltas only to the loading client
         if let Some(tid) = target_client_id {
             stamp_meta_value(&mut notification.meta, "x.ai/leaderClientId", tid);
         }
@@ -273,9 +265,9 @@ impl MvpAgent {
                     drain.push(rx).await;
                 }
             }
-            // Do not flush collapser leftovers: synthesizing a ToolCall here
-            // would drop the persisted `_meta.eventId` and duplicate on
-            // incremental reconnect. Child stream EOF flush is separate.
+            // Do not flush collapser leftovers
+            // Synthesizing a ToolCall here would drop the persisted `_meta.eventId` and duplicate on incremental reconnect
+            // Child stream EOF flush is separate
         }
 
         if updates_count > 0 && drain.forwarded() == 0 {
@@ -306,15 +298,13 @@ impl MvpAgent {
 
     /// Enqueue replay notifications for updates appended after `from_offset`.
     /// Returns completion receivers; callers open the gate then drain.
-    /// Intentionally sync (not async) so no prompt-task progress before gate flip.
+    /// Intentionally sync (not async) so no prompt task can make progress before the gate flips.
     ///
-    /// The delta tail is typically small (appends during the just-finished
-    /// replay). Windowing would require `.await` here and would delay the gate
-    /// flip; the caller drains the returned receivers before `LoadSessionResponse`.
+    /// The delta tail is typically small (appends during the just-finished replay).
+    /// Windowing would require `.await` here and would delay the gate flip; the caller drains the returned receivers before `LoadSessionResponse`.
     ///
-    /// When `mark_replay` is false (cursor-based reconnect), delta events are
-    /// forwarded without `_meta.isReplay` since they are truly new events the
-    /// client has not seen.
+    /// When `mark_replay` is false (cursor-based reconnect), delta events are forwarded without `_meta.isReplay`.
+    /// They are truly new events the client has not seen.
     pub(super) fn replay_session_updates_from_offset_enqueue(
         &self,
         session_id: &acp::SessionId,

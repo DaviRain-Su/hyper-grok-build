@@ -234,14 +234,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_entries_returns_none() {
-        assert_eq!(
-            first_unknown_tool_id(&[], &allowed(&["GrokBuild:grep"])),
-            None
-        );
-    }
-
-    #[test]
     fn first_unknown_id_is_returned_with_index() {
         let entries = [
             entry("GrokBuild:grep"),

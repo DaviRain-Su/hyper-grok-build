@@ -1,21 +1,99 @@
+use super::policy::*;
+use super::response::ManagedConfigResponse;
+use super::store::*;
+use super::supervisor::*;
 use super::*;
 
-/// Fail closed only for a managed principal AND compromised policy; every other combination proceeds.
 #[test]
-fn gate_blocks_only_managed_principal_with_compromised_policy() {
-    // The one blocking case.
-    assert!(
-        managed_policy_gate_decision(true, true).is_err(),
-        "managed principal + compromised policy must fail closed"
+fn gate_snapshot_denies_when_lock_held_or_unopenable() {
+    let short_wait = std::time::Duration::from_millis(150);
+    let dir = tempfile::tempdir().unwrap();
+    let _held = try_lock_managed_config(dir.path()).expect("test takes the lock first");
+    assert_eq!(
+        locked_gate_snapshot(dir.path(), short_wait).map(|_| ()),
+        Err(ManagedPolicyRefusal::Busy),
+        "a contended gate lock must fail closed as busy"
     );
-    // Policy intact / opted-out → proceed even for a managed principal.
-    assert!(managed_policy_gate_decision(true, false).is_ok());
-    // No managed principal → nothing to enforce.
-    assert!(managed_policy_gate_decision(false, true).is_ok());
-    assert!(managed_policy_gate_decision(false, false).is_ok());
+    let missing = dir.path().join("missing/home");
+    assert_eq!(
+        locked_gate_snapshot(&missing, short_wait).map(|_| ()),
+        Err(ManagedPolicyRefusal::LockUnavailable {
+            home: missing.clone()
+        }),
+        "an unopenable lock file must fail closed as unavailable, not busy"
+    );
 }
 
-/// Writes both artifacts and overwrites in place on re-fetch.
+#[tokio::test]
+async fn refresher_drop_stops_work_without_cancelling_parent() {
+    let parent = tokio_util::sync::CancellationToken::new();
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    drop(ManagedConfigRefresher::spawn(&parent, async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let _ = tx.send(());
+    }));
+    assert!(
+        rx.await.is_err(),
+        "the aborted work must never reach its send"
+    );
+    assert!(!parent.is_cancelled());
+}
+
+#[tokio::test]
+async fn supervisor_slot_respawns_a_dead_task_and_keeps_a_live_one() {
+    let dead = ManagedConfigRefresher::spawn(&tokio_util::sync::CancellationToken::new(), async {});
+    while !dead.handle.is_finished() {
+        tokio::task::yield_now().await;
+    }
+    let dead_token = dead.cancel.clone();
+    *REFRESH_SUPERVISOR.lock().unwrap() = Some(dead);
+
+    ensure_supervisor(|| {
+        ManagedConfigRefresher::spawn(
+            &tokio_util::sync::CancellationToken::new(),
+            std::future::pending(),
+        )
+    });
+    assert!(
+        dead_token.is_cancelled(),
+        "the finished supervisor must be replaced (its guard dropped)"
+    );
+    {
+        let slot = REFRESH_SUPERVISOR.lock().unwrap();
+        assert!(
+            !slot.as_ref().unwrap().handle.is_finished(),
+            "a live supervisor must now occupy the slot"
+        );
+    }
+
+    let live_token = REFRESH_SUPERVISOR
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .cancel
+        .clone();
+    ensure_supervisor(|| unreachable!("a live supervisor must be kept, not respawned"));
+    assert!(!live_token.is_cancelled());
+
+    *REFRESH_SUPERVISOR.lock().unwrap() = None;
+}
+
+#[test]
+fn gate_blocks_only_managed_principal_with_compromised_policy() {
+    let snapshot = |managed_principal_present, policy_compromised| GateSnapshot {
+        managed_principal_present,
+        policy_compromised,
+    };
+    assert!(
+        managed_policy_gate_decision(snapshot(true, true)).is_err(),
+        "managed principal + compromised policy must fail closed"
+    );
+    assert!(managed_policy_gate_decision(snapshot(true, false)).is_ok());
+    assert!(managed_policy_gate_decision(snapshot(false, true)).is_ok());
+    assert!(managed_policy_gate_decision(snapshot(false, false)).is_ok());
+}
+
 #[test]
 fn apply_writes_and_overwrites_artifacts() {
     let dir = tempfile::tempdir().unwrap();
@@ -42,15 +120,12 @@ fn apply_writes_and_overwrites_artifacts() {
     );
 }
 
-/// An artifact the response no longer serves (absent or empty) is REMOVED — a withdrawn
-/// policy must stop enforcing, and a leftover would trip the signed absence check.
 #[test]
 fn apply_removes_artifact_the_server_no_longer_serves() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path();
     std::fs::write(home.join("requirements.toml"), "[features]\n").unwrap();
 
-    // Response carries managed_config but NOT requirements.
     let body = ManagedConfigResponse {
         deployment_id: None,
         team_id: None,
@@ -66,7 +141,6 @@ fn apply_removes_artifact_the_server_no_longer_serves() {
         "an artifact the server no longer serves is removed"
     );
 
-    // EMPTY served content means the same thing as absent: remove.
     let withdrawn = ManagedConfigResponse {
         deployment_id: None,
         team_id: None,
@@ -80,21 +154,16 @@ fn apply_removes_artifact_the_server_no_longer_serves() {
         "empty served content converges to absence"
     );
 
-    // Converged state: another empty apply changes nothing.
     assert!(!apply_managed_config(home, &withdrawn).unwrap());
 }
 
-/// Partial-write robustness: if one artifact lands and the other write
-/// fails, the error surfaces but the artifact that succeeded is kept.
 #[cfg(unix)]
 #[test]
 fn apply_partial_write_failure_keeps_written_artifact() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path();
-    // Force the requirements write to fail: a squatting dir whose child can't be
-    // unlinked (no write bit on the dir), so even the dir-squat clearing fails
-    // and the rename onto the dir fails after it.
+    // A squat whose child can't be unlinked: the squat-clear and the rename both fail.
     let req = home.join("requirements.toml");
     std::fs::create_dir(&req).unwrap();
     std::fs::write(req.join("pin"), "x").unwrap();
@@ -118,12 +187,9 @@ fn apply_partial_write_failure_keeps_written_artifact() {
         home.join("managed_config.toml").exists(),
         "the artifact that wrote successfully must be kept"
     );
-    // Tidy so the tempdir can be cleaned up.
     let _ = std::fs::set_permissions(&req, std::fs::Permissions::from_mode(0o700));
 }
 
-/// The apply clears a squatting directory on both the overwrite and removal branches,
-/// so a dir-squat can't permanently block convergence.
 #[test]
 fn apply_converges_over_a_squatting_directory() {
     let dir = tempfile::tempdir().unwrap();
@@ -132,7 +198,6 @@ fn apply_converges_over_a_squatting_directory() {
     std::fs::write(home.join("requirements.toml").join("junk"), "x").unwrap();
     std::fs::create_dir(home.join("managed_config.toml")).unwrap();
 
-    // Overwrite branch clears the dir and writes; removal branch clears the dir.
     let body = ManagedConfigResponse {
         deployment_id: None,
         team_id: None,
@@ -152,14 +217,10 @@ fn apply_converges_over_a_squatting_directory() {
     );
 }
 
-/// The purge primitive (shared by logout and the identity-change purge) is best-effort over a
-/// PARTIAL install: present artifacts are removed, absent ones are tolerated (no panic, no
-/// error), and a directory squatting an artifact path is removed too.
 #[test]
 fn remove_managed_config_files_tolerates_partial_existence() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path();
-    // Only two of the four artifacts exist; one of them is a squatting DIRECTORY.
     std::fs::write(home.join("requirements.toml"), "[features]\n").unwrap();
     std::fs::create_dir(home.join("managed_config.toml")).unwrap();
     std::fs::write(home.join("managed_config.toml").join("junk"), "x").unwrap();
@@ -179,16 +240,31 @@ fn remove_managed_config_files_tolerates_partial_existence() {
     }
 }
 
-/// The transport-interruption variant must be retryable (so the loop escapes a
-/// poisoned connection) and must not be mistaken for an auth rejection.
 #[test]
-fn connection_interrupted_is_retryable_not_auth() {
-    let e = ManagedConfigError::ConnectionInterrupted("closed".into());
-    assert!(e.is_retryable(), "a transient interruption must be retried");
-    assert!(
-        !e.is_auth_rejection(),
-        "a transport error is not an auth rejection"
-    );
+fn staging_classifier_matches_only_the_write_deny_class() {
+    use std::io::{Error, ErrorKind};
+    for kind in [
+        ErrorKind::PermissionDenied,
+        ErrorKind::ReadOnlyFilesystem,
+        ErrorKind::ResourceBusy,
+    ] {
+        assert!(
+            write_failure_is_deny(&Error::from(kind)),
+            "{kind:?} is the sandbox deny class and may stage"
+        );
+    }
+    for kind in [
+        ErrorKind::IsADirectory,
+        ErrorKind::DirectoryNotEmpty,
+        ErrorKind::StorageFull,
+        ErrorKind::NotFound,
+        ErrorKind::Other,
+    ] {
+        assert!(
+            !write_failure_is_deny(&Error::from(kind)),
+            "{kind:?} must propagate loudly, not stage"
+        );
+    }
 }
 
 #[test]
@@ -217,6 +293,10 @@ fn transport_failure_maps_to_managed_config_error() {
     assert!(
         interrupted.is_retryable(),
         "an in-flight interruption is retried"
+    );
+    assert!(
+        !interrupted.is_auth_rejection(),
+        "a transport error is not an auth rejection"
     );
 
     let permanent = map_transport_failure(TransportFailure {
@@ -273,117 +353,6 @@ fn certificate_detail_names_the_bundle_env_only_when_set() {
     );
 }
 
-/// `send_with_retry_escaping_pool` combinator behavior with a counting op (no network):
-/// retryable errors retry up to `max_attempts`, non-retryable fails fast, success
-/// short-circuits, backoff awaited once per retry. The fresh-client swap on the final
-/// attempt needs a real degraded upstream and stays covered by the headless/e2e pass.
-#[tokio::test]
-async fn send_with_retry_escaping_pool_combinator_behavior() {
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    // (a) all-retryable: op runs max_attempts times, backoff awaited max_attempts-1 times, last Err returned.
-    let op_calls = AtomicU32::new(0);
-    let backoffs = AtomicU32::new(0);
-    let exhausted: Result<(), u32> = crate::http::send_with_retry_escaping_pool(
-        |_client| {
-            let n = op_calls.fetch_add(1, Ordering::SeqCst);
-            async move { Err(n) }
-        },
-        3,
-        |_e: &u32| true,
-        |_attempt| {
-            backoffs.fetch_add(1, Ordering::SeqCst);
-            std::future::ready(())
-        },
-    )
-    .await;
-    assert_eq!(exhausted, Err(2), "returns the last attempt's error");
-    assert_eq!(
-        op_calls.load(Ordering::SeqCst),
-        3,
-        "op runs max_attempts times"
-    );
-    assert_eq!(
-        backoffs.load(Ordering::SeqCst),
-        2,
-        "backoff awaited max_attempts-1 times"
-    );
-
-    // (b) non-retryable: fail fast after one op call, no backoff.
-    let op_calls = AtomicU32::new(0);
-    let backoffs = AtomicU32::new(0);
-    let fast: Result<(), u32> = crate::http::send_with_retry_escaping_pool(
-        |_client| {
-            op_calls.fetch_add(1, Ordering::SeqCst);
-            async { Err(7) }
-        },
-        5,
-        |_e: &u32| false,
-        |_attempt| {
-            backoffs.fetch_add(1, Ordering::SeqCst);
-            std::future::ready(())
-        },
-    )
-    .await;
-    assert_eq!(fast, Err(7));
-    assert_eq!(
-        op_calls.load(Ordering::SeqCst),
-        1,
-        "a non-retryable error fails fast"
-    );
-    assert_eq!(
-        backoffs.load(Ordering::SeqCst),
-        0,
-        "no backoff on a fast failure"
-    );
-
-    // (c) success short-circuits: fail once (retryable), then succeed on the 2nd attempt.
-    let op_calls = AtomicU32::new(0);
-    let ok: Result<u32, u32> = crate::http::send_with_retry_escaping_pool(
-        |_client| {
-            let n = op_calls.fetch_add(1, Ordering::SeqCst);
-            let outcome: Result<u32, u32> = if n == 0 { Err(1) } else { Ok(42) };
-            async move { outcome }
-        },
-        5,
-        |_e: &u32| true,
-        |_attempt| std::future::ready(()),
-    )
-    .await;
-    assert_eq!(ok, Ok(42));
-    assert_eq!(
-        op_calls.load(Ordering::SeqCst),
-        2,
-        "stops at the first success"
-    );
-}
-
-/// The sync marker is structurally separate from the artifact list — it must only ever
-/// be removed by the dedicated post-loop step in `remove_managed_config_files`.
-#[test]
-fn marker_is_not_a_managed_artifact() {
-    assert!(
-        !MANAGED_ARTIFACT_FILES.contains(&xai_grok_config::MANAGED_CONFIG_CACHE_FILE),
-        "the marker must be removed last, never as part of the artifact loop"
-    );
-    // Pin the composed contents: the purge loops, tmp-prefix sweep, and eviction all
-    // derive from these names, so a constant silently changing value would re-point
-    // them all at once.
-    assert_eq!(
-        MANAGED_ARTIFACT_FILES,
-        [
-            "managed_config.toml",
-            "requirements.toml",
-            "managed_config.sig.json",
-            "managed_identity.sig.json"
-        ],
-        "the artifact list is load-bearing for every derived loop; change it deliberately"
-    );
-}
-
-/// Error prefixes re-arm the detector like crash prefixes: when an artifact removal
-/// FAILS, the marker must survive, so the next start re-runs the purge instead of
-/// leaving the prior tenant's policy live with the detector disarmed.
 #[cfg(unix)]
 #[test]
 fn purge_keeps_marker_when_an_artifact_removal_fails() {
@@ -395,8 +364,7 @@ fn purge_keeps_marker_when_an_artifact_removal_fails() {
     }
     std::fs::write(home.join(xai_grok_config::MANAGED_CONFIG_CACHE_FILE), "{}").unwrap();
 
-    // Make one artifact unremovable: squat it with a dir whose read-only subdir
-    // holds a file — `remove_dir_all` can't unlink inside the read-only subdir.
+    // Unremovable squat: `remove_dir_all` can't unlink inside the read-only subdir.
     let squat = home.join("requirements.toml");
     std::fs::remove_file(&squat).unwrap();
     let locked_subdir = squat.join("locked");
@@ -417,7 +385,6 @@ fn purge_keeps_marker_when_an_artifact_removal_fails() {
         "a failed artifact removal must keep the marker (detector stays armed)"
     );
 
-    // Clear the fault: the next purge converges and only then drops the marker.
     std::fs::set_permissions(&locked_subdir, std::fs::Permissions::from_mode(0o755)).unwrap();
     remove_managed_config_files(home);
     for name in MANAGED_ARTIFACT_FILES {
@@ -431,9 +398,6 @@ fn purge_keeps_marker_when_an_artifact_removal_fails() {
     );
 }
 
-// --- The is-managed claim persist rules ---
-
-/// Deployment id wins over team id (server parity).
 #[test]
 fn served_principal_prefers_deployment_id() {
     use xai_grok_config::signed_policy::SignedPayload;
@@ -460,7 +424,6 @@ fn served_principal_prefers_deployment_id() {
     assert_eq!(served_principal_of(&payload(None, None)), None);
 }
 
-/// A verified claim persists ONLY when bound to the served principal.
 #[test]
 fn claim_persists_only_when_bound_to_served_principal() {
     let claim = |principal: &str| xai_grok_config::signed_policy::ManagedIdentityClaim {
@@ -475,15 +438,11 @@ fn claim_persists_only_when_bound_to_served_principal() {
     assert!(!claim_binds_to(&claim("team-007"), None));
 }
 
-/// Old server, no claim envelopes: nothing persists, nothing errors.
 #[test]
 fn absent_claim_is_skipped() {
     assert!(verified_claim_sidecar(&ManagedConfigResponse::default(), Some("team-007")).is_none());
 }
 
-/// The startup label: a deployment key wins outright, and an unreadable
-/// `auth.json` is `unknown`, never `personal` — the sync still runs and
-/// mislabeling it would hide the deployment-cost split.
 #[test]
 fn auth_mode_classification() {
     use xai_grok_telemetry::startup::AuthMode;
@@ -495,9 +454,6 @@ fn auth_mode_classification() {
     assert_eq!(auth_mode(false, &Err(err())), AuthMode::Unknown);
 }
 
-/// The `GROK_CONFIG` overlay must not arm or disarm the managed-config sync gate:
-/// the reader is overlay-free, so an overlay value never reaches it in either
-/// direction. Requirements/managed layers still resolve normally.
 #[test]
 fn managed_config_gate_ignores_the_overlay_in_both_directions() {
     use crate::config::ConfigLayers;

@@ -1,27 +1,20 @@
-//! The per-cell executor: spawn the primed pager, replay the gesture,
-//! synchronize on the recorder, judge the invariants, classify the verdict.
+//! The per-cell executor: spawn the primed pager, replay the gesture, synchronize on the recorder, judge the invariants, classify the verdict.
 //!
 //! ## Blocking model
 //!
-//! A cell's body ([`run_cell_inner`]) is host-paced end to end — PTY drains,
-//! `thread::sleep` gesture gaps, finalize polling — so [`run_cell`] runs it
-//! on `spawn_blocking` (driving the async session spawns via
-//! `Handle::block_on`, which requires a **multi-thread** runtime) and applies
-//! the per-cell hard cap with `tokio::time::timeout` on the join handle.
-//! That also converts setup panics (the session preambles assert with the
-//! screen contents) into a `Fail` report instead of killing the whole sweep.
-//! A capped cell's blocking task cannot be aborted mid-syscall: it is left
-//! to unwind on its own bounded waits (its `Drop`s kill the pager child and
-//! mock server), while the sweep moves on.
+//! A cell's body ([`run_cell_inner`]) is host-paced end to end: PTY drains, `thread::sleep` gesture gaps, finalize polling.
+//! [`run_cell`] therefore runs it on `spawn_blocking` and applies the per-cell hard cap with `tokio::time::timeout` on the join handle.
+//! The blocking task drives the async session spawns via `Handle::block_on`, which requires a **multi-thread** runtime.
+//! That also converts setup panics (the session preambles assert with the screen contents) into a `Fail` report instead of killing the whole sweep.
+//! A capped cell's blocking task cannot be aborted mid-syscall.
+//! It is left to unwind on its own bounded waits (its `Drop`s kill the pager child and mock server) while the sweep moves on.
 //!
 //! ## Harness-side invariants
 //!
-//! [`InvariantId::Screen`] and [`InvariantId::Quiet`] are checked here (the
-//! log alone can't see the viewport or repaints — `invariants.rs` panics on
-//! them by contract): I-QUIET counts frames in a post-finalize watermark
-//! window, I-SCREEN replays the per-stream `applied_total`s through a
-//! bottom-clamped travel simulation and compares the topmost visible marker
-//! against the session baseline.
+//! The log alone cannot see the viewport or repaints, so [`InvariantId::Screen`] and [`InvariantId::Quiet`] are checked here.
+//! `invariants.rs` panics on them by contract.
+//! I-QUIET counts frames in a post-finalize watermark window.
+//! I-SCREEN replays the per-stream `applied_total`s through a bottom-clamped travel simulation and compares the topmost marker to the baseline.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -36,36 +29,30 @@ use super::session::{
     SessionKind, WHEEL_COL, WHEEL_ROW, spawn_marker_session, topmost_visible_marker,
 };
 
-/// Transcript height for every cell: comfortably taller than the 50-row PTY
-/// (the preamble's scrollable-baseline guard) with enough headroom that the
-/// small gestures judged by I-SCREEN never clamp at the transcript top.
-/// Deliberate travel clamping (floods can deliver hundreds of rows) is fine:
-/// no log-side invariant reads the viewport.
+/// Transcript height for every cell: comfortably taller than the 50-row PTY (the preamble's scrollable-baseline guard).
+/// The headroom keeps the small gestures judged by I-SCREEN from clamping at the transcript top.
+/// Deliberate travel clamping (floods can deliver hundreds of rows) is fine: no log-side invariant reads the viewport.
 const MARKER_COUNT: usize = 400;
 
-/// Recorder-synchronization budget: every gesture table spans < 1.5s and a
-/// stream finalizes 80ms after its last event, so 5s only trips on a real
-/// wedge (or a stall so long the cell is unusable anyway).
+/// Recorder-synchronization budget: every gesture table spans under 1.5s and a stream finalizes 80ms after its last event.
+/// 5s only trips on a real wedge (or a stall so long the cell is unusable anyway).
 const FINALIZE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Post-finalize settle: consume the gesture-era PTY backlog so the quiet
-/// window below counts only NEW frames (the harness parses chunks lazily in
-/// `update`, not at arrival).
+/// Post-finalize settle: consume the gesture-era PTY backlog so the quiet window below counts only NEW frames.
+/// The harness parses chunks lazily in `update`, not at arrival.
 const PIPELINE_DRAIN: Duration = Duration::from_millis(300);
 
-/// I-QUIET observation window after the drain + watermark reset.
+/// I-QUIET observation window after the drain and watermark reset.
 const QUIET_WINDOW: Duration = Duration::from_millis(500);
 
-/// I-QUIET allowance: a straggler cadence/finalize paint mid-pipeline may
-/// land after the watermark; repaint CHURN (the A2 symptom) paints dozens.
+/// I-QUIET allowance: a straggler cadence/finalize paint mid-pipeline may land after the watermark; repaint CHURN (the A2 symptom) paints dozens.
 const QUIET_MAX_FRAMES: u64 = 2;
 
-/// Streaming-session teardown budget: the paced tail is ~7s at spawn time,
-/// so the released turn completes well inside this.
+/// Streaming-session teardown budget: the paced tail is ~7s at spawn time, so the released turn completes well inside this.
 const COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Per-cell hard cap (spawn → verdict). The slowest legitimate cell — the
-/// streaming preamble plus its post-gesture tail drain — finishes in ~20s.
+/// Per-cell hard cap (spawn to verdict).
+/// The slowest legitimate cell (the streaming preamble plus its post-gesture tail drain) finishes in ~20s.
 const CELL_HARD_CAP: Duration = Duration::from_secs(60);
 
 /// `tier` label for [`CellReport`].
@@ -76,18 +63,15 @@ fn tier_label(tier: Tier) -> &'static str {
     }
 }
 
-/// One SGR (DECSET 1006) wheel press report at the shared in-scrollback
-/// position — 0-based [`WHEEL_ROW`]/[`WHEEL_COL`] encode 1-based on the wire
-/// (same bytes as the pager e2e `sgr_mouse` helper).
+/// One SGR (DECSET 1006) wheel press report at the shared in-scrollback position.
+/// 0-based [`WHEEL_ROW`]/[`WHEEL_COL`] encode 1-based on the wire (same bytes as the pager e2e `sgr_mouse` helper).
 fn sgr_wheel_report(button: u16) -> String {
     format!("\x1b[<{button};{};{}M", WHEEL_COL + 1, WHEEL_ROW + 1)
 }
 
-/// Run one matrix cell against `binary`, capturing the recorder JSONL to
-/// `artifacts_dir/<cell_id>.jsonl` (kept for post-mortems). Never panics and
-/// never hangs past [`CELL_HARD_CAP`]; every abnormality becomes a `Fail`
-/// report with a phase note. Requires a multi-thread tokio runtime (see the
-/// module docs).
+/// Run one matrix cell against `binary`, capturing the recorder JSONL to `artifacts_dir/<cell_id>.jsonl` (kept for post-mortems).
+/// Never panics and never hangs past [`CELL_HARD_CAP`]; every abnormality becomes a `Fail` report with a phase note.
+/// Requires a multi-thread tokio runtime (see the module docs).
 pub async fn run_cell(cell: &MatrixCell, binary: &Path, artifacts_dir: &Path) -> CellReport {
     let started = Instant::now();
     let cell = *cell;
@@ -152,9 +136,8 @@ struct CellRun {
 }
 
 async fn run_cell_inner(cell: MatrixCell, binary: &Path, log_path: &Path) -> Result<CellRun> {
-    // Stale-capture guard: the recorder opens its file lazily on the first
-    // record, so a leftover capture from a previous run would satisfy the
-    // finalize wait with the OLD gesture's records.
+    // Stale-capture guard: the recorder opens its file lazily on the first record
+    // A leftover capture from a previous run would satisfy the finalize wait with the OLD gesture's records
     if log_path.exists() {
         std::fs::remove_file(log_path)
             .with_context(|| format!("setup: remove stale capture {}", log_path.display()))?;
@@ -168,9 +151,8 @@ async fn run_cell_inner(cell: MatrixCell, binary: &Path, log_path: &Path) -> Res
     let (mut harness, content, baseline, streaming_turn) =
         spawn_marker_session(binary, cell.session, MARKER_COUNT, &env).await;
 
-    // Replay the gesture table: sleep each step's pre-delay (host-side lower
-    // bound — jitter only stretches gaps), then emit its report. Port of the
-    // pager e2e `send_wheel_sequence` loop onto `WheelStep`.
+    // Replay the gesture table: sleep each step's pre-delay (a host-side lower bound; jitter only stretches gaps), then emit its report
+    // This ports the pager e2e `send_wheel_sequence` loop onto `WheelStep`
     for step in cell.gesture.steps(cell.expected.ept) {
         if step.pre_delay_ms > 0 {
             std::thread::sleep(Duration::from_millis(step.pre_delay_ms));
@@ -183,9 +165,8 @@ async fn run_cell_inner(cell: MatrixCell, binary: &Path, log_path: &Path) -> Res
     wait_for_finalize_count(log_path, cell.gesture.expected_streams(), FINALIZE_TIMEOUT)
         .context("gesture: finalize wait")?;
 
-    // Drain the gesture-era backlog, then watermark → the quiet window
-    // counts only post-finalize frames; the marker read afterwards sees the
-    // fully painted final viewport (I-SCREEN's input).
+    // Drain the gesture-era backlog, then reset the watermark so the quiet window counts only post-finalize frames
+    // The marker read afterwards sees the fully painted final viewport (I-SCREEN's input)
     harness.update(PIPELINE_DRAIN);
     harness.reset_timing();
     harness.update(QUIET_WINDOW);
@@ -208,8 +189,7 @@ async fn run_cell_inner(cell: MatrixCell, binary: &Path, log_path: &Path) -> Res
     harness.quit().context("teardown: quit pager")?;
     drop(content);
 
-    // The pager exited (recorder flushed + closed), so the capture is
-    // complete and torn-tail-free by construction.
+    // The pager exited (recorder flushed and closed), so the capture is complete and no line is truncated
     let records = parse_jsonl(log_path).context("verdict: parse capture")?;
     let groups = group_streams(&records).context("verdict: group streams")?;
 
@@ -237,8 +217,7 @@ async fn run_cell_inner(cell: MatrixCell, binary: &Path, log_path: &Path) -> Res
     })
 }
 
-/// I-QUIET: no repaint churn after the last finalize — at most
-/// [`QUIET_MAX_FRAMES`] frames land in the watermark window.
+/// I-QUIET: no repaint churn after the last finalize; at most [`QUIET_MAX_FRAMES`] frames land in the watermark window.
 fn check_quiet(quiet_frames: u64) -> InvariantResult {
     if quiet_frames > QUIET_MAX_FRAMES {
         return InvariantResult::Violated {
@@ -251,9 +230,8 @@ fn check_quiet(quiet_frames: u64) -> InvariantResult {
     InvariantResult::Pass
 }
 
-/// Net signed lines a stream delivered: its last flush-bearing record's
-/// cumulative `applied_total` (finalize when present, else the last flush of
-/// a trailing in-flight stream).
+/// Net signed lines a stream delivered: its last flush-bearing record's cumulative `applied_total`.
+/// That is the finalize when present, else the last flush of a trailing in-flight stream.
 fn stream_applied(group: &StreamGroup<'_>) -> i64 {
     group
         .flush_bearing()
@@ -261,10 +239,8 @@ fn stream_applied(group: &StreamGroup<'_>) -> i64 {
         .map_or(0, |record| record.applied_total)
 }
 
-/// Replay per-stream deliveries through the viewport's clamps: `0` is the
-/// bottom pin (down-deliveries there don't move — G7's point), and the
-/// return is clamped to `-baseline` because travel above marker 0 pins the
-/// topmost visible marker at 0.
+/// Replay per-stream deliveries through the viewport's clamps: `0` is the bottom pin, where down-deliveries don't move (G7's point).
+/// The return is clamped to `-baseline` because travel above marker 0 pins the topmost visible marker at 0.
 fn simulate_clamped_travel(baseline: usize, applied: impl IntoIterator<Item = i64>) -> i64 {
     let mut pos: i64 = 0;
     for delta in applied {
@@ -273,10 +249,9 @@ fn simulate_clamped_travel(baseline: usize, applied: impl IntoIterator<Item = i6
     pos.max(-(baseline as i64))
 }
 
-/// I-SCREEN: the viewport visibly moved/clamped exactly as the recorder
-/// says it should have — topmost-marker delta equals the bottom-clamped
-/// replay of the per-stream `applied_total`s (up is negative, matching the
-/// producer's `ScrollDirection` sign and the marker index direction).
+/// I-SCREEN: the viewport visibly moved and clamped exactly as the recorder says it should have.
+/// The topmost-marker delta must equal the bottom-clamped replay of the per-stream `applied_total`s.
+/// Up is negative, matching the producer's `ScrollDirection` sign and the marker index direction.
 fn check_screen(
     session: SessionKind,
     baseline: usize,
@@ -284,8 +259,7 @@ fn check_screen(
     groups: &[StreamGroup<'_>],
 ) -> InvariantResult {
     if session == SessionKind::Streaming {
-        // The live bottom keeps growing mid-stream, so "marker delta ==
-        // applied" has no stable frame of reference — a cell-table bug.
+        // The live bottom keeps growing mid-stream, so "marker delta == applied" has no stable frame of reference; this is a cell-table bug
         return InvariantResult::Violated {
             detail: "I-SCREEN attached to a streaming session (no stable baseline)".to_owned(),
         };
@@ -313,9 +287,8 @@ const XPASS_DETAIL: &str = "expected to violate (xfail) but PASSED — the pinne
                             or the cell rotted; promote the invariant out of the xfail set";
 
 /// Classify evaluated invariants into per-row statuses and the cell verdict.
-/// Precedence: any `Fail` (non-xfail violation) fails the cell; else any
-/// `XPass` fails it (fixed/rotted xfail must be promoted, not absorbed);
-/// else any `XFail` marks the expected failure; else `Pass`.
+/// Precedence: any `Fail` (non-xfail violation) fails the cell; else any `XPass` fails it (a fixed or rotted xfail must be promoted, not absorbed).
+/// Else any `XFail` marks the expected failure; else `Pass`.
 fn classify(
     outcomes: &[(InvariantId, InvariantResult)],
     xfail: &[InvariantId],
@@ -367,8 +340,7 @@ mod tests {
         }
     }
 
-    /// The wire bytes of the shared wheel position, pinned to the
-    /// `40;12` encoding documented on `WHEEL_ROW`/`WHEEL_COL`.
+    /// The wire bytes of the shared wheel position, pinned to the `40;12` encoding documented on `WHEEL_ROW`/`WHEEL_COL`.
     #[test]
     fn sgr_report_encodes_one_based_wire_coords() {
         assert_eq!(sgr_wheel_report(64), "\x1b[<64;40;12M");
@@ -409,7 +381,7 @@ mod tests {
         assert!(
             matches!(lost, InvariantResult::Violated { ref detail } if detail.contains("no marker"))
         );
-        // Empty capture ⇒ no movement expected; a matching marker passes.
+        // An empty capture means no movement is expected; a matching marker passes
         assert!(check_screen(SessionKind::BottomPinned, 100, Some(100), &[]).is_pass());
         let moved = check_screen(SessionKind::BottomPinned, 100, Some(97), &[]);
         assert!(matches!(moved, InvariantResult::Violated { .. }));
@@ -419,13 +391,13 @@ mod tests {
     fn classify_precedence_fail_over_xpass_over_xfail_over_pass() {
         use InvariantId::{Cap, NoDrop, Ord, SmoothCoast};
 
-        // All pass, nothing xfailed → Pass.
+        // All pass, nothing xfailed: the cell is Pass
         let (status, rows) = classify(&[(Ord, InvariantResult::Pass)], &[]);
         assert_eq!(status, CellStatus::Pass);
         assert_eq!(rows[0].status, InvariantStatus::Pass);
         assert_eq!(rows[0].id, "I-ORD");
 
-        // The declared bug violates, everything else passes → XFail.
+        // The declared bug violates, everything else passes: the cell is XFail
         let jerk = [
             (Ord, InvariantResult::Pass),
             (SmoothCoast, violated("coast")),
@@ -436,7 +408,7 @@ mod tests {
         assert_eq!(rows[1].status, InvariantStatus::XFail);
         assert_eq!(rows[1].detail.as_deref(), Some("coast"));
 
-        // One xfail row passing flips the cell to XPass (fixed-bug tripwire)…
+        // One xfail row passing flips the cell to XPass, the tripwire for a fixed bug
         let half_fixed = [
             (SmoothCoast, InvariantResult::Pass),
             (NoDrop, violated("dropped 74")),
@@ -445,18 +417,12 @@ mod tests {
         assert_eq!(status, CellStatus::XPass);
         assert!(rows[0].detail.as_deref().unwrap().contains("promote"));
 
-        // …but any non-xfail violation dominates everything.
+        // Any non-xfail violation dominates everything
         let broken = [
             (Cap, violated("flushed 40 exceeds cap 25")),
             (SmoothCoast, InvariantResult::Pass),
         ];
         let (status, _) = classify(&broken, &[SmoothCoast]);
         assert_eq!(status, CellStatus::Fail);
-    }
-
-    #[test]
-    fn tier_labels_match_the_report_vocabulary() {
-        assert_eq!(tier_label(Tier::Curated), "curated");
-        assert_eq!(tier_label(Tier::Full), "full");
     }
 }

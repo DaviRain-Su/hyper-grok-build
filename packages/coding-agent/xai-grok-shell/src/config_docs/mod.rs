@@ -1,10 +1,9 @@
 //! Checks that the CLI config-reference page matches the live registries.
 //!
-//! The page
-//! `crates/codegen/xai-grok-pager/docs/user-guide/26-config-reference.md` is the
-//! source. Edit that file; CI fails when a registered key has no row, a
-//! `features.*` / MCP row names an unknown key, or a Requirements / Managed
-//! cell disagrees with the resolver metadata. The pager extracts the file to
+//! The page `crates/codegen/xai-grok-pager/docs/user-guide/26-config-reference.md` is the source; edit that file.
+//! CI fails when a registered key has no row, or an MCP or `features.*` row names an unknown key.
+//! It also fails when a Requirements or Managed cell disagrees with the resolver metadata.
+//! The pager extracts the file to
 //! `~/.grok/docs/user-guide/` on launch.
 
 use std::collections::BTreeMap;
@@ -17,10 +16,40 @@ use crate::util::config::MANAGED_WINS_OVER_USER;
 
 pub const USER_GUIDE_FILENAME: &str = "26-config-reference.md";
 
-/// Keys the pager / `load_from_disk()` read from user `config.toml` only.
+/// Live `[telemetry] otel_*` keys the external resolver reads. A missing
+/// `telemetry.otel_*` row on the config-reference page fails CI.
+pub const TELEMETRY_OTEL_KEYS: &[&str] = &[
+    "telemetry.otel_enabled",
+    "telemetry.otel_metrics_exporter",
+    "telemetry.otel_logs_exporter",
+    "telemetry.otel_endpoint",
+    "telemetry.otel_protocol",
+    "telemetry.otel_timeout",
+    "telemetry.otel_metric_export_interval",
+    "telemetry.otel_logs_endpoint",
+    "telemetry.otel_metrics_endpoint",
+    "telemetry.otel_logs_protocol",
+    "telemetry.otel_metrics_protocol",
+    "telemetry.otel_certificate",
+    "telemetry.otel_logs_certificate",
+    "telemetry.otel_metrics_certificate",
+    "telemetry.otel_client_certificate",
+    "telemetry.otel_client_key",
+    "telemetry.otel_logs_client_certificate",
+    "telemetry.otel_logs_client_key",
+    "telemetry.otel_metrics_client_certificate",
+    "telemetry.otel_metrics_client_key",
+    "telemetry.otel_metrics_include_session_id",
+    "telemetry.otel_log_user_prompts",
+    "telemetry.otel_log_tool_details",
+    "telemetry.otel_log_assistant_responses",
+    "telemetry.otel_log_tool_content",
+];
+
+/// Keys that the pager and `load_from_disk()` read from the user `config.toml` only.
 const USER_ONLY_KEYS: &[&str] = &["features.remember_mode", "privacy.privacy_banner_acked"];
 
-/// Nested GrokComConfig / OAuth2 / OIDC leaves enterprise writes today.
+/// The nested GrokComConfig, OAuth2, and OIDC leaf keys that enterprise deployments write today.
 /// Keep in sync with `src/auth/config.rs`.
 const GROK_COM_CONFIG_LEAVES: &[&str] = &[
     "grok_com_config.grok_ws_origin",
@@ -126,8 +155,7 @@ fn strip_cell(s: &str) -> String {
     s.trim().trim_matches('`').trim().to_string()
 }
 
-/// Parse `| `key` | type | req | managed | details |` (config.toml) and the
-/// requirements-only `| key | type | default | details |` table.
+/// Parse `| `key` | type | req | managed | details |` (config.toml) and the requirements-only `| key | type | default | details |` table.
 fn parse_tables(markdown: &str) -> (Vec<Row>, Vec<Row>) {
     let mut config = Vec::new();
     let mut requirements_only = Vec::new();
@@ -265,6 +293,21 @@ mod tests {
             assert!(
                 map.contains_key(path.as_str()),
                 "missing {path}; add a row to {USER_GUIDE_FILENAME}"
+            );
+        }
+    }
+
+    #[test]
+    fn telemetry_otel_keys_have_rows() {
+        let (config, _, _) = page();
+        let map = by_key(&config);
+        for path in TELEMETRY_OTEL_KEYS {
+            let row = map
+                .get(*path)
+                .unwrap_or_else(|| panic!("missing {path}; add a row to {USER_GUIDE_FILENAME}"));
+            assert_eq!(
+                row.requirements, "pin",
+                "{path} Requirements must be pin (listed telemetry.otel_* in requirements.toml)"
             );
         }
     }
@@ -476,6 +519,7 @@ mod tests {
             "FEATURES",
             "UNMIRRORED_BOOLEAN_FEATURES",
             "KNOWN_MCP_SERVER_FIELDS",
+            "TELEMETRY_OTEL_KEYS",
         ] {
             assert!(
                 !md.contains(leak),

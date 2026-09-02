@@ -3125,69 +3125,8 @@ fn render_picker_long_description_wraps_no_ellipsis() {
     }
 }
 
-/// Word-wrap detail check: the choice symbol and display name stay on line 1 and the description wraps across at least 2 lines.
-/// Continuation lines are indented to the description column (column 0 holds whitespace, NOT a marker glyph).
-/// Uses the production `coding_data_sharing` "Opt out" choice, a long description that wraps at width=60 and was reported clipped with `…`.
-/// Debugging helper: renders the wrap fixture and prints the buffer so a human can eyeball the layout.
-/// Ignored by default; run with `cargo test -- --ignored picker_visual_smoke_debug --nocapture`.
-#[test]
-#[ignore]
-fn picker_visual_smoke_debug() {
-    let entries = vec![SettingMeta {
-        key: "wrap_enum",
-        category: SettingCategory::Privacy,
-        owner: SettingOwner::Shared,
-        label: "Coding data sharing",
-        description: "Controls whether SpaceXAI may retain and train on coding data.",
-        keywords: &["test"],
-        kind: SettingKind::Enum {
-            default: "opt-out",
-            choices: &[
-                EnumChoice {
-                    canonical: "opt-in",
-                    display: "Opt in",
-                    description: "Allow SpaceXAI to retain and use coding session data for training and product improvement.",
-                },
-                EnumChoice {
-                    canonical: "opt-out",
-                    display: "Opt out",
-                    description: "Do not retain coding session data. Code requests will not be used for training.",
-                },
-            ],
-            supports_preview: false,
-        },
-        restart_required: false,
-        hidden_in_minimal: false,
-    }];
-    let mut s = SettingsModalState::new(
-        Arc::new(SettingsRegistry::from_entries(entries)),
-        UiConfig::default(),
-        PagerLocalSnapshot::default(),
-    );
-    s.transition_to_picking_enum("wrap_enum", 1, SettingValue::Enum("opt-out"), false);
-    let area = Rect {
-        x: 0,
-        y: 0,
-        width: 60,
-        height: 12,
-    };
-    let mut buf = Buffer::empty(area);
-    let theme = Theme::current();
-    render_picking_enum(&mut buf, area, &s, &theme);
-    println!("\nPicker visual smoke at width=60:");
-    println!("{}", "─".repeat(area.width as usize));
-    for y in 0..area.height {
-        let mut row = String::new();
-        for x in 0..area.width {
-            if let Some(cell) = buf.cell((x, y)) {
-                row.push_str(cell.symbol());
-            }
-        }
-        println!("{row}");
-    }
-    println!("{}", "─".repeat(area.width as usize));
-}
-
+/// Long enum-choice descriptions wrap across lines instead of clipping with `…`.
+/// Pins the wrap-at-width=60 catalog case from the user-feedback screenshot.
 #[test]
 fn picker_long_description_wraps_to_multiple_lines() {
     let entries = vec![SettingMeta {
@@ -4787,14 +4726,8 @@ fn row_layout_bool_without_chevron() {
     assert_eq!(row_layout(39, label, value, false), RowLayout::TwoLine);
 }
 
-/// Sanity: `_ = synthetic_enum_chevron_meta` reference so the test helper isn't flagged unused while the two-line fixtures stabilise.
-#[test]
-fn synthetic_enum_chevron_meta_constructs() {
-    let m = synthetic_enum_chevron_meta();
-    assert_eq!(m.key, "test-enum-with-chevron");
-}
-
-// -- Blank line between the "Tip · Ask Grok…" docs footer and the keybinding hints --
+// -- User-feedback follow-up: always reserve a blank line between
+//    the "Tip · Ask Grok…" docs footer and the keybindings hints.
 //
 // The chrome sets `footer_lines` to `predicted_hint_rows + 1`, so a blank row always separates the tip from the first hint line
 // This holds even when the hints wrap to 2 rows at narrow modal widths

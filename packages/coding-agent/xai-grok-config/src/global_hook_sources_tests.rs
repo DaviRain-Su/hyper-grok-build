@@ -59,7 +59,7 @@ fn missing_configured_is_reported() {
 fn hooks_paths_read_error_keeps_fixed_slots() {
     let tmp = TempDir::new().unwrap();
     let dir = tmp.path();
-    // Directory named hooks-paths → read_to_string fails with IsADirectory.
+    // A directory named hooks-paths makes read_to_string fail with IsADirectory
     std::fs::create_dir_all(dir.join("hooks-paths")).unwrap();
     let resolved = resolve_global_hook_sources(Some(dir), false).unwrap();
     assert!(resolved.is_incomplete());
@@ -138,7 +138,7 @@ fn ensure_creates_hooks_dir_and_empty_registry() {
             "{name} first-run is empty"
         );
     }
-    // Idempotent — does not truncate existing registry content.
+    // Idempotent: does not truncate existing registry content
     std::fs::write(&reg, b"/abs/extra\n").unwrap();
     std::fs::write(dir.join("config.toml"), b"model = \"keep\"\n").unwrap();
     ensure_grok_hook_slots(&dir).unwrap();
@@ -196,15 +196,14 @@ fn ensure_rejects_preexisting_symlink_registry() {
     std::fs::write(&target, b"attacker\n").unwrap();
     std::os::unix::fs::symlink(&target, dir.join("hooks-paths")).unwrap();
     let err = ensure_grok_hook_slots(&dir).unwrap_err();
-    // create_new hits EEXIST on the symlink → require_real_file rejects it;
-    // or O_NOFOLLOW path — never write through the symlink.
+    // create_new hits EEXIST on the symlink and require_real_file rejects it, or O_NOFOLLOW stops the open; nothing writes through the symlink
     assert!(matches!(
         err,
         GlobalHookSourceError::InvalidRegistryFile { .. }
             | GlobalHookSourceError::SymlinkedSource { .. }
             | GlobalHookSourceError::CreateRegistryFile { .. }
     ));
-    // Attacker target must remain unchanged (no write-through).
+    // Nothing wrote through the symlink
     assert_eq!(std::fs::read(&target).unwrap(), b"attacker\n");
 }
 
@@ -219,8 +218,7 @@ fn ensure_trust_boundary_rejects_preexisting_symlink_persist_file() {
     let persist = dir.join(TRUST_BOUNDARY_FILENAMES[0]);
     std::os::unix::fs::symlink(&target, &persist).unwrap();
     let err = ensure_grok_trust_boundary_slots(&dir).unwrap_err();
-    // create_new hits EEXIST on the symlink → require_real_file rejects it;
-    // or O_NOFOLLOW path — never write through the symlink.
+    // create_new hits EEXIST on the symlink and require_real_file rejects it, or O_NOFOLLOW stops the open; nothing writes through the symlink
     assert!(
         matches!(
             err,
@@ -325,12 +323,11 @@ fn ancestors_to_pin_skips_mountpoints_but_continues_above() {
         "must never pin /: {pin:?}"
     );
 
-    // Immediate parent of leaf is mid (mountpoint) — skipped; outer still present.
     let sources = [GlobalHookSource {
         path: leaf,
         kind: GlobalHookSourceKind::ConfiguredSource,
     }];
-    // With real mountpoint detector, under temp dirs nothing is a mount → full chain.
+    // With the real mountpoint detector nothing under a temp dir is a mount, so the full chain comes back
     let rootward = unique_ancestors_rootward(&sources);
     for w in rootward.windows(2) {
         assert!(

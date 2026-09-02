@@ -1,9 +1,9 @@
 //! The published external-auth contract, end to end.
 //!
-//! Operator binaries live outside this repo and read `GROK_AUTH_EXPIRED=1` as
-//! "headless, don't prompt", declining a run they cannot complete silently. So
-//! a binary that declines the boot probe must still be able to sign the user
-//! in, and the two runs have to reach it in the order boot produces them.
+//! Operator binaries live outside this repo and read `GROK_AUTH_EXPIRED=1` as "headless, don't prompt".
+//! They decline a run they cannot complete silently.
+//! So a binary that declines the boot probe must still be able to sign the user in.
+//! The two runs have to reach it in the order boot produces them.
 
 #![cfg(unix)]
 
@@ -22,12 +22,10 @@ const SSO_TOKEN: &str = "token-minted-by-the-interactive-flow";
 /// A regression here reaches the browser login, which hangs rather than fails.
 const LOGIN_BUDGET: Duration = Duration::from_secs(60);
 
-/// Measured at ~0.3s healthy and 47s while the flow contended with its own
-/// `auth.json.lock`; loose enough for a loaded CI runner in between.
+/// Measured at ~0.3s healthy and 47s while the flow contended with its own `auth.json.lock`; loose enough for a loaded CI runner in between.
 const NO_SELF_CONTENTION: Duration = Duration::from_secs(20);
 
-/// The skeleton published in `README.md` and `docs/user-guide/02-authentication.md`,
-/// which operators copy.
+/// The skeleton published in `README.md` and `docs/user-guide/02-authentication.md`, which operators copy.
 fn write_conforming_provider(home: &Path) -> String {
     use std::os::unix::fs::PermissionsExt;
 

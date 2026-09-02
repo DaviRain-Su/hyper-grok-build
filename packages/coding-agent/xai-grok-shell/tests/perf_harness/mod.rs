@@ -1,7 +1,5 @@
-//! Instrumented ACP client and dedicated-thread agent topology shared by the
-//! perf tests. The agent runs on its OWN thread so client-side timestamping
-//! never competes with the parent session's `LocalSet`. Included per binary
-//! via `#[path]`; unused items in one binary are dead code there.
+//! The agent runs on its OWN thread so client-side timestamping never competes with the parent session's `LocalSet`.
+//! Each perf test binary includes this module via `#[path]`; items unused in one binary are dead code there.
 #![allow(dead_code)]
 
 use std::cell::RefCell;
@@ -47,7 +45,7 @@ pub struct FinishedEvent {
 /// Raw callback log; each perf test derives its own analysis from it.
 #[derive(Default)]
 pub struct Recorded {
-    /// Every `session_notification`, as `(arrival, sessionUpdate kind)`.
+    /// One entry per `session_notification`, stored as `(arrival, sessionUpdate kind)`.
     pub session_updates: Vec<(Instant, String)>,
     pub dispatch: Vec<DispatchEvent>,
     pub spawned: Vec<SpawnedEvent>,
@@ -56,8 +54,7 @@ pub struct Recorded {
 
 pub type SharedRecorded = Rc<RefCell<Recorded>>;
 
-/// Auto-approves permissions; timestamps every client callback into a
-/// [`Recorded`] log.
+/// Auto-approves permissions; timestamps every client callback into a [`Recorded`] log.
 pub struct PerfRecorder {
     pub rec: SharedRecorded,
 }
@@ -109,7 +106,7 @@ impl PerfRecorder {
             }
             return;
         }
-        // A fresh id with no rawInput yet still records; task_id backfills.
+        // A fresh `tool_call` id records even before rawInput arrives; a later update backfills task_id
         if kind == "tool_call" || task_id.is_some() {
             rec.dispatch.push(DispatchEvent {
                 at: Instant::now(),
@@ -210,9 +207,8 @@ impl Drop for AgentThread {
     }
 }
 
-/// Stand up the agent on its own thread (own current-thread runtime and
-/// `LocalSet`), mirroring production's session topology; returns the client
-/// pipe ends for [`acp_harness::connect_client`].
+/// Stand up the agent on its own thread (own current-thread runtime and `LocalSet`), matching how production runs a session.
+/// Returns the client pipe ends for [`acp_harness::connect_client`].
 pub fn spawn_agent_thread(name: &str) -> (acp_harness::AgentPipes, AgentThread) {
     let (c2a_client, c2a_agent) = tokio::io::duplex(acp_harness::DUPLEX_BUFFER_BYTES);
     let (a2c_agent, a2c_client) = tokio::io::duplex(acp_harness::DUPLEX_BUFFER_BYTES);

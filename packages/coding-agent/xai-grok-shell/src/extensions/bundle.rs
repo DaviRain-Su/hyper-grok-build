@@ -1,8 +1,7 @@
 //! ACP extension handlers for bundled subagent cache sync and status.
 //!
-//! These endpoints operate on the on-disk bundled cache only. Sync updates the
-//! cache for future agent construction / future conversations; it does not live
-//! reload the currently running `MvpAgent` instance.
+//! These endpoints operate on the on-disk bundled cache only.
+//! Sync updates the cache for future agent construction / future conversations; it does not live reload the running `MvpAgent` instance.
 use super::{ExtResult, parse_params, to_ext_response};
 use crate::agent::MvpAgent;
 use crate::bundle::{self, BundleManifest};
@@ -17,12 +16,10 @@ use xai_grok_tools::implementations::skills::discovery::extract_first_paragraph;
 pub(crate) const BUNDLE_SYNC_TTL: Duration = Duration::from_secs(60 * 60);
 /// Error message returned when no auth source is available for a bundle sync.
 ///
-/// Hoisted to a constant so the user-facing wording stays in lockstep
-/// across `sync_bundle`, `sync_bundle_to_root`, and any future call sites.
+/// Hoisted to a constant so the user-facing wording stays identical across `sync_bundle`, `sync_bundle_to_root`, and any future call sites.
 pub(crate) const NO_BUNDLE_CREDENTIALS_ERROR: &str =
     "bundle sync requires either an authenticated cli-chat-proxy session or a deployment key";
-/// Whether the caller has any source of authentication that the
-/// cli-chat-proxy `/v1/subagents/bundle` endpoint will accept.
+/// Whether the caller has any source of authentication that the cli-chat-proxy `/v1/subagents/bundle` endpoint will accept.
 ///
 /// Centralised so the auth gate predicate stays consistent across:
 /// - `sync_bundle` (user-triggered ACP entrypoint)
@@ -30,9 +27,7 @@ pub(crate) const NO_BUNDLE_CREDENTIALS_ERROR: &str =
 /// - `maybe_sync_bundle_to_root` (proactive wrapper, silent skip on miss)
 /// - `MvpAgent::maybe_sync_bundle_in_background` (post-auth pre-spawn gate)
 ///
-/// All four call sites previously inlined the same predicate; a future
-/// auth-source addition (e.g., service-account token) only needs to land
-/// here.
+/// All four call sites previously inlined the same predicate; a future auth-source addition (e.g., service-account token) only needs to land here.
 #[inline]
 pub(crate) fn has_bundle_credentials(
     auth_manager: Option<&std::sync::Arc<crate::auth::AuthManager>>,
@@ -136,16 +131,12 @@ async fn sync_bundle(agent: &MvpAgent, req: BundleSyncRequest) -> anyhow::Result
     )
     .await
 }
-/// `true` when `<root>/manifest.json` exists, was written within `ttl`, and
-/// is parseable as a [`BundleManifest`].
+/// `true` when `<root>/manifest.json` exists, was written within `ttl`, and is parseable as a [`BundleManifest`].
 ///
-/// The parse check guards against the silent-skip failure mode where the
-/// mtime is recent (e.g., a partial/aborted write) but the manifest is
-/// truncated or otherwise corrupt. A bare mtime check would let
-/// `maybe_sync_bundle_to_root` proactively skip a re-sync, leaving callers
-/// (`status_bundle_at`, `SubagentsConfig::resolve`) to fail later with an
-/// empty or stale catalog. Treating an unparseable manifest as "not fresh"
-/// forces a re-sync on the next post-auth event.
+/// The parse check guards against a silent skip: the mtime is recent (e.g., a partial/aborted write) but the manifest is truncated or corrupt.
+/// A bare mtime check would let `maybe_sync_bundle_to_root` proactively skip a re-sync.
+/// Callers (`status_bundle_at`, `SubagentsConfig::resolve`) would then fail later with an empty or stale catalog.
+/// Treating an unparseable manifest as "not fresh" forces a re-sync on the next post-auth event.
 pub(crate) fn bundle_cache_is_fresh(root: &Path, ttl: Duration) -> bool {
     let manifest = root.join("manifest.json");
     let Ok(meta) = std::fs::metadata(&manifest) else {
@@ -163,8 +154,7 @@ pub(crate) fn bundle_cache_is_fresh(root: &Path, ttl: Duration) -> bool {
     }
     matches!(bundle::read_cached_manifest(root), Ok(Some(_)))
 }
-/// Proactive variant of [`sync_bundle_to_root`] that respects an auth gate
-/// and a TTL guard.
+/// Proactive variant of [`sync_bundle_to_root`] that respects an auth gate and a TTL guard.
 ///
 /// Returns:
 /// - `Ok(Some(result))` when a sync was performed.

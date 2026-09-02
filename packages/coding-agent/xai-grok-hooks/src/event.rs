@@ -2,14 +2,12 @@ use serde::Serialize;
 
 pub const MAX_PAYLOAD_SIZE: usize = 128 * 1024;
 
-/// Generates [`HookEventName`] and its `Deserialize`, `Display`, `traits()`, and
-/// `ALL` from one table, so adding an event is a single row.
 macro_rules! hook_events {
     ($(
         $(#[$vmeta:meta])*
         $variant:ident {
             display: $display:literal,
-            aliases: [$($alias:literal),* $(,)?],
+            aliases: [$first_alias:literal $(, $alias:literal)* $(,)?],
             traits: ($gate:ident, $matcher:ident, $hub:literal $(,)?),
         }
     ),* $(,)?) => {
@@ -24,9 +22,13 @@ macro_rules! hook_events {
 
             fn from_key_str(s: &str) -> Option<Self> {
                 match s {
-                    $($($alias)|* => Some(Self::$variant),)*
+                    $($first_alias $(| $alias)* => Some(Self::$variant),)*
                     _ => None,
                 }
+            }
+
+            pub fn pascal_case(self) -> &'static str {
+                match self { $(Self::$variant => $first_alias,)* }
             }
 
             pub fn traits(self) -> EventTraits {
@@ -108,7 +110,7 @@ hook_events! {
             "afterAgentResponse",
             "afterAgentThought",
         ],
-        traits: (Observe, Tested, true),
+        traits: (PostTool, Tested, true),
     },
     PostToolUseFailure {
         display: "post_tool_use_failure",
@@ -182,9 +184,10 @@ pub enum GateKind {
     Observe,
     Tool,
     Stop,
-    /// Prompt decision control (`decision: "block"` + `reason`, exit 2). The
-    /// block reason is user-facing, never model context. Exit 2 blocks
-    /// regardless of JSON, and the default timeout is 30s.
+    PostTool,
+    /// Prompt decision control (`decision: "block"` with `reason`, exit 2).
+    /// The block reason is user-facing, never model context.
+    /// Exit 2 blocks regardless of JSON, and the default timeout is 30s.
     Prompt,
 }
 
@@ -241,6 +244,8 @@ pub fn clip_stop_entry_text(text: &str) -> String {
 pub const MAX_REASON_CHARS: usize = 256;
 
 pub const MAX_HOOK_FEEDBACK_CHARS: usize = 10_000;
+
+pub const MAX_HOOK_OUTPUT_REPLACEMENT_CHARS: usize = 64 * 1024;
 
 pub fn clip_reason(reason: &str) -> String {
     clip_text(reason, MAX_REASON_CHARS)
@@ -358,8 +363,7 @@ pub struct HookEventEnvelope {
     pub payload: HookPayload,
 }
 
-// grok camelCase -> additive snake_case aliases some hook clients read; grok's
-// camelCase stays authoritative.
+// Additive snake_case aliases for grok's camelCase keys, which some hook clients read; the camelCase keys stay authoritative
 const SNAKE_CASE_ALIASES: &[(&str, &str)] = &[
     ("hookEventName", "hook_event_name"),
     ("sessionId", "session_id"),
@@ -369,6 +373,8 @@ const SNAKE_CASE_ALIASES: &[(&str, &str)] = &[
     ("toolInput", "tool_input"),
     ("toolResult", "tool_response"),
     ("toolUseId", "tool_use_id"),
+    ("durationMs", "duration_ms"),
+    ("isInterrupt", "is_interrupt"),
 ];
 
 impl HookEventEnvelope {
@@ -380,6 +386,11 @@ impl HookEventEnvelope {
                     map.entry(*snake).or_insert(aliased);
                 }
             }
+            // The snake key carries Claude's PascalCase value; the camel key stays grok-native.
+            map.insert(
+                "hook_event_name".to_string(),
+                self.hook_event_name.pascal_case().into(),
+            );
         }
         value
     }
@@ -448,9 +459,8 @@ pub enum HookPayload {
     },
 
     PreToolUse {
-        /// For meta-dispatch tools (`use_tool`, the external MCP-call tool) this is
-        /// the resolved underlying tool (`server__tool`), not the dispatcher, so
-        /// matchers key on the real target.
+        /// For meta-dispatch tools (`use_tool`, the external MCP-call tool) this is the underlying tool (`server__tool`), not the dispatcher.
+        /// Matchers key on the real target.
         #[serde(rename = "toolName")]
         tool_name: String,
         #[serde(rename = "toolUseId")]
@@ -492,6 +502,10 @@ pub enum HookPayload {
         #[serde(rename = "toolInputTruncated")]
         tool_input_truncated: bool,
         error: String,
+        #[serde(rename = "durationMs", skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        #[serde(rename = "isInterrupt")]
+        is_interrupt: bool,
         #[serde(rename = "subagentType", skip_serializing_if = "Option::is_none")]
         subagent_type: Option<String>,
     },
@@ -686,6 +700,18 @@ mod tests {
     }
 
     #[test]
+    fn pascal_case_is_the_pascal_alias() {
+        for event in HookEventName::ALL {
+            let pascal = event.pascal_case();
+            let first = pascal.chars().next().expect("alias is non-empty");
+            assert!(
+                first.is_ascii_uppercase() && !pascal.contains('_'),
+                "{event}: pascal_case() must be the PascalCase alias, got {pascal:?}"
+            );
+        }
+    }
+
+    #[test]
     fn event_traits_report_gate_matcher_and_hub_forward() {
         use super::{GateKind, MatcherPolicy};
 
@@ -701,7 +727,7 @@ mod tests {
             GateKind::Stop,
             "alias resolves through canonical()"
         );
-        assert_eq!(HookEventName::PostToolUse.traits().gate, GateKind::Observe);
+        assert_eq!(HookEventName::PostToolUse.traits().gate, GateKind::PostTool);
 
         assert_eq!(HookEventName::Stop.traits().matcher, MatcherPolicy::Ignored);
         assert_eq!(
@@ -770,7 +796,6 @@ mod tests {
 
         let assert_base_aliases = |v: &serde_json::Value| {
             for (camel, snake) in [
-                ("hookEventName", "hook_event_name"),
                 ("sessionId", "session_id"),
                 ("transcriptPath", "transcript_path"),
                 ("permissionMode", "permission_mode"),
@@ -798,7 +823,8 @@ mod tests {
             assert_eq!(pre[camel], pre[snake], "{camel} != {snake}");
             assert!(!pre[camel].is_null(), "missing tool key pair for {camel}");
         }
-        assert_eq!(pre["hook_event_name"], "pre_tool_use");
+        assert_eq!(pre["hookEventName"], "pre_tool_use");
+        assert_eq!(pre["hook_event_name"], "PreToolUse");
         assert_eq!(pre["tool_name"], "run_terminal_command");
 
         let post = HookEventEnvelope {
@@ -839,7 +865,41 @@ mod tests {
             serde_json::json!({ "stdout": "a\nb\n" })
         );
         assert_eq!(post["hookEventName"], "post_tool_use");
+        assert_eq!(post["hook_event_name"], "PostToolUse");
         assert!(post.get("durationMs").is_some());
+    }
+
+    #[test]
+    fn post_tool_use_failure_carries_duration_and_interrupt() {
+        let value = HookEventEnvelope {
+            hook_event_name: HookEventName::PostToolUseFailure,
+            session_id: "sess-1".into(),
+            cwd: "/repo".into(),
+            workspace_root: "/repo".into(),
+            timestamp: "2025-01-01T00:00:00Z".into(),
+            transcript_path: None,
+            client_identifier: None,
+            prompt_id: None,
+            permission_mode: None,
+            payload: HookPayload::PostToolUseFailure {
+                tool_name: "run_terminal_command".into(),
+                tool_use_id: "tu-1".into(),
+                tool_input: serde_json::json!({ "command": "ls" }),
+                tool_input_truncated: false,
+                error: "boom".into(),
+                duration_ms: Some(42),
+                is_interrupt: true,
+                subagent_type: None,
+            },
+        }
+        .to_hook_json();
+        assert_eq!(value["hookEventName"], "post_tool_use_failure");
+        assert_eq!(value["hook_event_name"], "PostToolUseFailure");
+        assert_eq!(value["error"], "boom");
+        assert_eq!(value["durationMs"], 42);
+        assert_eq!(value["duration_ms"], 42);
+        assert_eq!(value["isInterrupt"], true);
+        assert_eq!(value["is_interrupt"], true);
     }
 
     #[test]

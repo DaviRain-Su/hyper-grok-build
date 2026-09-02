@@ -212,7 +212,7 @@ mod links {
         let mut t = term(20, 3);
         let out = frame(&mut t, "AB", &[span(0, 2, "https://x.ai", None)]);
         assert!(
-            out.contains("\x1b]8;;https://x.ai\x07"),
+            out.contains("\x1b]8;id=1;https://x.ai\x07"),
             "missing open: {out:?}"
         );
         assert!(out.contains("AB"));
@@ -330,7 +330,7 @@ mod links {
         let _ = frame(&mut t, "AB", &[span(0, 2, "https://a", None)]);
         let out = frame(&mut t, "AB", &[span(0, 2, "https://b", None)]);
         assert!(
-            out.contains("\x1b]8;;https://b\x07"),
+            out.contains("\x1b]8;id=1;https://b\x07"),
             "new url not emitted: {out:?}"
         );
     }
@@ -423,11 +423,42 @@ mod links {
     }
 
     #[test]
+    fn unnamed_wrapped_same_url_share_osc8_id() {
+        // Scanned wrap fragments have no source id. They must still share a
+        // reminted OSC 8 id so Windows Terminal groups the wrap as one link.
+        let mut t = term(20, 3);
+        t.backend_mut().buf.clear();
+        {
+            let mut f = t.get_frame();
+            f.buffer_mut()
+                .set_string(0, 0, "https://example.com/", Style::default());
+            f.buffer_mut()
+                .set_string(0, 1, "projects/issues/1", Style::default());
+        }
+        t.set_frame_links(&[
+            span_at(0, 0, 20, "https://example.com/projects/issues/1", None),
+            span_at(1, 0, 17, "https://example.com/projects/issues/1", None),
+        ]);
+        t.flush_with_links().unwrap();
+        t.swap_buffers();
+        let out = String::from_utf8(t.backend().buf.clone()).unwrap();
+        let payload = id1_payloads(&out, "https://example.com/projects/issues/1");
+        assert!(
+            payload.contains("https://example.com/") && payload.contains("projects/issues/1"),
+            "both wrap fragments must sit in id=1 runs: payload={payload:?} out={out:?}"
+        );
+        assert!(
+            !out.contains("\x1b]8;;https://example.com/projects/issues/1\x07"),
+            "un-id'd open must be absent: {out:?}"
+        );
+    }
+
+    #[test]
     fn url_control_chars_sanitized() {
         let mut t = term(20, 3);
         let out = frame(&mut t, "AB", &[span(0, 2, "https://x\x07\x1b/y", None)]);
         assert!(
-            out.contains("\x1b]8;;https://x/y\x07"),
+            out.contains("\x1b]8;id=1;https://x/y\x07"),
             "url not sanitized: {out:?}"
         );
     }
@@ -443,11 +474,11 @@ mod links {
         );
         // Each link wraps exactly its own cell; the gap is not wrapped.
         assert!(
-            out.contains("\x1b]8;;https://a\x07A\x1b]8;;\x07"),
+            out.contains("\x1b]8;id=1;https://a\x07A\x1b]8;;\x07"),
             "a-run: {out:?}"
         );
         assert!(
-            out.contains("\x1b]8;;https://b\x07B\x1b]8;;\x07"),
+            out.contains("\x1b]8;id=2;https://b\x07B\x1b]8;;\x07"),
             "b-run: {out:?}"
         );
     }
@@ -459,7 +490,7 @@ mod links {
         // the OSC 8 wraps it.
         let out = frame(&mut t, "世", &[span(0, 2, "https://x.ai", None)]);
         assert!(
-            out.contains("\x1b]8;;https://x.ai\x07世\x1b]8;;\x07"),
+            out.contains("\x1b]8;id=1;https://x.ai\x07世\x1b]8;;\x07"),
             "wide-char run: {out:?}"
         );
     }
@@ -491,7 +522,7 @@ mod links {
         t.flush_with_links().unwrap();
         let out = String::from_utf8(t.backend().buf.clone()).unwrap();
         assert!(
-            out.contains("\x1b]8;;https://x.ai\x07AB\x1b]8;;\x07"),
+            out.contains("\x1b]8;id=1;https://x.ai\x07AB\x1b]8;;\x07"),
             "non-origin mapping: {out:?}"
         );
     }

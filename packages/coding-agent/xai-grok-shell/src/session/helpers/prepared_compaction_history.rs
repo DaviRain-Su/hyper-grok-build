@@ -11,7 +11,7 @@ use super::session_compact::build_compaction_prompt;
 
 /// The exact owned history sent by a compaction attempt and persisted in its artifact.
 pub(crate) struct PreparedCompactionHistory {
-    /// Prompt-terminated items after the single image-budget transformation.
+    /// Items ending with the summarization prompt, after the one image-budget transformation.
     pub(crate) items: Vec<ConversationItem>,
     /// Exact accounting for the transformation applied to `items`.
     pub(crate) image_budget: ImageBudgetOutcome,

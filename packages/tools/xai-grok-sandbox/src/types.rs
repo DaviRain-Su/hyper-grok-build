@@ -1,5 +1,3 @@
-//! Types for sandbox events, metrics, and profile configuration.
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,7 +9,7 @@ pub struct SandboxEvent {
     pub event_type: SandboxEventType,
     pub profile: String,
 
-    // Context fields — present on ProfileApplied/ApplyFailed
+    // Context fields, present on ProfileApplied/ApplyFailed
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -61,7 +59,6 @@ impl SandboxEvent {
         }
     }
 
-    /// Create a "profile applied" event with full context.
     pub fn profile_applied(
         profile: &str,
         workspace: &std::path::Path,
@@ -108,7 +105,6 @@ impl SandboxEvent {
         event
     }
 
-    /// Create an "apply failed" event with context.
     pub fn apply_failed(
         profile: &str,
         workspace: &std::path::Path,
@@ -130,7 +126,6 @@ impl SandboxEvent {
         event
     }
 
-    /// Create a filesystem violation event.
     pub fn fs_violation(profile: &str, target: &str, operation: &str) -> Self {
         let mut event = Self::base(SandboxEventType::FsViolation, profile);
         event.operation = Some(operation.to_string());
@@ -138,7 +133,6 @@ impl SandboxEvent {
         event
     }
 
-    /// Create a network violation event.
     pub fn net_violation(profile: &str, target: &str) -> Self {
         let mut event = Self::base(SandboxEventType::NetViolation, profile);
         event.operation = Some("connect".to_string());

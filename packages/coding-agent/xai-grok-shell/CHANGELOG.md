@@ -1,6 +1,122 @@
 # Changelog
 
+# 1.0.16 — 2026-09-01
+
+## Breaking Changes
+
+- **Enterprise policies** can now restrict which models users may select via signed requirements.toml.
+
+## Features
+
+- **MCP servers** can now be supplied at session bind time for workspace integrations.
+
+## Bug Fixes
+
+- **Long-running sessions** interrupted by expired tokens during network issues no longer lose work.
+- **Slash command suggestions** with very long names no longer show blank labels in the dropdown.
+- **Sending a message immediately after spawning a subagent** no longer fails while the child is still starting.
+- **Loading spinners** inside the extensions modal (/mcps and other tabs) now animate correctly.
+- **MCP server OAuth authentication** triggered from /mcps no longer deadlocks the session.
+
+## Performance
+
+- **Long-running subagent and task output waits** now default to a one-hour ceiling instead of ten minutes.
+
+
+# 1.0.15 — 2026-08-31
+
+## Features
+
+- **Tip appears** after repeated scrollback drag-copies suggesting /copy and /export commands.
+
+## Bug Fixes
+
+- **Session close** is now faster because memory consolidation runs at the next launch instead of blocking exit.
+- **Typed input including Enter** during pager startup is now preserved and correctly interpreted as submit or newline.
+- **Dock panel** input and rollout now respect remote settings and correctly handle keyboard focus when hidden or empty.
+
+## Performance
+
+- **First reply latency** is reduced by opening the model connection in the background when a session starts.
+- **Signed-in startup** is faster because an expired token refresh now begins in the background at agent spawn.
+- **Creating a new session** returns faster; MCP tools and other startup work happen in the background.
+
+
+# 1.0.14 — 2026-08-31
+
+## Features
+
+- **OIDC token refresh** is now proactive by default for better reliability.
+- **PostToolUse hooks** can now provide feedback and context to the model after tool execution.
+- **SDK-registered PostToolUse hooks** now provide model-facing feedback.
+- **grok usage <session-id>** now shows persisted per-turn token and cost data.
+- **Retry status** in composer and title now shows a short reason for the retry.
+- **Models can now declare** a different identifier for each reasoning-effort level instead of always sending the same id.
+- **Prompt suggestions** now respect remote configuration and default to the current session model.
+- **Windows CLI downloads** are now ~70% smaller using the same compressed sidecars as macOS and Linux.
+
+## Bug Fixes
+
+- **grok inspect** now correctly shows Claude bypass locks as advisory rather than enforced.
+- **Subagent sessions** no longer leak threads or file descriptors when the parent is busy.
+- **Cold startup** no longer performs duplicate remote settings fetches.
+- **Compaction failures** due to context size now degrade input instead of retrying identically.
+- **--sandbox strict** now restricts writes to ~/.grok/sessions only.
+- **Subagent spawning** now waits longer on a busy coordinator and shows clearer retry guidance instead of "unreachable".
+- **Failed task and todo tool calls** now appear in the transcript instead of disappearing without a trace.
+- **Composer status row** no longer collapses or flashes when using double-Enter to send now.
+- **Session close** is no longer delayed by a single slow hook; each SessionEnd hook now has its own timeout.
+- **Hook removal** in the extensions modal no longer offers actions that the handler will refuse.
+- **Interjections** during a turn are now delivered atomically or not at all.
+- **Subagent tasks** no longer get incorrectly cancelled when the parent session is waiting for completion.
+- **Workflow detail view** now closes the overlay on X or outside click instead of returning to the run list.
+- **Resuming subagents** now succeeds for larger transcripts that still fit the model context with headroom.
+
+## Performance
+
+- **Startup** now fetches remote settings only once per boot instead of potentially twice.
+- **First message** on large repositories no longer waits on repository status scan.
+- **Large session memory** no longer blocks the agent during turn completion or subagent spawning.
+- **Signed-in CLI starts** faster by serving remote settings from a local cache on warm boots.
+
+
+# 1.0.13 — 2026-08-28
+
+## Features
+
+- **Length-truncated responses** now continue automatically instead of failing the turn.
+- **Hooks** can now ask the user to confirm a tool call instead of always allowing or denying.
+- **Hooks** can now request deferral or add context shown to the model after a tool runs.
+- **Session close** now records detailed timing data for performance analysis.
+- **Credit limit upsell** now offers a Try Again button to retry the last prompt.
+- **Pasted images** now show a live pixel preview in the prompt box on iTerm2.
+
+## Bug Fixes
+
+- **Transient inference failures** (stalls, drops, 5xx) now retry automatically instead of ending the turn.
+- **Windows users** can now correctly open ~/.grok and worktree sessions.
+- **Session data** is now more reliably saved after prompts and on power loss.
+- **Compaction failures** now show the actual error instead of a generic message.
+- **Truncation error messages** now show the right guidance instead of suggesting an unhelpful retry.
+- **Truncated tool calls** are now executed instead of failing the turn when arguments are complete.
+- **Images larger than 2000px** no longer brick sessions on many-image requests.
+- **Wrapped hyperlinks** in the pager now remain fully clickable on Windows Terminal instead of only the first line.
+- **Recurring scheduled tasks** now include a reminder to stop the monitor when work finishes.
+- **Scheduled task IDs** are now full UUID strings, preventing collisions when tasks are created in the same millisecond.
+
+## Performance
+
+- **Subagent spawning** is faster when connections drop during bursts.
+- **Session startup** with MCP servers is now much faster when auth is already configured.
+- **MCP server startup** no longer stalls behind a fixed batch size.
+- **CLI downloads** are now compressed, making fresh installs and updates substantially faster.
+
+
 # 1.0.12 — 2026-08-27
+
+## Features
+
+- **Credit-limit upsell** now includes a Try Again option. Max-tier users see the same question modal without Upgrade tier.
 
 ## Bug Fixes
 

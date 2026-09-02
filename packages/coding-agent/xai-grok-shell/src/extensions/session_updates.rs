@@ -1,8 +1,5 @@
-//! ACP extension handler for bulk session updates (`x.ai/session/updates`).
-//!
-//! Returns session updates in a single response with rewind dead branches
-//! filtered out. Supports optional pagination (`offset`/`limit`) for large
-//! sessions.
+//! `x.ai/session/updates`: returns a session's updates in a single response, with the dead branches left by rewinds filtered out.
+//! Supports optional pagination (`offset`, `limit`) for large sessions.
 //!
 //! ## Usage
 //!
@@ -27,11 +24,9 @@
 //! Negative `offset` counts from the end: `-100` means "last 100 updates".
 //! `turnIndex` slices by user-message turn boundaries instead of raw count.
 //!
-//! Each element in the `updates` array is the full JSONL storage envelope
-//! (with `timestamp`, `method`, and `params` wrapper), not just the inner
-//! notification params. Clients should parse the `method` field to determine
-//! the update type (`"session/update"` for ACP, `"_x.ai/session/update"` for
-//! xAI extensions) and extract the notification payload from `params`.
+//! Each element in the `updates` array is the full JSONL storage envelope (`timestamp`, `method`, `params`), not just the inner notification params.
+//! Clients parse the `method` field to tell the update type (`"session/update"` for ACP, `"_x.ai/session/update"` for xAI extensions).
+//! The notification payload is in `params`.
 //!
 //! Metadata columns and cross-host import live in [`crate::extensions::session_state`].
 
@@ -48,7 +43,7 @@ use crate::session::wire_tags::{REWIND_MARKER, USER_MESSAGE_CHUNK_PREFIX};
 struct Request {
     session_id: String,
     cwd: String,
-    /// Negative offset counts from end (e.g. `-100` = last 100).
+    /// Negative offset counts from the end (`-100` means the last 100).
     #[serde(default)]
     offset: Option<i64>,
     #[serde(default)]
@@ -62,7 +57,7 @@ struct Request {
     /// Tail by user-message-turn count instead of raw update count.
     #[serde(default)]
     turn_index: Option<usize>,
-    /// Routing metadata — forwarded to chunk notifications for leader/relay.
+    /// Routing metadata, forwarded to chunk notifications so the gateway can route them to the requesting client.
     #[serde(default, rename = "_meta")]
     meta: Option<crate::extensions::routing::RequestMeta>,
 }
@@ -96,11 +91,8 @@ fn page_bounds(request: &Request, total_count: usize) -> PageBounds {
     PageBounds { start, end }
 }
 
-/// Check if a raw JSONL line is a `user_message_chunk` ACP update.
-/// Uses a fast substring match on the serialized JSON instead of a full
-/// deserialization.  The pattern `"sessionUpdate":"user_message_chunk"` is
-/// emitted deterministically by serde and cannot appear in user content
-/// without being escaped, so false positives are not possible.
+/// Check if a raw JSONL line is a `user_message_chunk` ACP update, by substring match rather than a full deserialization.
+/// Serde emits `"sessionUpdate":"user_message_chunk"` deterministically, and it cannot appear unescaped in user content, so a match is never false.
 fn is_user_message_chunk(line: &str) -> bool {
     line.contains(&*USER_MESSAGE_CHUNK_PREFIX)
 }
@@ -132,8 +124,7 @@ fn try_stream_tail_page(request: &Request, updates_path: &Path) -> io::Result<Op
     let reader = BufReader::new(file);
 
     if is_turn_index {
-        // Single-pass scan: read lines, detect rewinds, and compute prompt
-        // boundaries in one pass to avoid a second traversal.
+        // One pass reads lines, detects rewinds, and computes prompt boundaries, avoiding a second traversal
         let mut has_rewinds = false;
         let mut all_lines = Vec::new();
         let mut prompt_starts = Vec::new();
@@ -153,8 +144,7 @@ fn try_stream_tail_page(request: &Request, updates_path: &Path) -> io::Result<Op
             all_lines.push(line);
         }
 
-        // If rewinds are present, filter dead branches and recompute
-        // prompt boundaries over the live lines.
+        // If rewinds are present, filter dead branches and recompute prompt boundaries over the live lines
         let (all_lines, prompt_starts) = if has_rewinds {
             let refs: Vec<&str> = all_lines.iter().map(|s| s.as_str()).collect();
             let live = crate::session::storage::filter_rewind_lines(refs);
@@ -185,7 +175,7 @@ fn try_stream_tail_page(request: &Request, updates_path: &Path) -> io::Result<Op
             prompt_starts,
         }))
     } else {
-        // Negative-offset path: ring buffer, only keep last N lines in memory.
+        // Negative-offset path: a ring buffer keeps only the last N lines in memory
         let tail_n = (-request.offset.unwrap()) as usize;
         let mut total_count = 0usize;
         let mut has_rewinds = false;
@@ -326,7 +316,7 @@ fn send_streamed_chunks<T: AsRef<str>>(
     }
 }
 
-/// Inline sync I/O (`spawn_blocking` is slow on `current_thread` + `LocalSet`).
+/// Inline sync I/O (`spawn_blocking` is slow on a `current_thread` runtime with a `LocalSet`).
 pub async fn handle(
     args: &acp::ExtRequest,
     gateway: &xai_acp_lib::AcpAgentGatewaySender,
@@ -349,8 +339,7 @@ pub async fn handle(
     let mut updates_path = crate::session::persistence::session_dir(&session_info)
         .join(crate::session::storage::UPDATES_FILE);
 
-    // Subagents persist under their own cwd (may differ from the parent cwd
-    // passed here), so fall back to an id scan when the (id, cwd) path misses.
+    // Subagents persist under their own cwd (may differ from the parent cwd passed here), so fall back to an id scan when the (id, cwd) path misses
     if !updates_path.exists()
         && let Some(found_dir) =
             crate::session::persistence::find_persisted_session_dir_by_id_result(
@@ -613,13 +602,13 @@ mod tests {
         assert!(rendered.contains("replacement-resp"));
     }
 
-    /// Divergent-cwd subagents must resolve by id, not the caller's parent cwd.
+    /// A subagent whose cwd differs from the caller's must resolve by id, not by the caller's parent cwd.
     #[tokio::test]
     async fn handle_falls_back_to_id_lookup_for_divergent_cwd() {
-        // Transcript lives under the subagent's own cwd …
+        // The transcript lives under the subagent's own cwd
         let child_cwd_tmp = tempfile::TempDir::new().unwrap();
         let child_cwd = child_cwd_tmp.path().to_string_lossy().to_string();
-        // … but the caller only knows the parent cwd.
+        // The caller only knows the parent cwd
         let parent_cwd_tmp = tempfile::TempDir::new().unwrap();
         let parent_cwd = parent_cwd_tmp.path().to_string_lossy().to_string();
 
@@ -841,7 +830,7 @@ mod tests {
         let cwd = cwd_tmp.path().to_string_lossy().to_string();
         let session_id = "tail-prompts-basic";
 
-        // 3 turns: user+agent, user+agent, user+agent
+        // 3 turns, each one user chunk then one agent chunk
         let lines = vec![
             user_chunk("p1"),
             agent_chunk("r1"),
@@ -864,13 +853,13 @@ mod tests {
         assert_eq!(json["totalCount"], 6);
         assert_eq!(json["hasMore"], true);
         let updates = json["updates"].as_array().unwrap();
-        // Last 2 turns = 4 updates (p2, r2, p3, r3)
+        // The last 2 turns hold 4 updates (p2, r2, p3, r3)
         assert_eq!(updates.len(), 4);
         let rendered = serde_json::to_string(updates).unwrap();
         assert!(rendered.contains("p2"));
         assert!(rendered.contains("r3"));
         assert!(!rendered.contains("p1"));
-        // promptStarts: indices in full array
+        // promptStarts indexes into the full updates array
         let ps = json["promptStarts"].as_array().unwrap();
         assert_eq!(ps, &[0, 2, 4]);
     }
@@ -932,7 +921,7 @@ mod tests {
         .unwrap();
         let json = parse_response(response);
 
-        // Live lines: p1, r1, p2-new, r2-new, p3, r3 = 6
+        // The live lines are p1, r1, p2-new, r2-new, p3, r3
         assert_eq!(json["totalCount"], 6);
         assert_eq!(json["hasMore"], true);
         let updates = json["updates"].as_array().unwrap();
@@ -942,7 +931,7 @@ mod tests {
         assert!(!rendered.contains("dead"));
         assert!(rendered.contains("p2-new"));
         assert!(rendered.contains("p3"));
-        // promptStarts over live lines
+        // promptStarts is computed over the live lines
         let ps = json["promptStarts"].as_array().unwrap();
         assert_eq!(ps, &[0, 2, 4]);
     }
@@ -964,7 +953,7 @@ mod tests {
         write_session(session_id, &cwd, &lines);
 
         let gw = dummy_gateway();
-        // offset set → turnIndex should be ignored, offset takes priority
+        // With offset set, turnIndex is ignored and offset takes priority
         let response = handle(
             &make_turn_index_request(session_id, &cwd, 1, Some(-2), None),
             &gw,
@@ -974,7 +963,7 @@ mod tests {
         let json = parse_response(response);
 
         assert_eq!(json["totalCount"], 6);
-        // offset -2 → last 2 updates
+        // offset -2 selects the last 2 updates
         let updates = json["updates"].as_array().unwrap();
         assert_eq!(updates.len(), 2);
     }

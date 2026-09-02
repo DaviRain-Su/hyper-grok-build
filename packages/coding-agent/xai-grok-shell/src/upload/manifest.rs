@@ -45,8 +45,7 @@ pub(crate) struct UploadManifest {
     pub failure_details: HashMap<String, FailureDetail>,
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub skip_details: HashMap<String, String>,
-    /// Writer discriminator for non-standard producers; absent for the live
-    /// turn-upload path.
+    /// Names the writer for non-standard producers; absent for the live turn-upload path.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<&'static str>,
 }
@@ -127,11 +126,10 @@ pub(crate) fn skip_artifact(tracker: &ArtifactTracker, filename: &str, reason: &
     inner.statuses.insert(key.clone(), ArtifactStatus::Skipped);
     inner.skips.insert(key, reason.to_owned());
 }
-/// `fully_uploaded` is `true` iff no artifact has status `Failed`. `Enqueued`
-/// counts as non-failure because every writer of it has passed a real queue
-/// hand-off gate (see [`ArtifactStatus::Enqueued`]) — pre-handoff timeouts
-/// record `Failed` instead — and flagging an accepted hand-off as failure
-/// would permanently park a turn whose artifacts land moments later.
+/// `fully_uploaded` is `true` iff no artifact has status `Failed`.
+/// `Enqueued` counts as non-failure: it is only written after the upload queue accepted the artifact (see [`ArtifactStatus::Enqueued`]).
+/// Timeouts before the queue accepts record `Failed` instead.
+/// Treating an accepted artifact as failed would permanently park a turn whose artifacts land moments later.
 pub(crate) fn build_manifest(
     tracker: &ArtifactTracker,
     upload_method: ManifestUploadMethod,
@@ -207,9 +205,7 @@ pub(crate) async fn write_upload_manifest(ctx: &PromptTraceContext, manifest: &U
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// Artifact names expected by the session-trace ingest pipeline.
-    /// Artifacts recorded by the turn-end upload path (excludes
-    /// `upload_tool_definitions`, which runs earlier in the turn).
+    /// Artifacts recorded by the turn-end upload path (excludes `upload_tool_definitions`, which runs earlier in the turn).
     fn ingestion_expected_artifacts() -> Vec<&'static str> {
         vec![
             "metadata.json",
@@ -262,8 +258,7 @@ mod tests {
         let manifest = build_manifest(&tracker, ManifestUploadMethod::Proxy, None);
         assert!(!manifest.fully_uploaded);
     }
-    /// `enqueued` is the wire value the flush-bounded blocking path writes for
-    /// artifacts still uploading at manifest time; it must not read as failure.
+    /// `enqueued` is the wire value the flush-bounded blocking path writes for artifacts still uploading at manifest time.
     #[test]
     fn enqueued_status_serializes_and_keeps_fully_uploaded() {
         let tracker = new_artifact_tracker();
@@ -275,8 +270,7 @@ mod tests {
         assert_eq!(json["artifacts"]["turn_result.json"], "enqueued");
         assert!(json.get("failure_details").is_none());
     }
-    /// A later terminal outcome may overwrite `enqueued` (an in-flight
-    /// upload finishing during the flush); last write wins.
+    /// A later terminal outcome may overwrite `enqueued` (an in-flight upload finishing during the flush); last write wins.
     #[test]
     fn enqueued_status_upgrades_to_terminal_outcome() {
         let tracker = new_artifact_tracker();

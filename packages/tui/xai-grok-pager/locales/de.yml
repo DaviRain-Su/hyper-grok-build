@@ -432,6 +432,8 @@ settings.contextual_hints.word_select.label: "Wortauswahl"
 settings.contextual_hints.word_select.description: "Erinnert Sie nach einem Doppelklick auf Konversationstext, während Textauswahl auf Ein-/Ausklappen steht, dass Wortauswahl in den Einstellungen zu finden ist."
 settings.contextual_hints.ssh_wrap.label: "SSH-Wrap"
 settings.contextual_hints.ssh_wrap.description: "Empfiehlt beim Sitzungsstart über SSH `grok wrap ssh` für Zwischenablage-Weiterleitung und Terminal-Wiederherstellung."
+settings.contextual_hints.export_copy.label: "Kopieren und exportieren"
+settings.contextual_hints.export_copy.description: "Erinnert Sie nach drei nahe beieinanderliegenden Ziehen-Kopiervorgängen von Konversationstext daran, dass /copy und /export existieren."
 settings.fork_secondary_model.label: "Sekundäres Modell abzweigen"
 settings.fork_secondary_model.description: "Modell für den sekundären Agenten beim Abzweigen. „(keine Überschreibung)“ wählen, um zu löschen."
 

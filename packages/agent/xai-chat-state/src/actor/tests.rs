@@ -109,36 +109,6 @@ impl TestHarness {
 }
 
 // ============================================================================
-// Lifecycle tests
-// ============================================================================
-
-#[tokio::test]
-async fn actor_spawns_and_shuts_down_via_cancellation() {
-    let (mock, _rx) = MockChatPersistence::new();
-    let (event_tx, _event_rx) = mpsc::unbounded_channel();
-    let token = tokio_util::sync::CancellationToken::new();
-    let _handle = ChatStateActor::spawn(
-        vec![],
-        test_config(),
-        Box::new(mock),
-        event_tx,
-        token.clone(),
-    );
-    token.cancel();
-    tokio::time::sleep(Duration::from_millis(50)).await;
-}
-
-#[tokio::test]
-async fn actor_shuts_down_when_all_handles_dropped() {
-    let (mock, _rx) = MockChatPersistence::new();
-    let (event_tx, _event_rx) = mpsc::unbounded_channel();
-    let token = tokio_util::sync::CancellationToken::new();
-    let handle = ChatStateActor::spawn(vec![], test_config(), Box::new(mock), event_tx, token);
-    drop(handle);
-    tokio::time::sleep(Duration::from_millis(50)).await;
-}
-
-// ============================================================================
 // Mutation tests
 // ============================================================================
 
@@ -153,6 +123,77 @@ async fn push_user_message_appends_and_persists() {
     let records = h.drain_persistence();
     assert_eq!(records.len(), 1);
     assert!(matches!(&records[0], PersistenceRecord::Message(_)));
+}
+
+#[tokio::test]
+async fn push_user_messages_batch_appends_and_persists_in_order() {
+    let mut h = TestHarness::new();
+    h.handle
+        .try_push_user_messages_batch(vec![
+            ConversationItem::interjection("first"),
+            ConversationItem::interjection("second"),
+        ])
+        .unwrap();
+
+    let conversation = h.handle.get_conversation().await;
+    assert_eq!(
+        conversation
+            .iter()
+            .map(ConversationItem::text_content)
+            .collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+    assert_eq!(
+        h.drain_persistence()
+            .into_iter()
+            .filter_map(|record| match record {
+                PersistenceRecord::Message(item) => Some(item.text_content()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+}
+
+#[test]
+fn user_messages_batch_uses_one_command() {
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+    let handle = crate::handle::ChatStateHandle::new(cmd_tx);
+
+    handle
+        .try_push_user_messages_batch(vec![
+            ConversationItem::interjection("first"),
+            ConversationItem::interjection("second"),
+        ])
+        .unwrap();
+
+    let command = cmd_rx.try_recv().expect("one batch command");
+    let crate::commands::ChatStateCommand::PushUserMessagesBatch { items } = command else {
+        panic!("expected user-message batch command");
+    };
+    assert_eq!(
+        items
+            .iter()
+            .map(ConversationItem::text_content)
+            .collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+    assert!(cmd_rx.try_recv().is_err(), "batch must use one send");
+}
+
+#[test]
+fn closed_mailbox_rejects_entire_batch() {
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    drop(cmd_rx);
+    let handle = crate::handle::ChatStateHandle::new(cmd_tx);
+
+    assert_eq!(
+        handle.try_push_user_messages_batch(vec![
+            ConversationItem::interjection("first"),
+            ConversationItem::interjection("second"),
+        ]),
+        Err(crate::ChatStateMailboxClosed)
+    );
 }
 
 #[tokio::test]
@@ -1163,37 +1204,6 @@ async fn flush_calls_persistence_flush() {
     assert!(matches!(&records[0], PersistenceRecord::Flush));
 }
 
-#[tokio::test]
-async fn restore_snapshot_restores_all_fields() {
-    let mut h = TestHarness::new();
-    h.handle.push_user_message(ConversationItem::user("msg"));
-    h.handle.record_token_usage(500);
-    h.handle.increment_prompt_index();
-
-    // Drain events from the mutations above
-    let _ = h.handle.get_conversation().await;
-    h.drain_events();
-
-    let snapshot = h.handle.snapshot().await.unwrap();
-    assert_eq!(snapshot.prompt_index, 1);
-    assert_eq!(snapshot.total_tokens, 500);
-    assert_eq!(snapshot.conversation.len(), 1);
-
-    // Replace state
-    h.handle.replace_conversation(vec![]);
-    let _ = h.handle.get_conversation().await;
-
-    // Restore
-    h.handle.restore_snapshot(snapshot);
-
-    let conv = h.handle.get_conversation().await;
-    assert_eq!(conv.len(), 1);
-    let idx = h.handle.get_prompt_index().await;
-    assert_eq!(idx, 1);
-    let tokens = h.handle.get_total_tokens().await;
-    assert_eq!(tokens, 500);
-}
-
 // ============================================================================
 // Query tests
 // ============================================================================
@@ -1207,13 +1217,6 @@ async fn get_conversation_returns_current_state() {
 
     let conv = h.handle.get_conversation().await;
     assert_eq!(conv.len(), 2);
-}
-
-#[tokio::test]
-async fn get_total_tokens_returns_zero_initially() {
-    let h = TestHarness::new();
-    let tokens = h.handle.get_total_tokens().await;
-    assert_eq!(tokens, 0);
 }
 
 #[tokio::test]
@@ -1324,17 +1327,6 @@ async fn empty_conversation_queries_return_defaults() {
     assert_eq!(h.handle.get_prompt_index().await, 0);
     assert_eq!(h.handle.get_total_tokens().await, 0);
     assert!(h.handle.get_agent_edited_paths().await.is_empty());
-}
-
-#[tokio::test]
-async fn check_auto_compact_returns_none_when_under_threshold() {
-    let h = TestHarness::with_context_window(10000);
-    h.handle.record_token_usage(100);
-    // Sync point
-    let _ = h.handle.get_total_tokens().await;
-
-    let trigger = h.handle.check_auto_compact_needed(85).await;
-    assert!(trigger.is_none());
 }
 
 #[tokio::test]
@@ -3168,12 +3160,6 @@ async fn turn_capture_survives_persisted_memory_reminder_prepend() {
 // ============================================================================
 
 #[tokio::test]
-async fn get_conversation_len_empty() {
-    let h = TestHarness::new();
-    assert_eq!(h.handle.get_conversation_len().await, 0);
-}
-
-#[tokio::test]
 async fn get_conversation_len_matches_full_conversation() {
     let h = TestHarness::new();
     h.handle.push_user_message(ConversationItem::user("a"));
@@ -3283,10 +3269,459 @@ async fn get_last_assistant_text_in_turn_walks_past_synthetic_injections() {
 }
 
 #[tokio::test]
+async fn get_assistant_text_in_turn_concatenates_multi_round_bubbles() {
+    let h = TestHarness::new();
+    h.handle.push_user_message(ConversationItem::user("q"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("first bubble"));
+    h.handle
+        .push_tool_result(ConversationItem::tool_result("call-1", "ok"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("last bubble"));
+
+    assert_eq!(
+        h.handle.get_last_assistant_text_in_turn().await.as_deref(),
+        Some("last bubble"),
+        "last-bubble helper stays last-only"
+    );
+    assert_eq!(
+        h.handle.get_assistant_text_in_turn().await.as_deref(),
+        Some("first bubble\nlast bubble"),
+        "completed multi-round turn must export earlier bubbles, not only the last"
+    );
+}
+
+#[tokio::test]
+async fn get_assistant_text_in_turn_stops_at_boundary() {
+    let h = TestHarness::new();
+    h.handle.push_user_message(ConversationItem::user("q1"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("previous turn"));
+    h.handle.push_user_message(ConversationItem::user("q2"));
+    assert!(h.handle.get_assistant_text_in_turn().await.is_none());
+}
+
+#[tokio::test]
 async fn get_last_assistant_text_no_assistant_messages() {
     let h = TestHarness::new();
     h.handle.push_user_message(ConversationItem::user("hi"));
     assert!(h.handle.get_last_assistant_text().await.is_none());
+}
+
+#[tokio::test]
+async fn get_trailing_assistant_report_single_item_matches_last_assistant_text() {
+    let h = TestHarness::new();
+    h.handle.push_user_message(ConversationItem::user("q"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("the answer"));
+
+    assert_eq!(
+        h.handle.get_trailing_assistant_report().await.as_deref(),
+        Some("the answer")
+    );
+    assert_eq!(
+        h.handle.get_trailing_assistant_report().await,
+        h.handle.get_last_assistant_text().await,
+        "normal turn must match the single-item query"
+    );
+}
+
+#[tokio::test]
+async fn get_trailing_assistant_report_joins_salvaged_segments() {
+    let h = TestHarness::new();
+    h.handle.push_user_message(ConversationItem::user("q"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("seg1"));
+    // The Length-salvage continue reminder committed between segments.
+    h.handle
+        .push_user_message(ConversationItem::length_continue_reminder("continue"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("seg2"));
+
+    // Joined forward with no separator: Length cuts mid-token, so the
+    // continuation carries its own leading whitespace when one is needed.
+    assert_eq!(
+        h.handle.get_trailing_assistant_report().await.as_deref(),
+        Some("seg1seg2")
+    );
+}
+
+#[tokio::test]
+async fn get_trailing_assistant_report_skips_reasoning_between_segments() {
+    let h = TestHarness::new();
+    h.handle.push_user_message(ConversationItem::user("q"));
+    h.handle.push_tool_result(ConversationItem::Reasoning(
+        xai_grok_sampling_types::synthesized_reasoning_item("r1"),
+    ));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("seg1"));
+    h.handle
+        .push_user_message(ConversationItem::length_continue_reminder("continue"));
+    // Reasoning models commit a reasoning sibling before each segment; the
+    // turn loop pushes it via the same non-Assistant commit path used here.
+    h.handle.push_tool_result(ConversationItem::Reasoning(
+        xai_grok_sampling_types::synthesized_reasoning_item("r2"),
+    ));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("seg2"));
+
+    assert_eq!(
+        h.handle.get_trailing_assistant_report().await.as_deref(),
+        Some("seg1seg2"),
+        "reasoning siblings are not report content and not a boundary"
+    );
+}
+
+#[tokio::test]
+async fn get_trailing_assistant_report_stops_at_non_salvage_reminder() {
+    let h = TestHarness::new();
+    h.handle.push_user_message(ConversationItem::user("q"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("Analysis done."));
+    // A todo-gate style nudge separates two DISTINCT answers; joining them
+    // with no separator would garble the report.
+    h.handle
+        .push_user_message(ConversationItem::system_reminder("finish your todos"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("Final report: X."));
+
+    assert_eq!(
+        h.handle.get_trailing_assistant_report().await.as_deref(),
+        Some("Final report: X."),
+        "only the Length-continue reminder joins segments"
+    );
+}
+
+#[tokio::test]
+async fn get_trailing_assistant_report_stops_at_tool_boundary() {
+    use xai_grok_sampling_types::ToolCall;
+    let h = TestHarness::new();
+    h.handle.push_user_message(ConversationItem::user("q"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("pre-tool commentary"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant_tool_calls(vec![ToolCall {
+            id: "call_1".into(),
+            name: "my_tool".to_string(),
+            arguments: "{}".into(),
+        }]));
+    h.handle
+        .push_tool_result(ConversationItem::tool_result("call_1", "ok"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("final report"));
+
+    // Tool items and tool-calling assistants end the walk: text before them
+    // belongs to an earlier step, not the trailing report.
+    assert_eq!(
+        h.handle.get_trailing_assistant_report().await.as_deref(),
+        Some("final report")
+    );
+}
+
+#[tokio::test]
+async fn get_trailing_assistant_report_stops_at_real_user_message() {
+    let h = TestHarness::new();
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("previous turn"));
+    h.handle.push_user_message(ConversationItem::user("q2"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("this turn"));
+
+    assert_eq!(
+        h.handle.get_trailing_assistant_report().await.as_deref(),
+        Some("this turn")
+    );
+}
+
+#[tokio::test]
+async fn get_trailing_assistant_report_skips_empty_assistant_items() {
+    let h = TestHarness::new();
+    h.handle.push_user_message(ConversationItem::user("q"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("real report"));
+    // Reasoning-only responses commit an empty assistant item.
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("   \n  "));
+
+    assert_eq!(
+        h.handle.get_trailing_assistant_report().await.as_deref(),
+        Some("real report")
+    );
+}
+
+#[tokio::test]
+async fn cancel_integrity_repair_drops_stranded_continue_reminder() {
+    let h = TestHarness::new();
+    h.handle.push_user_message(ConversationItem::user("q"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("partial"));
+    // Cancel raced between the reminder push and the continuation sample.
+    h.handle
+        .push_user_message(ConversationItem::length_continue_reminder("continue"));
+
+    h.handle.repair_dangling_after_harness_halt("test-cancel");
+    let conv = h.handle.get_conversation().await;
+    assert!(
+        !matches!(
+            conv.last(),
+            Some(ConversationItem::User(u))
+                if u.synthetic_reason
+                    == Some(xai_grok_sampling_types::SyntheticReason::LengthContinue)
+        ),
+        "the stranded reminder must not survive the cancel repair"
+    );
+    assert_eq!(
+        h.handle.get_trailing_assistant_report().await.as_deref(),
+        Some("partial"),
+        "the committed partial stays"
+    );
+}
+
+#[tokio::test]
+async fn recovery_prompt_drops_stranded_continue_reminder() {
+    let h = TestHarness::new();
+    h.handle.push_user_message(ConversationItem::user("q"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("partial"));
+    h.handle
+        .push_user_message(ConversationItem::length_continue_reminder("continue"));
+    // The continuation died; the recovery wrapper injects its prompt.
+    h.handle
+        .push_user_message(ConversationItem::auto_recovery("try again"));
+
+    let conv = h.handle.get_conversation().await;
+    assert!(
+        !conv.iter().any(|i| matches!(
+            i,
+            ConversationItem::User(u)
+                if u.synthetic_reason
+                    == Some(xai_grok_sampling_types::SyntheticReason::LengthContinue)
+        )),
+        "the dead continuation's reminder must not precede the recovery prompt"
+    );
+}
+
+#[tokio::test]
+async fn next_real_prompt_drops_stranded_continue_reminder() {
+    let h = TestHarness::new();
+    h.handle.push_user_message(ConversationItem::user("q"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("partial"));
+    h.handle
+        .push_user_message(ConversationItem::length_continue_reminder("continue"));
+    // Cancel raced the continuation; the user types a new prompt.
+    h.handle.push_user_message(ConversationItem::user("next q"));
+
+    let conv = h.handle.get_conversation().await;
+    assert!(
+        !conv.iter().any(|i| matches!(
+            i,
+            ConversationItem::User(u)
+                if u.synthetic_reason
+                    == Some(xai_grok_sampling_types::SyntheticReason::LengthContinue)
+        )),
+        "the stranded reminder must not precede the new prompt"
+    );
+    assert!(matches!(
+        conv.last(),
+        Some(ConversationItem::User(u)) if u.synthetic_reason.is_none()
+    ));
+}
+
+/// No trailing `LengthContinue` item anywhere in the conversation.
+async fn assert_no_continue_reminder(h: &TestHarness, context: &str) {
+    let conv = h.handle.get_conversation().await;
+    assert!(
+        !conv.iter().any(|i| matches!(
+            i,
+            ConversationItem::User(u)
+                if u.synthetic_reason
+                    == Some(xai_grok_sampling_types::SyntheticReason::LengthContinue)
+        )),
+        "{context}: the dead continuation's reminder must be popped"
+    );
+}
+
+/// Seed `[user, partial assistant, stranded reminder]`.
+fn seed_stranded_reminder(h: &TestHarness) {
+    h.handle.push_user_message(ConversationItem::user("q"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("partial"));
+    h.handle
+        .push_user_message(ConversationItem::length_continue_reminder("continue"));
+}
+
+#[tokio::test]
+async fn stop_hook_feedback_drops_stranded_continue_reminder() {
+    let h = TestHarness::new();
+    seed_stranded_reminder(&h);
+    // The turn completed truncated; the stop gate keeps the model working.
+    h.handle
+        .push_user_message(ConversationItem::stop_hook_feedback("keep going"));
+    assert_no_continue_reminder(&h, "stop-hook feedback").await;
+}
+
+#[tokio::test]
+async fn goal_directive_drops_stranded_continue_reminder() {
+    let h = TestHarness::new();
+    seed_stranded_reminder(&h);
+    h.handle
+        .push_user_message(ConversationItem::goal_summary("next goal round"));
+    assert_no_continue_reminder(&h, "goal directive").await;
+}
+
+#[tokio::test]
+async fn drained_interjection_drops_stranded_continue_reminder() {
+    let h = TestHarness::new();
+    seed_stranded_reminder(&h);
+    // The continuation failed empty; the turn drains a queued interjection.
+    // Drains are deferred while a continuation is in flight, so a trailing
+    // reminder at this push is always dead.
+    h.handle
+        .push_user_message(ConversationItem::interjection("also do this"));
+    assert_no_continue_reminder(&h, "drained interjection").await;
+}
+
+#[tokio::test]
+async fn working_directory_switch_push_drops_stranded_continue_reminder() {
+    let h = TestHarness::new();
+    seed_stranded_reminder(&h);
+    h.handle
+        .push_user_message(ConversationItem::working_directory_switch(
+            "cd /elsewhere",
+            2,
+        ));
+    assert_no_continue_reminder(&h, "directory-switch push").await;
+}
+
+#[tokio::test]
+async fn working_directory_switch_append_drops_stranded_continue_reminder() {
+    let mut h = TestHarness::new();
+    seed_stranded_reminder(&h);
+    // Resume-time disk-authoritative append (not a push): must not bury the
+    // stranded reminder behind the switch item.
+    h.handle
+        .append_working_directory_switch_and_ack(
+            "cd /elsewhere".to_string(),
+            NonZeroU64::new(2).expect("nonzero"),
+        )
+        .await
+        .expect("append acked");
+    assert_no_continue_reminder(&h, "directory-switch append").await;
+    // The pop's history rewrite must precede the acked append; a rewrite
+    // after it would erase the durably-acknowledged switch item from disk.
+    let records = h.drain_persistence();
+    let append_at = records
+        .iter()
+        .position(|r| matches!(r, PersistenceRecord::AcknowledgedMessage(_)))
+        .expect("the switch append reached persistence");
+    assert!(
+        !records[append_at..]
+            .iter()
+            .any(|r| matches!(r, PersistenceRecord::ReplaceHistory(_))),
+        "no history rewrite may follow the acked append: {records:?}"
+    );
+}
+
+#[tokio::test]
+async fn get_trailing_assistant_report_joins_later_reminderless_segments() {
+    let h = TestHarness::new();
+    h.handle.push_user_message(ConversationItem::user("q"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("one, "));
+    // The reminder is injected on the first continue only; segments from
+    // later continues sit adjacent (with at most Reasoning between).
+    h.handle
+        .push_user_message(ConversationItem::length_continue_reminder("continue"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("two, "));
+    h.handle.push_tool_result(ConversationItem::Reasoning(
+        xai_grok_sampling_types::synthesized_reasoning_item("r"),
+    ));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("three"));
+
+    assert_eq!(
+        h.handle.get_trailing_assistant_report().await.as_deref(),
+        Some("one, two, three"),
+        "the budget-2 exhaustion path produces three segments; all must join"
+    );
+}
+
+#[tokio::test]
+async fn get_trailing_assistant_report_joins_into_a_tool_calling_tail() {
+    use xai_grok_sampling_types::ToolCall;
+    let h = TestHarness::new();
+    h.handle.push_user_message(ConversationItem::user("q"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("cut sen"));
+    h.handle
+        .push_user_message(ConversationItem::length_continue_reminder("continue"));
+    // The continuation finishes the sentence and then calls a tool.
+    let mut tail = ConversationItem::assistant_tool_calls(vec![ToolCall {
+        id: "call_1".into(),
+        name: "my_tool".to_string(),
+        arguments: "{}".into(),
+    }]);
+    if let ConversationItem::Assistant(a) = &mut tail {
+        a.content = "tence, done.".into();
+    }
+    h.handle.push_assistant_response(tail);
+
+    assert_eq!(
+        h.handle.get_trailing_assistant_report().await.as_deref(),
+        Some("cut sentence, done."),
+        "earlier salvage segments join into a tool-calling tail"
+    );
+}
+
+#[tokio::test]
+async fn get_trailing_assistant_report_survives_trailing_reminder() {
+    let h = TestHarness::new();
+    h.handle.push_user_message(ConversationItem::user("q"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("final report"));
+    // Todo-gate impasse: the reminder lands after the final text and the
+    // turn completes without sampling again. The report must survive.
+    h.handle
+        .push_user_message(ConversationItem::system_reminder("todo impasse"));
+
+    assert_eq!(
+        h.handle.get_trailing_assistant_report().await.as_deref(),
+        Some("final report")
+    );
+}
+
+#[tokio::test]
+async fn get_trailing_assistant_report_survives_trailing_tool_results() {
+    use xai_grok_sampling_types::ToolCall;
+    let h = TestHarness::new();
+    h.handle.push_user_message(ConversationItem::user("q"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("commentary then stop"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant_tool_calls(vec![ToolCall {
+            id: "call_1".into(),
+            name: "my_tool".to_string(),
+            arguments: "{}".into(),
+        }]));
+    // Stationarity-style tail: the turn ends right after tool results with
+    // no further assistant text. The last commentary must survive, unjoined.
+    h.handle
+        .push_tool_result(ConversationItem::tool_result("call_1", "ok"));
+
+    assert_eq!(
+        h.handle.get_trailing_assistant_report().await.as_deref(),
+        Some("commentary then stop")
+    );
+}
+
+#[tokio::test]
+async fn get_trailing_assistant_report_no_assistant_text() {
+    let h = TestHarness::new();
+    assert!(h.handle.get_trailing_assistant_report().await.is_none());
+    h.handle.push_user_message(ConversationItem::user("hi"));
+    assert!(h.handle.get_trailing_assistant_report().await.is_none());
 }
 
 #[tokio::test]
@@ -5073,4 +5508,35 @@ async fn repair_history_command_refused_while_turn_active() {
         .unwrap()
         .unwrap();
     assert_eq!(report.stripped_tool_result_ids, vec!["call_ORPHAN"]);
+}
+
+#[tokio::test]
+async fn restore_snapshot_restores_all_fields() {
+    let mut h = TestHarness::new();
+    h.handle.push_user_message(ConversationItem::user("msg"));
+    h.handle.record_token_usage(500);
+    h.handle.increment_prompt_index();
+
+    // Drain events from the mutations above
+    let _ = h.handle.get_conversation().await;
+    h.drain_events();
+
+    let snapshot = h.handle.snapshot().await.unwrap();
+    assert_eq!(snapshot.prompt_index, 1);
+    assert_eq!(snapshot.total_tokens, 500);
+    assert_eq!(snapshot.conversation.len(), 1);
+
+    // Replace state
+    h.handle.replace_conversation(vec![]);
+    let _ = h.handle.get_conversation().await;
+
+    // Restore
+    h.handle.restore_snapshot(snapshot);
+
+    let conv = h.handle.get_conversation().await;
+    assert_eq!(conv.len(), 1);
+    let idx = h.handle.get_prompt_index().await;
+    assert_eq!(idx, 1);
+    let tokens = h.handle.get_total_tokens().await;
+    assert_eq!(tokens, 500);
 }

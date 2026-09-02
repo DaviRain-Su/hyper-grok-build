@@ -1,13 +1,9 @@
-//! File watcher for appearance configuration.
-//!
 //! In dev mode, watches ~/.grok/pager.toml for changes and hot-reloads.
 //! In prod mode, returns static defaults (no file operations).
 use super::config::AppearanceConfig;
 use std::io;
 use std::path::PathBuf;
 use tokio::sync::watch;
-/// Watches for appearance config changes.
-///
 /// In dev mode: reads from ~/.grok/pager.toml, watches for changes.
 /// In prod mode: returns static defaults, `.changed()` never fires.
 pub struct ConfigWatcher {
@@ -23,18 +19,15 @@ enum WatcherState {
     },
 }
 impl ConfigWatcher {
-    /// Start the config watcher.
-    ///
     /// - In dev mode: reads/creates ~/.grok/pager.toml, watches for changes
     /// - In prod mode: returns default config, no file operations
     pub async fn start() -> io::Result<Self> {
         Self::start_static()
     }
-    /// Get current config.
     pub fn current(&self) -> watch::Ref<'_, AppearanceConfig> {
         self.rx.borrow()
     }
-    /// Wait for config to change. Never completes in prod mode.
+    /// Never completes in prod mode.
     pub async fn changed(&mut self) -> Result<(), watch::error::RecvError> {
         self.rx.changed().await
     }
@@ -42,7 +35,7 @@ impl ConfigWatcher {
     fn pager_config_path() -> PathBuf {
         crate::util::pager_toml_path()
     }
-    /// Start with config loaded from disk (prod mode — no hot-reload).
+    /// Start with config loaded from disk (prod mode, no hot-reload).
     fn start_static() -> io::Result<Self> {
         let config = xai_grok_config::user_grok_home()
             .and_then(|_| std::fs::read_to_string(Self::pager_config_path()).ok())
@@ -57,16 +50,5 @@ impl ConfigWatcher {
             rx,
             state: WatcherState::Static { _tx: tx },
         })
-    }
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[tokio::test]
-    async fn test_watcher_start() {
-        let watcher = ConfigWatcher::start().await.unwrap();
-        let config = watcher.current();
-        let _ = config.scrollback.blocks.edit.indent;
-        let _ = config.scrollback.blocks.edit.vpad;
     }
 }

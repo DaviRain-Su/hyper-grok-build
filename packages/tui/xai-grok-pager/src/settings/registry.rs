@@ -596,6 +596,9 @@ pub fn current_value_for(
         "contextual_hints.word_select" => Some(SettingValue::Bool(
             ui.contextual_hints.word_select.unwrap_or(true),
         )),
+        "contextual_hints.export_copy" => Some(SettingValue::Bool(
+            ui.contextual_hints.export_copy.unwrap_or(true),
+        )),
         "contextual_hints.ssh_wrap" => Some(SettingValue::Bool(
             ui.contextual_hints.ssh_wrap.unwrap_or(true),
         )),
@@ -863,6 +866,13 @@ mod tests {
                         *default,
                         ui.contextual_hints.word_select.unwrap_or(true),
                         "contextual_hints.word_select default drifts from UiConfig::default()"
+                    );
+                }
+                ("contextual_hints.export_copy", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.contextual_hints.export_copy.unwrap_or(true),
+                        "contextual_hints.export_copy default drifts from UiConfig::default()"
                     );
                 }
                 ("contextual_hints.ssh_wrap", SettingKind::Bool { default }) => {
@@ -1716,6 +1726,7 @@ mod tests {
                 "contextual_hints.send_now",
                 "contextual_hints.small_screen",
                 "contextual_hints.word_select",
+                "contextual_hints.export_copy",
                 "contextual_hints.ssh_wrap",
             ],
         );

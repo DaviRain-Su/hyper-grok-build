@@ -1,23 +1,17 @@
 //! Chat-history integrity across mid-turn user-message injection.
 //!
-//! A `push_user_message` (system reminder, interjection, etc.) while an
-//! assistant `tool_use` is committed but unanswered makes integrity repair
-//! fabricate a `"cancelled by the user"` `tool_result`. If the tool then
-//! runs and appends its real result, the conversation has **two**
-//! `tool_result`s for one `tool_use_id`. Providers reject that shape with
-//! HTTP 400 on every subsequent request — a permanently bricked session
-//! with no in-band recovery.
+//! A `push_user_message` (system reminder, interjection, etc.) can land while an assistant `tool_use` is committed but unanswered.
+//! Integrity repair then fabricates a `"cancelled by the user"` `tool_result`.
+//! If the tool then runs and appends its real result, the conversation has **two** `tool_result`s for one `tool_use_id`.
+//! Providers reject that shape with HTTP 400 on every subsequent request: the session is permanently broken and there is no in-band recovery.
 //!
-//! The concrete injector that first hit this was the action-stationarity
-//! nudge (consecutive identical tool calls). The invariant is broader:
-//! **no mid-turn user injection may leave duplicate results for one id.**
+//! The concrete injector that first hit this was the action-stationarity nudge (consecutive identical tool calls).
+//! The invariant is broader: **no mid-turn user injection may leave duplicate results for one id.**
 //! The nudge is only the driver that reaches the vulnerable window.
 //!
-//! This is intentionally *not* a unit test of `IdenticalToolCallRun`'s latch
-//! (see `identical_tool_call_run_tests` in `turn.rs`). It drives a real
-//! turn loop against a scripted model so a reordering that pushes the
-//! reminder between `record_assistant_response` and `execute_tool_calls`
-//! fails here.
+//! The unit test of `IdenticalToolCallRun`'s latch is `identical_tool_call_run_tests` in `turn.rs`.
+//! This suite drives a real turn loop against a scripted model.
+//! A reordering that pushes the reminder between `record_assistant_response` and `execute_tool_calls` fails here.
 
 use super::support::*;
 use super::*;
@@ -29,11 +23,9 @@ use xai_grok_test_support::sse::{
 };
 use xai_grok_test_support::{MockInferenceServer, ScriptedResponse};
 
-/// Derived from the harness's own thresholds so retuning them retunes this suite instead
-/// of breaking it. The scripted tool is `todo_write`, which is in the
-/// problematically-repeating tier, so this tracks that tier's constants. Script two more
-/// calls than the hard stop allows, so the run always ends because the harness stopped it
-/// rather than because the script ran dry.
+/// Derived from the harness's own thresholds so retuning them retunes this suite instead of breaking it.
+/// The scripted tool is `todo_write`, which is in the problematically-repeating tier, so this tracks that tier's constants.
+/// Script two more calls than the hard stop allows, so the run always ends because the harness stopped it rather than because the script ran dry.
 const SCRIPTED_IDENTICAL_CALLS: usize =
     super::turn::MAX_CONSECUTIVE_IDENTICAL_PROBLEMATIC_TOOL_CALLS as usize + 2;
 /// A run only reaches the injection window under test once the nudge fires.
@@ -44,8 +36,8 @@ const TODO_ARGS: &str = r#"{"todos":[{"id":"t1","content":"poll","status":"compl
 
 const CANCEL_MARKER: &str = "cancelled by the user";
 
-/// Distinctive fragment of the action-stationarity reminder. Present in both
-/// the rendered template and the unrendered fallback string.
+/// A distinctive fragment of the action-stationarity reminder.
+/// It is present in both the rendered template and the unrendered fallback string.
 const STATIONARITY_NUDGE_MARKER: &str = "stuck in a polling loop";
 
 fn tool_call_sse(call_id: &str) -> ScriptedResponse {
@@ -58,29 +50,8 @@ fn tool_call_sse(call_id: &str) -> ScriptedResponse {
     ))
 }
 
-fn drain_gateway(mut rx: tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpClientMessage>) {
-    tokio::task::spawn_local(async move {
-        while let Some(msg) = rx.recv().await {
-            if let xai_acp_lib::AcpClientMessage::SessionNotification(args) = msg {
-                let _ = args.response_tx.send(Ok(()));
-            }
-        }
-    });
-}
-
-fn drain_persistence(mut rx: tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>) {
-    tokio::task::spawn_local(async move {
-        while let Some(msg) = rx.recv().await {
-            if let PersistenceMsg::FlushAndAck { respond_to } = msg {
-                let _ = respond_to.send(Ok(()));
-            }
-        }
-    });
-}
-
-/// Group `ToolResult` bodies by `tool_call_id` across the whole conversation
-/// (not just the contiguous run after an assistant message). Provider validation
-/// is global; a user row between two results for the same id still 400s.
+/// Group `ToolResult` bodies by `tool_call_id` across the whole conversation (not just the contiguous run after an assistant message).
+/// Provider validation is global; a user row between two results for the same id still 400s.
 fn tool_results_by_call_id(conv: &[ConversationItem]) -> HashMap<String, Vec<String>> {
     let mut by_id: HashMap<String, Vec<String>> = HashMap::new();
     for item in conv {
@@ -94,12 +65,11 @@ fn tool_results_by_call_id(conv: &[ConversationItem]) -> HashMap<String, Vec<Str
     by_id
 }
 
-/// Mid-turn system reminder (stationarity nudge after 8 identical tool calls)
-/// must not fabricate a phantom cancel that duplicates a live tool's result.
+/// A mid-turn system reminder must not fabricate a cancel `tool_result` that duplicates a live tool's result.
+/// Here the reminder is the stationarity nudge after 8 identical tool calls.
 ///
-/// Pre-fix this failed: the nudge was pushed after the assistant `tool_use`
-/// was committed and before `execute_tool_calls`, so integrity repair wrote
-/// a cancel result and the real result landed beside it under the same id.
+/// The regression: the nudge was pushed after the assistant `tool_use` was committed and before `execute_tool_calls`.
+/// Integrity repair then wrote a cancel result and the real result landed beside it under the same id.
 #[tokio::test(flavor = "current_thread")]
 async fn mid_turn_user_injection_must_not_duplicate_tool_results_for_one_tool_use_id() {
     let local = tokio::task::LocalSet::new();
@@ -224,9 +194,8 @@ async fn mid_turn_user_injection_must_not_duplicate_tool_results_for_one_tool_us
                 by_id.len()
             );
 
-            // Fewer executed than scripted proves the harness stopped the run at the
-            // tight tier's limit, i.e. `todo_write` resolved to a problematically
-            // repeating kind rather than falling through to the looser thresholds.
+            // Fewer executed than scripted proves the harness stopped the run at the tight tier's limit
+            // `todo_write` resolved to a problematically repeating kind rather than falling through to the looser thresholds
             assert!(
                 by_id.len() <= super::turn::MAX_CONSECUTIVE_IDENTICAL_PROBLEMATIC_TOOL_CALLS
                     as usize,

@@ -1,17 +1,12 @@
-//! Read-only filesystem helpers backing the client-facing
-//! `workspace.client_fs_*` RPCs (the grok.com conversation-files UI,
-//! tunneled through the server).
+//! Read-only filesystem helpers backing the client-facing `workspace.client_fs_*` RPCs.
+//! The grok.com conversation-files UI calls them, tunneled through the server.
 //!
-//! Deliberately separate from the shell-facing ext ops in
-//! [`ext_fs`](super::ext_fs): every path here is client-fs-base-relative
-//! (`WorkspaceHandle::client_fs_base`) and resolves through the
-//! root-confinement helper, the list walk excludes symlinks that resolve
-//! outside the base (and never descends into them), listings paginate
-//! with stable post-sort slices, and reads are binary-safe (base64
-//! chunks).
+//! Deliberately separate from the shell-facing ext ops in [`ext_fs`](super::ext_fs).
+//! Every path is relative to the client-fs base (`WorkspaceHandle::client_fs_base`) and resolves through the root-confinement helper.
+//! The list walk excludes symlinks that resolve outside the base and never descends into them.
+//! Listings paginate with stable post-sort slices, and reads are binary-safe (base64 chunks).
 //!
-//! Wire types live in `xai_grok_workspace_types::rpc::fs` (the
-//! `ClientFs*` types), shared with the backend caller.
+//! Wire types live in `xai_grok_workspace_types::rpc::fs` (the `ClientFs*` types), shared with the backend caller.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -25,21 +20,18 @@ use xai_grok_workspace_types::rpc::fs::{
 use crate::error::{WorkspaceError, WorkspaceResult};
 use crate::handle::{ClientFsBase, WorkspaceHandle};
 
-/// Hard cap on entries collected per list call before sorting (shared
-/// across all fs surfaces; see [`super::walk::MAX_LIST_COLLECT`]).
+/// Hard cap on entries collected per list call before sorting (shared across all fs surfaces; see [`super::walk::MAX_LIST_COLLECT`]).
 const MAX_LIST_COLLECT: usize = super::walk::MAX_LIST_COLLECT;
 
 /// Server-side cap on `FsListReq::limit`.
 const MAX_LIST_LIMIT: u32 = 1000;
 
-/// Server-side cap on a single read's effective byte budget (shared
-/// across all fs surfaces; see [`super::walk::MAX_READ_BYTES`]). Only
-/// referenced by tests now that the clamp lives in `walk::clamp_read_length`.
+/// Server-side cap on a single read's effective byte budget (shared across all fs surfaces; see [`super::walk::MAX_READ_BYTES`]).
+/// Only referenced by tests now that the clamp lives in `walk::clamp_read_length`.
 #[cfg(test)]
 const MAX_READ_BYTES: u64 = super::walk::MAX_READ_BYTES;
 
-/// Bound on memoized hashes; the memo is cleared (not LRU-evicted) when
-/// full — entries simply re-hash on next use.
+/// Bound on memoized hashes; the memo is cleared (not LRU-evicted) when full, and entries re-hash on next use.
 const HASH_MEMO_CAPACITY: usize = 4096;
 
 // =========================================================================
@@ -53,11 +45,8 @@ struct MemoEntry {
     hash: String,
 }
 
-/// Memo of full-content SHA-256 digests keyed by absolute path and
-/// validated against `(size, mtime_ms)`, so unchanged files hash once
-/// instead of on every `client_fs_stat`. The memo only avoids redundant
-/// hashing — it never substitutes mtime for content addressing: a
-/// `(size, mtime_ms)` mismatch is a miss and the caller re-hashes.
+/// Memo of full-content SHA-256 digests keyed by absolute path and validated against `(size, mtime_ms)`.
+/// Unchanged files hash once instead of on every `client_fs_stat`; on a mismatch the caller re-hashes, so mtime never stands in for the content hash.
 #[derive(Debug, Default)]
 pub(crate) struct FileHashMemo {
     entries: parking_lot::Mutex<HashMap<PathBuf, MemoEntry>>,
@@ -71,9 +60,8 @@ impl FileHashMemo {
         (entry.size == size && entry.mtime_ms == mtime_ms).then(|| entry.hash.clone())
     }
 
-    /// Record a freshly computed hash, replacing any stale entry for the
-    /// same path. Clears the whole memo when inserting a new path would
-    /// exceed [`HASH_MEMO_CAPACITY`].
+    /// Record a freshly computed hash, replacing any stale entry for the same path.
+    /// Clears the whole memo when inserting a new path would exceed [`HASH_MEMO_CAPACITY`].
     pub(crate) fn store(&self, path: &Path, size: u64, mtime_ms: i64, hash: String) {
         let mut entries = self.entries.lock();
         if !entries.contains_key(path) && entries.len() >= HASH_MEMO_CAPACITY {
@@ -94,8 +82,7 @@ impl FileHashMemo {
 // Path resolution
 // =========================================================================
 
-/// Resolve a base-relative request path (`""`/`"."` = the base), rejecting
-/// `..` and symlink escapes above the caller session's client-fs base.
+/// Resolve a base-relative request path (`""` and `"."` mean the base), rejecting `..` and symlink escapes above the session's client-fs base.
 async fn resolve_with_base(
     ws: &WorkspaceHandle,
     session_id: Option<&str>,
@@ -129,10 +116,9 @@ fn system_time_ms(st: std::time::SystemTime) -> i64 {
 // list
 // =========================================================================
 
-/// List `req.path` with stable pagination: collect the full walk (bounded
-/// by [`MAX_LIST_COLLECT`]), sort directories-first / case-insensitive by
-/// name, then slice `[offset, offset + limit)`. Symlinks resolving outside
-/// the base are excluded from the walk (and never descended into).
+/// List `req.path` with stable pagination: collect the full walk (bounded by [`MAX_LIST_COLLECT`]), sort, then slice `[offset, offset + limit)`.
+/// The sort is directories first, then case-insensitive by name.
+/// Symlinks resolving outside the base are excluded from the walk (and never descended into).
 pub(crate) async fn list(
     ws: &WorkspaceHandle,
     session_id: Option<&str>,
@@ -140,8 +126,7 @@ pub(crate) async fn list(
 ) -> WorkspaceResult<FsListRes> {
     let (abs, base) = resolve_with_base(ws, session_id, &req.path).await?;
     let req = req.clone();
-    // The walk does synchronous traversal + metadata syscalls; run it off
-    // the async executor (matching the ext_fs ops).
+    // The walk does synchronous traversal and metadata syscalls; run it off the async executor (matching the ext_fs ops)
     tokio::task::spawn_blocking(move || {
         list_blocking(&abs, &base.base, &base.canonical, &req, MAX_LIST_COLLECT)
     })
@@ -156,8 +141,7 @@ fn list_blocking(
     req: &FsListReq,
     max_collect: usize,
 ) -> WorkspaceResult<FsListRes> {
-    // Base confinement also holds mid-walk: a symlink inside the base
-    // pointing outside must not enumerate outside metadata.
+    // Base confinement also holds mid-walk: a symlink inside the base pointing outside must not enumerate metadata of files outside it
     let page = super::walk::list_directory_paged(
         abs_dir,
         super::walk::ListOptions {
@@ -187,8 +171,7 @@ fn list_blocking(
             mtime_ms: e.modified.map(system_time_ms),
             is_symlink: e.is_symlink.then_some(true),
             // Base-relative path (divergent from the shell's absolute path).
-            // A walk under a symlinked base yields canonical-spelled
-            // entries, so strip either spelling.
+            // A walk under a symlinked base yields entries spelled with the canonical path, so strip either spelling
             path: e
                 .abs_path
                 .strip_prefix(base)
@@ -210,8 +193,7 @@ fn list_blocking(
 // stat
 // =========================================================================
 
-/// Stat `req.path`: existence, kind, size, mtime, and — for files — a
-/// full-content SHA-256 served through the workspace hash memo.
+/// Stat `req.path`: existence, kind, size, mtime, and (for files) a full-content SHA-256 served through the workspace hash memo.
 pub(crate) async fn stat(
     ws: &WorkspaceHandle,
     session_id: Option<&str>,
@@ -220,8 +202,7 @@ pub(crate) async fn stat(
     let abs = resolve(ws, session_id, &req.path).await?;
     let md = match tokio::fs::metadata(&abs).await {
         Ok(md) => md,
-        // NotADirectory: a *file* sits mid-path (e.g. `a.txt/sub`) — for an
-        // existence probe that is a miss, not an RPC error.
+        // NotADirectory: a *file* sits mid-path (e.g. `a.txt/sub`); for an existence probe that is a miss, not an RPC error.
         Err(e)
             if e.kind() == std::io::ErrorKind::NotFound
                 || e.kind() == std::io::ErrorKind::NotADirectory =>
@@ -280,12 +261,9 @@ pub(crate) async fn stat(
 // read_file
 // =========================================================================
 
-/// Read a byte range of `req.path` (binary-safe, capped at
-/// `min(req.max_bytes, MAX_READ_BYTES)`) together with the full-file
-/// SHA-256. When the hash is memoized for the current `(size, mtime)`
-/// only the requested range is read; otherwise the whole file streams
-/// once (via the shared [`crate::handle::stream_hash_and_range`]) to
-/// hash it.
+/// Read a byte range of `req.path` (binary-safe, capped at `min(req.max_bytes, MAX_READ_BYTES)`) together with the full-file SHA-256.
+/// When the hash is memoized for the current `(size, mtime)` only the requested range is read.
+/// Otherwise the whole file streams once (via the shared [`crate::handle::stream_hash_and_range`]) to hash it.
 pub(crate) async fn read_file(
     ws: &WorkspaceHandle,
     session_id: Option<&str>,
@@ -304,8 +282,7 @@ pub(crate) async fn read_file(
     let size = md.len();
     let mtime_ms = md.modified().ok().map(system_time_ms);
     let offset = req.offset.unwrap_or(0);
-    // Server-side clamp: a hostile/buggy caller cannot lift the per-chunk
-    // budget past MAX_READ_BYTES regardless of `maxBytes`.
+    // Server-side clamp: a hostile/buggy caller cannot lift the per-chunk budget past MAX_READ_BYTES regardless of `maxBytes`
     let length = super::walk::clamp_read_length(req.length, req.max_bytes);
 
     let memo = &ws.shared.client_fs_hash_memo;
@@ -328,8 +305,7 @@ pub(crate) async fn read_file(
         }
     };
 
-    // Shared encoder keeps the paired wire fields coherent with one UTF-8
-    // validation pass; `type` is text iff the bytes were valid UTF-8.
+    // Shared encoder keeps the paired wire fields consistent with one UTF-8 validation pass; `type` is text only when the bytes were valid UTF-8
     let (payload, is_text) = super::walk::encode_chunk(chunk, req.encoding);
     let (content, content_base64) = match payload {
         super::walk::ChunkPayload::Text(t) => (Some(t), None),
@@ -371,9 +347,8 @@ mod tests {
         }
     }
 
-    /// Fixture: root with files `b.txt`, `A.txt`, `c.txt` and dirs
-    /// `Zeta`, `alpha`. Expected order: dirs first case-insensitive
-    /// (`alpha`, `Zeta`), then files (`A.txt`, `b.txt`, `c.txt`).
+    /// Fixture: root with files `b.txt`, `A.txt`, `c.txt` and dirs `Zeta`, `alpha`.
+    /// Expected order: dirs first case-insensitive (`alpha`, `Zeta`), then files (`A.txt`, `b.txt`, `c.txt`).
     fn populate(root: &Path) {
         std::fs::write(root.join("b.txt"), b"bb").unwrap();
         std::fs::write(root.join("A.txt"), b"a").unwrap();
@@ -382,8 +357,7 @@ mod tests {
         std::fs::create_dir(root.join("alpha")).unwrap();
     }
 
-    /// `list_blocking` against `dir` as both walk root and workspace root
-    /// (canonicalized for the confinement check, like production).
+    /// `list_blocking` against `dir` as both walk root and workspace root (canonicalized for the confinement check, like production).
     fn list_dir(dir: &Path, req: &FsListReq, max_collect: usize) -> FsListRes {
         let canonical = dunce::canonicalize(dir).unwrap();
         list_blocking(dir, dir, &canonical, req, max_collect).unwrap()
@@ -405,8 +379,7 @@ mod tests {
         assert_eq!(res.nodes[2].path, "A.txt");
     }
 
-    /// Pagination slices the *sorted* listing, so consecutive pages have
-    /// stable boundaries and concatenate to the full listing.
+    /// Pagination slices the *sorted* listing, so consecutive pages have stable boundaries and concatenate to the full listing.
     #[test]
     fn list_paginates_post_sort_with_stable_boundaries() {
         let dir = tempfile::tempdir().unwrap();
@@ -437,8 +410,7 @@ mod tests {
         assert!(!page.truncated);
     }
 
-    /// The collection cap marks the result truncated even when the page
-    /// itself is not full.
+    /// The collection cap marks the result truncated even when the page itself is not full.
     #[test]
     fn list_collection_cap_truncates() {
         let dir = tempfile::tempdir().unwrap();
@@ -456,14 +428,13 @@ mod tests {
             limit: u32::MAX,
             ..list_req("")
         };
-        // Must not panic / overflow; the page is everything (< 1000).
+        // Must not panic or overflow; the page is everything (fewer than 1000)
         let res = list_dir(dir.path(), &req, MAX_LIST_COLLECT);
         assert_eq!(res.nodes.len(), 5);
     }
 
-    /// Regression: the list walk must not traverse — or
-    /// even surface — in-root symlinks that resolve outside the workspace
-    /// root, while symlinks staying inside the root keep working.
+    /// Regression: the list walk must not traverse (or even list) in-root symlinks that resolve outside the workspace root.
+    /// Symlinks staying inside the root keep working.
     #[test]
     #[cfg(unix)]
     fn list_excludes_symlink_escapes_mid_walk() {
@@ -493,8 +464,7 @@ mod tests {
             !paths.iter().any(|p| p.contains("secret.txt")),
             "outside entries must not be enumerated: {paths:?}"
         );
-        // Confinement must not over-filter: in-root symlinks survive,
-        // including descent through them.
+        // Confinement must not over-filter: in-root symlinks survive, including descent through them
         assert!(paths.contains(&"good_link"), "{paths:?}");
         assert!(paths.contains(&"good_link/inner.txt"), "{paths:?}");
         assert!(paths.contains(&"real_dir/inner.txt"), "{paths:?}");
@@ -508,9 +478,9 @@ mod tests {
         let path = Path::new("/ws/a.txt");
         memo.store(path, 10, 1000, "h1".into());
         assert_eq!(memo.lookup(path, 10, 1000).as_deref(), Some("h1"));
-        // Size change ⇒ miss.
+        // A size change is a miss
         assert_eq!(memo.lookup(path, 11, 1000), None);
-        // Mtime change ⇒ miss.
+        // An mtime change is a miss
         assert_eq!(memo.lookup(path, 10, 2000), None);
         // Re-store replaces the stale entry.
         memo.store(path, 11, 2000, "h2".into());
@@ -518,8 +488,7 @@ mod tests {
         assert_eq!(memo.lookup(path, 10, 1000), None);
     }
 
-    /// `stat` consults the memo (no re-hash for an unchanged file) and
-    /// recomputes when `(size, mtime)` no longer match.
+    /// `stat` consults the memo (no re-hash for an unchanged file) and recomputes when `(size, mtime)` no longer match.
     #[tokio::test]
     async fn stat_uses_memo_until_file_changes() {
         let ws = make_handle();
@@ -535,8 +504,8 @@ mod tests {
         assert_eq!(first.size, Some(11));
         let real_hash = first.hash.clone().expect("hash for files");
 
-        // Plant a sentinel hash for the file's current (size, mtime). A
-        // second stat must return the sentinel — proof it did not re-hash.
+        // Plant a sentinel hash for the file's current (size, mtime)
+        // A second stat must return the sentinel, proof it did not re-hash
         let abs = root.join("data.txt");
         let md = std::fs::metadata(&abs).unwrap();
         let mtime = system_time_ms(md.modified().unwrap());
@@ -554,8 +523,7 @@ mod tests {
         assert_ne!(new_hash, real_hash);
     }
 
-    /// A path with a *file* as an intermediate component (`ENOTDIR`) is an
-    /// existence miss, not an RPC error.
+    /// A path with a *file* as an intermediate component (`ENOTDIR`) is an existence miss, not an RPC error.
     #[tokio::test]
     async fn stat_enotdir_intermediate_reports_not_exists() {
         let ws = make_handle();
@@ -602,7 +570,7 @@ mod tests {
 
         let req = FsReadFileReq {
             path: "blob.bin".into(),
-            // Bytes 200..210 are bare continuation bytes — never valid UTF-8.
+            // Bytes 200..210 are bare continuation bytes, never valid UTF-8
             offset: Some(200),
             length: Some(50),
             max_bytes: 10, // cap below the requested length
@@ -621,8 +589,7 @@ mod tests {
         use sha2::{Digest, Sha256};
         assert_eq!(res.hash, format!("{:x}", Sha256::digest(&payload)));
 
-        // Memoized second read (range-only fast path) returns the
-        // identical chunk + hash.
+        // Memoized second read (range-only fast path) returns the identical chunk and hash
         let again = read_file(&ws, None, &req).await.unwrap();
         assert_eq!(again.hash, res.hash);
         let again_bytes = base64::engine::general_purpose::STANDARD
@@ -631,9 +598,7 @@ mod tests {
         assert_eq!(again_bytes, payload[200..210]);
     }
 
-    /// `maxBytes` is server-capped at [`MAX_READ_BYTES`]:
-    /// a caller-supplied huge budget cannot make the workspace buffer the
-    /// whole file.
+    /// `maxBytes` is server-capped at [`MAX_READ_BYTES`]: a caller-supplied huge budget cannot make the workspace buffer the whole file.
     #[tokio::test]
     async fn read_file_server_caps_max_bytes() {
         let ws = make_handle();
@@ -728,8 +693,7 @@ mod tests {
         }
     }
 
-    /// An absolute path *inside* the workspace root is accepted and stats
-    /// the same file as its root-relative form.
+    /// An absolute path *inside* the workspace root is accepted and stats the same file as its root-relative form.
     #[tokio::test]
     async fn resolve_accepts_absolute_within_root() {
         let ws = make_handle();
@@ -794,8 +758,7 @@ mod tests {
         assert!(res.nodes.iter().any(|n| n.name == "rooted.txt"));
     }
 
-    /// A session cwd that extends the root rebases the client-fs surface:
-    /// paths are cwd-relative and root-level files are unreachable.
+    /// A session cwd that extends the root rebases the client-fs surface: paths are cwd-relative and root-level files are unreachable.
     #[tokio::test]
     async fn session_cwd_rebases_client_fs_surface() {
         let ws = make_handle();
@@ -876,9 +839,8 @@ mod tests {
         }
     }
 
-    /// Unusable session cwds fall back to the root base instead of failing
-    /// every op: a directory missing on disk (e.g. an artifacts mount not
-    /// yet established) and a `..`-containing cwd.
+    /// Unusable session cwds fall back to the root base instead of failing every op.
+    /// The two cases here are a directory missing on disk (an artifacts mount not yet established) and a cwd containing `..`.
     #[tokio::test]
     async fn unusable_session_cwds_fall_back_to_root_base() {
         let ws = make_handle();
@@ -897,8 +859,7 @@ mod tests {
         }
     }
 
-    /// A session cwd whose suffix is a symlink out of the root falls back
-    /// to the root base (rebasing there would widen confinement).
+    /// A session cwd whose suffix is a symlink out of the root falls back to the root base (rebasing there would widen confinement).
     #[tokio::test]
     #[cfg(unix)]
     async fn symlink_escape_session_cwd_falls_back_to_root_base() {

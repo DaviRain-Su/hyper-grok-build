@@ -1,7 +1,6 @@
 //! Tests for StorageClient retry logic.
 //!
-//! Uses a local axum server to simulate various HTTP error scenarios
-//! and verify that the client handles retries correctly.
+//! Uses a local axum server to simulate various HTTP error scenarios and verify that the client handles retries correctly.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -75,7 +74,6 @@ async fn upload_handler_429(
         return response;
     }
 
-    // Success response
     (
         StatusCode::OK,
         r#"{"bucket": "test-bucket", "path": "test/path", "size": 100, "content_type": "application/json", "generation": 1}"#,
@@ -100,7 +98,6 @@ async fn upload_handler_500(
             .into_response();
     }
 
-    // Success response
     (
         StatusCode::OK,
         r#"{"bucket": "test-bucket", "path": "test/path", "size": 100, "content_type": "application/json", "generation": 1}"#,
@@ -212,7 +209,7 @@ async fn test_upload_retries_on_429() {
         .await;
 
     assert!(result.is_ok());
-    assert_eq!(state.get_request_count(), 3); // 2 failures + 1 success
+    assert_eq!(state.get_request_count(), 3); // The two failures and the final success.
 }
 
 #[tokio::test]
@@ -232,7 +229,7 @@ async fn test_upload_retries_on_500() {
         .await;
 
     assert!(result.is_ok());
-    assert_eq!(state.get_request_count(), 3); // 2 failures + 1 success
+    assert_eq!(state.get_request_count(), 3); // The two failures and the final success.
 }
 
 #[tokio::test]
@@ -252,7 +249,7 @@ async fn test_upload_does_not_retry_on_400() {
         .await;
 
     assert!(result.is_err());
-    assert_eq!(state.get_request_count(), 1); // Only 1 request, no retries
+    assert_eq!(state.get_request_count(), 1);
 }
 
 #[tokio::test]
@@ -272,7 +269,7 @@ async fn test_upload_respects_max_retries() {
         .await;
 
     assert!(result.is_err());
-    // Should have 1 initial request + 3 retries = 4 total
+    // The initial request and the three configured retries
     assert_eq!(state.get_request_count(), 4);
 }
 
@@ -295,7 +292,7 @@ async fn test_upload_respects_retry_after_header() {
     let elapsed = start.elapsed();
 
     assert!(result.is_ok());
-    // Should have waited at least 1 second due to Retry-After header
+    // Retry-After asked for 1 second; 900ms leaves slack for timer imprecision
     assert!(
         elapsed >= Duration::from_millis(900),
         "Expected delay >= 900ms due to Retry-After, got {:?}",
@@ -325,8 +322,7 @@ async fn test_exponential_backoff_increases_delay() {
 
     assert!(result.is_ok());
 
-    // With 3 failures before success:
-    // Delay 1: 50ms, Delay 2: 100ms, Delay 3: 200ms = 350ms minimum
+    // Three failures before success give backoff delays of 50ms, 100ms, and 200ms, at least 350ms in total
     assert!(
         elapsed >= Duration::from_millis(300),
         "Expected delay >= 300ms for exponential backoff, got {:?}",

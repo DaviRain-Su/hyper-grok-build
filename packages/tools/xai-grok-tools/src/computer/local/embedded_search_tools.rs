@@ -45,9 +45,6 @@ const UGREP_DEFAULT_ARGS: &[&str] = &[
     "--exclude-dir=.sl",
 ];
 
-// Binaries embedded by build.rs when `GROK_TOOLS_BUNDLE_{BFS,UGREP}_PATH` is set
-// (release pipeline). Self-extracted to `~/.grok/vendor` on first use, mirroring
-// the ripgrep bundling in `grok_build::grep::ripgrep`.
 #[cfg(bundle_bfs)]
 const BFS_BYTES: &[u8] = include_bytes!(concat!(
     env!("OUT_DIR"),
@@ -55,7 +52,7 @@ const BFS_BYTES: &[u8] = include_bytes!(concat!(
     env!("GROK_TOOLS_BFS_VER"),
     "-",
     env!("GROK_TOOLS_BFS_TARGET"),
-    ".bin"
+    ".bin.zst"
 ));
 
 #[cfg(bundle_ugrep)]
@@ -65,7 +62,7 @@ const UGREP_BYTES: &[u8] = include_bytes!(concat!(
     env!("GROK_TOOLS_UGREP_VER"),
     "-",
     env!("GROK_TOOLS_UGREP_TARGET"),
-    ".bin"
+    ".bin.zst"
 ));
 
 /// Oneline inject for shell wrappers; always ends with `"; "`.
@@ -127,48 +124,10 @@ fn resolved_tools() -> &'static ResolvedTools {
     })
 }
 
-/// Write embedded `bytes` to `~/.grok/vendor/<versioned_name>` (chmod 755) on
-/// first use and return the path; reused on later runs. Versioned so bumping the
-/// bundled version writes a fresh file instead of reusing a stale one.
-#[cfg(any(bundle_bfs, bundle_ugrep))]
-fn extract_bundled(versioned_name: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
-    let dir = crate::util::grok_home().join("vendor");
-    let dest = dir.join(versioned_name);
-    if !dest.exists() {
-        std::fs::create_dir_all(&dir)?;
-        // Write to a unique temp then atomically rename, so a concurrent first
-        // use (or an interrupted write) can't leave a half-written binary that
-        // gets cached and exec'd.
-        let tmp = dir.join(format!(
-            "{versioned_name}.tmp.{}.{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::write(&tmp, bytes)?;
-        let mut perms = std::fs::metadata(&tmp)?.permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&tmp, perms)?;
-        // Rename is atomic on the same filesystem. If another process won the
-        // race, `dest` already exists and is correct — drop our temp copy.
-        if let Err(e) = std::fs::rename(&tmp, &dest) {
-            let _ = std::fs::remove_file(&tmp);
-            if !dest.exists() {
-                return Err(e);
-            }
-        }
-    }
-    Ok(dest)
-}
-
-/// Path to the bundled `bfs` (extracted on first use), or `None` when not bundled.
-fn bundled_bfs() -> Option<PathBuf> {
+fn bundled_bfs() -> Result<Option<PathBuf>, String> {
     #[cfg(bundle_bfs)]
     {
-        extract_bundled(
+        crate::util::vendor::resolve(
             concat!(
                 "bfs-",
                 env!("GROK_TOOLS_BFS_VER"),
@@ -176,20 +135,20 @@ fn bundled_bfs() -> Option<PathBuf> {
                 env!("GROK_TOOLS_BFS_TARGET")
             ),
             BFS_BYTES,
+            env!("GROK_TOOLS_BFS_SHA256"),
         )
-        .ok()
+        .map_err(|e| e.to_string())
     }
     #[cfg(not(bundle_bfs))]
     {
-        None
+        Ok(None)
     }
 }
 
-/// Path to the bundled `ugrep` (extracted on first use), or `None` when not bundled.
-fn bundled_ugrep() -> Option<PathBuf> {
+fn bundled_ugrep() -> Result<Option<PathBuf>, String> {
     #[cfg(bundle_ugrep)]
     {
-        extract_bundled(
+        crate::util::vendor::resolve(
             concat!(
                 "ugrep-",
                 env!("GROK_TOOLS_UGREP_VER"),
@@ -197,16 +156,27 @@ fn bundled_ugrep() -> Option<PathBuf> {
                 env!("GROK_TOOLS_UGREP_TARGET")
             ),
             UGREP_BYTES,
+            env!("GROK_TOOLS_UGREP_SHA256"),
         )
-        .ok()
+        .map_err(|e| e.to_string())
     }
     #[cfg(not(bundle_ugrep))]
     {
-        None
+        Ok(None)
     }
 }
 
-fn resolve_tool(bin_name: &str, env_override: &str, bundled: Option<PathBuf>) -> Option<PathBuf> {
+fn resolve_tool(
+    bin_name: &str,
+    env_override: &str,
+    bundled: Result<Option<PathBuf>, String>,
+) -> Option<PathBuf> {
+    // bfs/ugrep only shadow OS find/grep, so a corrupt bundle degrades to the
+    // env override or OS binary rather than failing closed like rg/fd.
+    let bundled = bundled.unwrap_or_else(|err| {
+        tracing::error!("ignoring corrupt bundled {bin_name}: {err}");
+        None
+    });
     resolve_tool_from(
         std::env::var_os(env_override).map(PathBuf::from),
         bundled,
@@ -543,8 +513,12 @@ mod tests {
     #[test]
     fn bundled_binaries_extract_and_run() {
         let vendor = crate::util::grok_home().join("vendor");
-        let bfs = bundled_bfs().expect("bfs should be bundled");
-        let ugrep = bundled_ugrep().expect("ugrep should be bundled");
+        let bfs = bundled_bfs()
+            .expect("bfs resolves")
+            .expect("bfs should be bundled");
+        let ugrep = bundled_ugrep()
+            .expect("ugrep resolves")
+            .expect("ugrep should be bundled");
         assert!(bfs.is_file() && bfs.starts_with(&vendor), "bfs at {bfs:?}");
         assert!(
             ugrep.is_file() && ugrep.starts_with(&vendor),

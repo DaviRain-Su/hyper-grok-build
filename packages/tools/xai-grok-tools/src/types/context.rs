@@ -66,7 +66,7 @@ impl TruncationConfig {
     ///
     /// Recognized placeholders:
     /// - `{max_lines_read}` — from `max_lines_read` (default 1000)
-    /// - `{max_wait_ms}` — the blocking-wait ceiling, as `600000 (~10 min)`
+    /// - `{max_wait_ms}` — the blocking-wait ceiling, as `3600000 (~1 h)`
     /// - `{max_output_bytes}` — resolved via `max_output_bytes_for(tool_name, builtin_default)`
     /// - `{max_chars_per_line}` — fixed display value for opencode-compat
     ///   descriptions only; the opencode `read` tool clips at its own

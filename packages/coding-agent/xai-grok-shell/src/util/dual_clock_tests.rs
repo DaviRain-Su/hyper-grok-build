@@ -2,8 +2,7 @@ use std::time::Duration;
 
 use super::DualClock;
 
-/// A backward wall jump (NTP step) clamps to zero rather than underflowing,
-/// so it can never fabricate a suspend or inflate a duration.
+/// A backward wall jump (NTP step) clamps to zero rather than underflowing, so it can never fabricate a suspend or inflate a duration.
 #[test]
 fn backward_wall_jump_clamps_to_zero() {
     let start = DualClock::now();

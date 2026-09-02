@@ -656,20 +656,6 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_report_serde_round_trip() {
-        let report = RebuildReport {
-            discovered: 5,
-            registered: 3,
-            already_tracked: 2,
-        };
-        let json = serde_json::to_string(&report).unwrap();
-        let deser: RebuildReport = serde_json::from_str(&json).unwrap();
-        assert_eq!(deser.discovered, 5);
-        assert_eq!(deser.registered, 3);
-        assert_eq!(deser.already_tracked, 2);
-    }
-
-    #[test]
     fn rebuild_nfs_under_managed_roots_is_not_labeled_linked() {
         let tmp = tempfile::TempDir::new().unwrap();
         let grok_home = tmp.path().join("grok");

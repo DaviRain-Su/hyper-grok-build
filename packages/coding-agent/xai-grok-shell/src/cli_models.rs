@@ -1,9 +1,9 @@
-//! Data APIs for `grok models`. Clients own display.
+//! Data APIs for `grok models`. Rendering is the client's job.
 use crate::agent::config::Config as AgentConfig;
 use agent_client_protocol as acp;
 use anyhow::Result;
 use xai_acp_lib::{AcpAgentTx, acp_send};
-/// Status for the `grok models` banner (display order ≠ sampling priority; see [`AuthStatus::resolve`]).
+/// Status for the `grok models` banner (the display order is not the sampling priority; see [`AuthStatus::resolve`]).
 #[derive(Debug, PartialEq, Eq)]
 pub enum AuthStatus {
     ApiKey,
@@ -15,12 +15,10 @@ pub enum AuthStatus {
     NotAuthenticated,
 }
 impl AuthStatus {
-    /// Banner status: env key → session → BYOK → deployment → none.
+    /// Banner status precedence: env key, then session, then BYOK, then deployment, then none.
     ///
-    /// Differs from sampling (`resolve_credentials`: BYOK → session → env) so a
-    /// logged-in user sees the login host. BYOK uses
-    /// [`crate::agent::auth_method::should_advertise_xai_api_key`] so
-    /// `disable_api_key_auth` is honored.
+    /// Differs from sampling (`resolve_credentials`: BYOK, then session, then env) so a logged-in user sees the login host.
+    /// BYOK uses [`crate::agent::auth_method::should_advertise_xai_api_key`] so `disable_api_key_auth` is honored.
     pub fn resolve(agent_config: &AgentConfig) -> Self {
         if crate::agent::auth_method::has_xai_api_key_env() {
             return Self::ApiKey;
@@ -48,7 +46,7 @@ impl AuthStatus {
         Self::NotAuthenticated
     }
 }
-/// Fetch model state (available models + default) over an ACP channel.
+/// Fetch model state (available models and the default) over an ACP channel.
 pub async fn list_models(
     acp_tx: &AcpAgentTx,
     client_type: &str,
@@ -84,8 +82,7 @@ pub async fn fetch_model_state(acp_tx: &AcpAgentTx) -> Result<acp::SessionModelS
     .await?;
     parse_models_list_response(resp.0.get())
 }
-/// Parse an `x.ai/models/list` payload; a handler error wins over a
-/// missing result.
+/// Parse an `x.ai/models/list` payload; a handler error wins over a missing result.
 fn parse_models_list_response(raw: &str) -> Result<acp::SessionModelState> {
     let parsed: crate::session::ExtMethodResult<acp::SessionModelState> =
         serde_json::from_str(raw)?;

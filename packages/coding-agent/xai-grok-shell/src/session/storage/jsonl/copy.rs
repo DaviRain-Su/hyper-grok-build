@@ -1,10 +1,8 @@
 //! Session fork/copy for the JSONL adapter.
 //!
-//! The `updates.jsonl` transcript is unbounded, so the copy streams it line by
-//! line: peak memory tracks a single capped line, plus one small per-line
-//! record when a prompt cut is requested. Chat history stays materialized: its
-//! transforms need random access and the compacted history is bounded by the
-//! context window.
+//! The `updates.jsonl` transcript is unbounded, so the copy streams it line by line.
+//! Peak memory tracks a single capped line, plus one small per-line record when a prompt cut is requested.
+//! Chat history stays materialized: its transforms need random access and the compacted history is bounded by the context window.
 
 use std::collections::BTreeSet;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, Write};
@@ -41,18 +39,15 @@ fn is_orchestration_projection_update(update: &SessionUpdate) -> bool {
     )
 }
 
-/// Updates written plus the `compaction_checkpoints/{uuid}.json` files the
-/// surviving records reference, collected in the same pass.
+/// Updates written plus the `compaction_checkpoints/{uuid}.json` files the surviving records reference, collected in the same pass.
 #[derive(Default)]
 struct CopiedUpdates {
     count: usize,
     checkpoint_files: BTreeSet<String>,
 }
 
-/// Longest `updates.jsonl` line the copy will buffer; anything past it is
-/// corruption (e.g. a tail that lost its newlines) and is discarded without
-/// being buffered. Discarded lines consume no index in either pass, unlike
-/// torn lines, which classify as [`RewindStep::Other`] and end a user run.
+/// Anything past this cap is corruption (e.g. a tail that lost its newlines) and is discarded without being buffered.
+/// Discarded lines consume no index in either pass, unlike torn lines, which classify as [`RewindStep::Other`] and end a user run.
 const MAX_UPDATE_LINE_BYTES: usize = 64 * 1024 * 1024;
 
 /// [`for_each_jsonl_line_capped`] with the production cap.
@@ -63,12 +58,11 @@ fn for_each_jsonl_line<R: BufRead>(
     for_each_jsonl_line_capped(reader, MAX_UPDATE_LINE_BYTES, f)
 }
 
-/// Invoke `f` with the index and bytes of each non-empty line, reusing one
-/// capped line buffer. Lines over `cap` content bytes are discarded without
-/// being buffered whole and consume no index. `f` returns `Break` to stop
-/// early. Raw bytes rather than the typed `UpdatesIterator`: classification
-/// must tolerate non-UTF-8 lines, and both copy passes need identical line
-/// indexes.
+/// Invoke `f` with the index and bytes of each non-empty line, reusing one capped line buffer.
+/// Lines over `cap` content bytes are discarded without being buffered whole and consume no index.
+/// `f` returns `Break` to stop early.
+/// `f` gets raw bytes rather than the typed `UpdatesIterator`.
+/// Classification must tolerate non-UTF-8 lines, and both copy passes need identical line indexes.
 fn for_each_jsonl_line_capped<R: BufRead>(
     mut reader: R,
     cap: usize,
@@ -126,10 +120,9 @@ fn for_each_jsonl_line_capped<R: BufRead>(
     result
 }
 
-/// Indexes (in non-empty-line order) of the source lines that survive rewind
-/// filtering and the `target_prompt_index` cut, holding one classification per
-/// line instead of the lines. As in replay, an unparseable line classifies as
-/// [`RewindStep::Other`] (ending a user run) and is skipped later at parse.
+/// Indexes (in non-empty-line order) of the source lines that survive rewind filtering and the `target_prompt_index` cut.
+/// The scan holds one classification per line instead of the lines.
+/// As in replay, an unparseable line classifies as [`RewindStep::Other`] (ending a user run) and is skipped later at parse.
 fn surviving_line_indexes<R: BufRead>(
     reader: R,
     target_prompt_index: usize,
@@ -150,9 +143,8 @@ fn surviving_line_indexes<R: BufRead>(
     Ok(records.into_iter().map(|record| record.index).collect())
 }
 
-/// Streaming writer for the fork target's `updates.jsonl`. Corruption-tolerant
-/// like the load path: a torn or undecodable line is skipped with a warning
-/// instead of failing the fork.
+/// Streaming writer for the fork target's `updates.jsonl`.
+/// Corruption-tolerant like the load path: a torn or undecodable line is skipped with a warning instead of failing the fork.
 struct UpdateLineWriter<'a> {
     writer: BufWriter<std::fs::File>,
     source: &'a Path,
@@ -234,12 +226,10 @@ impl<'a> UpdateLineWriter<'a> {
 }
 
 /// Copy `source` (an `updates.jsonl`) to `target` without materializing it.
-/// With a `target_prompt_index`, pass one computes the surviving line set and
-/// pass two writes exactly those lines; without one, every line streams
-/// through, preserving rewind markers and dead branches. Both passes read one
-/// pinned, rewound file handle, so their line indexes cannot skew under a
-/// concurrent rename; `updates.jsonl` is append-only by contract, so lines
-/// appended after pass one land past every survivor index.
+/// With a `target_prompt_index`, pass one computes the surviving line set and pass two writes exactly those lines.
+/// Without one, every line streams through, preserving rewind markers and dead branches.
+/// Both passes read one pinned, rewound file handle, so their line indexes cannot skew under a concurrent rename.
+/// `updates.jsonl` is append-only by contract, so lines appended after pass one land past every survivor index.
 fn copy_updates_streaming(
     source: &Path,
     target: &Path,
@@ -280,8 +270,7 @@ fn copy_updates_streaming(
 }
 
 impl JsonlStorageAdapter {
-    /// Fully synchronous implementation of `copy_session_data`, for use on a
-    /// blocking thread; every caller reaches it through `spawn_blocking`.
+    /// Fully synchronous implementation of `copy_session_data`, for use on a blocking thread; every caller reaches it through `spawn_blocking`.
     pub(crate) fn copy_session_data_sync(
         &self,
         source_info: &Info,
@@ -321,17 +310,15 @@ impl JsonlStorageAdapter {
             }
         }
 
-        // The child inherits everything below this boundary; compaction
-        // preserves it.
+        // The child inherits everything below this boundary; compaction preserves it
         let inherited_prefix_len = if options.fork_filter {
             Some(chat_to_copy.len())
         } else {
             options.inherited_prefix_len
         };
 
-        // Worktree forks skip the cwd rewrite: their display_cwd already
-        // shows the model the original project path, and rewritten
-        // conversation paths would contradict it.
+        // Worktree forks skip the cwd rewrite: their display_cwd already shows the model the original project path
+        // Rewritten conversation paths would contradict it
         if !options.skip_cwd_transform && source_info.cwd != target_info.cwd {
             transform_conversation_cwd(&mut chat_to_copy, &source_info.cwd, &target_info.cwd);
         }
@@ -358,8 +345,7 @@ impl JsonlStorageAdapter {
         }
         drop(chat_to_copy);
 
-        // A fork_filter copy (subagent context bootstrap) starts the child with
-        // an empty replay transcript, so the source updates are never read.
+        // A fork_filter copy (subagent context bootstrap) starts the child with an empty replay transcript, so the source updates are never read
         let copied_updates = if options.fork_filter {
             std::fs::write(self.updates_file(target_info), b"")?;
             CopiedUpdates::default()
@@ -398,6 +384,32 @@ impl JsonlStorageAdapter {
             &self.signals_file(source_info),
             &self.signals_file(target_info),
         )?;
+        let usage_copied = copy_sidecar_file(
+            options.copy_usage,
+            &self.usage_file(source_info),
+            &self.usage_file(target_info),
+        )?;
+        if let Some(max_turn) = options.target_prompt_index.map(|i| (i + 1) as u32) {
+            if usage_copied {
+                restamp_copied_usage(
+                    &self.usage_file(target_info),
+                    &target_info.id,
+                    Some(max_turn),
+                )?;
+            }
+            if usage_copied && signals_copied {
+                clip_copied_signals_turns(&self.signals_file(target_info), max_turn)?;
+            }
+        } else if usage_copied {
+            restamp_copied_usage(&self.usage_file(target_info), &target_info.id, None)?;
+        }
+        if usage_copied && !signals_copied {
+            // Resume copies billed history without signals, so the child would start at turn 0 and fold new work into inherited rows
+            seed_signals_turn_from_usage(
+                &self.usage_file(target_info),
+                &self.signals_file(target_info),
+            )?;
+        }
         let plan_mode_state_copied = copy_sidecar_file(
             options.copy_plan_mode_state,
             &self.plan_mode_state_file(source_info),
@@ -413,24 +425,20 @@ impl JsonlStorageAdapter {
             &self.announcement_state_file(source_info),
             &self.announcement_state_file(target_info),
         )?;
-        // A truncating or filtering copy can drop the failure announcement
-        // from the child's context while the copied state still marks it
-        // announced, permanently muting it. End the episodes so still-down
-        // servers re-announce — the same rule as the rewind/compaction
-        // re-arm. Connected fingerprints stay latched: connected tools
-        // remain visible in the tool definitions regardless.
+        // A truncating or filtering copy can drop the failure announcement from the child's context
+        // The copied state still marks it announced, permanently muting it
+        // End the episodes so still-down servers re-announce, the same rule as after rewind or compaction
+        // Connected fingerprints stay latched: connected tools remain visible in the tool definitions regardless
         if announcement_state_copied
             && (options.target_prompt_index.is_some() || options.fork_filter)
         {
             clear_announced_failure_episodes(&self.announcement_state_file(target_info))?;
         }
 
-        // Title-refresh watermark: only a managed parent (one with a watermark)
-        // passes managed state to the child, so a fork of a pre-feature session
-        // stays unmanaged (frozen) rather than being adopted. A full fork
-        // inherits the parent's checkpoint (keeping the inherited title frozen);
-        // a partial fork starts fresh at `0` so it can retitle its shorter
-        // conversation.
+        // Title-refresh watermark: only a managed parent (one with a watermark) passes managed state to the child
+        // So a fork of a pre-feature session stays unmanaged (frozen) rather than being adopted
+        // A full fork inherits the parent's checkpoint (keeping the inherited title frozen)
+        // A partial fork starts fresh at `0` so it can retitle its shorter conversation
         if let Some(parent_idx) =
             crate::session::helpers::session_summary::load_title_refresh_watermark(
                 &self.session_dir(source_info),
@@ -492,8 +500,7 @@ impl JsonlStorageAdapter {
     }
 }
 
-/// Counters produced by this copy that feed the fork target's summary, named
-/// so the same-typed counts cannot transpose.
+/// Counters produced by this copy that feed the fork target's summary, named so the same-typed counts cannot transpose.
 struct ForkCounters {
     num_messages: usize,
     num_chat_messages: usize,
@@ -501,9 +508,8 @@ struct ForkCounters {
     inherited_prefix_len: Option<usize>,
 }
 
-/// Build the fork target's summary: counters from this copy, fork identity
-/// from `options`, and per field either inheritance from the source or a
-/// fresh-session reset.
+/// Build the fork target's summary: counters from this copy, fork identity from `options`.
+/// Every other field is either inherited from the source or reset as for a fresh session.
 fn fork_summary(
     source: Summary,
     target_info: &Info,
@@ -554,19 +560,17 @@ fn fork_summary(
         grok_home: crate::session::persistence::grok_home_string(),
         last_active_at: source.last_active_at,
         generated_title: source.generated_title,
-        // A fork keeps the parent's title, so its manual-ness rides along.
+        // A fork keeps the parent's title, so whether that title was set manually carries over too
         title_is_manual: source.title_is_manual,
-        // Re-derived from the target path, never inherited: the source's
-        // label describes the parent's worktree, not this one.
+        // Re-derived from the target path, never inherited: the source's label describes the parent's worktree, not this one
         worktree_label: target_worktree_identity
             .as_ref()
             .map(|identity| identity.label.clone()),
         agent_name: source.agent_name,
         sandbox_profile: source.sandbox_profile,
         reasoning_effort: source.reasoning_effort,
-        // Full forks keep the parent's last turn. Partial forks
-        // (`target_prompt_index`) may drop that turn, so clear the summary
-        // rather than showing work that is not in the child conversation.
+        // Full forks keep the parent's last turn
+        // Partial forks (`target_prompt_index`) may drop that turn, so clear the summary rather than showing work not in the child conversation
         last_turn_summary: if options.target_prompt_index.is_some() {
             None
         } else {
@@ -577,8 +581,7 @@ fn fork_summary(
         } else {
             source.last_turn_summary_prompt_id
         },
-        // A recap describes the parent's whole session; a partial fork may not
-        // contain that work, so clear it there and keep it for full forks.
+        // A recap describes the parent's whole session; a partial fork may not contain that work, so clear it there and keep it for full forks
         last_recap: if options.target_prompt_index.is_some() {
             None
         } else {
@@ -597,8 +600,7 @@ fn fork_summary(
     summary
 }
 
-/// Remove `announced_failed_servers` from a copied `announcement_state.json`,
-/// preserving every other field (including ones this build doesn't know).
+/// Remove `announced_failed_servers` from a copied `announcement_state.json`, preserving every other field (including ones this build doesn't know).
 /// A file that doesn't parse is left as copied: the next persist rewrites it.
 fn clear_announced_failure_episodes(path: &Path) -> io::Result<()> {
     let bytes = std::fs::read(path)?;
@@ -617,10 +619,82 @@ fn clear_announced_failure_episodes(path: &Path) -> io::Result<()> {
     )
 }
 
-/// Copy one optional sidecar file (plan, signals, tool state, ...) when
-/// enabled and present; reports whether a copy happened. A sidecar that
-/// exists but is not a regular file is skipped with a warning rather than
-/// failing the fork.
+fn clip_copied_signals_turns(path: &Path, max_turn: u32) -> io::Result<()> {
+    let data = match std::fs::read(path) {
+        Ok(data) => data,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let Ok(mut signals) = serde_json::from_slice::<crate::session::signals::SessionSignals>(&data)
+    else {
+        return Ok(());
+    };
+    if signals.turn_count > max_turn {
+        signals.turn_count = max_turn;
+    }
+    if signals.user_message_count > max_turn {
+        signals.user_message_count = max_turn;
+    }
+    if signals.assistant_message_count > max_turn {
+        signals.assistant_message_count = max_turn;
+    }
+    crate::session::storage::write_bytes_atomic(
+        path,
+        &serde_json::to_vec(&signals).map_err(invalid_data)?,
+    )
+}
+
+fn seed_signals_turn_from_usage(usage_path: &Path, signals_path: &Path) -> io::Result<()> {
+    let data = match std::fs::read(usage_path) {
+        Ok(data) => data,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let Ok(file) = serde_json::from_slice::<crate::session::usage_file::SessionUsageFile>(&data)
+    else {
+        return Ok(());
+    };
+    let Some(max_turn) = file.turns.iter().map(|turn| turn.turn_number).max() else {
+        return Ok(());
+    };
+    let signals = crate::session::signals::SessionSignals {
+        turn_count: max_turn,
+        user_message_count: max_turn,
+        ..Default::default()
+    };
+    crate::session::storage::write_bytes_atomic(
+        signals_path,
+        &serde_json::to_vec(&signals).map_err(invalid_data)?,
+    )
+}
+
+fn restamp_copied_usage(
+    path: &Path,
+    session_id: &acp::SessionId,
+    max_turn: Option<u32>,
+) -> io::Result<()> {
+    let data = match std::fs::read(path) {
+        Ok(data) => data,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let Ok(mut file) =
+        serde_json::from_slice::<crate::session::usage_file::SessionUsageFile>(&data)
+    else {
+        return Ok(());
+    };
+    file.session_id = session_id.to_string();
+    if let Some(max_turn) = max_turn {
+        file.retain_turns_through(max_turn);
+    }
+    crate::session::storage::write_bytes_atomic(
+        path,
+        &serde_json::to_vec_pretty(&file).map_err(invalid_data)?,
+    )
+}
+
+/// Copy one optional sidecar file (plan, signals, tool state, ...) when enabled and present; reports whether a copy happened.
+/// A sidecar that exists but is not a regular file is skipped with a warning rather than failing the fork.
 fn copy_sidecar_file(enabled: bool, src: &Path, dst: &Path) -> io::Result<bool> {
     if !enabled {
         return Ok(false);
@@ -638,11 +712,9 @@ fn copy_sidecar_file(enabled: bool, src: &Path, dst: &Path) -> io::Result<bool> 
     Ok(true)
 }
 
-/// Copy the `compaction_checkpoints/{uuid}.json` files referenced by the
-/// retained records; returns how many copied. Records are user-editable data,
-/// so only the exact path shape this feature writes may resolve, symlinks are
-/// never followed, and dangling references are skipped rather than failing
-/// the fork (otherwise every /rewind in the target session would fail).
+/// Copy the `compaction_checkpoints/{uuid}.json` files referenced by the retained records; returns how many copied.
+/// Records are user-editable data, so only the exact path shape this feature writes may resolve and symlinks are never followed.
+/// Dangling references are skipped rather than failing the fork (otherwise every /rewind in the target session would fail).
 fn copy_referenced_checkpoints(
     checkpoint_files: &BTreeSet<String>,
     source_session_dir: &Path,
@@ -652,10 +724,9 @@ fn copy_referenced_checkpoints(
     if checkpoint_files.is_empty() {
         return Ok(0);
     }
-    // The per-file `symlink_metadata` below only vets the final path
-    // component, so the intermediate `compaction_checkpoints` dir must itself
-    // be a real directory; a symlinked dir would resolve every matching name
-    // outside the session.
+    // The per-file `symlink_metadata` below only vets the final path component
+    // So the intermediate `compaction_checkpoints` dir must itself be a real directory
+    // A symlinked dir would resolve every matching name outside the session
     match std::fs::symlink_metadata(source_session_dir.join("compaction_checkpoints")) {
         Ok(meta) if meta.file_type().is_dir() => {}
         Ok(meta) => {
@@ -666,8 +737,7 @@ fn copy_referenced_checkpoints(
             );
             return Ok(0);
         }
-        // Dir gone means every record is dangling; same policy as a missing
-        // checkpoint file.
+        // Dir gone means every record is dangling; same policy as a missing checkpoint file
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             tracing::warn!(
                 session_id = %source_id,
@@ -680,8 +750,7 @@ fn copy_referenced_checkpoints(
     let mut copied = 0usize;
     for checkpoint_file in checkpoint_files {
         let relative = Path::new(checkpoint_file);
-        // A doctored record path must not address other session files (e.g.
-        // the fork's rewritten updates.jsonl).
+        // A doctored record path must not address other session files (e.g. the fork's rewritten updates.jsonl).
         let well_formed = relative.parent() == Some(Path::new("compaction_checkpoints"))
             && relative.extension() == Some("json".as_ref());
         if !well_formed {
@@ -696,8 +765,7 @@ fn copy_referenced_checkpoints(
         match std::fs::symlink_metadata(&src) {
             Ok(meta) if meta.file_type().is_file() => {}
             Ok(meta) => {
-                // This feature only ever writes regular files, so don't
-                // follow symlinks planted in the source session.
+                // This feature only ever writes regular files, so don't follow symlinks planted in the source session
                 tracing::warn!(
                     path = %src.display(),
                     file_type = ?meta.file_type(),
@@ -706,8 +774,7 @@ fn copy_referenced_checkpoints(
                 );
                 continue;
             }
-            // Already-dangling record (e.g. a chained fork of a broken
-            // session): the copy can't invent the file, so don't fail.
+            // Already-dangling record (e.g. a chained fork of a broken session): the copy can't invent the file, so don't fail.
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 tracing::warn!(
                     path = %src.display(),

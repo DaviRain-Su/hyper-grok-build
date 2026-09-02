@@ -1,25 +1,17 @@
-//! Workspace-scoped events (FS changes, server lifecycle, discovery,
-//! ...).
+//! Workspace-scoped events (FS changes, server lifecycle, discovery, ...).
 //!
-//! `WorkspaceEvent` carries only
-//! **workspace-observed external state** -- filesystem watcher fires,
-//! background subprocess lifecycle (LSP / MCP), background indexing
-//! progress, file-watcher-detected config changes, and so on.
+//! `WorkspaceEvent` carries only **workspace-observed external state**.
+//! Examples: filesystem watcher fires, background subprocess (LSP / MCP) lifecycle, background indexing progress, config changes detected on disk.
 //!
-//! Sampler-caused state never goes here. In particular, hunk events
-//! (`HunkRecorded`, `HunkAccepted`, `HunkRejected`) used to live on
-//! this enum and were removed: hunks come from tool writes
-//! (sampler-caused) and `act_on_hunk` RPCs (sampler-caused), so the
-//! sampler already has that state from the originating call. It can
-//! re-snapshot via `list_hunks()` if it needs to reconcile.
+//! Sampler-caused state never goes here.
+//! Hunk events (`HunkRecorded`, `HunkAccepted`, `HunkRejected`) are deliberately absent.
+//! Hunks come from tool writes and `act_on_hunk` RPCs, both sampler-caused, so the sampler already has that state from the originating call.
+//! It can re-snapshot via `list_hunks()` if it needs to reconcile.
 //!
-//! `ToolsChanged` is included on this enum because the tool registry
-//! is a workspace state observation: an MCP server snapshot change
-//! (workspace-observed) and a sampler-initiated `update_tool_config`
-//! both produce the same downstream effect (other subscribers and the
-//! sampler's UI need to re-fetch `tool_definitions`). Tool execution
-//! itself is **not** broadcast here -- it stays on the sampler-caused
-//! tool-result path.
+//! `ToolsChanged` is included on this enum because the tool registry is a workspace state observation.
+//! An MCP server snapshot change (workspace-observed) and a sampler-initiated `update_tool_config` produce the same downstream effect.
+//! Either way, other subscribers and the sampler's UI need to re-fetch `tool_definitions`.
+//! Tool execution itself is **not** broadcast here; it stays on the sampler-caused tool-result path.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -29,11 +21,8 @@ use crate::types::{
     FsEventKind, HookInfo, LspServerStatus, McpServerStatus, PluginInfo, SkillInfo, VcsKind,
 };
 
-/// Workspace-scoped event.
-///
-/// One event per fact, broadcast to every subscriber of the workspace
-/// channel. Topic filtering happens client-side via
-/// [`WorkspaceTopicSet`].
+/// One event per fact, broadcast to every subscriber of the workspace channel.
+/// Topic filtering happens client-side via [`WorkspaceTopicSet`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum WorkspaceEvent {
@@ -41,7 +30,6 @@ pub enum WorkspaceEvent {
     FsChanged {
         /// Affected path (absolute).
         path: PathBuf,
-        /// Event kind.
         kind: FsEventKind,
     },
     /// Git HEAD moved.
@@ -50,37 +38,29 @@ pub enum WorkspaceEvent {
         commit: String,
         /// New branch name (None for detached HEAD).
         branch: Option<String>,
-        /// VCS kind.
         vcs: VcsKind,
     },
-    /// Git lock is held by an external process; reads may block until
-    /// `until`.
+    /// Git lock is held by an external process; reads may block until `until`.
     GitLockHeld {
-        /// Best-effort wall-clock estimate of when the lock will be
-        /// released.
-        ///
-        /// An `Instant` would be natural, but `std::time::Instant`
-        /// is process-local (monotonic from process boot) and not
-        /// `Serialize` -- it is meaningless to a receiver in another
-        /// process. Wall-clock UTC is the only correct choice for a
-        /// wire type.
+        /// Best-effort wall-clock estimate of when the lock will be released.
+        /// Not an `Instant`: `std::time::Instant` is process-local and not `Serialize`, so it is meaningless to a receiver in another process.
         until: DateTime<Utc>,
     },
-    /// Skill discovery surfaced changes.
+    /// Skill discovery found changes.
     SkillsChanged {
         /// Newly added skills.
         added: Vec<SkillInfo>,
         /// Ids of removed skills.
         removed: Vec<String>,
     },
-    /// Plugin discovery surfaced changes.
+    /// Plugin discovery found changes.
     PluginsChanged {
         /// Current plugin set.
         plugins: Vec<PluginInfo>,
         /// Whether the project is trusted (gates plugin execution).
         project_trusted: bool,
     },
-    /// Hook discovery surfaced changes.
+    /// Hook discovery found changes.
     HooksChanged {
         /// Current hook set.
         hooks: Vec<HookInfo>,
@@ -113,13 +93,10 @@ pub enum WorkspaceEvent {
     /// A session's tool registry was rebuilt.
     ///
     /// Triggered when:
-    /// - `WorkspaceChannel::update_tool_config` swaps a session's
-    ///   `effective_tool_config`, or
-    /// - an MCP server snapshot changes and the workspace re-resolves
-    ///   each session's `FinalizedToolset`.
+    /// - `WorkspaceChannel::update_tool_config` swaps a session's `effective_tool_config`, or
+    /// - an MCP server snapshot changes and the workspace re-resolves each session's `FinalizedToolset`.
     ///
-    /// Subscribers should re-fetch tool definitions for the affected
-    /// session via `WorkspaceChannel::tool_definitions`.
+    /// Subscribers should re-fetch tool definitions for the affected session via `WorkspaceChannel::tool_definitions`.
     ToolsChanged {
         /// Affected session id.
         session_id: String,
@@ -129,17 +106,15 @@ pub enum WorkspaceEvent {
 /// Topic discriminator for workspace events.
 ///
 /// Used by `EventBus::subscribe_filtered` to skip uninteresting events.
-/// The mapping from event variant to topic is documented inline; topic
-/// filtering is purely a delivery optimisation -- it never changes the
-/// event payload.
+/// The mapping from event variant to topic is documented inline.
+/// Topic filtering is purely a delivery optimisation; it never changes the event payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceTopic {
     /// Filesystem-watcher events.
     Fs,
     /// VCS background events (HEAD moves, external git lock held).
-    /// Note: hunk events are not on the EventBus -- see the
-    /// module-level doc-comment.
+    /// Hunk events are not on the EventBus; see the module-level doc-comment.
     Vcs,
     /// Skill / plugin / hook discovery.
     Discovery,
@@ -149,8 +124,7 @@ pub enum WorkspaceTopic {
     Index,
     /// Config / permission policy.
     Config,
-    /// Session tool-registry rebuilds (capability filter, MCP merge,
-    /// explicit `update_tool_config`).
+    /// Session tool-registry rebuilds (capability filter, MCP merge, explicit `update_tool_config`).
     Tools,
 }
 
@@ -173,8 +147,7 @@ impl WorkspaceEvent {
     }
 }
 
-/// Set of workspace topics. Implemented as a small bitmask to keep
-/// filter checks branch-free.
+/// Implemented as a small bitmask to keep filter checks branch-free.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct WorkspaceTopicSet {
@@ -217,15 +190,13 @@ impl WorkspaceTopicSet {
         self.bits & (1u32 << topic_index(topic)) != 0
     }
 
-    /// Whether the set is empty.
     pub fn is_empty(&self) -> bool {
         self.bits == 0
     }
 }
 
 fn topic_index(topic: WorkspaceTopic) -> u32 {
-    // Stable indices (do not reorder existing variants without bumping
-    // the wire-compat manifest).
+    // Stable indices (do not reorder existing variants without bumping the wire-compat manifest)
     match topic {
         WorkspaceTopic::Fs => 0,
         WorkspaceTopic::Vcs => 1,
@@ -240,56 +211,6 @@ fn topic_index(topic: WorkspaceTopic) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn samples() -> Vec<WorkspaceEvent> {
-        vec![
-            WorkspaceEvent::FsChanged {
-                path: PathBuf::from("/x"),
-                kind: FsEventKind::Modified,
-            },
-            WorkspaceEvent::GitHeadChanged {
-                commit: "deadbeef".into(),
-                branch: Some("main".into()),
-                vcs: VcsKind::Git,
-            },
-            WorkspaceEvent::GitLockHeld { until: Utc::now() },
-            WorkspaceEvent::SkillsChanged {
-                added: vec![],
-                removed: vec![],
-            },
-            WorkspaceEvent::PluginsChanged {
-                plugins: vec![],
-                project_trusted: true,
-            },
-            WorkspaceEvent::HooksChanged {
-                hooks: vec![],
-                project_trusted: true,
-            },
-            WorkspaceEvent::McpServerStateChanged {
-                server: "fs".into(),
-                status: McpServerStatus::Running,
-            },
-            WorkspaceEvent::LspServerStateChanged {
-                server: "rust-analyzer".into(),
-                status: LspServerStatus::Running,
-            },
-            WorkspaceEvent::CodebaseIndexUpdated { files_indexed: 100 },
-            WorkspaceEvent::ProjectConfigChanged,
-            WorkspaceEvent::PermissionPolicyChanged,
-            WorkspaceEvent::ToolsChanged {
-                session_id: "main".into(),
-            },
-        ]
-    }
-
-    #[test]
-    fn every_variant_round_trips() {
-        for ev in samples() {
-            let json = serde_json::to_string(&ev).unwrap();
-            let back: WorkspaceEvent = serde_json::from_str(&json).unwrap();
-            assert_eq!(ev, back);
-        }
-    }
 
     #[test]
     fn topic_set_contains_what_was_added() {

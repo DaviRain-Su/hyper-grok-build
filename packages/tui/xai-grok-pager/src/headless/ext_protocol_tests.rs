@@ -608,3 +608,33 @@ fn dropped_receiver_does_not_panic() {
         .boxed(),
     );
 }
+
+#[test]
+fn headless_memory_flush_notifications_decode() {
+    use crate::headless::reducer::Lifecycle;
+
+    let started = make_ext_notif(
+        "x.ai/session/update",
+        serde_json::json!({ "sessionUpdate": "memory_flush_started" }),
+    );
+    assert!(matches!(
+        handle_ext_notification(&started),
+        ExtEvent::Lifecycle(Lifecycle::MemoryFlushStarted)
+    ));
+
+    let completed = make_ext_notif(
+        "x.ai/session/update",
+        serde_json::json!({
+            "sessionUpdate": "memory_flush_completed",
+            "result": "written",
+            "path": "/tmp/memory/sessions/log.md"
+        }),
+    );
+    match handle_ext_notification(&completed) {
+        ExtEvent::Lifecycle(Lifecycle::MemoryFlushCompleted { result, path }) => {
+            assert_eq!(result, "written");
+            assert_eq!(path.as_deref(), Some("/tmp/memory/sessions/log.md"));
+        }
+        _ => panic!("expected MemoryFlushCompleted"),
+    }
+}

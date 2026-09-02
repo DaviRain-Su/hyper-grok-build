@@ -1,12 +1,8 @@
-//! Layer-2 stream transforms: turn raw HTTP chunk streams into
-//! [`SamplingEvent`](crate::events::SamplingEvent) streams.
+//! Layer-2 stream transforms: turn raw HTTP chunk streams into [`SamplingEvent`](crate::events::SamplingEvent) streams.
 //!
-//! Each backend has its own transform because the raw chunk types
-//! differ; backend dispatch happens in M4's
-//! [`actor::request_task`](crate::actor::request_task), which knows
-//! the API backend from `SamplerConfig.api_backend` and calls the
-//! matching `SamplingClient::conversation_stream*` method before
-//! handing the result to the corresponding transform here.
+//! Each backend has its own transform because the raw chunk types differ.
+//! Dispatch lives in [`actor::request_task`](crate::actor::request_task), which reads `SamplerConfig.api_backend`.
+//! It calls the matching `SamplingClient::conversation_stream*` method and hands the raw stream to the transform here.
 
 pub mod chat_completions;
 pub mod collect;

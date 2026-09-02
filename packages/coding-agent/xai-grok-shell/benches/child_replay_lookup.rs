@@ -1,7 +1,7 @@
-//! Wall time of child `updates.jsonl` lookup — the live-`SubagentSpawned` path.
+//! Measures the wall time of finding a child session's `updates.jsonl`, the lookup a live `SubagentSpawned` update triggers.
 //!
-//! `Relocation` (pre-fix) walks every cwd bucket and `lstat`s each `summary.json`
-//! after a hinted miss. `HintedOnly` (post-fix) returns on that miss.
+//! After a hinted miss, `Relocation` walks every cwd bucket and `lstat`s each `summary.json`.
+//! `HintedOnly` returns on that miss.
 //!
 //! Default fixture: 180 encoded cwds × 20 sessions = 3,600 summaries (same
 //! order as a fat local `~/.grok/sessions`). Override with env:

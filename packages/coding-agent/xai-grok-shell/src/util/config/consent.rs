@@ -1,7 +1,6 @@
 //! Local record of which consent notices this machine has answered.
 //!
-//! The server is authoritative once the upstream record exists; until then this is what stops the
-//! notice re-asking on every launch.
+//! The server is authoritative once the upstream record exists; until then this is what stops the notice re-asking on every launch.
 
 use anyhow::Result;
 
@@ -52,8 +51,8 @@ pub async fn set_consent_answer(
             entry.version = version;
             entry.acked = acked;
         } else if version == recorded {
-            // The local write and the server ack race for the same version, and the local one
-            // carries `false`. Losing that race must not retract an ack that already landed.
+            // The local write and the server ack race for the same version, and the local one carries `false`
+            // Losing that race must not retract an ack that already landed
             entry.acked |= acked;
         }
     })

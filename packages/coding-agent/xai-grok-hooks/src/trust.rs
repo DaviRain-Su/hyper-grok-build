@@ -5,24 +5,19 @@ use std::path::{Path, PathBuf};
 // project hooks run (the same gate as repo-local MCP/LSP). The helpers below
 // exist only to migrate prior grants out of the legacy file.
 
-/// Path to the legacy project-hook trust file
-/// (`<user_grok_home>/trusted-hook-projects`), or `None` when no user grok home
-/// resolves. Retained only for the one-time migration into folder-trust.
+/// Path to the legacy project-hook trust file (`<user_grok_home>/trusted-hook-projects`), or `None` when no user grok home resolves.
+/// It is retained only for the one-time migration into folder-trust.
 pub fn legacy_trust_file_path() -> Option<PathBuf> {
     Some(xai_grok_config::user_grok_home()?.join(xai_grok_config::TRUSTED_HOOK_PROJECTS_FILENAME))
 }
 
-/// Parse the legacy trusted-projects file into a list of project paths.
-///
-/// The legacy format is one canonical absolute path per line; blank and
-/// `#`-comment lines are skipped. A missing file yields `Ok(empty)` (nothing to
-/// migrate); any OTHER read error is returned as `Err` so the caller does not
-/// mistake an unreadable file for an empty one and consume it. Consumed by the
-/// one-time migration that seeds folder-trust from prior grants.
+/// The legacy format is one canonical absolute path per line; blank and `#`-comment lines are skipped.
+/// A missing file yields `Ok(empty)` (nothing to migrate).
+/// Any other read error is returned as `Err` so the caller does not mistake an unreadable file for an empty one and consume it.
+/// The one-time migration that seeds folder-trust from prior grants consumes this list.
 pub fn list_trusted_projects_with_file(trust_file: &Path) -> std::io::Result<Vec<PathBuf>> {
     let content = match std::fs::read_to_string(trust_file) {
         Ok(c) => c,
-        // A missing file is "nothing to migrate", not an error.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
@@ -36,10 +31,7 @@ pub fn list_trusted_projects_with_file(trust_file: &Path) -> std::io::Result<Vec
 
 // ── Hook enable/disable ─────────────────────────────────────────────────
 
-/// Check whether a hook is disabled by name.
-///
-/// Disabled hooks are listed in `$GROK_HOME/disabled-hooks`, one hook name
-/// per line.
+/// Disabled hooks are listed in `$GROK_HOME/disabled-hooks`, one hook name per line.
 pub fn is_hook_disabled(hook_name: &str) -> bool {
     match disabled_hooks_file_path() {
         Some(file) => is_hook_disabled_with_file(hook_name, &file),
@@ -47,18 +39,13 @@ pub fn is_hook_disabled(hook_name: &str) -> bool {
     }
 }
 
-/// Disabled state for display surfaces (hooks modal, status reports) — the
-/// display spelling of the dispatcher's eligibility rule
-/// (`dispatcher::eligible_or_record_skip`): managed-policy hooks never
-/// display as disabled (their disable state is ignored at dispatch), and an
-/// ordinary hook is disabled by either its spec flag or a disabled-hooks
-/// entry. Keep the two in lockstep or the modal lies about what runs.
+/// What the hooks modal and status reports show as disabled; managed-policy hooks never do, since dispatch ignores their disable state.
+/// Keep this in lockstep with `dispatcher::eligible_or_record_skip` or the modal lies about what runs.
 pub fn hook_disabled_for_display(spec: &crate::config::HookSpec) -> bool {
     hook_disabled_for_display_with(spec, &DisabledHooks::load())
 }
 
-/// [`hook_disabled_for_display`] against a pre-loaded snapshot (bulk display
-/// passes and tests).
+/// The same rule as [`hook_disabled_for_display`], evaluated against a pre-loaded snapshot (bulk display passes and tests).
 pub fn hook_disabled_for_display_with(
     spec: &crate::config::HookSpec,
     disabled: &DisabledHooks,
@@ -66,9 +53,8 @@ pub fn hook_disabled_for_display_with(
     !spec.is_managed_policy() && (!spec.enabled || disabled.contains(&spec.name))
 }
 
-/// One-shot snapshot of the disabled-hooks file, for callers that evaluate
-/// many specs per pass (dispatch loops, the stop-gate guard) — one read
-/// instead of one per spec.
+/// One-shot snapshot of the disabled-hooks file, for callers that evaluate many specs per pass (dispatch loops, the stop-gate guard).
+/// One `load()` replaces a file read per spec.
 pub struct DisabledHooks(std::collections::HashSet<String>);
 
 impl DisabledHooks {
@@ -116,7 +102,7 @@ pub fn disable_hook(hook_name: &str) -> Result<(), String> {
 
 fn disable_hook_with_file(hook_name: &str, file: &Path) -> Result<(), String> {
     if is_hook_disabled_with_file(hook_name, file) {
-        return Ok(()); // Already disabled.
+        return Ok(());
     }
     if let Some(parent) = file.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -173,8 +159,7 @@ fn enable_hook_with_file(hook_name: &str, file: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
-/// Returns the path to `$GROK_HOME/disabled-hooks`, or `None` when no user grok
-/// home resolves.
+/// Returns the path to `$GROK_HOME/disabled-hooks`, or `None` when no user grok home resolves.
 fn disabled_hooks_file_path() -> Option<PathBuf> {
     Some(xai_grok_config::user_grok_home()?.join("disabled-hooks"))
 }
@@ -183,7 +168,7 @@ fn disabled_hooks_file_path() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    /// Each test creates its own legacy file in its own temp dir -- no shared state.
+    /// Each test creates its own legacy file in its own temp dir, so no state is shared.
     fn trust_file_in(dir: &Path) -> PathBuf {
         let grok_dir = dir.join(".grok");
         std::fs::create_dir_all(&grok_dir).unwrap();
@@ -212,8 +197,7 @@ mod tests {
 
     #[test]
     fn list_trusted_projects_missing_file_is_empty() {
-        // A missing file is Ok(empty), NOT an error — so the migration treats it
-        // as "nothing to migrate" rather than as an unreadable file.
+        // The migration treats a missing file as "nothing to migrate", not as an unreadable file
         let projects =
             list_trusted_projects_with_file(Path::new("/nonexistent/trusted-hook-projects"))
                 .expect("missing file resolves to Ok(empty)");

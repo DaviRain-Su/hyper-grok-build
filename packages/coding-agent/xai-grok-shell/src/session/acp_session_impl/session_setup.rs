@@ -1,6 +1,5 @@
-//! Session initialization concern for `SessionActor`: `initialize`, prefix
-//! readiness, skills reload and reminders, session info, and model-metadata
-//! refresh.
+//! Session initialization concern for `SessionActor`.
+//! Covers `initialize`, prefix readiness, skills reload and reminders, session info, and model-metadata refresh.
 use super::*;
 impl SessionActor {
     /// `true` for session-based ACP auth methods.
@@ -31,7 +30,7 @@ impl SessionActor {
         }
         map_sampling_err_to_acp(err)
     }
-    /// Set up `[system, skill_reminder?]` — prefix is deferred to background.
+    /// Set up `[system, skill_reminder?]`; the prefix is deferred to background.
     #[tracing::instrument(level = "debug", skip_all)]
     pub(super) async fn initialize(&self, system_prompt: String) {
         let bridge = self.agent.borrow().tool_bridge().clone();
@@ -48,28 +47,23 @@ impl SessionActor {
             .replace_conversation(messages.clone());
         persist_chat_history_jsonl_sync(&self.session_info, &messages);
     }
-    /// Ensure the conversation carries the correct baseline skill (and
-    /// workflow) `<system-reminder>`: exactly one for an agent that has
-    /// skills/workflows and uses reminders, and none for an agent that
-    /// renders skills inline via `<agent_skills>` with no workflows, or
-    /// when nothing is pending.
+    /// Ensure the conversation carries the correct baseline skill (and workflow) `<system-reminder>`.
+    /// An agent that has skills/workflows and uses reminders gets exactly one.
+    /// An agent that renders skills inline via `<agent_skills>` with no workflows gets none, as does one with nothing pending.
     ///
-    /// Called from `initialize` (fresh start, conversation is just `[system]`)
-    /// and the zero-turn harness rebuild (`handle_rebuild_agent_for_definition`,
-    /// conversation is the inherited zero-turn shape). Both drain the current
-    /// bridge's pending baseline.
+    /// Called from `initialize` (fresh start, conversation is just `[system]`).
+    /// Also called from the zero-turn harness rebuild (`handle_rebuild_agent_for_definition`).
+    /// There the conversation is the inherited zero-turn shape; both callers drain the current bridge's pending baseline.
     ///
-    /// Idempotent: strips any existing baseline skill reminder before
-    /// injecting, so a reminder-using -> reminder-using rebuild -- where
-    /// `rewrite_zero_turn_prefix` keeps the inherited reminder (it only drops it
-    /// for an inline-rendering target) -- cannot double-list.
+    /// Idempotent: strips any existing baseline skill reminder before injecting.
+    /// `rewrite_zero_turn_prefix` keeps the inherited reminder unless the target renders inline.
+    /// Without the strip, a rebuild from one reminder-using agent to another would list the baseline twice.
     ///
-    /// The inline-rendering agent still drains (after enabling XML format) so `announced_names` is
-    /// populated and later discovery reminders don't re-announce the baseline;
-    /// `wrap_skill_reminder` returns `None` for the inline-rendering agent+`BaselineChange`.
+    /// The inline-rendering agent still drains (after enabling XML format).
+    /// That populates `announced_names` so later discovery reminders don't re-announce the baseline.
+    /// `wrap_skill_reminder` returns `None` for the inline-rendering agent on a `BaselineChange`.
     ///
-    /// Returns the drained effects so callers can honor `send_available_commands`
-    /// on their own schedule.
+    /// Returns the drained effects so callers can honor `send_available_commands` on their own schedule.
     #[tracing::instrument(level = "debug", skip_all)]
     pub(super) async fn inject_baseline_skill_reminder(
         &self,
@@ -197,9 +191,8 @@ impl SessionActor {
             "ensure_prefix_ready: done"
         );
     }
-    /// Re-discover skills from disk, update the SkillManager baseline,
-    /// and re-advertise slash commands to the client. Returns the number
-    /// of skills discovered.
+    /// Re-discover skills from disk, update the SkillManager baseline, and re-advertise slash commands to the client.
+    /// Returns the number of skills discovered.
     #[tracing::instrument(skip_all)]
     pub(super) async fn reload_skills_from_disk(&self) -> usize {
         let cwd = &self.session_info.cwd;
@@ -226,9 +219,8 @@ impl SessionActor {
         }
         skill_count
     }
-    /// Skills used for slash resolve, mid-turn interjection expansion, and
-    /// prompt skill listings. Same source as ACU: product REST for chat-kind
-    /// (TTL-cached; never disk), `SkillManager` for Build.
+    /// Skills used for slash resolve, mid-turn interjection expansion, and prompt skill listings.
+    /// Same source as ACU: product REST for chat-kind (TTL-cached; never disk), `SkillManager` for Build.
     #[tracing::instrument(level = "debug", skip_all)]
     pub(crate) async fn slash_skills_for_resolve(
         &self,
@@ -245,12 +237,11 @@ impl SessionActor {
     }
     /// Send `AvailableCommandsUpdate` to the client.
     ///
-    /// Chat-kind sessions advertise the product Skills REST catalog (same
-    /// source as `list_commands(kind=chat)`). Build sessions read disk skills
-    /// from the tools layer (`SkillManager`). Chat never falls back to disk.
-    /// Product REST failure (or missing auth) reuses the shared last-successful
-    /// product catalog (same as `list_commands(kind=chat)`); if none exists yet,
-    /// advertises builtins only (never invents product skill names, never disk).
+    /// Chat-kind sessions advertise the product Skills REST catalog (same source as `list_commands(kind=chat)`).
+    /// Build sessions read disk skills from the tools layer (`SkillManager`).
+    /// Chat never falls back to disk.
+    /// Product REST failure (or missing auth) reuses the shared last-successful product catalog (same as `list_commands(kind=chat)`).
+    /// If none exists yet, it advertises builtins only (never invents product skill names, never disk).
     /// Empty product success still advertises builtins.
     #[tracing::instrument(level = "debug", skip_all)]
     pub(super) async fn send_available_commands_update(&self) {
@@ -296,20 +287,13 @@ impl SessionActor {
         )
         .await;
     }
-    /// Build the wrapped `<system[_-]reminder>` carrier for a skill
-    /// update, applying the harness-specific gate and tag selection.
+    /// Build the wrapped `<system[_-]reminder>` carrier for a skill update, applying the harness-specific gate and tag selection.
+    /// Centralized here so new call sites cannot accidentally drift the gating or tag selection.
     ///
-    /// Returns `None` when no reminder should be emitted -- either
-    /// because the effect carried no body, or because the compat
-    /// harness is suppressing this kind of update. The compat preamble
-    /// snapshots the full skill baseline in `<agent_skills>`, so a
-    /// `BaselineChange` reminder fired for it would be redundant.
-    /// `Discovery` reminders (skills found mid-session via tool
-    /// navigation into directories the baseline hadn't seen) are kept
-    /// for both harnesses; the preamble cannot list those.
-    ///
-    /// Tag selection for skill reminders. Centralized here so new call sites
-    /// cannot accidentally drift the gating or tag selection.
+    /// Returns `None` when no reminder should be emitted: either the effect carried no body, or the compat harness suppresses this kind of update.
+    /// The compat preamble snapshots the full skill baseline in `<agent_skills>`, so a `BaselineChange` reminder fired for it would be redundant.
+    /// `Discovery` reminders (skills found mid-session via tool navigation into directories the baseline hadn't seen) are kept for both harnesses.
+    /// The preamble cannot list those.
     pub(super) fn wrap_skill_reminder(
         &self,
         effects: &xai_grok_tools::types::skill_discovery_tracker::SkillUpdateEffects,
@@ -327,18 +311,16 @@ impl SessionActor {
     }
     /// Apply skill update side-effects produced by the tools layer.
     ///
-    /// The tools layer (`SkillManager`) owns skill state and projections.
-    /// This method applies only the conversation/UI effects that require
-    /// session capabilities:
+    /// The tools layer (`SkillManager`) owns skill state and the views derived from it.
+    /// This method applies only the conversation/UI effects that require session capabilities:
     /// - Injecting a `<system-reminder>` user message (skill announcement)
     /// - Refreshing slash command advertisement via the ACP gateway
     ///
     /// Slash command data is read from `bridge.slash_skills()`.
-    /// `PromptContext` is not involved. The system prompt is not mutated.
+    /// `PromptContext` is not involved.
+    /// The system prompt is not mutated.
     ///
-    /// Apply skill update effects: inject a system-reminder and refresh
-    /// slash commands. Both default and compat agents receive mid-session
-    /// discovery reminders.
+    /// Both default and compat agents receive mid-session discovery reminders.
     #[tracing::instrument(level = "debug", skip_all)]
     pub(super) async fn apply_skill_update_effects(
         &self,
@@ -382,10 +364,8 @@ impl SessionActor {
         self.persist_announcement_state().await;
     }
     /// Idle threshold for proactive model metadata refresh on session resume.
-    /// If the session has been idle longer than this, we fetch fresh model config
-    /// from cli-chat-proxy before the next API request to catch context_window changes.
+    /// A session idle longer than this fetches fresh model config from cli-chat-proxy before the next API request to catch context_window changes.
     pub(super) const IDLE_REFRESH_THRESHOLD_SECS: i64 = 600;
-    /// Record the current time as the last API request timestamp.
     pub(super) fn record_api_request_time(&self) {
         let now_ms = chrono::Utc::now().timestamp_millis();
         self.last_api_request_at
@@ -393,9 +373,9 @@ impl SessionActor {
     }
     /// Check if the session has been idle and proactively refresh model metadata.
     ///
-    /// Called at the start of each turn. If idle > `IDLE_REFRESH_THRESHOLD_SECS`,
-    /// fetches `/models-v2` from cli-chat-proxy and updates the cached
-    /// context_window / max_completion_tokens if remote settings changed them.
+    /// Called at the start of each turn.
+    /// When idle exceeds `IDLE_REFRESH_THRESHOLD_SECS`, fetches `/models-v2` from cli-chat-proxy.
+    /// Updates the cached context_window / max_completion_tokens if remote settings changed them.
     ///
     /// Skipped for BYOK users (no remote settings, no `/models-v2`).
     #[tracing::instrument(level = "debug", skip_all)]
@@ -591,9 +571,9 @@ impl SessionActor {
         self.chat_state_handle
             .update_sampling_config(updated_config);
     }
-    /// Inject the actor's managed Read-deny globs into the current ToolBridge so
-    /// the Grep tool excludes policy-forbidden paths. No-op when empty. Called on
-    /// session setup and re-called after an agent rebuild (the rebuilt bridge
+    /// Inject the actor's managed Read-deny globs into the current ToolBridge so the Grep tool excludes policy-forbidden paths.
+    /// No-op when empty.
+    /// Called on session setup and re-called after an agent rebuild (the rebuilt bridge
     #[tracing::instrument(level = "debug", skip_all)]
     pub(super) async fn inject_deny_read_globs(&self) {
         if self.deny_read_globs.is_empty() {
@@ -684,12 +664,11 @@ impl SessionActor {
             },
         }
     }
-    /// Build the `/context` usage rows for the skills listing, the workflow
-    /// listing, the MCP server listing, and AGENTS.md (see [`TokenUsageCategory`]).
+    /// Build the `/context` usage rows for the skills listing, the workflow listing, the MCP server listing, and AGENTS.md.
+    /// See [`TokenUsageCategory`].
     ///
-    /// Under templated sessions, the skills row estimates the mid-session
-    /// envelope; the baseline lives in the first-message preamble with the
-    /// same rows, so the difference is a few dozen tokens of envelope text.
+    /// Under templated sessions, the skills row estimates the mid-session envelope.
+    /// The baseline lives in the first-message preamble with the same rows, so the difference is a few dozen tokens of envelope text.
     #[tracing::instrument(level = "debug", skip_all)]
     pub(super) async fn usage_categories(&self) -> Vec<TokenUsageCategory> {
         let bridge = self.tool_bridge_handle();

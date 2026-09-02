@@ -1,13 +1,11 @@
-//! Provider construction for the external stream: `SdkLoggerProvider` +
-//! `SdkMeterProvider`, never registered globally, never sharing anything with
-//! the internal `RefreshableSpanExporter` pipeline.
+//! Provider construction for the external stream: `SdkLoggerProvider` and `SdkMeterProvider`.
+//! Neither is registered globally, and nothing is shared with the internal `RefreshableSpanExporter` pipeline.
 //!
-//! The exporters are plain `opentelemetry_otlp` http/protobuf or gRPC/protobuf
-//! exporters built with **only** the customer headers from
-//! `OTEL_EXPORTER_OTLP_HEADERS` — no code path here can attach
-//! `Authorization`/`X-XAI-Token-Auth`/`x-userid`;
-//! those constants live in `otel_layer` and are not referenced by this
-//! module. No `AuthCredentialProvider` is ever read.
+//! The exporters are plain `opentelemetry_otlp` http/protobuf or gRPC/protobuf exporters.
+//! They are built with **only** the customer headers from `OTEL_EXPORTER_OTLP_HEADERS`.
+//! No code path here can attach `Authorization`, `X-XAI-Token-Auth`, or `x-userid`.
+//! Those header constants live in `otel_layer` and are not referenced by this module.
+//! No `AuthCredentialProvider` is ever read.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -74,8 +72,7 @@ impl DedicatedRuntime {
             tracing::error!(error = %e, "external OTEL gRPC runtime thread spawn failed; external telemetry disabled");
             return None;
         }
-        // Bounded: this runs on the startup path, and the host that refuses
-        // threads is the one least likely to schedule this one promptly.
+        // Bounded: this runs on the startup path, and the host that refuses threads is the one least likely to schedule this one promptly
         match ready_rx.recv_timeout(Duration::from_secs(2)) {
             Ok(true) => Some(Self { tx }),
             _ => None,
@@ -129,9 +126,9 @@ impl opentelemetry_sdk::runtime::RuntimeChannel for DedicatedRuntime {
 use super::config::{ExporterSelection, ExternalOtelConfig, OtlpTransport, TemporalityPreference};
 use super::redact::{ExportHealth, RedactingLogExporter, SharedGates, ValidatingMetricExporter};
 
-/// Resource shared by both providers. `builder_empty()` (not `builder()`):
-/// the default `EnvResourceDetector` would export `OTEL_RESOURCE_ATTRIBUTES`
-/// env values, bypassing the schema (same rationale as the internal layer).
+/// Resource shared by both providers.
+/// `builder_empty()` (not `builder()`): the default `EnvResourceDetector` would export `OTEL_RESOURCE_ATTRIBUTES` env values, bypassing the schema.
+/// The internal layer skips the env detector for the same reason.
 fn build_resource(cfg: &ExternalOtelConfig) -> opentelemetry_sdk::Resource {
     let mut attrs = vec![
         opentelemetry::KeyValue::new("service.version", cfg.client.service_version.clone()),
@@ -148,7 +145,7 @@ fn build_resource(cfg: &ExternalOtelConfig) -> opentelemetry_sdk::Resource {
         attrs.push(opentelemetry::KeyValue::new("terminal.type", terminal_type));
     }
     opentelemetry_sdk::Resource::builder_empty()
-        // RQ6 (final): `grok-cli`, a wire commitment.
+        // `grok-cli` is a wire commitment
         .with_service_name("grok-cli")
         .with_attributes(attrs)
         .build()
@@ -161,9 +158,8 @@ fn temporality(pref: TemporalityPreference) -> Temporality {
     }
 }
 
-/// Console (stderr) log exporter for local debugging
-/// (`OTEL_LOGS_EXPORTER=console`). Writes to **stderr** so stdout protocol
-/// channels (headless/stream-JSON) are never corrupted.
+/// Console (stderr) log exporter for local debugging (`OTEL_LOGS_EXPORTER=console`).
+/// Writes to **stderr** so stdout protocol channels (headless/stream-JSON) are never corrupted.
 #[derive(Debug)]
 struct StderrLogExporter;
 
@@ -226,15 +222,15 @@ impl opentelemetry_sdk::metrics::exporter::PushMetricExporter for StderrMetricEx
     }
 }
 
-/// Customer headers as the HTTP OTLP builder's header map. The **only** headers
-/// the external HTTP exporters send (pinned by the header-isolation test below).
+/// Customer headers as the HTTP OTLP builder's header map.
+/// These are the **only** headers the external HTTP exporters send (pinned by the header-isolation test below).
 fn customer_headers(headers: &[(String, String)]) -> std::collections::HashMap<String, String> {
     headers.iter().cloned().collect()
 }
 
-/// Customer headers as gRPC metadata. Invalid metadata keys/values are skipped;
-/// this mirrors the HTTP builder's "only customer-supplied headers" invariant
-/// without letting one malformed entry disable telemetry entirely.
+/// Customer headers as gRPC metadata.
+/// Invalid metadata keys/values are skipped, so one malformed entry cannot disable telemetry entirely.
+/// This mirrors the HTTP builder's "only customer-supplied headers" invariant.
 fn customer_metadata(input: &[(String, String)]) -> MetadataMap {
     let mut headers = HeaderMap::new();
     for (key, value) in input {
@@ -258,32 +254,28 @@ pub(crate) struct BuiltProviders {
 
 /// TLS configurations to try, in order, when building a gRPC exporter.
 ///
-/// `opentelemetry-otlp` 0.32 must be handed an explicit `ClientTlsConfig` for
-/// `https://` endpoints: its own fallback is `ClientTlsConfig::new()`, whose
-/// root store is **empty** in tonic 0.14 (`Endpoint::from_shared` never
-/// auto-enables roots), so every handshake would fail with `UnknownIssuer`.
+/// `opentelemetry-otlp` 0.32 must be handed an explicit `ClientTlsConfig` for `https://` endpoints.
+/// Its own fallback is `ClientTlsConfig::new()`, whose root store is **empty** in tonic 0.14 (`Endpoint::from_shared` never auto-enables roots).
+/// Every handshake would therefore fail with `UnknownIssuer`.
 ///
 /// For https endpoints this returns two candidates:
-/// 1. system CA store + embedded webpki roots (+ the customer CA, if any);
-/// 2. embedded webpki roots only (+ the customer CA, if any) — the fallback
-///    for hosts whose native store is missing or unreadable, where tonic
-///    fails candidate 1 at build time (`NativeCertsNotFound`). This keeps
-///    parity with the HTTP transport's embedded-roots reqwest client.
+/// 1. system CA store and embedded webpki roots (and the customer CA, if any);
+/// 2. embedded webpki roots only (and the customer CA, if any).
+///    Candidate 2 is the fallback for hosts whose native store is missing or unreadable, where tonic fails candidate 1 (`NativeCertsNotFound`).
+///    This keeps parity with the HTTP transport's embedded-roots reqwest client.
 ///
 /// For plain `http://` endpoints it returns a single `None` (no TLS).
 /// `true` when the bytes contain at least one PEM certificate block.
 ///
-/// The emptiness gate for fail-closed CA handling: a readable but cert-less
-/// bundle must fail exporter construction, not silently fall back to the
-/// default roots. Malformed blocks are caught later by the TLS stack's own
-/// parser (also fail-closed, at exporter build).
+/// The emptiness gate for fail-closed CA handling: a readable but cert-less bundle must fail exporter construction.
+/// It must not silently fall back to the default roots.
+/// Malformed blocks are caught later by the TLS stack's own parser (also fail-closed, at exporter build).
 pub(crate) fn pem_contains_certificate(pem: &[u8]) -> bool {
     const MARKER: &[u8] = b"-----BEGIN CERTIFICATE-----";
     pem.windows(MARKER.len()).any(|window| window == MARKER)
 }
 
-/// Assemble a PEM BEGIN line from fragments so source scanners do not treat
-/// the marker itself as committed key material.
+/// Assemble a PEM BEGIN line from fragments so source scanners do not treat the marker itself as committed key material.
 fn pem_begin_line(label_parts: &[&[u8]]) -> Vec<u8> {
     let mut line = Vec::with_capacity(32);
     line.extend_from_slice(b"-----BEGIN ");
@@ -308,8 +300,7 @@ pub(crate) fn pem_contains_private_key(pem: &[u8]) -> bool {
     })
 }
 
-/// Re-encode validated DER roots as one multi-block PEM string (tonic's
-/// `Certificate::from_pem` parses every block in a single certificate).
+/// Re-encode validated DER roots as one multi-block PEM string (tonic's `Certificate::from_pem` parses every block in a single certificate).
 /// `None` when `ders` is empty.
 fn ders_to_pem_bundle(ders: &[Vec<u8>]) -> Option<String> {
     use base64::Engine as _;
@@ -331,12 +322,9 @@ fn grpc_tls_candidates(
     client_certificate_path: Option<&str>,
     client_key_path: Option<&str>,
 ) -> BuildResult<Vec<Option<ClientTlsConfig>>> {
-    // Mirror opentelemetry-otlp's own `is_https` detection exactly (parsed
-    // URI scheme == https, tonic/mod.rs) so its empty-root-store
-    // `ClientTlsConfig::new()` fallback for https endpoints is unreachable:
-    // every endpoint it treats as https gets an explicit config from us.
-    // Schemeless or non-http(s) endpoints get no TLS config here and fail
-    // fail-closed inside the exporter ("invalid URL, scheme is missing").
+    // Mirror opentelemetry-otlp's own `is_https` detection exactly (the parsed URI scheme is https; see tonic/mod.rs)
+    // Every endpoint it treats as https gets an explicit config from us, so its empty-root-store `ClientTlsConfig::new()` fallback is unreachable
+    // Schemeless or non-http(s) endpoints get no TLS config here and fail closed inside the exporter ("invalid URL, scheme is missing")
     let is_https = endpoint
         .parse::<http::Uri>()
         .ok()
@@ -354,16 +342,14 @@ fn grpc_tls_candidates(
     }
     let mut base =
         ClientTlsConfig::new().trust_anchors(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    // Process-wide `GROK_EXTRA_CA_BUNDLE` roots (fail-open by that crate's
-    // contract), matching the HTTP transport's client policy — the same
-    // corporate CA must work on both transports.
+    // Process-wide `GROK_EXTRA_CA_BUNDLE` roots (fail-open by that crate's contract), matching the HTTP transport's client policy
+    // The same corporate CA must work on both transports
     if let Some(extra_pem) = ders_to_pem_bundle(xai_grok_extra_ca::extra_root_ders()) {
         base = base.ca_certificate(Certificate::from_pem(extra_pem));
     }
     let base = match ca_certificate_path {
-        // Fail closed on an unreadable or certificate-less customer CA (the
-        // caller warns and disables the stream): silently exporting without
-        // the configured trust anchor would be worse than not exporting.
+        // Fail closed on an unreadable or certificate-less customer CA (the caller warns and disables the stream)
+        // Silently exporting without the configured trust anchor would be worse than not exporting
         Some(path) => {
             let pem = std::fs::read(path).map_err(|e| {
                 opentelemetry_otlp::ExporterBuildError::InternalFailure(format!(
@@ -457,12 +443,9 @@ impl OtlpExportFactory for OtlpLogExporterBuilder<'_> {
             OtlpExportTransport::HttpProtobuf(http_client) => {
                 opentelemetry_otlp::LogExporter::builder()
                     .with_http()
-                    // Pin http/protobuf. opentelemetry-otlp's default protocol
-                    // is compile-time, feature-gated: `http-json` (if unified
-                    // into the build, as it is under Bazel) flips the default to
-                    // JSON, while a pure-cargo build of this crate defaults to
-                    // protobuf. Pin explicitly so the contract holds on every
-                    // build when HTTP transport is selected.
+                    // Pin http/protobuf: opentelemetry-otlp's default protocol is compile-time, feature-gated
+                    // `http-json` (unified into the Bazel build) flips the default to JSON, while a pure-cargo build defaults to protobuf
+                    // Pin explicitly so the contract holds on every build when HTTP transport is selected
                     .with_protocol(Protocol::HttpBinary)
                     .with_http_client(http_client.clone())
                     .with_endpoint(&self.cfg.logs_endpoint)
@@ -510,8 +493,7 @@ impl OtlpExportFactory for OtlpMetricExporterBuilder<'_> {
             OtlpExportTransport::HttpProtobuf(http_client) => {
                 opentelemetry_otlp::MetricExporter::builder()
                     .with_http()
-                    // Pin http/protobuf (see the logs exporter above for the
-                    // feature-unification rationale).
+                    // Pin http/protobuf (see the logs exporter above for the feature-unification rationale)
                     .with_protocol(Protocol::HttpBinary)
                     .with_http_client(http_client.clone())
                     .with_endpoint(&self.cfg.metrics_endpoint)
@@ -682,8 +664,7 @@ fn build_signal_http_client(
         .map_err(opentelemetry_otlp::ExporterBuildError::InternalFailure)
 }
 
-/// Build the providers per the resolved config. Returns `None` providers for
-/// signals whose exporter selection is `none`.
+/// Returns `None` providers for signals whose exporter selection is `none`.
 pub(crate) fn build(
     cfg: &ExternalOtelConfig,
     gates: SharedGates,
@@ -712,9 +693,8 @@ pub(crate) fn build(
         })
         .transpose()?;
 
-    // Console output is suppressed in the agent/headless entrypoints:
-    // wrapping harnesses routinely capture stderr for diagnostics, and
-    // interleaving periodic telemetry dumps there degrades those logs.
+    // Console output is suppressed in the agent/headless entrypoints
+    // Wrapping harnesses routinely capture stderr for diagnostics, and interleaving periodic telemetry dumps there degrades those logs
     let console_ok = !matches!(cfg.client.app_entrypoint.as_str(), "agent" | "headless");
 
     let logger_provider = match cfg.logs_exporter {
@@ -798,11 +778,9 @@ mod tests {
         cfg
     }
 
-    /// Header-isolation invariant (T2): the outgoing header map equals
-    /// exactly the parsed `OTEL_EXPORTER_OTLP_HEADERS` — no `Authorization`,
-    /// `X-XAI-Token-Auth`, `x-userid`, or `x-teamid` unless customer-supplied
-    /// (complement of the internal pipeline's
-    /// `extra_headers_override_bearer_but_keep_static_identity`).
+    /// Header-isolation invariant: the outgoing header map equals exactly the parsed `OTEL_EXPORTER_OTLP_HEADERS`.
+    /// None of `Authorization`, `X-XAI-Token-Auth`, `x-userid`, or `x-teamid` appears unless customer-supplied.
+    /// The complement of the internal pipeline's `extra_headers_override_bearer_but_keep_static_identity`.
     #[test]
     fn exporter_headers_are_exactly_customer_headers() {
         let cfg = cfg_with_headers(vec![("x-collector-token".into(), "abc".into())]);
@@ -830,11 +808,9 @@ mod tests {
         );
     }
 
-    /// Regression test for GB-4580: with the opentelemetry-otlp 0.32 bump,
-    /// the `tls-roots` feature stopped implying a TLS provider feature and
-    /// every `https://` gRPC endpoint was rejected at exporter build time
-    /// ("uses HTTPS but no TLS feature is enabled"), silently disabling the
-    /// external stream. The exporters must build for https endpoints.
+    /// Regression: with the opentelemetry-otlp 0.32 bump, the `tls-roots` feature stopped implying a TLS provider feature.
+    /// Every `https://` gRPC endpoint was then rejected at exporter build time ("uses HTTPS but no TLS feature is enabled").
+    /// That silently disabled the external stream; the exporters must build for https endpoints.
     #[test]
     fn grpc_exporters_build_for_https_endpoints() {
         let cfg = ExternalOtelConfig::resolve_with(
@@ -842,8 +818,7 @@ mod tests {
                 "GROK_EXTERNAL_OTEL" => Some("1".into()),
                 "OTEL_LOGS_EXPORTER" | "OTEL_METRICS_EXPORTER" => Some("otlp".into()),
                 "OTEL_EXPORTER_OTLP_PROTOCOL" => Some("grpc".into()),
-                // Nothing listens here: gRPC channels connect lazily, so
-                // exporter construction must still succeed.
+                // Nothing listens here: gRPC channels connect lazily, so exporter construction must still succeed
                 "OTEL_EXPORTER_OTLP_ENDPOINT" => Some("https://localhost:1".into()),
                 _ => None,
             },
@@ -879,10 +854,8 @@ mod tests {
         assert!(candidates.iter().all(Option::is_some));
     }
 
-    /// Endpoints without a scheme must not get a TLS config: they agree with
-    /// opentelemetry-otlp's own https detection (parsed scheme), and the
-    /// exporter rejects them at connect time ("scheme is missing") rather
-    /// than handshaking with an empty root store.
+    /// Endpoints without a scheme must not get a TLS config: they agree with opentelemetry-otlp's own https detection (parsed scheme).
+    /// The exporter rejects them at connect time ("scheme is missing") rather than handshaking with an empty root store.
     #[test]
     fn grpc_tls_candidates_schemeless_endpoint_gets_no_tls() {
         let candidates = grpc_tls_candidates("collector.corp.example:4317", None, None, None)
@@ -891,8 +864,7 @@ mod tests {
         assert!(candidates[0].is_none());
     }
 
-    /// Scheme detection is on the parsed URI, so case differences cannot
-    /// diverge from the exporter's own https check.
+    /// Scheme detection is on the parsed URI, so case differences cannot diverge from the exporter's own https check.
     #[test]
     fn grpc_tls_candidates_uppercase_https_scheme_detected() {
         let candidates =
@@ -902,8 +874,7 @@ mod tests {
         assert!(candidates.iter().all(Option::is_some));
     }
 
-    /// A CA override on an *inactive* signal must not take down the active
-    /// signal's per-signal HTTP client (and with it the whole stream).
+    /// A CA override on an *inactive* signal must not take down the active signal's per-signal HTTP client (and with it the whole stream).
     #[test]
     fn inactive_signal_ca_does_not_disable_http_stream() {
         let cfg = ExternalOtelConfig::resolve_with(
@@ -928,8 +899,7 @@ mod tests {
         assert!(built.meter_provider.is_some());
     }
 
-    /// A readable but certificate-less CA bundle must fail closed, not build
-    /// exporters that verify without the configured trust anchor.
+    /// A readable but certificate-less CA bundle must fail closed, not build exporters that verify without the configured trust anchor.
     #[test]
     fn grpc_tls_candidates_fail_closed_on_empty_ca_file() {
         let file = tempfile::NamedTempFile::new().expect("temp CA file");
@@ -951,8 +921,7 @@ mod tests {
             b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
         ));
         assert!(!pem_contains_certificate(b""));
-        // A non-certificate PEM block (CSR) must not count — note it does not
-        // contain the exact `-----BEGIN CERTIFICATE-----` marker.
+        // A non-certificate PEM block (CSR) must not count; it lacks the exact `-----BEGIN CERTIFICATE-----` marker
         assert!(!pem_contains_certificate(
             b"-----BEGIN CERTIFICATE REQUEST-----\nAAAA\n-----END CERTIFICATE REQUEST-----\n"
         ));
@@ -1008,8 +977,7 @@ mod tests {
         assert!(err.to_string().contains("CLIENT_KEY"), "{err}");
     }
 
-    /// The DER→PEM re-encode used for `GROK_EXTRA_CA_BUNDLE` must produce a
-    /// bundle other PEM parsers can read back, one block per DER.
+    /// The DER-to-PEM re-encode used for `GROK_EXTRA_CA_BUNDLE` must produce a bundle other PEM parsers can read back, one block per DER.
     #[test]
     fn ders_to_pem_bundle_roundtrips() {
         assert!(ders_to_pem_bundle(&[]).is_none());

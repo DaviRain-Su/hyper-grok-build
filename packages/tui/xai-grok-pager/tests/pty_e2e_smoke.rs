@@ -11,8 +11,6 @@ mod common;
 mod agent_response;
 #[path = "pty_e2e/auto_compact_top_row.rs"]
 mod auto_compact_top_row;
-#[path = "pty_e2e/basename_path_demo_pty.rs"]
-mod basename_path_demo_pty;
 #[path = "pty_e2e/connect_ui_timeout_env_override.rs"]
 mod connect_ui_timeout_env_override;
 #[path = "pty_e2e/doubled_lines_out_of_band_repro.rs"]

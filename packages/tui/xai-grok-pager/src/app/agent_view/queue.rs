@@ -135,6 +135,12 @@ impl AgentView {
         self.expect_send_now_cancel = Some(prompt_id);
     }
 
+    pub(crate) fn send_now_awaiting_current(&self) -> bool {
+        self.expect_send_now_cancel
+            .as_deref()
+            .is_some_and(|id| self.session.current_prompt_id.as_deref() != Some(id))
+    }
+
     /// Clear both send-now expectations (failure, interactive cancel, or reload).
     pub(crate) fn clear_send_now_expectation(&mut self) {
         self.expect_send_now_cancel = None;
@@ -518,6 +524,12 @@ impl AgentView {
             .or_else(|| handle_overlay_nav_key(&mut self.queue.overlay, key));
         if let Some(action) = action {
             self.queue.on_state_change();
+            // Under the dock, Esc/dismiss collapses the sticky Queued section
+            // (render enforces the overlay from this flag, so clearing only
+            // `overlay.visible` would be re-opened next frame).
+            if !self.queue.overlay.visible && crate::views::dock::enabled() {
+                self.dock_queued_expanded = false;
+            }
             // Overlay dismiss skips hide_queue_pane; reset edge when queue is empty.
             if !self.queue.overlay.visible && self.visible_queue_is_empty() {
                 self.queue.reset_auto_show_edge();

@@ -1,6 +1,6 @@
-//! Corruption self-heal for the session-search SQLite cache: classify an
-//! unusable file, then quarantine it under a lock so a fresh empty database
-//! can be recreated. The index layer drives the retry.
+//! Corruption self-heal for the session-search SQLite cache.
+//! An unusable file is classified, then quarantined under a lock so a fresh empty database can be recreated.
+//! The index layer drives the retry.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -12,16 +12,14 @@ use xai_sqlite_journal::JournalMode;
 
 static HEAL_LOCK: Mutex<()> = Mutex::new(());
 
-/// Bumped each time the cache is quarantined and recreated, so callers can tell
-/// they are now looking at a different incarnation of the on-disk index.
+/// Bumped each time the cache is quarantined and recreated, so callers can tell the on-disk index file was replaced.
 static CACHE_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn current_epoch() -> u64 {
     CACHE_EPOCH.load(Ordering::Acquire)
 }
 
-/// A snapshot of the [`CACHE_EPOCH`], used to detect whether the cache was
-/// quarantined and recreated between two points in this process.
+/// A snapshot of the [`CACHE_EPOCH`], used to detect whether the cache was quarantined and recreated between two points in this process.
 pub(crate) struct CacheEpoch(u64);
 
 impl CacheEpoch {

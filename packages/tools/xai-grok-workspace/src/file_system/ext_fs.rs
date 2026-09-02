@@ -1,17 +1,9 @@
-//! Filesystem extension ops (`workspace.fs_*`) — the server-proxied backing
-//! for the shell's `x.ai/fs/*` ACP extension methods.
+//! Filesystem extension ops (`workspace.fs_*`): the server-proxied backing for the shell's `x.ai/fs/*` ACP extension methods.
 //!
-//! These mirror the pure functions that previously lived only in the
-//! shell (`xai-grok-shell/src/session/file_system.rs`) so that, in proxy
-//! mode, a `x.ai/fs/*` request executes on the *remote* workspace server
-//! instead of the agent host. Each request type implements
-//! [`WorkspaceOp`], so it runs in-process for local sessions and routes
-//! over the server `workspace_rpc` tool for proxy sessions — identical wire
-//! output either way.
-//!
-//! Path resolution: an absolute `path` is used directly; a relative
-//! `path` is joined onto `cwd` (the per-session cwd the shell resolves
-//! and sends) or, when absent, the workspace root.
+//! These mirror the pure functions that previously lived only in the shell (`xai-grok-shell/src/session/file_system.rs`).
+//! In proxy mode a `x.ai/fs/*` request executes on the *remote* workspace server instead of the agent host.
+//! Each request type implements [`WorkspaceOp`]: local sessions run it in-process, proxy sessions route it over the server `workspace_rpc` tool.
+//! The wire output is identical either way.
 
 use std::path::{Path, PathBuf};
 
@@ -30,9 +22,7 @@ pub use xai_grok_workspace_types::rpc::fs::{
     FsReadFileReq, FsWriteFileReq,
 };
 
-/// Resolve a request `path` to an absolute path. Absolute paths are used
-/// directly; relative paths join `cwd` (the shell-resolved per-session
-/// cwd) or, when absent, the workspace root.
+/// An absolute `path` is used directly; a relative one joins `cwd` (the per-session cwd the shell sends) or, when absent, the workspace root.
 fn resolve_abs(
     path: &str,
     cwd: &Option<PathBuf>,
@@ -58,7 +48,7 @@ impl WorkspaceOp for FsListReq {
     ) -> WorkspaceResult<Self::Response> {
         let abs_unconfined = resolve_abs(&self.path, &self.cwd, ws)?;
         let (abs, confine_root) = ws.confine_to_workspace_root(&abs_unconfined).await?;
-        // Off-executor: `list` does synchronous walk + metadata syscalls.
+        // `list` does a synchronous walk and metadata syscalls
         let req = self.clone();
         tokio::task::spawn_blocking(move || list(&abs, &req, confine_root))
             .await
@@ -90,8 +80,7 @@ impl WorkspaceOp for FsReadFileReq {
         let abs_unconfined = resolve_abs(&self.path, &self.cwd, ws)?;
         let (abs, _) = ws.confine_to_workspace_root(&abs_unconfined).await?;
 
-        // Legacy full-file read path: preserves the pre-range wire output
-        // (auto utf8/base64 detect, MIME `type`, `lineCount`).
+        // Legacy full-file read path: keeps the wire output from before ranged reads (auto utf8/base64 detect, MIME `type`, `lineCount`)
         let ranged = self.offset.is_some()
             || self.length.is_some()
             || self.encoding == FsReadEncoding::Base64;
@@ -102,8 +91,7 @@ impl WorkspaceOp for FsReadFileReq {
             return Ok(build_file_entry(&bytes));
         }
 
-        // Binary-safe ranged read: `size` is the full file size, the
-        // chunk is `[offset, offset + min(length, max_bytes, cap))`.
+        // Binary-safe ranged read: `size` is the full file size, the chunk is `[offset, offset + min(length, max_bytes, cap))`
         let md = tokio::fs::metadata(&abs)
             .await
             .map_err(|e| WorkspaceError::HubError(e.to_string()))?;
@@ -113,8 +101,7 @@ impl WorkspaceOp for FsReadFileReq {
                 self.path
             )));
         }
-        // Best-effort snapshot: a concurrent truncate/grow between here and
-        // read_range can make `size` inconsistent with the returned chunk.
+        // Best-effort snapshot: a concurrent truncate/grow between here and read_range can make `size` inconsistent with the returned chunk
         let size = md.len();
         let offset = self.offset.unwrap_or(0);
         let length = super::walk::clamp_read_length(self.length, self.max_bytes);
@@ -166,7 +153,7 @@ impl WorkspaceOp for FsDeleteFileReq {
 }
 
 // =========================================================================
-// Pure helpers — ported verbatim from the shell so output is identical.
+// Pure helpers, ported verbatim from the shell so output is identical
 // =========================================================================
 
 fn list(
@@ -174,8 +161,7 @@ fn list(
     req: &FsListReq,
     confine_to_canonical_root: Option<PathBuf>,
 ) -> WorkspaceResult<FsListData> {
-    // Confined to the canonical root when set (escaping symlinks not enumerated);
-    // `None` (the default) walks unconfined.
+    // The walk is confined to the canonical root when set (symlinks that escape are not enumerated); `None` (the default) walks unconfined
     let page = super::walk::list_directory_paged(
         abs_path,
         super::walk::ListOptions {
@@ -214,10 +200,8 @@ fn list(
     })
 }
 
-/// Map a binary-safe ranged chunk to the shell-facing `FsReadFileData`.
-/// `size` is the full file size; `lineCount` is omitted for ranged reads
-/// and the MIME `type` is a coarse text/binary tag (mid-file chunks make
-/// magic-byte sniffing meaningless).
+/// `size` is the full file size; `lineCount` is omitted for ranged reads.
+/// The MIME `type` is a coarse text/binary tag (mid-file chunks make magic-byte sniffing meaningless).
 fn build_ranged_entry(chunk: Vec<u8>, size: u64, encoding: FsReadEncoding) -> FsReadFileData {
     let (payload, is_text) = super::walk::encode_chunk(chunk, encoding);
     let (content, content_base64) = match payload {
@@ -266,9 +250,8 @@ fn build_file_entry(bytes: &[u8]) -> FsReadFileData {
 mod tests {
     use super::*;
 
-    /// Build an `FsListReq` for a temp dir test. `path`/`cwd` are unused by
-    /// `list` (it takes the resolved abs path directly); `respect_git_ignore`
-    /// is off so the temp dir's location can't filter out our fixtures.
+    /// `path`/`cwd` are unused by `list` (it takes the resolved abs path directly).
+    /// `respect_git_ignore` is off so the temp dir's location can't filter out our fixtures.
     fn list_req(limit: usize) -> FsListReq {
         FsListReq {
             path: String::new(),
@@ -369,8 +352,7 @@ mod tests {
 
     #[test]
     fn build_ranged_entry_encodes_utf8_and_binary() {
-        // UTF-8 chunk under the default encoding → `content`, text/plain,
-        // full `size` echoed, no line count.
+        // A UTF-8 chunk under the default encoding travels in `content` as text/plain
         let e = build_ranged_entry(b"hello".to_vec(), 100, FsReadEncoding::Utf8);
         assert_eq!(e.content, "hello");
         assert!(e.content_base64.is_none());
@@ -378,8 +360,7 @@ mod tests {
         assert!(e.line_count.is_none());
         assert_eq!(e.content_type, "text/plain");
 
-        // Explicit base64 of valid UTF-8 stays text/plain but travels in
-        // `contentBase64`.
+        // Explicit base64 of valid UTF-8 stays text/plain but travels in `contentBase64`
         let e = build_ranged_entry(b"hi".to_vec(), 2, FsReadEncoding::Base64);
         assert!(e.content.is_empty());
         assert_eq!(
@@ -388,7 +369,7 @@ mod tests {
         );
         assert_eq!(e.content_type, "text/plain");
 
-        // Non-UTF-8 bytes fall back to base64 + octet-stream.
+        // Non-UTF-8 bytes fall back to base64 and octet-stream
         let raw = vec![0xff_u8, 0x00, 0xfe];
         let e = build_ranged_entry(raw.clone(), 3, FsReadEncoding::Utf8);
         assert!(e.content.is_empty());
@@ -399,7 +380,7 @@ mod tests {
         assert_eq!(e.content_type, "application/octet-stream");
     }
 
-    // Confinement (WorkspaceOp::execute) — covers both local and proxy dispatch.
+    // Confinement (WorkspaceOp::execute): covers both local and proxy dispatch
 
     #[tokio::test]
     async fn read_write_within_root_ok() {
@@ -503,8 +484,7 @@ mod tests {
         );
     }
 
-    // A *dangling* in-root symlink (target outside root, not yet created) must
-    // not let a write escape via `open(O_CREAT)` following the link.
+    // A *dangling* in-root symlink (target outside root, not yet created) must not let a write escape via `open(O_CREAT)` following the link
     #[tokio::test]
     #[cfg(unix)]
     async fn write_file_rejects_dangling_symlink_escape() {

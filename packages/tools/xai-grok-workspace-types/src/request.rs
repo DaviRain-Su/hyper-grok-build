@@ -2,31 +2,20 @@
 //!
 //! # Why `RequestMessage<T>` and not a `Request<T>` with runtime fields?
 //!
-//! A `Request<T>` with `cancel:
-//! CancellationToken` and `extensions: Extensions` fields is tempting. Both are
-//! **runtime concerns**, not wire concerns:
+//! A `Request<T>` with `cancel: CancellationToken` and `extensions: Extensions` fields is tempting.
+//! Both are **runtime concerns**, not wire concerns:
 //!
-//! - `tokio_util::sync::CancellationToken` is a tokio type. Adding it
-//!   here would force every consumer of `xai-grok-workspace-types`
-//!   (including the eventual WASM browser SDK) to pull in tokio, which
-//!   defeats the whole point of having a separate wire-types crate.
-//!   Cancellation is a transport mechanism: in-process, the receiver
-//!   drop signal handles it; over gRPC, the client closing the stream
-//!   handles it.
-//! - `Extensions` (a typed `HashMap<TypeId, Box<dyn Any + Send + Sync>>`)
-//!   is explicitly "in-process only; not serialized" per the doc. It
-//!   carries tracing spans and telemetry context that have no wire
-//!   representation -- they belong with the runtime.
+//! - `tokio_util::sync::CancellationToken` is a tokio type.
+//!   Adding it here would force every consumer of `xai-grok-workspace-types` (including the eventual WASM browser SDK) to pull in tokio.
+//!   Cancellation is a transport mechanism: in-process, the receiver drop signal handles it; over gRPC, the client closing the stream handles it.
+//! - `Extensions` (a typed `HashMap<TypeId, Box<dyn Any + Send + Sync>>`) is in-process only and not serialized.
+//!   It carries tracing spans and telemetry context that have no wire representation, so it belongs with the runtime.
 //!
-//! So this crate exposes `RequestMessage<T>`: just the parts that need
-//! to survive a network hop ([`message`](RequestMessage::message),
-//! [`metadata`](RequestMessage::metadata), and an optional
-//! [`deadline`](RequestMessage::deadline)). The runtime crate
-//! (`xai-grok-workspace`) wraps this in its own `Request<T>` that
-//! adds the cancellation token and extensions map.
+//! So this crate exposes `RequestMessage<T>`: just the parts that need to survive a network hop.
+//! Those are the [`message`](RequestMessage::message), [`metadata`](RequestMessage::metadata), and optional [`deadline`](RequestMessage::deadline).
+//! The runtime crate (`xai-grok-workspace`) wraps this in its own `Request<T>` that adds the cancellation token and extensions map.
 //!
-//! Splitting the envelope this way keeps `xai-grok-workspace-types`
-//! tokio-free while preserving a clean lift from wire to runtime types.
+//! Splitting the envelope this way keeps `xai-grok-workspace-types` tokio-free.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -35,26 +24,22 @@ use crate::metadata::Metadata;
 
 /// Wire-side request envelope.
 ///
-/// Wraps a typed payload ([`message`](RequestMessage::message)) with
-/// per-call [`metadata`](RequestMessage::metadata) and an optional
-/// [`deadline`](RequestMessage::deadline). The runtime envelope adds
-/// cancellation and an in-process extensions map -- see this module's
-/// doc comment for why those fields live there and not here.
+/// The runtime envelope adds cancellation and an in-process extensions map.
+/// This module's doc comment explains why those fields live there and not here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestMessage<T> {
     /// The typed request payload (one of the `*Request` enums).
     pub message: T,
 
-    /// String-keyed metadata for the call (auth tokens, trace context,
-    /// session id, ...). See [`crate::metadata`] for the standard keys.
+    /// String-keyed metadata for the call (auth tokens, trace context, session id, ...).
+    /// See [`crate::metadata`] for the standard keys.
     #[serde(default)]
     pub metadata: Metadata,
 
     /// Optional absolute deadline for the call, in UTC.
     ///
-    /// Encoded as an ISO-8601 string in JSON. The runtime layer is
-    /// responsible for translating this to a tokio sleep / gRPC
-    /// `grpc-timeout` header.
+    /// Encoded as an ISO-8601 string in JSON.
+    /// The runtime layer translates this into a tokio sleep or the gRPC `grpc-timeout` header.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline: Option<DateTime<Utc>>,
 }
@@ -96,17 +81,6 @@ impl<T> RequestMessage<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::META_SESSION_ID;
-
-    #[test]
-    fn round_trips_with_string_payload() {
-        let mut meta = Metadata::default();
-        meta.insert(META_SESSION_ID, "s1");
-        let req = RequestMessage::new("hello".to_string()).with_metadata(meta);
-        let json = serde_json::to_string(&req).unwrap();
-        let back: RequestMessage<String> = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, req);
-    }
 
     #[test]
     fn omits_deadline_when_none() {

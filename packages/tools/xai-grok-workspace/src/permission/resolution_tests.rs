@@ -1,17 +1,13 @@
 use super::*;
 
-// Crate-shared lock serializing tests that mutate the global process
-// environment so concurrent test threads can't race on shared env state.
-// Shared so `GROK_HOME`/`HOME` mutations here also serialize against the
-// other env-mutating test modules under single-process `cargo test --lib`.
+// Crate-shared lock serializing tests that mutate the global process environment so concurrent test threads can't race on shared env state
+// Shared so `GROK_HOME`/`HOME` mutations here also serialize against the other env-mutating test modules under single-process `cargo test --lib`
 use crate::ENV_TEST_LOCK as ENV_LOCK;
 
-// The crate-shared generic env-var guard (one definition in `lib.rs`),
-// aliased here so the existing `EnvVarGuard::set/unset` call sites are unchanged.
+// The crate-shared generic env-var guard, defined once in `lib.rs`
 use crate::TestEnvGuard as EnvVarGuard;
 
-/// Only `Deny` rules on read-capable tools (Read/Grep/Any) become grep
-/// excludes — write-only denies and non-deny actions are left out.
+/// Only `Deny` rules on read-capable tools (Read/Grep/Any) become grep excludes; write-only denies and non-deny actions are left out.
 #[test]
 fn deny_read_globs_selects_read_capable_denies_only() {
     let rule = |action, tool, pat: &str| PermissionRule {
@@ -112,12 +108,12 @@ fn parse_double_star_patterns() {
 
 #[test]
 fn parse_web_fetch_domain_vs_url() {
-    // domain: prefix -> PatternMode::Domain, prefix stripped
+    // A domain: prefix parses as PatternMode::Domain with the prefix stripped
     let domain = parse_permission_rule("WebFetch(domain:example.com)", RuleAction::Allow).unwrap();
     assert_eq!(domain.pattern, Some("example.com".to_string()));
     assert_eq!(domain.pattern_mode, PatternMode::Domain);
 
-    // URL pattern -> PatternMode::Glob, pattern kept as-is
+    // A URL pattern parses as PatternMode::Glob with the pattern kept as-is
     let url = parse_permission_rule("WebFetch(https://example.com/*)", RuleAction::Deny).unwrap();
     assert_eq!(url.pattern, Some("https://example.com/*".to_string()));
     assert_eq!(url.pattern_mode, PatternMode::Glob);
@@ -238,8 +234,6 @@ fn load_settings_with_default_mode() {
 // Phase 4: Integration / Precedence Tests
 // ═══════════════════════════════════════════════════════════════════════
 
-/// Integration test: end-to-end flow from .claude/settings.json file
-/// through load -> into_config -> verify rules are produced.
 #[test]
 fn integration_claude_settings_file_to_permission_config() {
     let tmp = tempfile::tempdir().unwrap();
@@ -267,7 +261,6 @@ fn integration_claude_settings_file_to_permission_config() {
     let perms = settings.permissions.unwrap();
     let (cfg, warnings) = perms.into_permission_config();
 
-    // Should have 3 rules (2 allow + 1 deny)
     assert_eq!(cfg.rules.len(), 3, "expected 3 rules, got {:?}", cfg.rules);
     assert!(warnings.is_empty(), "unexpected warnings: {:?}", warnings);
 
@@ -277,15 +270,12 @@ fn integration_claude_settings_file_to_permission_config() {
     assert!(actions.contains(&RuleAction::Deny));
 }
 
-/// Test discovery returns correct priority order:
-/// - Project paths before global
-/// - settings.local.json before settings.json within each directory
+/// Discovery order: project paths before global, and settings.local.json before settings.json within each directory.
 #[test]
 fn discovery_priority_order() {
     let tmp = tempfile::tempdir().unwrap();
     let cwd = tmp.path();
 
-    // Create .claude dir at cwd
     std::fs::create_dir_all(cwd.join(".claude")).unwrap();
 
     let paths = find_claude_settings_paths(cwd);
@@ -298,7 +288,6 @@ fn discovery_priority_order() {
         p.ends_with(".claude/settings.json") && !p.to_string_lossy().contains("settings.local")
     });
 
-    // Local should come before base (within project)
     if let (Some(li), Some(bi)) = (local_idx, base_idx) {
         assert!(li < bi, "settings.local.json should precede settings.json");
     }
@@ -315,18 +304,15 @@ fn discovery_priority_order() {
     }
 }
 
-/// Test: when no .claude/settings.json exists anywhere, find returns paths
-/// but load returns None for each.
+/// When no .claude/settings.json exists anywhere, find returns paths but load returns None for each.
 #[test]
 fn discovery_with_no_settings_files() {
     let tmp = tempfile::tempdir().unwrap();
     let cwd = tmp.path();
 
     let paths = find_claude_settings_paths(cwd);
-    // Should return candidate paths
     assert!(!paths.is_empty(), "should return candidate paths");
 
-    // None should actually load
     let loaded: Vec<_> = paths
         .iter()
         .filter_map(|p| load_claude_settings(p))
@@ -339,12 +325,10 @@ fn discovery_with_no_settings_files() {
 
 #[test]
 fn project_claude_absent_when_home_is_git_repo() {
-    // Home-is-a-git-repo (dotfiles in $HOME): for a cwd under home, the
-    // repo-root walk must NOT reach $HOME and treat `~/.claude` as
-    // project-tier (its env is injected into every spawned subprocess).
-    // Serialize + guard $HOME (find_repo_root reaches home via `.git`, and
-    // the guard reads xai_dirs::home_dir()). Pin USERPROFILE too:
-    // home_dir() prefers it on Windows and ignores HOME.
+    // When $HOME is itself a git repo (dotfiles), the repo-root walk from a cwd under home must not treat `~/.claude` as project-tier
+    // Project-tier env is injected into every spawned subprocess
+    // Serialize and guard $HOME: find_repo_root reaches home via `.git`, and the guard reads xai_dirs::home_dir()
+    // Pin USERPROFILE too: home_dir() prefers it on Windows and ignores HOME
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempfile::tempdir().unwrap();
     let _home_guard = EnvVarGuard::set("HOME", home.path());
@@ -537,10 +521,8 @@ fn load_settings_no_env_field() {
 
 #[test]
 fn load_claude_env_merges_with_precedence() {
-    // GROK_HOME-isolate so the claude-import marker reads clean (an imported
-    // dev machine would otherwise early-return an empty map and fail these
-    // asserts); the project tier overrides any real `~/.claude`, so the
-    // per-key assertions hold without isolating HOME.
+    // Isolate GROK_HOME so the claude-import marker reads clean; an imported dev machine would otherwise early-return an empty map
+    // The project tier overrides any real `~/.claude`, so the per-key assertions hold without isolating HOME
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempfile::tempdir().unwrap();
     let _home_guard = EnvVarGuard::set("GROK_HOME", home.path());
@@ -571,9 +553,8 @@ fn load_claude_env_merges_with_precedence() {
 
 #[test]
 fn load_claude_env_empty_when_no_settings() {
-    // Isolate GROK_HOME (claude-import marker) AND HOME (global `~/.claude`)
-    // so neither a dev machine's import marker nor its real `~/.claude` env
-    // can trip the empty-map assertion.
+    // Isolate GROK_HOME (claude-import marker) and HOME (global `~/.claude`)
+    // Neither a dev machine's import marker nor its real `~/.claude` env can then trip the empty-map assertion
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempfile::tempdir().unwrap();
     let _home_guard = EnvVarGuard::set("GROK_HOME", home.path());
@@ -586,11 +567,10 @@ fn load_claude_env_empty_when_no_settings() {
 
 #[test]
 fn load_claude_env_with_project_drops_repo_env_when_untrusted() {
-    // The repo-tree `.claude/settings.json` env is injected into every spawned
-    // subprocess (BASH_ENV / GIT_SSH_COMMAND / …), so an untrusted folder must
-    // drop it. Isolate GROK_HOME so the claude-import marker reads clean (an
-    // imported dev machine would otherwise early-return an empty map); the
-    // unique key keeps it independent of the host's real `~/.claude`.
+    // The repo-tree `.claude/settings.json` env is injected into every spawned subprocess (BASH_ENV / GIT_SSH_COMMAND / …)
+    // An untrusted folder must drop it
+    // Isolate GROK_HOME so the claude-import marker reads clean (an imported dev machine would otherwise early-return an empty map)
+    // The unique key keeps it independent of the host's real `~/.claude`
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempfile::tempdir().unwrap();
     let _home_guard = EnvVarGuard::set("GROK_HOME", home.path());
@@ -604,7 +584,7 @@ fn load_claude_env_with_project_drops_repo_env_when_untrusted() {
     )
     .unwrap();
 
-    // Trusted (preserves the original behavior): repo-tree env IS merged.
+    // Trusted: repo-tree env IS merged
     let trusted = load_claude_env_with_project(tmp.path(), true);
     assert_eq!(
         trusted.get("REPO_TREE_ENV_GATED"),
@@ -637,9 +617,8 @@ fn parse_toml_compact_deny_rules() {
     assert_eq!(rules[1].pattern, Some("cat .env*".to_string()));
 }
 
-/// A wrong-typed compact value (string instead of array) must warn — the
-/// user believes a deny rule is in force — while valid sibling keys still
-/// parse and nothing fails.
+/// A wrong-typed compact value (string instead of array) must warn, because the user believes a deny rule is in force.
+/// Valid sibling keys still parse and nothing fails.
 #[test]
 fn parse_toml_non_array_compact_value_warns() {
     #[derive(Clone, Default)]
@@ -716,1144 +695,6 @@ fn managed_deny_rules_block_env_reads() {
     assert!(result.is_none());
 }
 
-// ── managed-settings.json tests ──────────────────────────────────
-
-#[test]
-fn parse_managed_settings_json_end_to_end() {
-    let json = serde_json::json!({
-        "env": {
-            "DISABLE_TELEMETRY": 1,
-            "DISABLE_FEEDBACK_COMMAND": 1
-        },
-        "permissions": {
-            "disableBypassPermissionsMode": "disable",
-            "deny": ["Read(**/.env*)"]
-        },
-        "allowedMcpServers": [
-            { "serverUrl": "https://*.example.com/*" },
-            { "command": "npx" }
-        ],
-        "strictKnownMarketplaces": [
-            { "source": "git", "url": "git@github.enterprise.example:ACME/repo.git" }
-        ]
-    });
-    let path = std::path::Path::new("/test/managed-settings.json");
-    let ms = parse_managed_settings_json(&json, path);
-
-    assert_eq!(ms.features.disable_telemetry, Some(true));
-    assert_eq!(ms.features.disable_feedback, Some(true));
-    assert_eq!(ms.features.disable_yolo, Some(true));
-
-    assert!(ms.mcp_allowlist.is_restricted());
-    assert!(
-        ms.mcp_allowlist
-            .is_http_allowed("https://api.example.com/mcp")
-    );
-    assert!(!ms.mcp_allowlist.is_http_allowed("https://evil.com/mcp"));
-    // Embedded URL in query string must not bypass allowlist
-    assert!(
-        !ms.mcp_allowlist
-            .is_http_allowed("https://evil.com/?x=https://fake.example.com/y")
-    );
-    assert!(ms.mcp_allowlist.is_stdio_allowed("npx"));
-    assert!(!ms.mcp_allowlist.is_stdio_allowed("node"));
-
-    assert!(ms.marketplace_allowlist.is_restricted());
-    assert!(
-        ms.marketplace_allowlist
-            .is_url_allowed("git@github.enterprise.example:ACME/repo.git")
-    );
-    assert!(
-        !ms.marketplace_allowlist
-            .is_url_allowed("git@evil.com:org/repo.git")
-    );
-
-    assert_eq!(ms.permissions.len(), 1);
-    assert_eq!(ms.permissions[0].value.action, RuleAction::Deny);
-}
-
-#[test]
-fn mcp_allowlist_restricts_only_its_own_transport() {
-    let http_only = McpServerAllowlist::new(
-        vec![AllowedMcpServer::Http {
-            url_pattern: "https://ok.com/*".into(),
-        }],
-        vec![],
-        None,
-    );
-    assert!(http_only.is_stdio_allowed("anything"));
-
-    let stdio_only = McpServerAllowlist::new(
-        vec![AllowedMcpServer::Stdio {
-            command: "npx".into(),
-        }],
-        vec![],
-        None,
-    );
-    assert!(stdio_only.is_http_allowed("https://anything.com/mcp"));
-}
-
-#[test]
-fn parse_managed_settings_denied_mcp_servers_only() {
-    // Enterprise MDM-shaped managed policy: pure blocklist, no allowlist.
-    let json = serde_json::json!({
-        "deniedMcpServers": [
-            { "serverUrl": "https://mcp-gateway.example.net/*" },
-            { "command": "npx" }
-        ]
-    });
-    let path = std::path::Path::new("/test/managed-settings.json");
-    let ms = parse_managed_settings_json(&json, path);
-
-    // Deny-only must still count as restricted so enforcement engages.
-    assert!(ms.mcp_allowlist.is_restricted());
-    assert!(
-        !ms.mcp_allowlist
-            .is_http_allowed("https://mcp-gateway.example.net/mcp")
-    );
-    // Query/fragment stripping applies to deny patterns too (no bypass).
-    assert!(
-        !ms.mcp_allowlist
-            .is_http_allowed("https://mcp-gateway.example.net/mcp?x=y")
-    );
-    assert!(
-        !ms.mcp_allowlist
-            .is_http_allowed("https://MCP-GATEWAY.example.net/mcp")
-    );
-    // Empty allowlist still allows everything not denied.
-    assert!(ms.mcp_allowlist.is_http_allowed("https://other.com/mcp"));
-
-    // Stdio deny is an exact string match on the command.
-    assert!(!ms.mcp_allowlist.is_stdio_allowed("npx"));
-    assert!(ms.mcp_allowlist.is_stdio_allowed("node"));
-    assert!(ms.mcp_allowlist.is_stdio_allowed("/usr/local/bin/npx"));
-}
-
-#[test]
-fn denied_mcp_servers_beat_allowlist() {
-    let json = serde_json::json!({
-        "allowedMcpServers": [
-            { "serverUrl": "https://*.example.com/*" },
-            { "command": "npx" }
-        ],
-        "deniedMcpServers": [
-            { "serverUrl": "https://blocked.example.com/*" },
-            { "command": "npx" }
-        ]
-    });
-    let path = std::path::Path::new("/test/managed-settings.json");
-    let ms = parse_managed_settings_json(&json, path);
-
-    assert!(
-        ms.mcp_allowlist
-            .is_http_allowed("https://ok.example.com/mcp")
-    );
-    // Allowed by the allowlist, but deny wins.
-    assert!(
-        !ms.mcp_allowlist
-            .is_http_allowed("https://blocked.example.com/mcp")
-    );
-    assert!(!ms.mcp_allowlist.is_stdio_allowed("npx"));
-}
-
-#[test]
-fn mcp_denylist_restricts_only_its_own_transport() {
-    let json = serde_json::json!({
-        "deniedMcpServers": [
-            { "serverUrl": "https://blocked.com/*" }
-        ]
-    });
-    let path = std::path::Path::new("/test/managed-settings.json");
-    let ms = parse_managed_settings_json(&json, path);
-
-    // An http-only denylist must not restrict stdio servers.
-    assert!(ms.mcp_allowlist.is_stdio_allowed("anything"));
-    assert!(!ms.mcp_allowlist.is_http_allowed("https://blocked.com/mcp"));
-}
-
-#[test]
-fn mcp_denylist_classifies_denied_servers() {
-    let json = serde_json::json!({
-        "allowedMcpServers": [
-            { "serverUrl": "https://ok.example.com/*" }
-        ],
-        "deniedMcpServers": [
-            { "serverUrl": "https://blocked.example.com/*" }
-        ]
-    });
-    let path = std::path::Path::new("/test/managed-settings.json");
-    let ms = parse_managed_settings_json(&json, path);
-
-    let denied = agent_client_protocol::McpServer::Http(
-        agent_client_protocol::McpServerHttp::new("blocked", "https://blocked.example.com/mcp")
-            .headers(vec![]),
-    );
-    let not_allowed = agent_client_protocol::McpServer::Http(
-        agent_client_protocol::McpServerHttp::new("other", "https://other.com/mcp").headers(vec![]),
-    );
-    assert!(!ms.mcp_allowlist.is_server_allowed(&denied));
-    assert!(ms.mcp_allowlist.is_server_denied(&denied));
-    assert!(!ms.mcp_allowlist.is_server_allowed(&not_allowed));
-    assert!(!ms.mcp_allowlist.is_server_denied(&not_allowed));
-}
-
-#[test]
-fn denied_mcp_servers_fail_closed_across_scheme_port_path() {
-    // Deny matching must be host-normalized and scheme/port-agnostic so a
-    // blocklist cannot be bypassed by trivial URL variations. Regression
-    // for a managed-gateway deny pattern.
-    let json = serde_json::json!({
-        "deniedMcpServers": [
-            { "serverUrl": "https://mcp-gateway.example.net/*" }
-        ]
-    });
-    let path = std::path::Path::new("/test/managed-settings.json");
-    let ms = parse_managed_settings_json(&json, path);
-    let al = &ms.mcp_allowlist;
-
-    // All four previously fell through the literal glob (fail-open).
-    for bypass in [
-        "https://mcp-gateway.example.net:443/mcp", // explicit port
-        "http://mcp-gateway.example.net/mcp",      // scheme swap
-        "https://mcp-gateway.example.net",         // path-less host
-        "https://mcp-gateway.example.net./mcp",    // trailing-dot FQDN
-    ] {
-        assert!(!al.is_http_allowed(bypass), "must be denied: {bypass}");
-    }
-
-    // The same must hold through the server-level deny classifier.
-    let denied_port = agent_client_protocol::McpServer::Http(
-        agent_client_protocol::McpServerHttp::new("g", "https://mcp-gateway.example.net:443/mcp")
-            .headers(vec![]),
-    );
-    assert!(al.is_server_denied(&denied_port));
-
-    // Baseline + existing guards stay denied.
-    assert!(!al.is_http_allowed("https://mcp-gateway.example.net/mcp"));
-    assert!(!al.is_http_allowed("https://mcp-gateway.example.net/mcp?x=y"));
-    assert!(!al.is_http_allowed("https://MCP-GATEWAY.example.net/mcp"));
-
-    // Over-block guard: a genuinely different host stays allowed (deny is
-    // host-scoped, not a blanket block).
-    assert!(al.is_http_allowed("https://mcp-gateway.staging.example.net/mcp"));
-    assert!(al.is_http_allowed("https://other.example.com/mcp"));
-}
-
-/// Allow-URL wildcards must not cross the host boundary or loosen scheme.
-#[test]
-fn allow_url_wildcard_cannot_cross_host_boundary() {
-    let al = allowlist_from(serde_json::json!({
-        "allowedMcpServers": [ { "serverUrl": "https://*.corp.com/*" } ]
-    }));
-    assert!(al.is_server_allowed(&http_named("ok", "https://mcp.corp.com/sse")));
-    assert!(al.is_server_allowed(&http_named("nested", "https://a.corp.com/x/y")));
-    // Embedded-host bypass: `*` must not span `evil.example/a`.
-    assert!(!al.is_server_allowed(&http_named("evil", "https://evil.example/a.corp.com/x")));
-    // Userinfo decoy: the connect host is evil.example, not the `@` prefix.
-    assert!(!al.is_server_allowed(&http_named("userinfo", "https://a.corp.com@evil.example/x")));
-    // Scheme and port stay literal.
-    assert!(!al.is_server_allowed(&http_named("http", "http://mcp.corp.com/sse")));
-    assert!(!al.is_server_allowed(&http_named("port", "https://mcp.corp.com:8080/sse")));
-}
-
-/// A `/*` allow pattern matches the path-less spelling of its own host —
-/// "" and "/" are the same request, and the deny side already treats them so.
-#[test]
-fn allow_glob_matches_pathless_url() {
-    let al = allowlist_from(serde_json::json!({
-        "allowedMcpServers": [ { "serverUrl": "https://mcp.corp.com/*" } ]
-    }));
-    assert!(al.is_server_allowed(&http_named("slash", "https://mcp.corp.com/")));
-    assert!(al.is_server_allowed(&http_named("bare", "https://mcp.corp.com")));
-    assert!(al.is_server_allowed(&http_named("deep", "https://mcp.corp.com/a/b")));
-}
-
-/// Dot segments resolve before matching on both sides: a path-scoped allow
-/// must not reach a sibling path, and a deny must not be dodged by an
-/// unnormalized spelling. Percent-encoded dot segments (`%2e%2e`) and empty
-/// segments resolve exactly like the connect-time parser.
-#[test]
-fn dot_segments_resolve_before_matching() {
-    let al = allowlist_from(serde_json::json!({
-        "allowedMcpServers": [ { "serverUrl": "https://corp.com/mcp/*" } ]
-    }));
-    // Each spelling connects to /admin — outside the grant.
-    for dodge in [
-        "https://corp.com/mcp/../admin",
-        "https://corp.com/mcp/%2e%2e/admin",
-        "https://corp.com/mcp/.%2e/admin",
-        "https://corp.com/mcp/%2e./admin",
-        "https://corp.com/mcp/%2E%2E/admin",
-    ] {
-        assert!(
-            !al.is_server_allowed(&http_named("dotdot", dodge)),
-            "must not be granted: {dodge}"
-        );
-    }
-    // Benign single-dot segments still land inside the grant.
-    assert!(al.is_server_allowed(&http_named("dot", "https://corp.com/mcp/./tool")));
-
-    let deny = allowlist_from(serde_json::json!({
-        "deniedMcpServers": [ { "serverUrl": "https://corp.com/admin/*" } ]
-    }));
-    // Each spelling connects under /admin — the deny must still hit.
-    for dodge in [
-        "https://corp.com/mcp/../admin/x",
-        "https://corp.com/mcp/%2e%2e/admin/x",
-        // Empty segments follow the connect-time parser: //../x pops only
-        // the empty segment, landing on /admin/x — still denied.
-        "https://corp.com/admin//../x",
-    ] {
-        assert!(
-            deny.is_server_denied(&http_named("dodge", dodge)),
-            "must be denied: {dodge}"
-        );
-    }
-}
-
-/// Special-scheme URLs treat `\` as a host terminator just like `/`
-/// (`https://evil.example\@a.corp.com/x` connects to evil.example). The
-/// matcher must see the connect host on both sides.
-#[test]
-fn backslash_terminates_authority_like_connect_time() {
-    let al = allowlist_from(serde_json::json!({
-        "allowedMcpServers": [ { "serverUrl": "https://*.corp.com/*" } ]
-    }));
-    assert!(!al.is_server_allowed(&http_named("bs", "https://evil.example\\@a.corp.com/x")));
-
-    let deny = allowlist_from(serde_json::json!({
-        "deniedMcpServers": [ { "serverUrl": "https://evil.example/*" } ]
-    }));
-    assert!(deny.is_server_denied(&http_named("bs", "https://evil.example\\@a.corp.com/x")));
-}
-
-/// IPv4 deny entries compare parsed addresses so the WHATWG alternate
-/// spellings the client canonicalizes at connect time (hex, shortened,
-/// decimal) are still denied.
-#[test]
-fn deny_matches_ipv4_alternate_spellings() {
-    let metadata = allowlist_from(serde_json::json!({
-        "deniedMcpServers": [ { "serverUrl": "http://169.254.169.254/*" } ]
-    }));
-    assert!(metadata.is_server_denied(&http_named("hex", "http://0xa9fea9fe/latest/meta-data")));
-
-    let localhost = allowlist_from(serde_json::json!({
-        "deniedMcpServers": [ { "serverUrl": "http://127.0.0.1/*" } ]
-    }));
-    assert!(localhost.is_server_denied(&http_named("short", "http://127.1/mcp")));
-    assert!(localhost.is_server_denied(&http_named("decimal", "http://2130706433/mcp")));
-    // A different address is untouched.
-    assert!(!localhost.is_server_denied(&http_named("other", "http://10.0.0.1/mcp")));
-}
-
-/// An IPv4 deny also blocks the IPv4-mapped IPv6 spelling of the same connect
-/// target (`[::ffff:169.254.169.254]`) and vice versa — a dual-stack socket
-/// reaches the mapped IPv4 address either way, a classic SSRF dodge.
-#[test]
-fn deny_matches_ipv4_mapped_ipv6_spellings() {
-    let metadata = allowlist_from(serde_json::json!({
-        "deniedMcpServers": [ { "serverUrl": "http://169.254.169.254/*" } ]
-    }));
-    assert!(
-        metadata.is_server_denied(&http_named(
-            "mapped",
-            "http://[::ffff:169.254.169.254]/latest/meta-data"
-        )),
-        "IPv4-mapped spelling must not dodge an IPv4 deny"
-    );
-    assert!(
-        metadata.is_server_denied(&http_named(
-            "mapped-hex",
-            "http://[::ffff:a9fe:a9fe]/latest/meta-data"
-        )),
-        "hex-group IPv4-mapped spelling must not dodge an IPv4 deny"
-    );
-    // A genuine IPv6 address is not an alias for the denied IPv4 host.
-    assert!(!metadata.is_server_denied(&http_named("v6", "http://[2001:db8::1]/mcp")));
-
-    // The mirror direction: an IPv4-mapped deny entry blocks the IPv4 spelling.
-    let mapped = allowlist_from(serde_json::json!({
-        "deniedMcpServers": [ { "serverUrl": "http://[::ffff:127.0.0.1]/*" } ]
-    }));
-    assert!(mapped.is_server_denied(&http_named("v4", "http://127.0.0.1/mcp")));
-}
-
-/// An explicit scheme-default port and no port name the same connect target;
-/// either spelling of the pattern matches either spelling of the URL. A
-/// non-default port stays literal.
-#[test]
-fn allow_matches_scheme_default_port_spellings() {
-    let al = allowlist_from(serde_json::json!({
-        "allowedMcpServers": [ { "serverUrl": "https://mcp.corp.com:443/*" } ]
-    }));
-    assert!(al.is_server_allowed(&http_named("bare", "https://mcp.corp.com/mcp")));
-    assert!(al.is_server_allowed(&http_named("port", "https://mcp.corp.com:443/mcp")));
-    assert!(!al.is_server_allowed(&http_named("other", "https://mcp.corp.com:8080/mcp")));
-}
-
-/// Host and port match separately, so a trailing host wildcard cannot absorb
-/// a non-default port — with or without an explicit port in the pattern.
-#[test]
-fn allow_host_wildcard_cannot_absorb_port() {
-    let bare = allowlist_from(serde_json::json!({
-        "allowedMcpServers": [ { "serverUrl": "https://mcp.corp.*/*" } ]
-    }));
-    assert!(bare.is_server_allowed(&http_named("ok", "https://mcp.corp.com/mcp")));
-    assert!(!bare.is_server_allowed(&http_named("port", "https://mcp.corp.com:8080/mcp")));
-
-    let with_port = allowlist_from(serde_json::json!({
-        "allowedMcpServers": [ { "serverUrl": "https://mcp.corp.*:443/*" } ]
-    }));
-    assert!(with_port.is_server_allowed(&http_named("ok", "https://mcp.corp.com/mcp")));
-    assert!(with_port.is_server_allowed(&http_named("default", "https://mcp.corp.com:443/mcp")));
-    assert!(!with_port.is_server_allowed(&http_named("port", "https://mcp.corp.com:8080/mcp")));
-}
-
-/// Unicode policy entries match their connect-time spelling on both sides:
-/// hosts canonicalize via IDNA/punycode and paths percent-encode, the same
-/// way the WHATWG parser rewrites the runtime URL.
-#[test]
-fn unicode_policy_entries_match_connect_spelling() {
-    let al = allowlist_from(serde_json::json!({
-        "allowedMcpServers": [ { "serverUrl": "https://bücher.example/café/*" } ]
-    }));
-    // Both spellings of the URL connect to the same target.
-    assert!(al.is_server_allowed(&http_named("uni", "https://bücher.example/café/tool")));
-    assert!(al.is_server_allowed(&http_named(
-        "puny",
-        "https://xn--bcher-kva.example/caf%C3%A9/tool"
-    )));
-    assert!(!al.is_server_allowed(&http_named(
-        "other",
-        "https://xn--bcher-kva.example/other/tool"
-    )));
-
-    let deny = allowlist_from(serde_json::json!({
-        "deniedMcpServers": [ { "serverUrl": "https://bücher.example/*" } ]
-    }));
-    assert!(deny.is_server_denied(&http_named("uni", "https://bücher.example/mcp")));
-    assert!(deny.is_server_denied(&http_named("puny", "https://xn--bcher-kva.example/mcp")));
-    assert!(!deny.is_server_denied(&http_named("other", "https://other.example/mcp")));
-
-    // A wildcard label stays a wildcard while the Unicode labels
-    // canonicalize around it.
-    let wild = allowlist_from(serde_json::json!({
-        "deniedMcpServers": [ { "serverUrl": "https://*.bücher.example/*" } ]
-    }));
-    assert!(wild.is_server_denied(&http_named("sub", "https://mcp.xn--bcher-kva.example/x")));
-}
-
-/// A runtime URL the connect-time parser rejects fails closed on both sides:
-/// no allow grant, and any URL deny entry blocks it.
-#[test]
-fn unparseable_url_fails_closed() {
-    let al = allowlist_from(serde_json::json!({
-        "allowedMcpServers": [ { "serverUrl": "https://mcp.corp.com/*" } ]
-    }));
-    assert!(!al.is_server_allowed(&http_named("relative", "mcp.corp.com/mcp")));
-
-    let deny = allowlist_from(serde_json::json!({
-        "deniedMcpServers": [ { "serverUrl": "https://blocked.example.com/*" } ]
-    }));
-    assert!(deny.is_server_denied(&http_named("relative", "mcp.corp.com/mcp")));
-}
-
-/// Deny matching must not fail open on IPv6 hosts, including alternate
-/// spellings of the same parsed address.
-#[test]
-fn deny_matches_ipv6_hosts() {
-    let al = allowlist_from(serde_json::json!({
-        "deniedMcpServers": [ { "serverUrl": "https://[2001:db8::1]/*" } ]
-    }));
-    // Any scheme/port variant of the denied IPv6 host is still denied.
-    assert!(al.is_server_denied(&http_named("v6", "https://[2001:db8::1]/mcp")));
-    assert!(al.is_server_denied(&http_named("v6-port", "http://[2001:db8::1]:8080/mcp")));
-    // Alternate spellings canonicalize to the same address at connect time.
-    assert!(al.is_server_denied(&http_named("leading-zero", "https://[2001:0db8::1]/mcp")));
-    assert!(al.is_server_denied(&http_named(
-        "expanded",
-        "https://[2001:db8:0:0:0:0:0:1]/mcp"
-    )));
-    // A different address is untouched.
-    assert!(!al.is_server_denied(&http_named("other", "https://[2001:db8::2]/mcp")));
-}
-
-/// IPv6 allow entries compare by parsed address (port literal).
-#[test]
-fn allow_matches_ipv6_hosts_by_address() {
-    let al = allowlist_from(serde_json::json!({
-        "allowedMcpServers": [ { "serverUrl": "https://[2001:db8::1]/*" } ]
-    }));
-    assert!(al.is_server_allowed(&http_named("v6", "https://[2001:db8::1]/mcp")));
-    // Same address, alternate spelling.
-    assert!(al.is_server_allowed(&http_named(
-        "expanded",
-        "https://[2001:db8:0:0:0:0:0:1]/mcp"
-    )));
-    assert!(!al.is_server_allowed(&http_named("other", "https://[2001:db8::2]/mcp")));
-    assert!(!al.is_server_allowed(&http_named("port", "https://[2001:db8::1]:8080/mcp")));
-
-    // An address whose last hextet spells the scheme-default port has no
-    // port to strip — default-port stripping must not corrupt it.
-    let tail = allowlist_from(serde_json::json!({
-        "allowedMcpServers": [ { "serverUrl": "https://[2001:db8::443]/*" } ]
-    }));
-    assert!(tail.is_server_allowed(&http_named("tail", "https://[2001:db8::443]/mcp")));
-    assert!(tail.is_server_allowed(&http_named("tail-port", "https://[2001:db8::443]:443/mcp")));
-
-    // A zero-padded default port strips numerically; a non-default one
-    // stays literal (both-explicit spellings compare numerically).
-    let zero_pad = allowlist_from(serde_json::json!({
-        "allowedMcpServers": [ { "serverUrl": "https://[::1]:0443/*" } ]
-    }));
-    assert!(zero_pad.is_server_allowed(&http_named("padded", "https://[::1]/mcp")));
-    let padded_high = allowlist_from(serde_json::json!({
-        "allowedMcpServers": [ { "serverUrl": "https://[::1]:08080/*" } ]
-    }));
-    assert!(padded_high.is_server_allowed(&http_named("p8080", "https://[::1]:8080/mcp")));
-    assert!(!padded_high.is_server_allowed(&http_named("bare", "https://[::1]/mcp")));
-}
-
-/// `https://host/` (the copied-URL spelling) and `https://host` are the same
-/// WHATWG URL; a deny written either way blocks the whole host.
-#[test]
-fn deny_trailing_slash_blocks_whole_host() {
-    let al = allowlist_from(serde_json::json!({
-        "deniedMcpServers": [ { "serverUrl": "https://blocked.example.com/" } ]
-    }));
-    assert!(al.is_server_denied(&http_named("deep", "https://blocked.example.com/mcp")));
-    assert!(al.is_server_denied(&http_named("root", "https://blocked.example.com/")));
-    assert!(!al.is_server_denied(&http_named("other", "https://ok.example.com/mcp")));
-}
-
-/// A leading `[…]` that isn't an IPv6 literal is a glob character class, not
-/// a bracketed address — the entry must keep working as a glob.
-#[test]
-fn deny_leading_character_class_globs_host() {
-    let al = allowlist_from(serde_json::json!({
-        "deniedMcpServers": [ { "serverUrl": "https://[ab]evil.example/*" } ]
-    }));
-    assert!(al.is_server_denied(&http_named("a", "https://aevil.example/x")));
-    assert!(al.is_server_denied(&http_named("b", "https://bevil.example/x")));
-    assert!(!al.is_server_denied(&http_named("c", "https://cevil.example/x")));
-}
-
-/// The allow side reads a leading non-address `[…]` the same way: a glob
-/// character class, so the grant works instead of silently vanishing. A
-/// bracketed IPv6 allow keeps comparing by parsed address.
-#[test]
-fn allow_leading_character_class_globs_host() {
-    let al = allowlist_from(serde_json::json!({
-        "allowedMcpServers": [ { "serverUrl": "https://[ab]host.corp.com/*" } ]
-    }));
-    assert!(al.is_server_allowed(&http_named("a", "https://ahost.corp.com/mcp")));
-    assert!(al.is_server_allowed(&http_named("b", "https://bhost.corp.com/mcp")));
-    assert!(!al.is_server_allowed(&http_named("c", "https://chost.corp.com/mcp")));
-
-    let v6 = allowlist_from(serde_json::json!({
-        "allowedMcpServers": [ { "serverUrl": "https://[2001:0db8::1]/*" } ]
-    }));
-    assert!(v6.is_server_allowed(&http_named("v6", "https://[2001:db8::1]/mcp")));
-}
-
-/// Allow-pattern ports are literal, as documented: a port glob grants
-/// nothing, and leading zeros compare numerically.
-#[test]
-fn allow_port_is_literal_not_glob() {
-    let glob_port = allowlist_from(serde_json::json!({
-        "allowedMcpServers": [ { "serverUrl": "https://mcp.corp.com:4*/*" } ]
-    }));
-    assert!(!glob_port.is_server_allowed(&http_named("p443", "https://mcp.corp.com:443/mcp")));
-    assert!(!glob_port.is_server_allowed(&http_named("p4000", "https://mcp.corp.com:4000/mcp")));
-    let zero_pad = allowlist_from(serde_json::json!({
-        "allowedMcpServers": [ { "serverUrl": "https://mcp.corp.com:0443/*" } ]
-    }));
-    assert!(zero_pad.is_server_allowed(&http_named("pad", "https://mcp.corp.com:443/mcp")));
-}
-
-/// Percent-encoded pattern hosts decode like the connect-time parser, so a
-/// copy-pasted encoded deny still blocks its real host.
-#[test]
-fn percent_encoded_pattern_host_matches_decoded_spelling() {
-    let al = allowlist_from(serde_json::json!({
-        "deniedMcpServers": [ { "serverUrl": "https://%61dmin.example/*" } ]
-    }));
-    assert!(al.is_server_denied(&http_named("plain", "https://admin.example/x")));
-    assert!(!al.is_server_denied(&http_named("other", "https://badmin.example/x")));
-}
-
-/// Dot segments in a PATTERN path resolve like the WHATWG serializer, so a
-/// deny spelled `/x/../admin/*` still scopes to `/admin/*`.
-#[test]
-fn pattern_path_dot_segments_resolve() {
-    let al = allowlist_from(serde_json::json!({
-        "deniedMcpServers": [ { "serverUrl": "https://h.example/x/../admin/*" } ]
-    }));
-    assert!(al.is_server_denied(&http_named("hit", "https://h.example/admin/secret")));
-    assert!(!al.is_server_denied(&http_named("miss", "https://h.example/x/admin/secret")));
-}
-
-/// Allow PATH globs are case-sensitive: URL paths are case-sensitive
-/// resources, and an allow match is a positive grant. Hosts stay
-/// case-insensitive on both sides; deny paths stay insensitive (over-block).
-#[test]
-fn allow_path_glob_is_case_sensitive() {
-    let al = allowlist_from(serde_json::json!({
-        "allowedMcpServers": [ { "serverUrl": "https://corp.com/mcp/*" } ]
-    }));
-    assert!(al.is_server_allowed(&http_named("lower", "https://corp.com/mcp/x")));
-    assert!(
-        !al.is_server_allowed(&http_named("upper", "https://corp.com/MCP/x")),
-        "a different-cased path is a different resource; no grant"
-    );
-    // Host case stays irrelevant.
-    assert!(al.is_server_allowed(&http_named("host", "https://CORP.com/mcp/x")));
-}
-
-/// A deny entry whose PATH glob is invalid (unclosed `[`) denies outright
-/// once the host matches — a broken character class must not disable the
-/// entry. A URL the connect-time parser rejects is denied regardless.
-#[test]
-fn invalid_deny_path_glob_fails_closed() {
-    let al = allowlist_from(serde_json::json!({
-        "deniedMcpServers": [ { "serverUrl": "https://h.example/admin[x/*" } ]
-    }));
-    // Host matched + invalid path glob: deny.
-    assert!(al.is_server_denied(&http_named("bad", "https://h.example/admin[x/y")));
-    // Different host: the entry does not apply.
-    assert!(!al.is_server_denied(&http_named("other", "https://other.example/admin[x/y")));
-    // Unparseable URL (`[` in the host): denied on the unparseable branch.
-    assert!(al.is_server_denied(&http_named("unparseable", "https://host[x/y")));
-}
-
-/// Percent-encoded unreserved bytes name the same path at the server
-/// (`%61` = `a`), so both the runtime path and the pattern path decode them
-/// before matching. Reserved escapes (`%2F`) stay encoded — decoding them
-/// would change the path structure.
-#[test]
-fn percent_encoded_unreserved_path_bytes_match_decoded_spelling() {
-    let al = allowlist_from(serde_json::json!({
-        "deniedMcpServers": [ { "serverUrl": "https://h.example/admin/*" } ]
-    }));
-    assert!(al.is_server_denied(&http_named("enc", "https://h.example/%61dmin/x")));
-    // A pattern spelled with the escape matches the plain runtime path too.
-    let enc_pattern = allowlist_from(serde_json::json!({
-        "deniedMcpServers": [ { "serverUrl": "https://h.example/%61dmin/*" } ]
-    }));
-    assert!(enc_pattern.is_server_denied(&http_named("plain", "https://h.example/admin/x")));
-    // %2F is not a path separator; it stays encoded and does not match.
-    assert!(!al.is_server_denied(&http_named("slash", "https://h.example/a%2Fdmin/x")));
-}
-
-/// An unbracketed IPv6 deny entry denies the bracketed connect spelling and
-/// is not misread as a numeric IPv4 host by the `:` split.
-#[test]
-fn deny_unbracketed_ipv6_pattern_matches_address() {
-    let al = allowlist_from(serde_json::json!({
-        "deniedMcpServers": [ { "serverUrl": "https://2001:db8::1/*" } ]
-    }));
-    assert!(al.is_server_denied(&http_named("v6", "https://[2001:db8::1]/mcp")));
-    // The old first-`:` split read host `2001` = IPv4 0.0.7.209 — wrong on
-    // both sides: the IPv6 target dodged and this IPv4 host was denied.
-    assert!(!al.is_server_denied(&http_named("v4", "https://0.0.7.209/mcp")));
-    // A trailing `:443`/`:8080` is a PORT, not a final hextet: the entry
-    // denies host `2001:db8::1` (deny is port-agnostic), not the different
-    // address `2001:db8::1:443`.
-    let with_port = allowlist_from(serde_json::json!({
-        "deniedMcpServers": [ { "serverUrl": "https://2001:db8::1:443/*" } ]
-    }));
-    assert!(with_port.is_server_denied(&http_named("v6b", "https://[2001:db8::1]/mcp")));
-    assert!(with_port.is_server_denied(&http_named("v6c", "https://[2001:db8::1]:8080/mcp")));
-    assert!(!with_port.is_server_denied(&http_named("other", "https://[2001:db8::1:443]/mcp")));
-    // A non-decimal final group is a hextet, not a port: the whole string is
-    // the address.
-    let hextet = allowlist_from(serde_json::json!({
-        "deniedMcpServers": [ { "serverUrl": "https://2001:db8::1:ffff/*" } ]
-    }));
-    assert!(hextet.is_server_denied(&http_named("hex", "https://[2001:db8::1:ffff]/mcp")));
-}
-
-/// A host wildcard allow grants IPv6 runtimes too — the address-equality
-/// branch applies only when the PATTERN authority is bracketed.
-#[test]
-fn allow_host_wildcard_matches_ipv6_runtime() {
-    let al = allowlist_from(serde_json::json!({
-        "allowedMcpServers": [ { "serverUrl": "https://*/*" } ]
-    }));
-    assert!(al.is_server_allowed(&http_named("v6", "https://[::1]/mcp")));
-    assert!(al.is_server_allowed(&http_named("v4", "https://10.0.0.1/mcp")));
-}
-
-/// Test sink that accumulates `tracing` output into a shared buffer.
-#[derive(Clone)]
-struct VecWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-
-impl std::io::Write for VecWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-/// Parse `key` while capturing WARN-level logs on this thread.
-fn parse_mcp_entries_capturing_logs(
-    json: &serde_json::Value,
-    key: &str,
-) -> (Vec<AllowedMcpServer>, String) {
-    let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
-    let writer_buf = buf.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_ansi(false)
-        .with_max_level(tracing::Level::WARN)
-        .with_writer(move || VecWriter(writer_buf.clone()))
-        .finish();
-    let entries = tracing::subscriber::with_default(subscriber, || parse_mcp_entries(json, key));
-    let logs = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
-    (entries, logs)
-}
-
-/// Allow patterns whose scheme can never match (glob or missing scheme) fail
-/// closed but must warn — a fleet policy written that way silently loses its
-/// grants.
-#[test]
-fn unmatchable_allow_url_patterns_warn() {
-    let json = serde_json::json!({
-        "allowedMcpServers": [
-            { "serverUrl": "*://mcp.corp.com/*" },
-            { "serverUrl": "*.corp.com/*" },
-            { "serverUrl": "https://mcp.corp.com/*" }
-        ]
-    });
-    let (entries, logs) = parse_mcp_entries_capturing_logs(&json, "allowedMcpServers");
-    // Entries are kept (fail-closed no-ops), but both bad shapes warn.
-    assert_eq!(entries.len(), 3);
-    assert_eq!(
-        logs.matches("can never match").count(),
-        2,
-        "expected warnings for the glob-scheme and scheme-less patterns, got: {logs:?}"
-    );
-}
-
-/// Allow entries in shapes that can never match — non-canonical IP
-/// spellings, unbracketed IPv6, Unicode-plus-glob labels — warn at load.
-#[test]
-fn unmatchable_allow_ip_and_label_shapes_warn() {
-    let json = serde_json::json!({
-        "allowedMcpServers": [
-            { "serverUrl": "http://127.1/*" },
-            { "serverUrl": "https://2001:db8::1/*" },
-            { "serverUrl": "https://bü*.example/*" },
-            // Working shapes the warn must NOT fire on: bracketed and
-            // canonical IPs, canonical-address-plus-port, trailing dot.
-            { "serverUrl": "https://[2001:0db8::1]/*" },
-            { "serverUrl": "https://127.0.0.1/*" },
-            { "serverUrl": "https://2001:db8::1:443/*" },
-            { "serverUrl": "https://127.0.0.1./*" },
-            { "serverUrl": "https://2001:db8*:443/*" },
-            // Dead shapes: no host, glob port — bracketed IPv6 included.
-            { "serverUrl": "https:///admin/*" },
-            { "serverUrl": "https://mcp.corp.com:*/mcp/*" },
-            { "serverUrl": "https://[::1]:*/*" },
-            { "serverUrl": "https://[::1]:http/*" },
-            // Working shape: bracketed address with a numeric port.
-            { "serverUrl": "https://[::1]:8080/*" }
-        ]
-    });
-    let (entries, logs) = parse_mcp_entries_capturing_logs(&json, "allowedMcpServers");
-    assert_eq!(entries.len(), 13);
-    assert_eq!(
-        logs.matches("can never match").count(),
-        7,
-        "expected warnings for 127.1, unbracketed IPv6, the Unicode+glob label, the host-less entry, and the three glob/non-numeric ports only, got: {logs:?}"
-    );
-    assert!(
-        logs.contains("has no host"),
-        "host-less allow must warn: {logs:?}"
-    );
-    assert!(
-        logs.contains("port is not a number"),
-        "glob port must warn: {logs:?}"
-    );
-}
-
-/// Deny entries that can never match — host-less patterns and
-/// non-compiling host globs — warn at load (silent zero enforcement).
-#[test]
-fn unmatchable_deny_url_shapes_warn() {
-    let json = serde_json::json!({
-        "deniedMcpServers": [
-            { "serverUrl": "/admin/*" },
-            { "serverUrl": "https://host[x/*" },
-            { "serverUrl": "https://blocked.example.com/*" }
-        ]
-    });
-    let (entries, logs) = parse_mcp_entries_capturing_logs(&json, "deniedMcpServers");
-    assert_eq!(entries.len(), 3);
-    assert!(
-        logs.contains("has no host"),
-        "host-less deny must warn, got: {logs:?}"
-    );
-    assert!(
-        logs.contains("host glob does not compile"),
-        "broken host glob must warn, got: {logs:?}"
-    );
-}
-
-/// Cross-dimension union at the production chokepoint: a command-only
-/// allowlist restricts stdio servers, never HTTP, and vice versa — pinned
-/// through `is_server_allowed`, where a match-guard fall-through once
-/// flipped exactly this behavior (the `#[cfg(test)]` helpers bypass it).
-#[test]
-fn allowlist_dimensions_are_union_at_server_level() {
-    let cmd_only = allowlist_from(serde_json::json!({
-        "allowedMcpServers": [ { "command": "npx" } ]
-    }));
-    assert!(cmd_only.is_server_allowed(&http_named("h", "https://any.example/mcp")));
-    assert!(cmd_only.is_server_allowed(&stdio_named("ok", "npx")));
-    assert!(!cmd_only.is_server_allowed(&stdio_named("no", "other")));
-
-    let url_only = allowlist_from(serde_json::json!({
-        "allowedMcpServers": [ { "serverUrl": "https://ok.example/*" } ]
-    }));
-    assert!(url_only.is_server_allowed(&stdio_named("s", "anything")));
-    assert!(url_only.is_server_allowed(&http_named("ok", "https://ok.example/mcp")));
-    assert!(!url_only.is_server_allowed(&http_named("h", "https://other.example/x")));
-}
-
-/// A pattern's userinfo drops like the connect-time parser drops it — a
-/// copied `token@host` URL still grants its host, including bracketed IPv6.
-#[test]
-fn allow_pattern_userinfo_drops() {
-    let al = allowlist_from(serde_json::json!({
-        "allowedMcpServers": [
-            { "serverUrl": "https://token@mcp.corp.com/*" },
-            { "serverUrl": "https://token@[::1]/*" }
-        ]
-    }));
-    assert!(al.is_server_allowed(&http_named("dom", "https://mcp.corp.com/x")));
-    assert!(al.is_server_allowed(&http_named("v6", "https://[::1]/x")));
-}
-
-/// Escape hex case never splits one connect target: `%c3%a9` and `%C3%A9`
-/// spellings match on both the pattern and the runtime side, even under
-/// case-sensitive allow paths.
-#[test]
-fn escape_hex_case_is_normalized_both_sides() {
-    let al = allowlist_from(serde_json::json!({
-        "allowedMcpServers": [ { "serverUrl": "https://h.example/caf%c3%a9/*" } ]
-    }));
-    assert!(al.is_server_allowed(&http_named("upper", "https://h.example/caf%C3%A9/x")));
-    assert!(al.is_server_allowed(&http_named("lower", "https://h.example/caf%c3%a9/x")));
-    assert!(al.is_server_allowed(&http_named("raw", "https://h.example/café/x")));
-}
-
-/// Every spelling whose canonical path is `/` denies the whole host, not
-/// just the literal trailing slash.
-#[test]
-fn deny_canonical_root_spellings_block_whole_host() {
-    for pattern in [
-        "https://blocked.example.com/.",
-        "https://blocked.example.com/mcp/..",
-        "https://blocked.example.com/./",
-    ] {
-        let al = allowlist_from(serde_json::json!({
-            "deniedMcpServers": [ { "serverUrl": pattern } ]
-        }));
-        assert!(
-            al.is_server_denied(&http_named("deep", "https://blocked.example.com/mcp")),
-            "{pattern} must deny the whole host"
-        );
-    }
-}
-
-#[test]
-fn denied_mcp_servers_warns_on_unsupported_entry() {
-    // An unenforceable deny entry = silent zero enforcement, so it must warn.
-    let json = serde_json::json!({
-        "deniedMcpServers": [
-            { "serverTypo": "internal-only" },
-            { "serverUrl": "https://blocked.com/*" }
-        ]
-    });
-    let (entries, logs) = parse_mcp_entries_capturing_logs(&json, "deniedMcpServers");
-    // Only the enforceable URL entry survives…
-    assert_eq!(entries.len(), 1);
-    // …and the dropped entry is recorded, not silently swallowed.
-    assert!(
-        logs.contains("ignoring unsupported deniedMcpServers entry"),
-        "expected a warning for the unsupported deny entry, got: {logs:?}"
-    );
-}
-
-#[test]
-fn allowed_mcp_servers_silent_on_unsupported_entry() {
-    // The allow side is fail-closed: an unparsed entry simply isn't granted,
-    // so it must NOT warn.
-    let json = serde_json::json!({
-        "allowedMcpServers": [ { "serverTypo": "internal-only" } ]
-    });
-    let (entries, logs) = parse_mcp_entries_capturing_logs(&json, "allowedMcpServers");
-    assert!(entries.is_empty());
-    assert!(
-        !logs.contains("ignoring unsupported"),
-        "allow side must stay silent, got: {logs:?}"
-    );
-}
-
-// ── serverName MCP policy matching ───────────────────────────────
-
-fn http_named(name: &str, url: &str) -> agent_client_protocol::McpServer {
-    agent_client_protocol::McpServer::Http(
-        agent_client_protocol::McpServerHttp::new(name, url).headers(vec![]),
-    )
-}
-
-fn stdio_named(name: &str, command: &str) -> agent_client_protocol::McpServer {
-    agent_client_protocol::McpServer::Stdio(agent_client_protocol::McpServerStdio::new(
-        name,
-        std::path::PathBuf::from(command),
-    ))
-}
-
-fn allowlist_from(json: serde_json::Value) -> McpServerAllowlist {
-    let path = std::path::Path::new("/test/managed-settings.json");
-    parse_managed_settings_json(&json, path).mcp_allowlist
-}
-
-#[test]
-fn mcp_name_matches_strips_managed_prefix_both_sides_exactly() {
-    // Exact match after stripping the prefix — never substring.
-    assert!(mcp_name_matches("foo", "foo"));
-    assert!(mcp_name_matches("foo", "grok_com_foo"));
-    assert!(mcp_name_matches("grok_com_foo", "foo"));
-    assert!(mcp_name_matches("grok_com_foo", "grok_com_foo"));
-    assert!(!mcp_name_matches("foo", "foobar"));
-    assert!(!mcp_name_matches("foo", "grok_com_foobar"));
-    assert!(!mcp_name_matches("foo", "barfoo"));
-    assert!(!mcp_name_matches("foo", "bar"));
-    assert!(!mcp_name_matches("", "foo"));
-}
-
-#[test]
-fn normalize_managed_name_lowercases_and_underscores_spaces() {
-    assert_eq!(normalize_managed_name("Slack"), "slack");
-    assert_eq!(normalize_managed_name("My Server"), "my_server");
-    assert_eq!(normalize_managed_name("My  Server"), "my__server");
-    assert_eq!(normalize_managed_name(""), "");
-}
-
-#[test]
-fn mcp_name_matches_is_case_and_space_insensitive() {
-    // A display-cased policy serverName matches to_managed_name's normalized
-    // runtime name, for managed and local servers alike.
-    assert!(mcp_name_matches("Slack", "grok_com_slack"));
-    assert!(mcp_name_matches("My Server", "grok_com_my_server"));
-    assert!(mcp_name_matches("grok_com_my_server", "My Server"));
-    assert!(mcp_name_matches("My Server", "my_server"));
-    assert!(mcp_name_matches("SLACK", "slack"));
-    assert!(!mcp_name_matches("My Server", "my_server_2"));
-    assert!(!mcp_name_matches("", ""));
-    assert!(!mcp_name_matches("grok_com_", "grok_com_anything"));
-}
-
-#[test]
-fn mcp_name_matches_mirrors_runtime_name_truncation() {
-    // A too-long serverName is truncated the same way as the runtime name, so
-    // it still matches.
-    let long = "a".repeat(MANAGED_MCP_NAME_MAX_CHARS * 2);
-    let max_bare = MANAGED_MCP_NAME_MAX_CHARS - MANAGED_MCP_PREFIX.len();
-    let runtime = format!("{MANAGED_MCP_PREFIX}{}", &long[..max_bare]);
-    assert!(mcp_name_matches(&long, &runtime));
-}
-
-/// Truncation applies only to `grok_com_*` names — long plain names
-/// sharing a prefix must not match.
-#[test]
-fn long_plain_names_do_not_collide_via_truncation() {
-    assert!(!mcp_name_matches(
-        "corporate-approved-server-alpha-prod",
-        "corporate-approved-server-alpha-anything"
-    ));
-    // Exact long names still match.
-    assert!(mcp_name_matches(
-        "corporate-approved-server-alpha-prod",
-        "corporate-approved-server-alpha-prod"
-    ));
-}
-
-/// A long `grok_com_*` POLICY entry must not become a prefix grant over
-/// attacker-chosen plain runtime names: truncation applies only when the
-/// runtime name is managed, because that is the only side the runtime ever
-/// truncates.
-#[test]
-fn long_managed_allow_entry_does_not_grant_plain_prefix_names() {
-    let max_bare = MANAGED_MCP_NAME_MAX_CHARS - MANAGED_MCP_PREFIX.len();
-    let long_bare = "a".repeat(max_bare + 8);
-    let entry = format!("{MANAGED_MCP_PREFIX}{long_bare}");
-    // A plain runtime name sharing the truncated prefix must NOT match…
-    let attacker = format!("{}-decoy", &long_bare[..max_bare]);
-    assert!(!mcp_name_matches(&entry, &attacker));
-    // …while the entry's own truncated managed runtime name still does.
-    let runtime = format!("{MANAGED_MCP_PREFIX}{}", &long_bare[..max_bare]);
-    assert!(mcp_name_matches(&entry, &runtime));
-
-    // Truncation applies only to the shape runtime truncation produces: a
-    // managed name AT the cap. An attacker-chosen `grok_com_*` decoy that is
-    // longer or shorter than the cap must not prefix-match the long entry.
-    let over_cap_decoy = format!("{MANAGED_MCP_PREFIX}{}-decoy", &long_bare[..max_bare]);
-    assert!(!mcp_name_matches(&entry, &over_cap_decoy));
-    let short_decoy = format!("{MANAGED_MCP_PREFIX}{}", &long_bare[..max_bare - 4]);
-    assert!(!mcp_name_matches(&entry, &short_decoy));
-}
-
-#[test]
-fn parse_mcp_entries_supports_server_name() {
-    // serverName is a first-class key: parsed, not dropped or warned.
-    let json = serde_json::json!({
-        "deniedMcpServers": [ { "serverName": "internal-only" } ]
-    });
-    let (entries, logs) = parse_mcp_entries_capturing_logs(&json, "deniedMcpServers");
-    assert_eq!(entries.len(), 1);
-    assert!(
-        matches!(&entries[0], AllowedMcpServer::Name { name } if name == "internal-only"),
-        "expected a Name entry, got {entries:?}"
-    );
-    assert!(
-        !logs.contains("ignoring unsupported"),
-        "serverName must no longer warn, got: {logs:?}"
-    );
-}
-
-#[test]
-fn denied_by_server_name_matches_bare_and_managed_prefix() {
-    let al = allowlist_from(serde_json::json!({
-        "deniedMcpServers": [ { "serverName": "foo" } ]
-    }));
-
-    assert!(al.is_restricted());
-
-    let bare = http_named("foo", "https://foo.example.com/mcp");
-    assert!(al.is_server_denied(&bare));
-    assert!(!al.is_server_allowed(&bare));
-
-    let managed = http_named("grok_com_foo", "https://foo.example.com/mcp");
-    assert!(al.is_server_denied(&managed));
-    assert!(!al.is_server_allowed(&managed));
-
-    // Name match is transport-agnostic.
-    let stdio = stdio_named("grok_com_foo", "npx");
-    assert!(al.is_server_denied(&stdio));
-    assert!(!al.is_server_allowed(&stdio));
-
-    // Unrelated names are NOT denied — exact match after strip, never substring.
-    for unrelated in ["foobar", "grok_com_foobar", "barfoo", "bar"] {
-        let s = http_named(unrelated, "https://x.example.com/mcp");
-        assert!(
-            !al.is_server_denied(&s),
-            "must not deny unrelated {unrelated}"
-        );
-        assert!(
-            al.is_server_allowed(&s),
-            "unrelated {unrelated} should remain allowed"
-        );
-    }
-}
-
-#[test]
-fn allowed_by_server_name_restricts_across_transports() {
-    let al = allowlist_from(serde_json::json!({
-        "allowedMcpServers": [ { "serverName": "foo" } ]
-    }));
-    assert!(al.is_restricted());
-
-    // A name allowlist is transport-agnostic: the named server is allowed on
-    // any transport regardless of URL/command, others are blocked.
-    assert!(al.is_server_allowed(&http_named("foo", "https://anything.example.com/x")));
-    assert!(al.is_server_allowed(&http_named("grok_com_foo", "https://evil.example.com/x")));
-    assert!(al.is_server_allowed(&stdio_named("grok_com_foo", "/usr/bin/whatever")));
-
-    let bar_http = http_named("bar", "https://anything.example.com/x");
-    assert!(!al.is_server_allowed(&bar_http));
-    assert!(!al.is_server_allowed(&stdio_named("bar", "npx")));
-    // Blocked as missing-allowlist, not an explicit deny.
-    assert!(!al.is_server_denied(&bar_http));
-}
-
-#[test]
-fn server_name_deny_beats_allow() {
-    let al = allowlist_from(serde_json::json!({
-        "allowedMcpServers": [ { "serverName": "foo" } ],
-        "deniedMcpServers":  [ { "serverName": "foo" } ]
-    }));
-
-    for s in [
-        http_named("foo", "https://foo.example.com/x"),
-        http_named("grok_com_foo", "https://foo.example.com/x"),
-    ] {
-        assert!(al.is_server_denied(&s));
-        assert!(
-            !al.is_server_allowed(&s),
-            "deny must beat allow for the same name"
-        );
-    }
-}
-
-#[test]
-fn server_name_prefix_edge_cases_vice_versa() {
-    // Reverse case: prefixed policy vs bare runtime still matches after strip.
-    let al = allowlist_from(serde_json::json!({
-        "deniedMcpServers": [ { "serverName": "grok_com_foo" } ]
-    }));
-
-    assert!(al.is_server_denied(&http_named("foo", "https://x.example.com/mcp")));
-    assert!(al.is_server_denied(&http_named("grok_com_foo", "https://x.example.com/mcp")));
-    assert!(!al.is_server_denied(&http_named("foobar", "https://x.example.com/mcp")));
-    assert!(!al.is_server_denied(&http_named("grok_com_foobar", "https://x.example.com/mcp")));
-}
-
-#[test]
-fn server_name_independent_of_url_and_command_dimensions() {
-    // Allow side — URL ∪ name: matching either dimension permits the server.
-    let al = allowlist_from(serde_json::json!({
-        "allowedMcpServers": [
-            { "serverUrl": "https://ok.example.com/*" },
-            { "serverName": "foo" }
-        ]
-    }));
-    assert!(al.is_server_allowed(&http_named("bar", "https://ok.example.com/mcp")));
-    assert!(al.is_server_allowed(&http_named("foo", "https://evil.example.com/mcp")));
-    assert!(!al.is_server_allowed(&http_named("bar", "https://evil.example.com/mcp")));
-
-    // Deny side — command and name deny independently, each on its own dimension.
-    let al = allowlist_from(serde_json::json!({
-        "deniedMcpServers": [
-            { "command": "npx" },
-            { "serverName": "foo" }
-        ]
-    }));
-    assert!(al.is_server_denied(&stdio_named("unrelated", "npx")));
-    assert!(al.is_server_denied(&stdio_named("foo", "node")));
-    let safe = stdio_named("unrelated", "node");
-    assert!(!al.is_server_denied(&safe));
-    assert!(al.is_server_allowed(&safe));
-}
-
-#[test]
-fn marketplace_allowlist_normalizes_git_urls() {
-    let al = MarketplaceAllowlist {
-        allowed_urls: vec!["git@github.enterprise.example:ACME/repo.git".into()],
-        source_path: None,
-    };
-
-    assert!(al.is_url_allowed("git@github.enterprise.example:ACME/repo.git"));
-    assert!(al.is_url_allowed("git@github.enterprise.example:ACME/repo"));
-    assert!(al.is_url_allowed("git@github.enterprise.example:acme/repo.git"));
-    assert!(!al.is_url_allowed("git@evil.com:ACME/repo.git"));
-}
-
 // ═══════════════════════════════════════════════════════════════════════
 // Bare tool name parsing tests
 // ═══════════════════════════════════════════════════════════════════════
@@ -1911,8 +752,7 @@ fn merge_permissions_across_project_and_global_settings() {
     let cwd = tmp.path();
 
     // Simulate a "global" settings file at the cwd level
-    // (in a real scenario this would be ~/.claude, but we test
-    // with two nested directories to exercise the merge logic).
+    // In a real scenario this would be ~/.claude; the test uses two nested directories to exercise the merge
     let repo_dir = cwd.join("repo");
     std::fs::create_dir_all(&repo_dir).unwrap();
     // Create .git so the repo root is found
@@ -1939,11 +779,10 @@ fn merge_permissions_across_project_and_global_settings() {
     )
     .unwrap();
 
-    // Resolve from sub_dir — should merge BOTH files
+    // Resolve from sub_dir: it merges BOTH files
     let (cfg, _, _) =
         resolve_claude_settings_inner(&sub_dir, true, None, UserDefaultModeLoad::Apply).unwrap();
 
-    // Should have all 3 rules: Edit(src/**) + Bash(*) + Read(*)
     assert_eq!(
         cfg.rules.len(),
         3,
@@ -1990,7 +829,6 @@ fn merge_deny_from_project_with_allow_from_parent() {
     let (cfg, _, _) =
         resolve_claude_settings_inner(&sub_dir, true, None, UserDefaultModeLoad::Apply).unwrap();
 
-    // Should have 2 rules: deny Bash(rm*) + allow Bash(*)
     assert_eq!(cfg.rules.len(), 2);
 
     let deny_rules: Vec<_> = cfg
@@ -2037,8 +875,7 @@ fn default_mode_from_specific_file_wins() {
     let (cfg, _, _) =
         resolve_claude_settings_inner(&sub_dir, true, None, UserDefaultModeLoad::Apply).unwrap();
 
-    // Sub-dir's "default" mode should prevent the repo's acceptEdits
-    // from producing a synthetic Edit rule.
+    // Sub-dir's "default" mode should prevent the repo's acceptEdits from producing a synthetic Edit rule
     let synthetic_edit_count = cfg
         .rules
         .iter()
@@ -2098,8 +935,8 @@ fn default_mode_inherited_from_parent_when_not_set() {
 
 #[test]
 fn single_file_still_works() {
-    // Isolate HOME so host/CI `~/.claude` rules don't bleed into the count
-    // (paths merge global + project; concurrent env tests race without the lock).
+    // Isolate HOME so host/CI `~/.claude` rules don't bleed into the count; paths merge global and project settings
+    // Concurrent env tests race without the lock
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempfile::tempdir().unwrap();
     let _home_guard = EnvVarGuard::set("HOME", home.path());
@@ -2119,8 +956,7 @@ fn single_file_still_works() {
     assert!(path.ends_with(".claude/settings.json"));
 }
 
-/// Untrusted clone must not honor project `.claude/settings.json` permission
-/// rules or `defaultMode` (including bypassPermissions).
+/// Untrusted clone must not honor project `.claude/settings.json` permission rules or `defaultMode` (including bypassPermissions).
 #[test]
 fn untrusted_project_claude_permissions_are_not_honored() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2160,7 +996,7 @@ fn untrusted_project_claude_permissions_are_not_honored() {
         "bypassPermissions catch-all must not load from untrusted project"
     );
 
-    // Trusted: project bypass + allows honored (plus global).
+    // Trusted: project bypass and allows honored (plus global)
     let (cfg, _, _) =
         resolve_claude_settings_inner(tmp.path(), true, None, UserDefaultModeLoad::Apply).unwrap();
     assert!(
@@ -2179,12 +1015,10 @@ fn untrusted_project_claude_permissions_are_not_honored() {
 
 /// Untrusted clone must not contribute project `.grok/config.toml` [permission].
 ///
-/// Sync + `block_on` so `ENV_LOCK` is not held across `.await` (clippy
-/// `await_holding_lock`). Does not assert exact global rule counts:
-/// `xai_grok_config::grok_home()` is a process-wide `OnceLock`, so under
-/// single-process `cargo test` an earlier test may have already pinned
-/// `GROK_HOME`. Project-rule filtering is independent of that; global
-/// survival is checked only when our temp home is the live `user_grok_home()`.
+/// The test is sync and uses `block_on` so `ENV_LOCK` is not held across `.await` (clippy `await_holding_lock`).
+/// It does not assert exact global rule counts: `xai_grok_config::grok_home()` is a process-wide `OnceLock`.
+/// Under single-process `cargo test` an earlier test may have already pinned `GROK_HOME`.
+/// Project-rule filtering is independent of that; global survival is checked only when our temp home is the live `user_grok_home()`.
 #[test]
 fn untrusted_project_config_toml_permissions_are_not_honored() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2219,8 +1053,7 @@ allow = ["Bash(evil *)"]
         .enable_all()
         .build()
         .expect("test runtime");
-    // Untrusted may be None when no global rules load (GROK_HOME OnceLock
-    // already pinned by another test) — empty after dropping project is OK.
+    // Untrusted may be None when no global rules load (GROK_HOME OnceLock already pinned by another test); empty after dropping project is OK
     let untrusted = rt.block_on(resolve_permissions_with_provenance_inner(
         tmp.path(),
         inputs_trusted(None, false),
@@ -2250,7 +1083,7 @@ allow = ["Bash(evil *)"]
         "trusted folder must load project config.toml allow"
     );
 
-    // Global survival only when this process's OnceLock points at our temp home.
+    // Global survival is checked only when this process's OnceLock points at our temp home
     let global_live = xai_grok_config::user_grok_home()
         .is_some_and(|g| g == home.path() || g.starts_with(home.path()));
     if global_live {
@@ -2296,8 +1129,7 @@ fn bypass_permissions_produces_catch_all_allow() {
     assert_eq!(cfg.rules[0].action, RuleAction::Allow);
     assert_eq!(cfg.rules[0].tool, ToolFilter::Any);
     assert!(cfg.rules[0].pattern.is_none());
-    // source_path must point to the file that provided defaultMode,
-    // even when no explicit permissions block exists.
+    // source_path must point to the file that provided defaultMode, even when no explicit permissions block exists
     assert!(
         path.ends_with(".claude/settings.json"),
         "source_path should reference the defaultMode file, got {:?}",
@@ -2319,9 +1151,7 @@ fn bypass_permissions_with_explicit_deny_still_has_deny() {
     let (cfg, _, _) =
         resolve_claude_settings_inner(tmp.path(), true, None, UserDefaultModeLoad::Apply).unwrap();
     assert_eq!(cfg.rules.len(), 2);
-    // Deny rule exists
     assert!(cfg.rules.iter().any(|r| r.action == RuleAction::Deny));
-    // Catch-all Allow Any exists
     assert!(cfg.rules.iter().any(|r| r.action == RuleAction::Allow
         && r.tool == ToolFilter::Any
         && r.pattern.is_none()));
@@ -2361,21 +1191,28 @@ fn bypass_permissions_overrides_accept_edits_cross_file() {
     assert_eq!(cfg.rules[0].tool, ToolFilter::Any);
 }
 
-const PIN: &str = YOLO_PIN_REASON_REQUIREMENTS;
+const PIN: &str = YoloPinReason::DisableBypassPermissionsMode.message();
 
-/// Hermetic resolver inputs: default managed settings, no managed-config
-/// rules, so tests never read the host's real managed files.
-fn inputs(policy_block: Option<&'static str>) -> ResolveInputs<'static> {
-    inputs_trusted(policy_block, true)
+/// The active pin as a lock value, labeled like a test requirements layer.
+fn pin_lock() -> YoloPolicyLock {
+    YoloPolicyLock {
+        source_label: "test-requirements.toml".to_string(),
+        reason: YoloPinReason::DisableBypassPermissionsMode,
+    }
+}
+
+/// Hermetic resolver inputs: default managed settings, no managed-config rules, so tests never read the host's real managed files.
+fn inputs(yolo_lock: Option<YoloPolicyLock>) -> ResolveInputs<'static> {
+    inputs_trusted(yolo_lock, true)
 }
 
 fn inputs_trusted(
-    policy_block: Option<&'static str>,
+    yolo_lock: Option<YoloPolicyLock>,
     project_trusted: bool,
 ) -> ResolveInputs<'static> {
     static DEFAULT_MANAGED: std::sync::OnceLock<ManagedSettings> = std::sync::OnceLock::new();
     ResolveInputs {
-        policy_block,
+        yolo_lock,
         managed: DEFAULT_MANAGED.get_or_init(ManagedSettings::default),
         managed_config_rules: Vec::new(),
         project_trusted,
@@ -2384,19 +1221,18 @@ fn inputs_trusted(
 
 /// [`inputs`] with an explicit managed-settings snapshot.
 fn inputs_with_managed<'a>(
-    policy_block: Option<&'static str>,
+    yolo_lock: Option<YoloPolicyLock>,
     managed: &'a ManagedSettings,
 ) -> ResolveInputs<'a> {
     ResolveInputs {
-        policy_block,
+        yolo_lock,
         managed,
         managed_config_rules: Vec::new(),
         project_trusted: true,
     }
 }
 
-/// Pin active: no catch-all Allow Any; explicit rules stay; the block is
-/// recorded as a skip for inspect.
+/// Pin active: no catch-all Allow Any; explicit rules stay; the block is recorded as a skip for inspect.
 #[test]
 fn bypass_permissions_blocked_by_policy_pin() {
     let tmp = tempfile::tempdir().unwrap();
@@ -2424,8 +1260,7 @@ fn bypass_permissions_blocked_by_policy_pin() {
     assert_eq!(skipped[0].reason, PIN);
 }
 
-/// A bypass-only file under the pin still resolves (zero rules) so the skip
-/// keeps provenance and reaches inspect instead of an early `None`.
+/// A bypass-only file under the pin still resolves (zero rules) so the skip keeps provenance and reaches inspect instead of an early `None`.
 #[test]
 fn bypass_permissions_blocked_pin_only_file_still_resolves() {
     let tmp = tempfile::tempdir().unwrap();
@@ -2451,8 +1286,7 @@ fn bypass_permissions_blocked_pin_only_file_still_resolves() {
     );
 }
 
-/// The pin covers bypass only — acceptEdits (edits-only auto-approve)
-/// keeps its synthetic Allow Edit rule.
+/// The pin covers bypass only: acceptEdits (edits-only auto-approve) keeps its synthetic Allow Edit rule.
 #[test]
 fn accept_edits_unaffected_by_policy_pin() {
     let tmp = tempfile::tempdir().unwrap();
@@ -2475,8 +1309,7 @@ fn accept_edits_unaffected_by_policy_pin() {
 
 // yolo_disabled_by_policy predicate tests (pure inner)
 
-/// Build a `(path, value)` layer for the predicate; the path only feeds
-/// non-bool warnings.
+/// Build a `(path, value)` layer for the predicate; the path only feeds non-bool warnings.
 fn layer(toml_str: &str) -> toml::Value {
     toml::from_str(toml_str).unwrap()
 }
@@ -2488,10 +1321,14 @@ fn yolo_policy_block_from_requirements_layer() {
     let enabled = layer("[ui]\ndisable_bypass_permissions_mode = false\n");
     let unrelated = layer("[features]\ntelemetry = false\n");
 
-    // Any layer setting the key true activates the block; false/unrelated don't.
+    // Any layer setting the key true activates the block; false/unrelated don't
+    // The lock carries the pinning layer's label
     assert_eq!(
         resolve_yolo_policy_block([(p, &unrelated), (p, &pinned)].into_iter()),
-        Some(YOLO_PIN_REASON_REQUIREMENTS),
+        Some(YoloPolicyLock {
+            source_label: "test-requirements.toml".to_string(),
+            reason: YoloPinReason::DisableBypassPermissionsMode,
+        }),
     );
     assert_eq!(
         resolve_yolo_policy_block([(p, &enabled), (p, &unrelated)].into_iter()),
@@ -2500,8 +1337,8 @@ fn yolo_policy_block_from_requirements_layer() {
     assert_eq!(resolve_yolo_policy_block(std::iter::empty()), None);
 }
 
-/// The native `[ui] disable_bypass_permissions_mode` key locks when true
-/// (default false). `permission_mode` is intentionally not a lock key.
+/// The native `[ui] disable_bypass_permissions_mode` key locks when true (default false).
+/// `permission_mode` is intentionally not a lock key.
 #[test]
 fn disable_bypass_permissions_mode_locks_when_true() {
     let p = Path::new("test-requirements.toml");
@@ -2510,8 +1347,13 @@ fn disable_bypass_permissions_mode_locks_when_true() {
     let absent = layer("[ui]\npermission_mode = \"always-approve\"\n");
 
     assert_eq!(
-        resolve_yolo_policy_block([(p, &locked)].into_iter()),
-        Some(YOLO_PIN_REASON_REQUIREMENTS),
+        resolve_yolo_policy_block([(p, &locked)].into_iter()).map(|l| l.reason),
+        Some(YoloPinReason::DisableBypassPermissionsMode),
+    );
+    // Pin the exact admin-facing message so a typo can't ship silently.
+    assert_eq!(
+        YoloPinReason::DisableBypassPermissionsMode.message(),
+        "always-approve disabled by managed policy ([ui] disable_bypass_permissions_mode = true in requirements.toml)"
     );
     // Explicit false (the default) does not lock.
     assert_eq!(
@@ -2522,24 +1364,59 @@ fn disable_bypass_permissions_mode_locks_when_true() {
     assert_eq!(resolve_yolo_policy_block([(p, &absent)].into_iter()), None);
 }
 
-/// Back-compat: `[ui] yolo = false` in requirements.toml still pins (legacy
-/// alias for pre-rename configs); `yolo = true` does not. The documented key
-/// is `disable_bypass_permissions_mode`.
+/// Back-compat: `[ui] yolo = false` in requirements.toml still pins (legacy alias for pre-rename configs); `yolo = true` does not.
+/// The documented key is `disable_bypass_permissions_mode`.
 #[test]
 fn legacy_yolo_false_still_locks() {
     let p = Path::new("test-requirements.toml");
     let off = layer("[ui]\nyolo = false\n");
     assert_eq!(
-        resolve_yolo_policy_block([(p, &off)].into_iter()),
-        Some(YOLO_PIN_REASON_LEGACY_YOLO),
+        resolve_yolo_policy_block([(p, &off)].into_iter()).map(|l| l.reason),
+        Some(YoloPinReason::LegacyYoloFalse),
+    );
+    // Pin the exact admin-facing message so a typo can't ship silently.
+    assert_eq!(
+        YoloPinReason::LegacyYoloFalse.message(),
+        "always-approve disabled by managed policy ([ui] yolo = false in requirements.toml)"
     );
     let on = layer("[ui]\nyolo = true\n");
     assert_eq!(resolve_yolo_policy_block([(p, &on)].into_iter()), None);
 }
 
-/// A non-bool lock value is a misconfiguration: it must NOT lock (so it
-/// can't accidentally pin), AND it must emit a WARN naming the key + layer
-/// so the admin sees the lock isn't taking effect.
+/// The Claude bypass-lock advisory requires an actually loaded managed-settings file:
+/// `disable_yolo` without `source_path` must not read as a request.
+#[test]
+fn claude_bypass_lock_request_requires_loaded_source() {
+    let unloaded = ManagedSettingsFeatures {
+        disable_yolo: Some(true),
+        ..Default::default()
+    };
+    assert!(
+        !claude_bypass_lock_request(&unloaded),
+        "no source_path: nothing was loaded, so nothing was requested"
+    );
+
+    let loaded = ManagedSettingsFeatures {
+        disable_yolo: Some(true),
+        source_path: Some(std::path::PathBuf::from(
+            "/etc/claude/managed-settings.json",
+        )),
+        ..Default::default()
+    };
+    assert!(claude_bypass_lock_request(&loaded));
+
+    let loaded_without_request = ManagedSettingsFeatures {
+        disable_yolo: Some(false),
+        source_path: Some(std::path::PathBuf::from(
+            "/etc/claude/managed-settings.json",
+        )),
+        ..Default::default()
+    };
+    assert!(!claude_bypass_lock_request(&loaded_without_request));
+}
+
+/// A non-bool lock value is a misconfiguration: it must NOT lock (so it can't accidentally pin).
+/// It must also emit a WARN naming the key and layer so the admin sees the lock isn't taking effect.
 #[test]
 fn non_bool_lock_key_warns_and_does_not_lock() {
     #[derive(Clone, Default)]
@@ -2574,7 +1451,6 @@ fn non_bool_lock_key_warns_and_does_not_lock() {
         resolve_yolo_policy_block([(p, &bad)].into_iter())
     });
 
-    // A misconfigured (non-bool) lock must NOT silently pin.
     assert_eq!(
         result, None,
         "non-bool lock value must not activate the pin"
@@ -2633,9 +1509,8 @@ fn catchall_allow_detection() {
     }));
 }
 
-/// A bare/match-all Allow on a freeform authority dimension
-/// (Bash / MCP / WebFetch / AgentMessage) is a `--yolo` substitute — including
-/// the prefix-regime `?*`-class and bare `allow = ["Bash"]` ({Allow, Bash, None}).
+/// A bare or match-all Allow on a freeform authority dimension (Bash / MCP / WebFetch / AgentMessage) is a `--yolo` substitute.
+/// That includes the prefix-regime `?*` pattern and bare `allow = ["Bash"]` ({Allow, Bash, None}).
 /// Scoped grants and file dimensions (Read/Edit/Grep) are not catch-alls.
 #[test]
 fn catchall_allow_covers_freeform_dimensions() {
@@ -2665,19 +1540,18 @@ fn catchall_allow_covers_freeform_dimensions() {
             "{tool:?} scoped"
         );
     }
-    // Bash prefix regime: `npm*` only auto-approves `npm ...` — keep it.
+    // Bash prefix regime: `npm*` only auto-approves `npm ...`, so keep it
     assert!(!is_catchall_allow(&allow_tool(
         &ToolFilter::Bash,
         Some("npm*")
     )));
-    // Regression: a URL-glob catch-all (`WebFetch(*://*)`) matches every URL
-    // at enforcement; the bash-shaped probe missed it, so it must be dropped.
+    // Regression: a URL-glob catch-all (`WebFetch(*://*)`) matches every URL at enforcement
+    // The bash-shaped probe missed it, so it must be dropped
     assert!(is_catchall_allow(&allow_tool(
         &ToolFilter::WebFetch,
         Some("*://*")
     )));
-    // File-access dimensions are not freeform execution: never dropped here,
-    // even bare (no command-execution exposure).
+    // File-access dimensions are not freeform execution: never dropped here, even bare (no command-execution exposure)
     for tool in [&ToolFilter::Read, &ToolFilter::Edit, &ToolFilter::Grep] {
         assert!(
             !is_catchall_allow(&allow_tool(tool, None)),
@@ -2716,9 +1590,8 @@ fn admin_source_trusts_only_root_owned_tiers() {
     assert!(!is_admin_source(&RequirementSource::Unknown));
 }
 
-/// The drop is both source-aware (untrusted catch-alls go, root-owned stay)
-/// and pattern-aware (the match-all globs `*` / `**` / `**/*` count; a scoped
-/// `Allow(Any, "src/**")` is not a catch-all and always survives).
+/// The drop is source-aware: untrusted catch-alls go, root-owned stay.
+/// It is also pattern-aware: the match-all globs `*` / `**` / `**/*` count; a scoped `Allow(Any, "src/**")` is not a catch-all and always survives.
 #[test]
 fn drop_untrusted_catchall_allows_is_source_aware() {
     let sourced = |value, source| Sourced { value, source };
@@ -2732,7 +1605,7 @@ fn drop_untrusted_catchall_allows_is_source_aware() {
             allow_any(Some("**")),
             RequirementSource::Settings { path: "s".into() },
         ),
-        // User-home requirements — untrusted.
+        // User-home requirements: untrusted
         sourced(
             allow_any(Some("**/*")),
             RequirementSource::Requirements {
@@ -2746,12 +1619,12 @@ fn drop_untrusted_catchall_allows_is_source_aware() {
                 path: "/etc/grok/managed_config.toml".into(),
             },
         ),
-        // Scoped Allow(Any) from an untrusted source — not a catch-all, kept.
+        // Scoped Allow(Any) from an untrusted source: not a catch-all, kept
         sourced(
             allow_any(Some("src/**")),
             RequirementSource::Config { path: "c".into() },
         ),
-        // System-dir requirements — root-owned, trusted.
+        // System-dir requirements: root-owned, trusted
         sourced(
             allow_any(Some("*")),
             RequirementSource::SystemRequirements {
@@ -2770,8 +1643,7 @@ fn drop_untrusted_catchall_allows_is_source_aware() {
     assert_eq!(kept.len(), 7);
     assert!(skipped.is_empty());
 
-    // Pin: untrusted catch-alls (`*`, `**`, `**/*`) drop; the scoped `src/**`
-    // and the two root-owned catch-alls survive.
+    // Pin: untrusted catch-alls (`*`, `**`, `**/*`) drop; the scoped `src/**` and the two root-owned catch-alls survive
     let mut skipped = Vec::new();
     let kept = drop_untrusted_catchall_allows(rules, Some(PIN), &mut skipped);
     assert_eq!(
@@ -2807,10 +1679,8 @@ fn drop_untrusted_catchall_allows_is_source_aware() {
     assert!(skipped.iter().all(|s| s.reason == PIN));
 }
 
-/// FIX 2: under the pin, a blanket freeform-execution Allow (bare
-/// `allow = ["Bash"]`, `?*`) from an untrusted source is dropped, while the
-/// SAME rule from a root-owned admin source survives and a scoped
-/// `Bash(git *)` is always kept.
+/// Under the pin, a blanket freeform-execution Allow (bare `allow = ["Bash"]`, `?*`) from an untrusted source is dropped.
+/// The SAME rule from a root-owned admin source survives, and a scoped `Bash(git *)` is always kept.
 #[test]
 fn drop_untrusted_freeform_catchalls_respects_source_and_scope() {
     let sourced = |value, source| Sourced { value, source };
@@ -2821,13 +1691,13 @@ fn drop_untrusted_freeform_catchalls_respects_source_and_scope() {
         path: "/etc/grok/requirements.toml".into(),
     };
     let rules = vec![
-        // Bare `allow = ["Bash"]` from an untrusted source — dropped.
+        // Bare `allow = ["Bash"]` from an untrusted source: dropped
         sourced(allow_tool(&ToolFilter::Bash, None), untrusted()),
-        // `?*` MCP allow from an untrusted source — dropped (prefix regime).
+        // `?*` MCP allow from an untrusted source: dropped (prefix regime)
         sourced(allow_tool(&ToolFilter::Mcp, Some("?*")), untrusted()),
-        // Scoped Bash from an untrusted source — KEPT (not a catch-all).
+        // Scoped Bash from an untrusted source: KEPT (not a catch-all)
         sourced(allow_tool(&ToolFilter::Bash, Some("git *")), untrusted()),
-        // Bare Bash from a root-owned admin source — KEPT (trusted).
+        // Bare Bash from a root-owned admin source: KEPT (trusted)
         sourced(allow_tool(&ToolFilter::Bash, None), admin()),
     ];
 
@@ -2837,7 +1707,7 @@ fn drop_untrusted_freeform_catchalls_respects_source_and_scope() {
     assert_eq!(kept.len(), 4);
     assert!(skipped.is_empty());
 
-    // Pin: untrusted blanket freeform allows drop; scoped + admin survive.
+    // Pin: untrusted blanket freeform allows drop; scoped and admin survive
     let mut skipped = Vec::new();
     let kept = drop_untrusted_catchall_allows(rules, Some(PIN), &mut skipped);
     assert_eq!(kept.len(), 2, "scoped untrusted + bare admin survive");
@@ -2856,8 +1726,7 @@ fn drop_untrusted_freeform_catchalls_respects_source_and_scope() {
     assert!(skipped.iter().all(|s| s.reason == PIN));
 }
 
-/// End-to-end: a `.claude` `permissions.allow: ["*"]` is dropped (and recorded)
-/// under the pin, kept without it.
+/// End-to-end: a `.claude` `permissions.allow: ["*"]` is dropped (and recorded) under the pin, kept without it.
 #[tokio::test]
 async fn claude_catchall_allow_dropped_under_pin() {
     use crate::permission::policy::CompiledPolicy;
@@ -2877,6 +1746,7 @@ async fn claude_catchall_allow_dropped_under_pin() {
     let resolved = resolve_permissions_with_provenance_inner(tmp.path(), inputs(None))
         .await
         .expect("rules resolve");
+    assert_eq!(resolved.yolo_lock, None, "no pin: no lock carried");
     assert!(
         resolved.config.rules.iter().any(is_catchall_allow),
         "no pin: catch-all allow is honored"
@@ -2889,9 +1759,14 @@ async fn claude_catchall_allow_dropped_under_pin() {
     );
 
     // Pin: dropped, recorded for inspect, and no longer auto-approving.
-    let resolved = resolve_permissions_with_provenance_inner(tmp.path(), inputs(Some(PIN)))
+    let resolved = resolve_permissions_with_provenance_inner(tmp.path(), inputs(Some(pin_lock())))
         .await
         .expect("skip-only resolution survives");
+    assert_eq!(
+        resolved.yolo_lock,
+        Some(pin_lock()),
+        "the resolution carries the pin it applied"
+    );
     assert!(
         !resolved.config.rules.iter().any(is_catchall_allow),
         "pin: untrusted catch-all allow must be dropped"
@@ -2908,8 +1783,7 @@ async fn claude_catchall_allow_dropped_under_pin() {
     );
 }
 
-/// End-to-end: a `.claude` `permissions.allow: ["**"]` auto-approves arbitrary
-/// bash without the pin, but is dropped under it.
+/// End-to-end: a `.claude` `permissions.allow: ["**"]` auto-approves arbitrary bash without the pin, but is dropped under it.
 #[tokio::test]
 async fn claude_double_star_allow_dropped_under_pin() {
     use crate::permission::policy::CompiledPolicy;
@@ -2941,7 +1815,7 @@ async fn claude_double_star_allow_dropped_under_pin() {
     );
 
     // Pin: `**` dropped, recorded, no longer auto-approves.
-    let resolved = resolve_permissions_with_provenance_inner(tmp.path(), inputs(Some(PIN)))
+    let resolved = resolve_permissions_with_provenance_inner(tmp.path(), inputs(Some(pin_lock())))
         .await
         .expect("skip-only resolution survives");
     assert!(
@@ -2954,6 +1828,37 @@ async fn claude_double_star_allow_dropped_under_pin() {
         policy.evaluate(&danger),
         Some(Decision::Allow),
         "pin: arbitrary bash no longer auto-approved"
+    );
+}
+
+/// The pinned public entry: the caller-supplied lock, not the host's requirements.toml, controls the catch-all drop.
+/// On a pinned host the `None` leg proves disk state is ignored; on an unpinned host the `Some` leg proves the parameter alone drops the rule.
+#[tokio::test]
+async fn fallback_pinned_lock_param_controls_catchall_drop() {
+    let tmp = tempfile::tempdir().unwrap();
+    let claude_dir = tmp.path().join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        r#"{"permissions": {"allow": ["*"]}}"#,
+    )
+    .unwrap();
+
+    let cfg = resolve_permission_config_with_fallback_pinned(tmp.path(), true, None)
+        .await
+        .expect("rules resolve");
+    assert!(
+        cfg.rules.iter().any(is_catchall_allow),
+        "no lock supplied: catch-all allow must be kept"
+    );
+
+    let lock = pin_lock();
+    let cfg = resolve_permission_config_with_fallback_pinned(tmp.path(), true, Some(&lock))
+        .await
+        .expect("skip-only resolution survives");
+    assert!(
+        !cfg.rules.iter().any(is_catchall_allow),
+        "supplied lock: untrusted catch-all allow must be dropped"
     );
 }
 
@@ -3056,27 +1961,7 @@ fn default_mode_from_str_and_effects() {
     assert!(DefaultPermissionMode::from_str("nope").is_err());
 }
 
-#[test]
-fn parse_managed_settings_reads_nested_default_mode() {
-    let json = serde_json::json!({
-        "permissions": {
-            "defaultMode": "dontAsk",
-            "allow": ["Bash(git status)"]
-        }
-    });
-    let path = std::path::Path::new("/test/managed-settings.json");
-    let ms = parse_managed_settings_json(&json, path);
-    assert_eq!(ms.default_mode, Some(DefaultPermissionMode::DontAsk));
-    assert_eq!(ms.permissions.len(), 1);
-
-    let auto_json = serde_json::json!({
-        "permissions": { "defaultMode": "auto" }
-    });
-    let ms_auto = parse_managed_settings_json(&auto_json, path);
-    assert_eq!(ms_auto.default_mode, Some(DefaultPermissionMode::Auto));
-}
-
-/// All permission rule strings fail to parse → skip-only resolution must not panic.
+/// When every permission rule string fails to parse, skip-only resolution must not panic.
 #[test]
 fn skip_only_invalid_permissions_resolves_without_panic() {
     let tmp = tempfile::tempdir().unwrap();
@@ -3256,7 +2141,7 @@ async fn managed_bypass_under_pin_records_skip_without_catchall() {
     };
     let resolved = resolve_permissions_with_provenance_inner(
         tmp.path(),
-        inputs_with_managed(Some("pin-reason"), &managed),
+        inputs_with_managed(Some(pin_lock()), &managed),
     )
     .await
     .expect("blocked bypass still resolves for inspect");
@@ -3392,7 +2277,6 @@ fn default_mode_known_values_no_warnings() {
         let (cfg, _, _) =
             resolve_claude_settings_inner(tmp.path(), true, None, UserDefaultModeLoad::Apply)
                 .unwrap();
-        // Should have only the explicit rule, no synthetic
         assert_eq!(
             cfg.rules.len(),
             1,
@@ -3457,7 +2341,6 @@ fn notebook_tools_warn_and_skip_like_enter_worktree() {
 
 #[test]
 fn parse_escaped_parens_in_content() {
-    // "Bash(python -c \"print\\(1\\)\")" should unescape to content "python -c \"print(1)\""
     let rule = parse_permission_rule(r#"Bash(python -c "print\(1\)")"#, RuleAction::Allow).unwrap();
     assert_eq!(rule.tool, ToolFilter::Bash);
     assert_eq!(rule.pattern, Some(r#"python -c "print(1)""#.to_string()));
@@ -3524,7 +2407,7 @@ fn deny_star_is_tool_wide() {
 
 #[test]
 fn parse_escaped_backslash_before_paren() {
-    // \\( in content = escaped backslash + literal open-paren
+    // In content, \\( is an escaped backslash followed by a literal open-paren
     let rule = parse_permission_rule(r"Bash(echo \\(test)", RuleAction::Allow).unwrap();
     assert_eq!(rule.pattern, Some(r"echo \(test".to_string()));
 }
@@ -3598,7 +2481,7 @@ async fn managed_config_toml_rules_resolve_as_non_admin_defaults() {
         tmp.path(),
         ResolveInputs {
             managed_config_rules: rules,
-            ..inputs(Some(PIN))
+            ..inputs(Some(pin_lock()))
         },
     )
     .await
@@ -3612,9 +2495,8 @@ async fn managed_config_toml_rules_resolve_as_non_admin_defaults() {
     assert!(resolved.skipped.iter().any(|s| s.reason == PIN));
 }
 
-/// `apply_permission_mode_hint`: honored only for `"alwaysAllow"`, with no
-/// pin, when no settings layer configured `defaultMode`; every explicitly
-/// configured mode — including ones that project to `Ask` — and the pin win.
+/// `apply_permission_mode_hint` is honored only for `"alwaysAllow"`, with no pin, when no settings layer configured `defaultMode`.
+/// Every explicitly configured mode (including ones that project to `Ask`) and the pin win.
 #[test]
 fn permission_mode_hint_apply_matrix() {
     /// A config as the resolver produces it for an explicit `defaultMode`.
@@ -3673,8 +2555,8 @@ fn permission_mode_hint_apply_matrix() {
     ));
     assert_eq!(auto.as_ref().unwrap().prompt_policy, PromptPolicy::Auto);
 
-    // Explicit default / plan / acceptEdits / invalid fail-safe all project to
-    // Ask but ARE configured modes: the provenance bit must refuse the upgrade.
+    // Explicit default / plan / acceptEdits / invalid fail-safe all project to Ask but ARE configured modes
+    // The provenance bit must refuse the upgrade
     let mut explicit_default = configured(PromptPolicy::Ask);
     assert!(!apply_permission_mode_hint(
         &mut explicit_default,
@@ -3696,14 +2578,11 @@ fn permission_mode_hint_apply_matrix() {
     assert_eq!(ask.as_ref().unwrap().prompt_policy, PromptPolicy::Allow);
 }
 
-/// The resolver stamps `default_mode_configured` for an explicit user-tier
-/// `defaultMode` even when it projects to `Ask` (e.g. `"default"`), so the
-/// alwaysAllow hint cannot override an explicit operator choice — including
-/// the rule-less mode-only case, which must survive the outer resolver's
-/// empty-config drop instead of degrading to `None` (an unconfigured look).
+/// The resolver stamps `default_mode_configured` for an explicit user-tier `defaultMode` even when it projects to `Ask` (e.g. `"default"`).
+/// The alwaysAllow hint then cannot override an explicit operator choice.
+/// That includes the rule-less mode-only case: it must survive the outer resolver's empty-config drop, since a `None` there reads as unconfigured.
 ///
-/// Sync + `block_on` so `ENV_LOCK` is not held across `.await` (clippy
-/// `await_holding_lock`), same as the untrusted-project tests above.
+/// The test is sync and uses `block_on` so `ENV_LOCK` is not held across `.await` (clippy `await_holding_lock`), like the untrusted-project tests.
 #[test]
 fn explicit_default_mode_blocks_permission_mode_hint() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -3711,7 +2590,7 @@ fn explicit_default_mode_blocks_permission_mode_hint() {
         .build()
         .unwrap();
 
-    // (settings json, label) — with companion rules and mode-only.
+    // (settings json, label): with companion rules and mode-only
     let cases = [
         (
             r#"{"permissions": {"defaultMode": "default", "allow": ["Bash(git status)"]}}"#,

@@ -61,7 +61,7 @@ pub use pre_tui::{PreTuiLoginOutcome, maybe_run_pre_tui_external_login};
 mod meta;
 pub use error::{AuthError, RefreshTokenError, RefreshTokenFailedReason};
 pub use manager::{AuthManager, shared_api_key_provider};
-pub(crate) use manager::{AuthRemedy, SilentRefresh};
+pub(crate) use manager::{AuthRemedy, CachedTokenState, SilentRefresh};
 pub use meta::{AuthMeta, GateInfo};
 pub use model::{
     AMAZON_BEDROCK_AUTH_SCOPE, ANTHROPIC_CLAUDE_OAUTH_SCOPE, AuthMode, GITHUB_COPILOT_OAUTH_SCOPE,

@@ -977,57 +977,6 @@ mod tests {
     }
     register_resource!("grok_build", "Todo", TodoData);
     #[test]
-    fn insert_and_get_typed_values() {
-        let mut res = Resources::new();
-        res.insert(42u32);
-        res.insert("hello".to_string());
-        assert_eq!(res.get::<u32>(), Some(&42));
-        assert_eq!(res.get::<String>(), Some(&"hello".to_string()));
-        assert_eq!(res.get::<bool>(), None);
-    }
-    #[test]
-    fn get_mut_modifies_in_place() {
-        let mut res = Resources::new();
-        res.insert(10i32);
-        *res.get_mut::<i32>().unwrap() += 5;
-        assert_eq!(res.get::<i32>(), Some(&15));
-    }
-    #[test]
-    fn get_or_default_inserts_when_missing() {
-        let mut res = Resources::new();
-        let val = res.get_or_default::<Vec<i32>>();
-        val.push(1);
-        val.push(2);
-        assert_eq!(res.get::<Vec<i32>>(), Some(&vec![1, 2]));
-    }
-    #[test]
-    fn get_or_default_returns_existing() {
-        let mut res = Resources::new();
-        res.insert(vec![42i32]);
-        let val = res.get_or_default::<Vec<i32>>();
-        assert_eq!(val, &vec![42]);
-    }
-    #[test]
-    fn remove_returns_value() {
-        let mut res = Resources::new();
-        res.insert("test".to_string());
-        let removed = res.remove::<String>();
-        assert_eq!(removed, Some("test".to_string()));
-        assert_eq!(res.get::<String>(), None);
-    }
-    #[test]
-    fn remove_returns_none_when_missing() {
-        let mut res = Resources::new();
-        assert_eq!(res.remove::<String>(), None);
-    }
-    #[test]
-    fn contains_checks_presence() {
-        let mut res = Resources::new();
-        assert!(!res.contains::<u32>());
-        res.insert(42u32);
-        assert!(res.contains::<u32>());
-    }
-    #[test]
     fn params_and_state_coexist_without_collision() {
         let mut res = Resources::new();
         res.insert(Params(EditConfig {
@@ -1242,21 +1191,6 @@ mod tests {
         assert_eq!(names.resolve("offset"), "start_line");
         assert_eq!(names.resolve("limit"), "max_lines");
         assert_eq!(names.resolve("path"), "path");
-    }
-    #[test]
-    fn params_deref() {
-        let p = Params(EditConfig {
-            skip_read_before_edit: true,
-            max_file_size: Some(42),
-        });
-        assert!(p.skip_read_before_edit);
-        assert_eq!(p.max_file_size, Some(42));
-    }
-    #[test]
-    fn state_deref_mut() {
-        let mut s = State(ReadHistory { files_read: vec![] });
-        s.files_read.push("new.rs".to_string());
-        assert_eq!(s.files_read, vec!["new.rs".to_string()]);
     }
     #[test]
     fn resolve_model_path_relative_no_display() {

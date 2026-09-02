@@ -1,12 +1,11 @@
-//! Agent-scoped interactive PTY manager. PTYs are keyed by `terminalId`,
-//! outlive sessions, and multiplex I/O over the existing ACP WebSocket.
-//! Shells enroll in the process-global scope as terminal owners, so teardown
-//! hangs a live shell up and it forwards that to its jobs. A shell that exits
-//! on its own leaves them running, as a terminal does: their process groups are
-//! their own and nothing here holds a handle to them.
+//! Agent-scoped interactive PTY manager.
+//! PTYs are keyed by `terminalId`, outlive sessions, and multiplex I/O over the existing ACP WebSocket.
+//! Shells enroll in the process-global scope as terminal owners, so teardown hangs a live shell up and it forwards that to its jobs.
+//! A shell that exits on its own leaves them running, as a terminal does.
+//! Their process groups are their own and nothing here holds a handle to them.
 
-// A panic here loses a shell: teardown paths run inside `Drop`, where an
-// unwind during another unwind aborts the process. Tests panic freely.
+// A panic here loses a shell: teardown paths run inside `Drop`, where an unwind during another unwind aborts the process
+// Tests panic freely
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 use std::collections::{HashMap, VecDeque};
@@ -22,8 +21,7 @@ use xai_grok_workspace::file_system::TargetClientId;
 use crate::{TerminalExtError, TerminalInfo, TerminalStatus};
 
 /// Inject `targetClientId` into `_meta` and fire-and-forget an ext notification.
-/// Mirrors `xai_grok_shell::extensions::routing::send_routed_notification` so
-/// this crate does not depend on the shell.
+/// Mirrors `xai_grok_shell::extensions::routing::send_routed_notification` so this crate does not depend on the shell.
 fn send_routed_notification(
     gateway: &GatewaySender,
     method: &str,
@@ -56,7 +54,7 @@ const OUTPUT_BATCH_INTERVAL_MS: u64 = 16;
 const BUSY_POLL_INTERVAL_MS: u64 = 500;
 const INPUT_CHANNEL_CAPACITY: usize = 256;
 const EXIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
-/// Collecting a killed shell, not waiting on a live one.
+/// This wait collects a killed shell rather than waiting on a live one.
 const REAP_GRACE: std::time::Duration = std::time::Duration::from_millis(100);
 
 pub struct PtySession {
@@ -78,9 +76,8 @@ pub struct PtySession {
 
 /// A shell and the group that can signal it.
 ///
-/// Reaping releases the pid, and a released pid can be recycled, so a signal
-/// after the reap may reach a stranger. `Reaped` carries no group, which makes
-/// that mistake unrepresentable rather than a rule to remember.
+/// Reaping releases the pid, and a released pid can be recycled, so a signal after the reap may reach a stranger.
+/// `Reaped` carries no group, which makes that mistake unrepresentable rather than a rule to remember.
 enum Shell {
     Running {
         child: Box<dyn portable_pty::Child + Send + Sync>,
@@ -116,10 +113,9 @@ impl Shell {
         }
     }
 
-    /// Reap a shell that never reached the registry, where teardown would
-    /// otherwise never find it. Same order as [`reap`], and it has to wait:
-    /// `killpg` returns before the kernel has zombified the leader, so dropping
-    /// straight after would leak it and retire the group with it.
+    /// Reap a shell that never reached the registry, where teardown would otherwise never find it.
+    /// It follows the same order as [`reap`], and it has to wait: `killpg` returns before the kernel has zombified the leader.
+    /// Dropping straight after would leak it and retire the group with it.
     fn reap_now(&mut self) {
         if self.hangup() && self.wait_exit(xai_tty_utils::HANGUP_GRACE) {
             return;
@@ -128,8 +124,8 @@ impl Shell {
         self.wait_exit(REAP_GRACE);
     }
 
-    /// Poll to a deadline. [`wait_for_exit`] is the same wait for a session that
-    /// reached the registry, where each turn has to retake the lock.
+    /// Poll to a deadline.
+    /// [`wait_for_exit`] is the same wait for a session that reached the registry, where each turn has to retake the lock.
     fn wait_exit(&mut self, budget: std::time::Duration) -> bool {
         let deadline = std::time::Instant::now() + budget;
         loop {
@@ -159,9 +155,8 @@ impl Shell {
         }
     }
 
-    /// Whether the shell is gone. An error counts as gone: the pid is not ours
-    /// to signal either way, and leaving the group attached would let teardown
-    /// signal a recycled one.
+    /// Whether the shell is gone.
+    /// An error counts as gone: the pid is not ours to signal either way, and leaving the group attached would let teardown signal a recycled one.
     fn poll_exit(&mut self) -> bool {
         if let Shell::Running { child, .. } = self {
             match child.try_wait() {
@@ -182,11 +177,8 @@ impl Shell {
 }
 
 /// A shell not yet in the registry, where teardown would never find it.
-/// Dropping reaps it; [`Self::into_registered`] hands it to the registry
-/// instead.
-///
-/// Disarming leaves [`Shell::Reaped`] behind rather than an empty slot, so the
-/// guard has no state in which its own field is missing.
+/// Dropping reaps it; [`Self::into_registered`] hands it to the registry instead.
+/// Disarming leaves [`Shell::Reaped`] behind rather than an empty slot, so the guard has no state in which its own field is missing.
 struct UnregisteredShell(Shell);
 
 impl UnregisteredShell {
@@ -202,8 +194,8 @@ impl UnregisteredShell {
         self.0.attach_group(enrolled);
     }
 
-    /// Disarms the guard. The caller must reach the registry without awaiting,
-    /// or it reopens the window this type closes.
+    /// Disarms the guard.
+    /// The caller must reach the registry without awaiting, or it reopens the window this type closes.
     fn into_registered(mut self) -> Shell {
         self.disarm()
     }
@@ -216,10 +208,9 @@ impl UnregisteredShell {
 impl Drop for UnregisteredShell {
     fn drop(&mut self) {
         let mut shell = self.disarm();
-        // `reap_now` blocks through its grace waits, so keep it off an async
-        // thread. Not the runtime's blocking pool though: a task still queued
-        // there at shutdown is dropped unrun, taking the group with it and
-        // leaving the scope holding a dead `Weak`.
+        // `reap_now` blocks through its grace waits, so keep it off an async thread
+        // Do not use the runtime's blocking pool though: a task still queued there at shutdown is dropped unrun
+        // That takes the group with it and leaves the scope holding a dead `Weak`
         if tokio::runtime::Handle::try_current().is_ok() {
             std::thread::spawn(move || shell.reap_now());
         } else {
@@ -291,7 +282,7 @@ pub async fn create_pty(
     cmd.env("LANG", "en_US.UTF-8");
     cmd.env("LC_ALL", "en_US.UTF-8");
 
-    // Enrolled below, and reaped by the guard until it reaches the registry.
+    // The child is enrolled below, and the guard reaps it until it reaches the registry
     #[allow(clippy::disallowed_methods)]
     let child = pair
         .slave
@@ -300,8 +291,7 @@ pub async fn create_pty(
 
     let mut shell = UnregisteredShell::new(child);
     if let Some(pid) = shell.pid() {
-        // `enroll_terminal_pid` reaps with a grace wait if it loses the close
-        // race, so run it off-task.
+        // `enroll_terminal_pid` reaps with a grace wait if it loses the close race, so run it off-task
         let enrolled = tokio::task::spawn_blocking(move || {
             xai_tty_utils::global_process_scope().enroll_terminal_pid(pid)
         })
@@ -350,12 +340,10 @@ pub async fn create_pty(
             })
     });
 
-    // Taking the lock first means nothing can await between disarming the guard
-    // and the insert that gives teardown another way to reach the shell.
+    // Taking the lock first means nothing can await between disarming the guard and the insert that gives teardown another way to reach the shell
     let mut registry = PTY_REGISTRY.lock().await;
 
-    // The scope can close during the setup above, and teardown has already run
-    // by then: publishing here would advertise a shell it just killed.
+    // The scope can close during the setup above, and teardown has already run by then: publishing here would advertise a shell it just killed
     if xai_tty_utils::global_process_scope().is_closed() {
         return Err(TerminalExtError::Internal(
             "process scope closed while the shell was starting".to_string(),
@@ -403,9 +391,8 @@ fn spawn_pty_input_loop(mut writer: Box<dyn Write + Send>, mut input_rx: mpsc::R
 }
 
 /// Reads PTY output, batches on a 16ms tick, and sends notifications.
-/// Also samples the foreground process group on a slower tick and pushes
-/// `process_started`/`process_ended` on idle↔busy transitions — time-based
-/// rather than output-driven because a busy process can be silent.
+/// Also samples the foreground process group on a slower tick and pushes `process_started`/`process_ended` when the shell turns busy or idle.
+/// The sampling is time-based rather than output-driven because a busy process can be silent.
 async fn run_pty_output_loop(
     reader: Box<dyn Read + Send>,
     pty: Arc<Mutex<PtySession>>,
@@ -476,8 +463,7 @@ async fn run_pty_output_loop(
         }
     }
 
-    // The reader ending does not prove the shell did, so poll rather than
-    // blocking on `wait`: teardown needs this lock to hang the shell up.
+    // The reader ending does not prove the shell did, so poll rather than blocking on `wait`: teardown needs this lock to hang the shell up
     let (exit_code, signal, target_client_id, was_busy) = tokio::task::spawn_blocking({
         let pty = pty.clone();
         move || {
@@ -520,10 +506,8 @@ async fn run_pty_output_loop(
 }
 
 /// Whether a command is running, rather than the shell sitting at its prompt.
-///
-/// A shell that `exec`s a program in place keeps its pid and pgid, so that
-/// program reads as idle. Separating it from a real prompt needs per-OS
-/// process inspection.
+/// A shell that `exec`s a program in place keeps its pid and pgid, so that program reads as idle.
+/// Separating it from a real prompt needs per-OS process inspection.
 #[cfg(unix)]
 fn session_has_foreground_process(session: &PtySession) -> bool {
     let Some(foreground_pgid) = session
@@ -539,16 +523,14 @@ fn session_has_foreground_process(session: &PtySession) -> bool {
     }
 }
 
-/// `tcgetpgrp` has no ConPTY equivalent (`process_group_leader` is
-/// unix-only in portable-pty), so non-unix PTYs never report a foreground
-/// process and clients close terminals without confirmation.
+/// `tcgetpgrp` has no ConPTY equivalent (`process_group_leader` is unix-only in portable-pty).
+/// Non-unix PTYs therefore never report a foreground process, and clients close terminals without confirmation.
 #[cfg(not(unix))]
 fn session_has_foreground_process(_session: &PtySession) -> bool {
     false
 }
 
-/// Emits `process_started` / `process_ended` only on idle↔busy transitions so
-/// a steady state never repeats notifications.
+/// Emits `process_started` / `process_ended` only when the session flips between idle and busy, so a steady state never repeats notifications.
 async fn sample_busy_transition(pty: &Arc<Mutex<PtySession>>, pty_id: &str) {
     let mut session = pty.lock().await;
     let now_busy = session_has_foreground_process(&session);
@@ -661,8 +643,7 @@ pub async fn close_pty(pty_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Dropping the master would not hang the shell up: the reader and writer hold
-/// their own dups of it, and SIGHUP needs the last one closed.
+/// Dropping the master would not hang the shell up: the reader and writer hold their own dups of it, and SIGHUP needs the last one closed.
 fn reap(entry: &Arc<Mutex<PtySession>>) {
     let hung_up = {
         let mut session = entry.blocking_lock();
@@ -678,8 +659,7 @@ fn reap(entry: &Arc<Mutex<PtySession>>) {
     wait_for_exit(entry, REAP_GRACE);
 }
 
-/// Polls rather than blocking on `wait`, re-locking each turn: a shell that
-/// ignores its hangup must not wedge teardown or stall the pty's own I/O.
+/// Polls rather than blocking on `wait`, re-locking each turn: a shell that ignores its hangup must not wedge teardown or stall the pty's own I/O.
 fn wait_for_exit(entry: &Arc<Mutex<PtySession>>, budget: std::time::Duration) -> bool {
     let deadline = std::time::Instant::now() + budget;
     loop {
@@ -704,8 +684,8 @@ pub async fn close_all() {
     }
 }
 
-/// Explicit `shell` param, then `$SHELL`, then the platform default. Windows
-/// has no `$SHELL`, so it uses the `detect_windows_shell` cascade.
+/// Explicit `shell` param, then `$SHELL`, then the platform default.
+/// Windows has no `$SHELL`, so it uses the `detect_windows_shell` cascade.
 fn resolve_pty_shell(shell: Option<&str>) -> (String, Vec<String>) {
     if let Some(s) = shell {
         return (s.to_string(), vec![]);
@@ -770,9 +750,8 @@ pub struct PtyLoadResult {
     pub exit_code: Option<i32>,
 }
 
-/// Reconnect to a PTY, replaying the ring buffer so the client can reset its
-/// VTE emulator and feed all bytes from scratch. An exited PTY still loads, so
-/// its final output stays readable.
+/// Reconnect to a PTY, replaying the ring buffer so the client can reset its VTE emulator and feed all bytes from scratch.
+/// An exited PTY still loads, so its final output stays readable.
 pub async fn load(
     pty_id: &str,
     gateway: &GatewaySender,
@@ -983,8 +962,7 @@ mod tests {
                     .expect("write command");
                 let grandchild = wait_for_reported_pid(&pty_id).await;
 
-                // Without job control the job shares the shell's group and the
-                // group kill alone would pass this test.
+                // Without job control the job shares the shell's group and the group kill alone would pass this test
                 let shell = require_pty(&pty_id)
                     .await
                     .expect("pty")
@@ -1013,8 +991,7 @@ mod tests {
             .await;
     }
 
-    /// A local scope, so the process-global one is not latched closed for the
-    /// tests that follow.
+    /// This test uses a local scope, so the process-global one is not latched closed for the tests that follow.
     #[cfg(unix)]
     #[tokio::test]
     async fn scope_teardown_kills_a_background_grandchild() {
@@ -1097,7 +1074,7 @@ mod tests {
             let entry = require_pty(pty_id).await.expect("pty");
             let out: Vec<u8> = entry.lock().await.output_ring.iter().copied().collect();
             let text = String::from_utf8_lossy(&out);
-            // Every occurrence, since the shell echoes the command's own `pid=$!`.
+            // Check every occurrence, since the shell echoes the command's own `pid=$!`
             if let Some(pid) = text
                 .split("pid=")
                 .skip(1)

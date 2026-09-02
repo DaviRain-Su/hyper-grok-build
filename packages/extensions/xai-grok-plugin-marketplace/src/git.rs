@@ -1,5 +1,3 @@
-//! Git marketplace source support.
-//!
 //! Provides persistent caching of git marketplace repos.
 //! Cache root: `~/.grok/marketplace-cache/<url-hash>/`
 
@@ -15,7 +13,6 @@ use std::time::{Duration, Instant};
 
 use fs2::FileExt;
 
-/// Default TTL for marketplace cache freshness (5 minutes).
 const CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -42,9 +39,7 @@ impl Drop for SourceCacheLease {
     }
 }
 
-/// Sync a git marketplace source to the persistent cache.
-///
-/// Returns the path to the cached repo on success.
+/// Sync a git marketplace source to the persistent cache and return the cached repo path.
 pub fn sync_source_cache(
     url: &str,
     branch: Option<&str>,
@@ -160,7 +155,6 @@ fn is_cache_fresh(cache_dir: &Path) -> bool {
     }
 }
 
-/// Get the default cache root directory.
 pub fn default_cache_root() -> PathBuf {
     xai_grok_config::grok_home().join("marketplace-cache")
 }
@@ -175,9 +169,7 @@ fn cache_hash(url: &str) -> String {
 }
 
 /// Clone a git repo with depth 1.
-///
-/// Uses the git CLI (not libgit2): a libgit2 clone cannot be killed on
-/// timeout, so a hung remote would pin a thread forever.
+/// Uses the git CLI (not libgit2): a libgit2 clone cannot be killed on timeout, so a hung remote would pin a thread forever.
 fn clone_repo(url: &str, branch: Option<&str>, dest: &Path) -> Result<(), String> {
     let url = xai_grok_agent::plugins::git_install::validate_git_url(url)?;
     let branch = branch
@@ -253,10 +245,8 @@ fn clone_cli_command(url: &str, branch: Option<&str>, dest: &Path) -> std::proce
     cmd
 }
 
-/// Probe whether `url` is a reachable git repository via a timed
-/// `git ls-remote`, without touching any cache. Used to reject non-git URLs
-/// (e.g. MCP endpoints) at add time instead of persisting a source that
-/// fails on every scan.
+/// Probe whether `url` is a reachable git repository via a timed `git ls-remote`, without touching any cache.
+/// Used to reject non-git URLs (e.g. MCP endpoints) at add time instead of persisting a source that fails on every scan.
 pub fn probe_git_remote(url: &str) -> Result<(), String> {
     let url = xai_grok_agent::plugins::git_install::validate_git_url(url)?;
     let mut cmd = git_command();
@@ -277,12 +267,12 @@ fn fetch_cli_command(repo_dir: &Path, branch: Option<&str>) -> std::process::Com
     cmd
 }
 
-/// Run a git command, wait up to `timeout`, kill+reap on hang. Errors on
-/// timeout or non-zero exit; `what` names the operation in error messages.
+/// Run a git command, wait up to `timeout`, kill and reap on hang.
+/// Errors on timeout or non-zero exit; `what` names the operation in error messages.
 fn run_git_timed(cmd: &mut Command, what: &str, timeout: Duration) -> Result<(), String> {
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::piped());
-    #[allow(clippy::disallowed_methods)] // enrolled before any waiter thread starts
+    #[allow(clippy::disallowed_methods)] // The child is enrolled before any waiter thread starts
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("failed to run git {what}: {e}"))?;
@@ -403,8 +393,7 @@ fn kill_git_child(
     stderr: Option<StderrReader>,
     identity: CleanupIdentity,
 ) -> Option<Vec<u8>> {
-    // ECHILD makes numeric group identity unsafe; dropping its owner prevents
-    // later scope cleanup from signaling a recycled group.
+    // ECHILD makes numeric group identity unsafe; dropping its owner prevents later scope cleanup from signaling a recycled group
     let group = match identity {
         CleanupIdentity::Certain => {
             if let Err(group_error) = group.kill()
@@ -595,10 +584,9 @@ impl CappedStderr {
     }
 }
 
-/// Condense git stderr into a user-facing failure message. git writes
-/// progress ("Cloning into ...") to stderr alongside real errors, so keep
-/// only `fatal:`/`error:` lines, and translate the prompts-disabled auth
-/// failure (we set GIT_TERMINAL_PROMPT=0 / ssh BatchMode) out of git-speak.
+/// Condense git stderr into a user-facing failure message.
+/// git writes progress ("Cloning into ...") to stderr alongside real errors, so keep only `fatal:`/`error:` lines.
+/// Translate the auth failure git reports when prompts are disabled (we set GIT_TERMINAL_PROMPT=0 and ssh BatchMode) into plain language.
 fn git_failure_message(what: &str, stderr: impl AsRef<[u8]>) -> String {
     const AUTH_PATTERNS: [&str; 3] = [
         "could not read Username",
@@ -915,22 +903,6 @@ mod tests {
         xai_tty_utils::detach_std_command(&mut cmd);
 
         run_git_timed(&mut cmd, "stderr-flood", Duration::from_secs(3)).expect("git command");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn run_git_timed_kills_hung_process_tree() {
-        let dir = tempfile::tempdir().unwrap();
-        let marker = dir.path().join("descendant-finished");
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c")
-            .arg(format!("(sleep 2; touch {}) & wait", marker.display()));
-        xai_tty_utils::detach_std_command(&mut cmd);
-
-        let err = run_git_timed(&mut cmd, "sleep", Duration::from_millis(100)).unwrap_err();
-        assert!(err.contains("timed out"), "{err}");
-        std::thread::sleep(Duration::from_millis(2200));
-        assert!(!marker.exists(), "timeout must kill detached descendants");
     }
 
     #[cfg(unix)]

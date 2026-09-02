@@ -6,10 +6,9 @@ use opentelemetry::trace::{Event, Status};
 use opentelemetry::{Array, KeyValue, StringValue, Value};
 use opentelemetry_sdk::trace::SpanData;
 
-/// Adding a span attribute (default-deny via `enforce_allowlist`): record
-/// numerics as `i64` (`u64` serializes as a string and is dropped); derive
-/// label values from an enum `as_str()`; add string keys here and to the
-/// round-trip test pin, and only if they carry no user content.
+/// Adding a span attribute (default-deny via `enforce_allowlist`): record numerics as `i64` (`u64` serializes as a string and is dropped).
+/// Derive label values from an enum `as_str()`.
+/// Add string keys here and to the round-trip test pin, and only if they carry no user content.
 pub(super) static ALLOWED_STRING_KEYS: &[&str] = &[
     // tracing-opentelemetry / framework-injected
     "level",
@@ -79,6 +78,8 @@ pub(super) static ALLOWED_STRING_KEYS: &[&str] = &[
     "error_category",
     "error_type",
     "outcome",
+    "ttft_outcome",
+    "freshness",
     "decision",
     "update_type",
     "kind",
@@ -143,20 +144,17 @@ pub(super) static ALLOWED_STRING_KEYS: &[&str] = &[
     "auto_cadence_reason",
 ];
 
-/// O(1) lookup view over [`ALLOWED_STRING_KEYS`].
 static ALLOWED_STRING_KEY_SET: LazyLock<HashSet<&'static str>> =
     LazyLock::new(|| ALLOWED_STRING_KEYS.iter().copied().collect());
 
-/// Allowlisted keys holding full URLs: reduced to `scheme://host[:port]` so
-/// user-influenced path/query can't export. Storage-*path* keys (`gcs_path`,
-/// `object_path`, `output_path`) are excluded — those paths are wanted.
+/// Allowlisted keys holding full URLs: reduced to `scheme://host[:port]` so user-influenced path/query can't export.
+/// Storage-*path* keys (`gcs_path`, `object_path`, `output_path`) are excluded; those paths are wanted.
 static URL_VALUED_KEYS: &[&str] = &["url", "endpoint", "gcs_url", "bucket_url"];
 
-/// Scrub every text-bearing surface of each span before export.
+/// Scrub every text-bearing field of each span before export.
 pub(super) fn redact_batch(batch: &mut [SpanData]) {
     for span in batch.iter_mut() {
-        // Exhaustive destructure (no `..`): a new `SpanData` field in a future
-        // `opentelemetry_sdk` fails to compile here instead of exporting unscrubbed.
+        // Exhaustive destructure (no `..`): a new field in a future `opentelemetry_sdk` fails to compile here instead of exporting unscrubbed
         let SpanData {
             name,
             attributes,
@@ -190,8 +188,8 @@ pub(super) fn redact_batch(batch: &mut [SpanData]) {
     }
 }
 
-/// Numeric/bool scalars and their arrays are content-free; everything else —
-/// strings and any future `#[non_exhaustive]` variant — is content (fail-closed).
+/// Numeric/bool scalars and their arrays are content-free.
+/// Everything else (strings and any future `#[non_exhaustive]` variant) is content (fail-closed).
 fn is_content_value(value: &Value) -> bool {
     !matches!(
         value,
@@ -219,10 +217,9 @@ fn scrub_attributes(attrs: &mut Vec<KeyValue>) {
     }
 }
 
-/// An event's name is the formatted `tracing` message (`Event.name`) — free
-/// text the key allowlist can't gate, so replace it with the static callsite id
-/// (fail-closed). Rebuilt from the `code.filepath`/`code.lineno` attrs that
-/// `tracing-opentelemetry` attaches to every event (`with_location`, default-on).
+/// An event's name is the formatted `tracing` message (`Event.name`), free text the key allowlist can't gate.
+/// Replace it with the static callsite id (fail-closed).
+/// The id is rebuilt from the `code.filepath`/`code.lineno` attrs that `tracing-opentelemetry` attaches to every event (`with_location`, default-on).
 fn neuter_event_name(event: &mut Event) {
     let mut file: Option<String> = None;
     let mut line: Option<i64> = None;
@@ -249,8 +246,8 @@ fn neuter_event_name(event: &mut Event) {
     };
 }
 
-/// Reduce a URL to `scheme://host[:port]` — its path/query can carry user
-/// content. Unparseable values pass through to the secret scrubber.
+/// Reduce a URL to `scheme://host[:port]`; its path/query can carry user content.
+/// Unparseable values pass through to the secret scrubber.
 fn reduce_url_to_origin(value: &mut Value) {
     if let Value::String(s) = value
         && let Cow::Owned(origin) = crate::redact_common::url_origin(s.as_str())
@@ -260,8 +257,7 @@ fn reduce_url_to_origin(value: &mut Value) {
 }
 
 /// Secret-shape then user-path scrub (shared with the external pipeline).
-/// Returns `Some` only when the input changed (owned, so callers can
-/// overwrite in place).
+/// Returns `Some` only when the input changed (owned, so callers can overwrite in place).
 fn redact_owned(input: &str) -> Option<String> {
     crate::redact_common::redact_owned(input)
 }
@@ -339,10 +335,10 @@ mod tests {
         let mut attrs = vec![
             KeyValue::new("session_id", "sess-abc"), // allowlisted string
             KeyValue::new("path", "/tmp/x.rs"),      // allowlisted string
-            KeyValue::new("prompt", "CANARY_PROMPT secret user text"), // not allowlisted → drop
-            KeyValue::new("command", "echo CANARY_SECRET"), // not allowlisted → drop
-            KeyValue::new("turn_number", 7_i64),     // numeric → keep
-            KeyValue::new("is_background", true),    // bool → keep
+            KeyValue::new("prompt", "CANARY_PROMPT secret user text"), // not allowlisted, dropped
+            KeyValue::new("command", "echo CANARY_SECRET"), // not allowlisted, dropped
+            KeyValue::new("turn_number", 7_i64),     // numeric, kept
+            KeyValue::new("is_background", true),    // bool, kept
         ];
         enforce_allowlist(&mut attrs);
         let keys: Vec<&str> = attrs.iter().map(|kv| kv.key.as_str()).collect();
@@ -372,8 +368,7 @@ mod tests {
 
     #[test]
     fn allowlist_contents_are_pinned() {
-        // Keep this an independent copy — don't reference ALLOWED_STRING_KEYS, or
-        // the assert becomes a tautology and stops gating allowlist changes.
+        // Keep this an independent copy: don't reference ALLOWED_STRING_KEYS, or the assert becomes a tautology and stops gating allowlist changes
         let expected: &[&str] = &[
             "level",
             "target",
@@ -437,6 +432,8 @@ mod tests {
             "error_category",
             "error_type",
             "outcome",
+            "ttft_outcome",
+            "freshness",
             "decision",
             "update_type",
             "kind",
@@ -507,8 +504,7 @@ mod tests {
 
     #[test]
     fn error_status_message_retained_but_secret_scrubbed() {
-        // Error messages are useful telemetry and must survive; only secret
-        // shapes (and home/username paths) are scrubbed out of them.
+        // Error messages are useful telemetry and must survive; only secret shapes (and home/username paths) are scrubbed out of them
         let mut status = Status::error("upstream auth failed: sk-CANARYabcdefghij1234567890");
         if let Status::Error { description } = &mut status {
             redact_in_place(description);
@@ -544,7 +540,7 @@ mod tests {
 
     #[test]
     fn url_valued_keys_reduced_to_origin_but_storage_paths_kept() {
-        // Origin-reduction applies to every URL-valued key, not just `url`...
+        // Origin-reduction applies to every URL-valued key, not just `url`
         let mut attrs = vec![
             KeyValue::new(
                 "bucket_url",
@@ -554,7 +550,7 @@ mod tests {
                 "endpoint",
                 "https://api.example.com:8443/v1/chat?u=CANARYUSER",
             ),
-            // ...but storage *paths* are deliberately exported in full.
+            // Storage *paths* are deliberately exported in full
             KeyValue::new("gcs_path", "sessions/abc123/artifact-kept.tar"),
         ];
         scrub_attributes(&mut attrs);
@@ -579,8 +575,7 @@ mod tests {
 
     #[test]
     fn allowlisted_value_is_still_secret_scrubbed() {
-        // Allowlisting a key permits the field; it does not exempt the value
-        // from the shape scrub.
+        // Allowlisting a key permits the field; it does not exempt the value from the shape scrub
         let mut attrs = vec![KeyValue::new("source", "sk-CANARYabcdefghij1234567890")];
         scrub_attributes(&mut attrs);
         let blob = format!("{attrs:?}");
@@ -592,8 +587,7 @@ mod tests {
 
     #[test]
     fn allowlisted_path_values_are_still_home_scrubbed() {
-        // Path keys are allowlisted so the field exports, but home/username
-        // segments must still collapse — allowlist is not a scrub bypass.
+        // Path keys are allowlisted so the field exports, but home/username segments must still collapse; allowlist is not a scrub bypass
         let home = xai_dirs::home_dir().expect("home dir for path-scrub test");
         let home_str = home.to_string_lossy();
         // Skip if the home path is too short/generic for the scrubber to match.
@@ -620,8 +614,7 @@ mod tests {
 
     #[test]
     fn error_key_value_is_secret_and_path_scrubbed() {
-        // Free-form `error` strings are allowlisted for classification labels;
-        // any secret/path content that sneaks in must still be scrubbed.
+        // Free-form `error` strings are allowlisted for classification labels; any secret/path content that sneaks in must still be scrubbed
         let home = xai_dirs::home_dir().expect("home dir");
         let home_str = home.to_string_lossy();
         let msg =

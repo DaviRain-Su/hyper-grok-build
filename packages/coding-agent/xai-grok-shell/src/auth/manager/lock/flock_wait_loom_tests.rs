@@ -1,5 +1,5 @@
-//! Models the `Round` mutex protocol and the shipped `subscribe_if_waiting` peek;
-//! Notify wakeups and `Arc`/`Weak` counts are pinned by the tokio tests instead.
+//! Models the `Round` mutex protocol and the real `subscribe_if_waiting` implementation.
+//! Notify wakeups and `Arc`/`Weak` counts are checked by the tokio tests instead.
 //! Run: `cargo test --release --features loom -p xai-grok-shell --lib flock_wait::loom -- --test-threads=1`
 
 use std::io;

@@ -87,6 +87,9 @@ pub enum SyntheticReason {
     CompactionMeta,
     /// Runtime-injected `<system-reminder>` message. Not real user input.
     SystemReminder,
+    /// Continue reminder after a salvaged Length truncation.
+    /// Distinct from [`Self::SystemReminder`] so report assembly joins segments around exactly this reminder and no other.
+    LengthContinue,
     /// Project-level instruction message (AGENTS.md / CLAUDE.md) injected at
     /// session spawn. Invariant: once placed, never replaced (would bust the
     /// KV-cache prefix).
@@ -163,6 +166,7 @@ impl SyntheticReason {
             | Self::SystemReminder
             | Self::ProjectInstructions
             | Self::AutoContinue
+            | Self::LengthContinue
             | Self::AutoRecovery
             | Self::Interjection
             | Self::GoalSummary
@@ -1361,6 +1365,19 @@ impl ConversationItem {
                 text: Arc::<str>::from(content.into()),
             }],
             synthetic_reason: Some(SyntheticReason::SystemReminder),
+            cwd_generation: None,
+            prior_turn_interrupt: None,
+            prompt_index: None,
+        })
+    }
+
+    /// The synthetic continue reminder, tagged [`SyntheticReason::LengthContinue`].
+    pub fn length_continue_reminder(content: impl Into<String>) -> Self {
+        Self::User(UserItem {
+            content: vec![ContentPart::Text {
+                text: Arc::<str>::from(content.into()),
+            }],
+            synthetic_reason: Some(SyntheticReason::LengthContinue),
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,

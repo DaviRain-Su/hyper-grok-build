@@ -3,8 +3,7 @@
 use crate::profiles::{ProfileConfig, ProfileName, SandboxConfig};
 use std::collections::HashMap;
 
-/// Hosts with a retargetable `$GROK_HOME/hooks` symlink (fail-closed under
-/// write-deny) cannot resolve enforcing profiles against the real home.
+/// Hosts with a retargetable `$GROK_HOME/hooks` symlink (fail-closed under write-deny) cannot resolve enforcing profiles against the real home.
 pub(crate) fn skip_if_host_hook_write_deny_unresolvable() -> bool {
     if !crate::hook_write_deny::profile_enforces_hook_write_deny(&ProfileName::Workspace) {
         return false;

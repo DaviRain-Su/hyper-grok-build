@@ -1,16 +1,12 @@
 //! HTTP CONNECT proxy support for WebSocket connections.
 //!
-//! When running behind a corporate egress proxy,
-//! `tokio-tungstenite`'s `connect_async` cannot reach external
-//! hosts directly because it does not read the standard `HTTPS_PROXY` /
-//! `HTTP_PROXY` environment variables.
+//! Behind a corporate egress proxy, `tokio-tungstenite`'s `connect_async` cannot reach external hosts directly.
+//! It does not read the standard `HTTPS_PROXY` / `HTTP_PROXY` environment variables.
 //!
 //! This module provides:
-//! - [`resolve_proxy_for_host`]: reads proxy env vars and `NO_PROXY`, returning
-//!   the proxy URL to use for a given target host (or `None` for direct).
-//! - [`connect_via_proxy`]: opens a TCP connection to the proxy, sends an HTTP
-//!   CONNECT request to create a tunnel, wraps the result in TLS, and returns a
-//!   stream suitable for `tokio_tungstenite::client_async`.
+//! - [`resolve_proxy_for_host`]: reads proxy env vars and `NO_PROXY` and returns the proxy URL for a given target host, or `None` for direct.
+//! - [`connect_via_proxy`]: opens TCP to the proxy, sends an HTTP CONNECT request to create a tunnel, and wraps the result in TLS.
+//!   The returned stream is suitable for `tokio_tungstenite::client_async`.
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
@@ -21,12 +17,10 @@ use tracing::debug;
 // Environment-variable resolution
 // ---------------------------------------------------------------------------
 
-/// Read proxy configuration from the environment and decide whether `target_host`
-/// should be connected through a proxy.
+/// Read proxy configuration from the environment and decide whether `target_host` should be connected through a proxy.
 ///
 /// Resolution order (matches `curl` / `reqwest` behaviour):
-/// 1. If `NO_PROXY` contains `target_host` (or a matching domain suffix / CIDR),
-///    return `None`.
+/// 1. If `NO_PROXY` contains `target_host` (or a matching domain suffix / CIDR), return `None`.
 /// 2. If `HTTPS_PROXY` (or `https_proxy`) is set, return its value.
 /// 3. If `HTTP_PROXY` (or `http_proxy`) is set, return its value.
 /// 4. Otherwise return `None`.
@@ -68,8 +62,7 @@ where
 
 /// Check whether `host` is in the `no_proxy` list.
 ///
-/// The `no_proxy` value is a comma-separated list of hostnames, domain
-/// suffixes (with or without a leading dot), IP addresses, or CIDR ranges.
+/// The `no_proxy` value is a comma-separated list of hostnames, domain suffixes (with or without a leading dot), IP addresses, or CIDR ranges.
 /// The special value `*` matches everything.
 fn is_host_bypassed(host: &str, no_proxy: &str) -> bool {
     let host_lower = host.to_ascii_lowercase();
@@ -78,7 +71,7 @@ fn is_host_bypassed(host: &str, no_proxy: &str) -> bool {
         if entry.is_empty() {
             continue;
         }
-        // Wildcard — bypass all hosts.
+        // Wildcard: bypass all hosts
         if entry == "*" {
             return true;
         }
@@ -87,8 +80,7 @@ fn is_host_bypassed(host: &str, no_proxy: &str) -> bool {
             return true;
         }
         // Domain suffix match: ".example.com" matches "foo.example.com".
-        // Also handle the common convention of omitting the leading dot:
-        // "example.com" in NO_PROXY should match "sub.example.com".
+        // Also handle the common convention of omitting the leading dot: "example.com" in NO_PROXY should match "sub.example.com"
         let matches_suffix = if entry.starts_with('.') {
             host_lower.ends_with(entry.as_str())
         } else {
@@ -99,9 +91,8 @@ fn is_host_bypassed(host: &str, no_proxy: &str) -> bool {
         if matches_suffix {
             return true;
         }
-        // CIDR / IP matching is intentionally omitted here — our target host
-        // is always a DNS name, not an IP literal. Keeping this simple avoids
-        // pulling in a CIDR parsing dependency.
+        // CIDR / IP matching is intentionally omitted: our target host is always a DNS name, not an IP literal
+        // Skipping it avoids a CIDR parsing dependency
     }
     false
 }
@@ -112,12 +103,8 @@ fn is_host_bypassed(host: &str, no_proxy: &str) -> bool {
 
 /// Establish a TLS-wrapped TCP stream through an HTTP CONNECT proxy.
 ///
-/// Steps:
-/// 1. Parse the proxy URL to get host + port.
-/// 2. Open a TCP connection to the proxy and perform the CONNECT handshake.
-/// 3. Wrap the tunnel in TLS (using rustls with native root certificates).
-/// 4. Return the stream as `MaybeTlsStream<TcpStream>` so it is compatible
-///    with `tokio_tungstenite::client_async`.
+/// Opens the tunnel, wraps it in TLS (rustls with native root certificates), and returns a `MaybeTlsStream<TcpStream>`.
+/// The result is ready for `tokio_tungstenite::client_async`.
 pub(crate) async fn connect_via_proxy(
     proxy_url: &str,
     target_host: &str,
@@ -130,7 +117,7 @@ pub(crate) async fn connect_via_proxy(
 
 /// Open a raw TCP tunnel through an HTTP CONNECT proxy (no TLS).
 ///
-/// 1. Parse the proxy URL to get host + port.
+/// 1. Parse the proxy URL to get host and port.
 /// 2. Open a plain TCP connection to the proxy.
 /// 3. Send `CONNECT target_host:target_port HTTP/1.1\r\n\r\n`.
 /// 4. Read the proxy's response; expect `HTTP/1.x 200 …`.
@@ -180,10 +167,9 @@ async fn open_connect_tunnel(
     }
 
     // 5. Assert the BufReader's internal buffer is empty before reuniting.
-    // BufReader::read_line may have read ahead into its buffer. If extra
-    // bytes were consumed beyond the HTTP headers (e.g., from a proxy that
-    // eagerly forwards data or coalesced TCP segments), dropping them would
-    // corrupt the subsequent TLS handshake.
+    // BufReader::read_line may have read ahead into its buffer
+    // A proxy that eagerly forwards data, or coalesced TCP segments, can leave bytes beyond the HTTP headers there
+    // Dropping them would corrupt the subsequent TLS handshake
     let remaining = reader.buffer();
     if !remaining.is_empty() {
         anyhow::bail!(
@@ -235,7 +221,7 @@ fn parse_proxy_url(url: &str) -> anyhow::Result<(String, u16)> {
             .map_err(|_| anyhow::anyhow!("Invalid proxy port in '{url}'"))?;
         Ok((host.to_string(), port))
     } else {
-        // No port — default to 80 for HTTP proxies.
+        // No port: default to 80 for HTTP proxies
         Ok((authority.to_string(), 80))
     }
 }
@@ -353,7 +339,6 @@ mod tests {
 
     #[test]
     fn test_bypass_cidr_not_matched_for_dns_names() {
-        // CIDR entries like 10.0.0.0/8 should not match DNS names.
         assert!(!is_host_bypassed("api.external.example", "10.0.0.0/8"));
     }
 
@@ -457,8 +442,7 @@ mod tests {
 
     /// Helper: spawn a mock HTTP CONNECT proxy that accepts one connection.
     ///
-    /// On receiving a CONNECT request, it validates the request format,
-    /// replies with `status_line`, and then echoes data (simulating a tunnel).
+    /// On receiving a CONNECT request, it validates the request format, replies with `status_line`, and then echoes data (simulating a tunnel).
     /// Returns the proxy's listen address.
     async fn spawn_mock_proxy(status_line: &'static str) -> std::net::SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -507,8 +491,7 @@ mod tests {
         addr
     }
 
-    /// Tests that `open_connect_tunnel` sends a correct CONNECT request,
-    /// parses the proxy's 200 response, and returns a usable tunnel stream.
+    /// Tests that `open_connect_tunnel` sends a correct CONNECT request, parses the proxy's 200 response, and returns a usable tunnel stream.
     #[tokio::test]
     async fn test_open_connect_tunnel_success() {
         let addr =
@@ -529,8 +512,7 @@ mod tests {
         assert_eq!(&response, b"hello tunnel");
     }
 
-    /// Tests that `open_connect_tunnel` with a non-default port sends the
-    /// correct CONNECT target.
+    /// Tests that `open_connect_tunnel` with a non-default port sends the correct CONNECT target.
     #[tokio::test]
     async fn test_open_connect_tunnel_custom_port() {
         let addr = spawn_mock_proxy("HTTP/1.1 200 OK\r\n\r\n").await;
@@ -540,8 +522,7 @@ mod tests {
         assert!(stream.is_ok(), "tunnel should succeed for custom port");
     }
 
-    /// Tests that `open_connect_tunnel` returns an error when the proxy
-    /// rejects the CONNECT request with a non-200 status.
+    /// Tests that `open_connect_tunnel` returns an error when the proxy rejects the CONNECT request with a non-200 status.
     #[tokio::test]
     async fn test_open_connect_tunnel_proxy_rejects() {
         let addr = spawn_mock_proxy("HTTP/1.1 403 Forbidden\r\n\r\n").await;
@@ -556,8 +537,7 @@ mod tests {
         );
     }
 
-    /// Tests that `open_connect_tunnel` returns an error when connecting
-    /// to a proxy that isn't listening.
+    /// Tests that `open_connect_tunnel` returns an error when connecting to a proxy that isn't listening.
     #[tokio::test]
     async fn test_open_connect_tunnel_proxy_unreachable() {
         let result = open_connect_tunnel("http://127.0.0.1:1", "example.com", 443).await;

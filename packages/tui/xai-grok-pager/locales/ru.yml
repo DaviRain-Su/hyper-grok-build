@@ -432,6 +432,8 @@ settings.contextual_hints.word_select.label: "Выбор слова"
 settings.contextual_hints.word_select.description: "После двойного клика по тексту диалога, когда Выделение текста в режиме сворачивания/навигации, напоминает, что Выбор слова находится в Настройках."
 settings.contextual_hints.ssh_wrap.label: "SSH wrap"
 settings.contextual_hints.ssh_wrap.description: "При загрузке сессии по SSH рекомендует `grok wrap ssh` для проброса буфера обмена и восстановления терминала."
+settings.contextual_hints.export_copy.label: "Копирование и экспорт"
+settings.contextual_hints.export_copy.description: "После трёх близких копирований текста диалога перетаскиванием напоминает, что существуют /copy и /export."
 settings.fork_secondary_model.label: "Вторичная модель при fork"
 settings.fork_secondary_model.description: "Модель для вторичного агента при fork. Выберите «(без переопределения)», чтобы очистить."
 

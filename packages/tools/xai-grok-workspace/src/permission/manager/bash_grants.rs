@@ -1,8 +1,6 @@
-//! Translation between what a permission prompt showed the user and what
-//! becomes a persisted bash grant key. Grant keys are dequoted word joins;
-//! `evaluate_bash` matches them per segment by word-boundary prefix, and
-//! whole-script exact grants additionally require the join (or the raw text)
-//! to cover the entire script.
+//! Translation between what a permission prompt showed the user and what becomes a persisted bash grant key.
+//! Grant keys are dequoted word joins; `evaluate_bash` matches them per segment by word-boundary prefix.
+//! Whole-script exact grants additionally require the join (or the raw text) to cover the entire script.
 
 use crate::permission::bash_command_splitting::{
     BashCommandHighlights, PlainCommand, is_setup_command, primary_command_from_script,
@@ -10,31 +8,25 @@ use crate::permission::bash_command_splitting::{
 };
 use crate::permission::state::PermissionState;
 
-/// Whether accepting the always-allow row at scope `n` (the first `n`
-/// highlighted words) persists a grant that replays — the predicate the ←/→
-/// arrows use to skip scopes that would save nothing. Mirrors
-/// [`persist_bash_always_allow`]: an argv-unambiguous prefix at or above the
-/// dangerous-command floor, or the full command of a single unwrapped script
-/// (persisted as raw text). An ambiguous intermediate scope (a quoted arg
-/// with a space) joins to a key that could match a different argv, so it is
-/// refused and must be skipped.
+/// Whether accepting the always-allow row at scope `n` (the first `n` highlighted words) persists a grant that replays.
+/// The left/right arrows use this to skip scopes that would save nothing.
+/// Mirrors [`persist_bash_always_allow`]: what persists is an argv-unambiguous prefix at or above the dangerous-command floor.
+/// The full command of a single unwrapped script also persists, stored as raw text.
+/// An ambiguous intermediate scope (a quoted arg with a space) joins to a key that could match a different argv, so it is refused.
 pub fn always_allow_scope_persists(h: &BashCommandHighlights, n: usize) -> bool {
     let words = &h.highlighted_words;
     if n == 0 || n > words.len() || n < super::minimum_always_allow_scope(words) {
         return false;
     }
-    // The raw-text fallback needs a single unwrapped command spanning the
-    // whole script (empty prefix/suffix).
+    // The raw-text fallback needs a single unwrapped command spanning the whole script (empty prefix/suffix)
     words_join_unambiguously(&words[..n])
         || (n == words.len() && h.prefix.is_empty() && h.suffix.is_empty())
 }
 
 /// Whether `join(" ")` round-trips these words to the same single command.
-/// A word with whitespace collapses to the join of different adjacent words
-/// (`-m "fix stuff"` vs `-m fix stuff`), and a word with shell metacharacters
-/// respells a different script (`-m "fix;git"` joins into a two-segment
-/// chain), so a join serves as a grant key only if re-parsing it yields one
-/// whole-script command with this exact argv.
+/// A word with whitespace collapses to the join of different adjacent words (`-m "fix stuff"` vs `-m fix stuff`).
+/// A word with shell metacharacters respells a different script (`-m "fix;git"` joins into a two-segment chain).
+/// So a join serves as a grant key only if re-parsing it yields one whole-script command with this exact argv.
 pub(super) fn words_join_unambiguously(words: &[String]) -> bool {
     let joined = words.join(" ");
     try_parse_shell(&joined)
@@ -45,11 +37,9 @@ pub(super) fn words_join_unambiguously(words: &[String]) -> bool {
         })
 }
 
-/// Whether persisted grants exactly cover the whole script: the raw text, or
-/// — because prompt-saved grants are dequoted joins while `cmd` is raw — the
-/// join of a single argv-unambiguous command spanning the entire script.
-/// Anything narrower (assignment prefix, chained sibling, space-bearing word)
-/// must not match: it would widen the grant past what the user approved.
+/// Whether persisted grants exactly cover the whole script: the raw text, or the join of a single argv-unambiguous command spanning it.
+/// The join counts because prompt-saved grants are dequoted joins while `cmd` is raw.
+/// Anything narrower (assignment prefix, chained sibling, space-bearing word) must not match: it would widen the grant past what the user approved.
 pub(super) fn whole_script_grant(
     cmd: &str,
     segments: &[PlainCommand],
@@ -66,15 +56,11 @@ pub(super) fn whole_script_grant(
     }
 }
 
-/// Per-segment grant keys for a whole-script "don't ask again" answer, in the
-/// wrapper-peeled dequoted form enforcement matches. Empty when the script
-/// can't be decomposed, exceeds the cap, or a segment is ambiguous. Dangerous
-/// verbs and exec vehicles never mint standalone grants — a silent
-/// per-segment key must not authorize anything beyond the exact chain the
-/// user saw (dangerous verbs ignore prefix grants and exec vehicles match
-/// exactly, but there is no reason to mint keys for them at all). The exact
-/// chain still replays via the raw whole-script key the caller stores
-/// alongside these.
+/// Per-segment grant keys for a whole-script "don't ask again" answer, in the wrapper-peeled dequoted form enforcement matches.
+/// Empty when the script can't be decomposed, exceeds the cap, or a segment is ambiguous.
+/// Dangerous verbs and exec vehicles never mint standalone grants.
+/// A silent per-segment key must not authorize anything beyond the exact chain the user saw.
+/// The exact chain still replays via the raw whole-script key the caller stores alongside these.
 pub(super) fn bash_grant_segments(cmd: &str) -> Vec<String> {
     use crate::permission::policy::head_is_exec_vehicle;
     const MAX_SEGMENT_GRANTS: usize = 5;
@@ -102,14 +88,11 @@ pub(super) fn bash_grant_segments(cmd: &str) -> Vec<String> {
     grants
 }
 
-/// Persist an "Always allow: <words>" selection, verified against the row it
-/// was built from: the label must re-derive as an argv-unambiguous prefix of
-/// the primary command's words, at or above `minimum_always_allow_scope`, so a
-/// forged/stale label (e.g. a remote hub reply) naming another segment — or
-/// narrowing a dangerous command to a bare `git` — persists nothing. The raw
-/// script is stored only when the label is the whole unwrapped command modulo
-/// quoting (empty prefix/suffix), so an unseen `env` assignment can't clear
-/// the injection floor via the raw key.
+/// Persist an "Always allow: <words>" selection, verified against the row it was built from.
+/// The label must re-derive as an argv-unambiguous prefix of the primary command's words, at or above `minimum_always_allow_scope`.
+/// A forged/stale label (e.g. a remote hub reply) naming another segment, or narrowing a dangerous command to a bare `git`, persists nothing.
+/// The raw script is stored only when the label is the whole unwrapped command, differing only in quoting (empty prefix/suffix).
+/// This keeps an unseen `env` assignment from clearing the injection floor via the raw key.
 pub(super) fn persist_bash_always_allow(state: &mut PermissionState, cmd: &str, prefix: &str) {
     let Some(h) = primary_command_from_script(cmd) else {
         tracing::warn!(
@@ -134,13 +117,10 @@ pub(super) fn persist_bash_always_allow(state: &mut PermissionState, cmd: &str, 
     }
 }
 
-/// Whether a user-authored (or client-supplied) glob grant is scoped to
-/// `cmd`: it must match at least one non-setup segment under the same matcher
-/// enforcement uses (the raw text when the script is unparseable), and it must
-/// not be universally broad. A pattern like `*` / `**` / `* *` "matches the
-/// prompted script" only by matching everything, so a forged reply could mint
-/// a blanket grant; [`bash_glob_is_catchall`] refuses those. Scoped patterns
-/// the pattern editor produces (`gh api repos/owner/*`) still pass.
+/// Whether a user-authored (or client-supplied) glob grant is scoped to `cmd`.
+/// It must match at least one non-setup segment under the same matcher enforcement uses (the raw text when the script is unparseable).
+/// A catch-all like `*`, `**`, or `* *` matches everything, so a forged reply could mint a blanket grant; [`bash_glob_is_catchall`] refuses those.
+/// Scoped patterns the pattern editor produces (`gh api repos/owner/*`) still pass.
 pub(super) fn bash_glob_covers_script(cmd: &str, pattern: &str) -> bool {
     use crate::permission::policy::{bash_glob_is_catchall, bash_pattern_matches_command};
     if bash_glob_is_catchall(pattern) {
@@ -159,32 +139,25 @@ pub(super) fn bash_glob_covers_script(cmd: &str, pattern: &str) -> bool {
     })
 }
 
-/// Whether the "Always allow" row can be honored for `cmd`: accepting it at
-/// the scope the cursor opens on ([`default_always_allow_scope`], what Enter
-/// persists) must let this same script replay without a prompt. Decided by
-/// construction, not by enumerating finding classes — the default-scope save
-/// is simulated into a scratch state and the pre-classifier grant gate is
-/// asked whether the result would allow. A row failing this would save a grant
-/// that cannot stop the script ("always allow" that keeps asking): a wrapped
-/// dangerous command whose exact grant is unproducible, or a chain whose
-/// primary-scoped grant leaves a segment prompting.
+/// Whether the "Always allow" row can be honored for `cmd`.
+/// Accepting it at the scope the cursor opens on ([`default_always_allow_scope`], what Enter persists) must let the script replay without a prompt.
+/// The default-scope save is simulated into a scratch state and the pre-classifier grant gate is asked whether the result would allow.
+/// A row failing this would save a grant that cannot stop the script ("always allow" that keeps asking).
+/// That happens for a wrapped dangerous command whose exact grant is unproducible, or a chain whose primary-scoped grant leaves a segment prompting.
 pub fn always_allow_row_is_effective(cmd: &str) -> bool {
     let Some(h) = primary_command_from_script(cmd) else {
         return false;
     };
     let scope = super::default_always_allow_scope(&h.highlighted_words);
-    // The default cursor scope must itself persist a grant. This is the exact
-    // predicate the prompt's ←/→ arrows and the enqueue invariant use, so
-    // gating row visibility on it keeps "row shown" and "default scope
-    // persists" from diverging: an argv-ambiguous default that only some other
-    // scope's join happens to save must not surface a row Enter can't honor.
+    // The default cursor scope must itself persist a grant
+    // The prompt's left/right arrows and the enqueue invariant use this same predicate, so "row shown" and "default scope persists" cannot diverge
+    // An argv-ambiguous default that only some other scope's join happens to save must not show a row Enter can't honor
     if !always_allow_scope_persists(&h, scope) {
         return false;
     }
-    // A FRESH scratch state keeps the verdict independent of any live grant
-    // the prompt doesn't show. `always_allow_scope_persists` guarantees this
-    // save inserts a key; the pre-classifier gate below is the real test of
-    // whether that key lets the whole script replay.
+    // A FRESH scratch state keeps the verdict independent of any live grant the prompt doesn't show
+    // `always_allow_scope_persists` guarantees this save inserts a key
+    // The pre-classifier gate below is the real test of whether that key lets the whole script replay
     let mut scratch = PermissionState::default();
     persist_bash_always_allow(&mut scratch, cmd, &h.highlighted_words[..scope].join(" "));
     let evaluation = super::evaluate_bash(cmd, &scratch, true);
@@ -205,14 +178,13 @@ mod tests {
 
     #[test]
     fn always_allow_persists_exactly_the_labeled_selection() {
-        // Plain full-scope dangerous command: label == raw, exact grant works.
+        // Plain full-scope dangerous command: the label equals the raw text, so the exact grant works
         let mut plain = PermissionState::default();
         persist_bash_always_allow(&mut plain, "git push origin main", "git push origin main");
         assert!(plain.allowed_bash_commands.contains("git push origin main"));
         assert!(evaluate_bash("git push origin main", &plain, true).exact_grant);
 
-        // Wrapper-prefixed: only the labeled (peeled) words are stored; the
-        // raw spelling with the hidden assignment never becomes a grant.
+        // Wrapper-prefixed: only the labeled (peeled) words are stored; the raw spelling with the hidden assignment never becomes a grant
         let mut wrapped = PermissionState::default();
         persist_bash_always_allow(
             &mut wrapped,
@@ -226,8 +198,7 @@ mod tests {
         );
         assert!(!evaluate_bash("env FOO=1 git push origin main", &wrapped, true).exact_grant);
 
-        // Chained script: only a primary-command prefix persists; a label
-        // naming another segment (forgeable via remote replies) is refused.
+        // Chained script: only a primary-command prefix persists; a label naming another segment (forgeable via remote replies) is refused
         let mut chained = PermissionState::default();
         const CHAIN: &str = "cargo build && git push --force";
         persist_bash_always_allow(&mut chained, CHAIN, "cargo build");
@@ -236,8 +207,7 @@ mod tests {
         assert!(!chained.allowed_bash_commands.contains("git push --force"));
         assert!(!chained.allowed_bash_commands.contains(CHAIN));
 
-        // Quoted single command: the full-scope label is argv-ambiguous, so
-        // the raw text is stored instead — it matches only its own spelling.
+        // Quoted single command: the full-scope label is argv-ambiguous, so the raw text is stored instead; it matches only its own spelling
         let mut quoted = PermissionState::default();
         const QUOTED: &str = r#"git commit -m "fix stuff""#;
         persist_bash_always_allow(&mut quoted, QUOTED, "git commit -m fix stuff");
@@ -250,12 +220,10 @@ mod tests {
         persist_bash_always_allow(&mut forged, "ls -la", "rm -rf /");
         assert!(forged.allowed_bash_commands.is_empty());
 
-        // A narrowed dangerous label persists nothing: enforcement ignores
-        // dangerous prefix grants, so the rule could never match (clients
-        // clamp this; the persist path is the backstop for the rest). The
-        // bare-`git` shape matters — `git` alone is not a dangerous verb, so
-        // a per-prefix dangerous check would let it through and a `git`
-        // prefix grant would cover `git reset --hard`.
+        // A narrowed dangerous label persists nothing: enforcement ignores dangerous prefix grants, so the rule could never match
+        // Clients clamp this; the persist path is the backstop for the rest
+        // The bare-`git` shape matters: `git` alone is not a dangerous verb, so a per-prefix dangerous check would let it through
+        // A `git` prefix grant would cover `git reset --hard`
         for label in ["git push", "git"] {
             let mut narrowed = PermissionState::default();
             persist_bash_always_allow(&mut narrowed, "git push origin main", label);
@@ -268,8 +236,7 @@ mod tests {
 
     #[test]
     fn metacharacter_words_never_mint_chain_colliding_grants() {
-        // The dequoted join respells a dangerous two-segment chain, so only
-        // the raw text may persist and the chain never gains an exact grant.
+        // The dequoted join respells a dangerous two-segment chain, so only the raw text may persist and the chain never gains an exact grant
         const CMD: &str = r#"git commit -m "fix;git" push --force"#;
         const COLLIDING_CHAIN: &str = "git commit -m fix;git push --force";
 
@@ -285,17 +252,15 @@ mod tests {
 
     #[test]
     fn scope_persistence_matches_what_persist_would_store() {
-        // Argv-ambiguous intermediate scope: a quoted arg with a space
-        // followed by another word. The full command persists (raw fallback),
-        // the ambiguous middle count does not, the unambiguous prefixes do.
-        // (`git show` is deliberately a non-vehicle, non-dangerous head so the
-        // scope floors to one word and intermediate prefixes remain offerable.)
+        // Argv-ambiguous intermediate scope: a quoted arg with a space followed by another word
+        // The full command persists (raw fallback), the ambiguous middle count does not, the unambiguous prefixes do
+        // (`git show` is deliberately a non-vehicle, non-dangerous head so the scope floors to one word and intermediate prefixes remain offerable.)
         const CMD: &str = r#"git show -e "A B" file"#;
         let h = primary_command_from_script(CMD).unwrap();
         assert_eq!(h.highlighted_words.len(), 5);
         assert!(always_allow_scope_persists(&h, 3)); // `git show -e`
-        assert!(!always_allow_scope_persists(&h, 4)); // `git show -e A B` — ambiguous
-        assert!(always_allow_scope_persists(&h, 5)); // full command → raw fallback
+        assert!(!always_allow_scope_persists(&h, 4)); // `git show -e A B`, ambiguous
+        assert!(always_allow_scope_persists(&h, 5)); // The full command persists via the raw fallback
 
         // Cross-check against the real persist path for every scope.
         for n in 1..=h.highlighted_words.len() {
@@ -325,8 +290,7 @@ mod tests {
         // A forged scope naming commands the prompt never showed is refused.
         assert!(!bash_glob_covers_script("ls -la", "gh api *"));
         assert!(!bash_glob_covers_script("ls -la", "*push*"));
-        // Catch-all patterns "match the prompted script" only by matching
-        // everything, so a forged reply cannot mint a blanket grant.
+        // Catch-all patterns "match the prompted script" only by matching everything, so a forged reply cannot mint a blanket grant
         for catchall in ["*", "**", "* *", "?*"] {
             assert!(
                 !bash_glob_covers_script("gh api repos/owner/xai", catchall),
@@ -356,9 +320,9 @@ mod tests {
             bash_grant_segments("cargo build && git push --force"),
             vec!["cargo build".to_owned()]
         );
-        // Exec-vehicle segments never mint standalone (prefix-matching) grants
-        // either: a `docker run nginx` key would prefix-match `docker run nginx
-        // --privileged`. The chain still replays via the raw whole-script key.
+        // Exec-vehicle segments never mint standalone (prefix-matching) grants either
+        // A `docker run nginx` key would prefix-match `docker run nginx --privileged`
+        // The chain still replays via the raw whole-script key
         assert_eq!(
             bash_grant_segments("docker run nginx && echo done"),
             vec!["echo done".to_owned()]
@@ -385,27 +349,23 @@ mod tests {
         assert!(always_allow_row_is_effective("timeout 30 cargo test"));
         // Plain dangerous command: full-scope label equals the raw text.
         assert!(always_allow_row_is_effective("git push origin main"));
-        // Wrapped or assignment-prefixed dangerous/floored commands can never
-        // produce the exact grant they require — no row.
+        // Wrapped or assignment-prefixed dangerous/floored commands can never produce the exact grant they require, so they get no row
         assert!(!always_allow_row_is_effective(
             "env FOO=1 git push origin main"
         ));
         assert!(!always_allow_row_is_effective("FOO=1 git push origin main"));
         assert!(!always_allow_row_is_effective("env FOO=1 make"));
-        // Chains whose primary-scoped grant leaves another segment prompting
-        // get no row even with zero findings — the simulation catches what
-        // finding-class enumeration missed (`ls` was already auto-safe, and
-        // granting it cannot stop `npm publish` from prompting).
+        // Chains whose primary-scoped grant leaves another segment prompting get no row even with zero findings
+        // The simulation catches what finding-class enumeration missed (`ls` is auto-safe; granting it cannot stop `npm publish` from prompting)
         assert!(!always_allow_row_is_effective("ls && npm publish"));
         assert!(!always_allow_row_is_effective(
             "git status && git push origin main"
         ));
         // Unparseable scripts have no primary command and no honorable row.
         assert!(!always_allow_row_is_effective("echo $(date)"));
-        // A pipe whose primary carries a space-bearing arg is still honorable:
-        // the DEFAULT scope (verb + flags, no ambiguous word) persists and the
-        // safe-listed tail (`head`) replays — the row must be offered even
-        // though the WIDEST join is argv-ambiguous.
+        // A pipe whose primary carries a space-bearing arg is still honorable
+        // The DEFAULT scope (verb and flags, no ambiguous word) persists and the safe-listed tail (`head`) replays
+        // The row must be offered even though the WIDEST join is argv-ambiguous
         assert!(always_allow_row_is_effective(
             r#"terraform plan -var "x=1 2" | head"#
         ));
@@ -416,12 +376,10 @@ mod tests {
 
     #[test]
     fn row_effective_implies_default_scope_persists() {
-        // The enqueue invariant, proven crate-locally: whenever the agent
-        // offers the "Always allow:" row, the cursor's default scope persists a
-        // grant — so pressing Enter without touching the ←/→ arrows always
-        // saves. Exec vehicles are the regression case: flooring the minimum
-        // scope without flooring the default would open the row on a dead scope
-        // below the floor, which no arrow could repair.
+        // The enqueue invariant, proven in this crate: whenever the "Always allow:" row is offered, the cursor's default scope persists a grant
+        // So pressing Enter without touching the left/right arrows always saves
+        // Exec vehicles are the regression case: flooring the minimum scope but not the default would open the row on a dead scope below the floor
+        // No arrow could repair it
         for cmd in [
             "cargo test --lib",
             "timeout 30 cargo test",

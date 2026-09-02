@@ -1,89 +1,61 @@
-//! Shared helper for resolving `[Image #N: <path>]` placeholders into
-//! image bytes.
+//! Shared helper for resolving `[Image #N: <path>]` placeholders into image bytes.
 //!
-//! Both the TUI ([`xai_grok_pager::prompt_images`]) and the server-side
-//! ingestion path ([`crate::session::acp_session`]) need to recover image
-//! bytes when a placeholder lacks an attached `PastedImage` /
-//! `ContentBlock::Image` — e.g. a paste from a previous session's
-//! prompt, a session reload, or a synthetic re-render. The two sides
-//! share one canonical loader so the validation rules (extension
-//! allowlist, prefix allowlist, size cap, image-decoder validation,
-//! aggregate-bytes cap) cannot drift.
+//! The TUI ([`xai_grok_pager::prompt_images`]) and the server-side ingestion path ([`crate::session::acp_session`]) need to recover image bytes.
+//! A placeholder can arrive without its attached `PastedImage` / `ContentBlock::Image`.
+//! That happens on a paste from a previous session's prompt, a session reload, or a synthetic re-render.
+//! The two sides share one canonical loader so the validation rules cannot drift.
 //!
 //! ## Threat model
 //!
-//! The placeholder path is **user-controlled** but the user does not
-//! explicitly opt in to reading any arbitrary file — they paste a chat
-//! transcript fragment and the agent may resurrect it across sessions.
-//! To stop the placeholder mechanism from becoming a generic file
-//! exfiltration sink, the loader is intentionally conservative:
+//! The placeholder path is **user-controlled** but the user does not explicitly opt in to reading any arbitrary file.
+//! They paste a chat transcript fragment and the agent may resurrect it across sessions.
+//! To stop the placeholder mechanism from becoming a generic file exfiltration sink, the loader is intentionally conservative:
 //!
 //! * Canonicalises every candidate path (resolves `..` and symlinks).
-//! * Asserts the canonical target lives under an explicit prefix
-//!   allowlist (workspace cwd + a small set of common user-image
-//!   directories under `$HOME`; never the whole `$HOME`). See
-//!   [`default_allowed_prefixes`].
+//! * Asserts the canonical target lives under an explicit prefix allowlist. See [`default_allowed_prefixes`].
+//!   The allowlist is the workspace cwd and a few common user-image directories under `$HOME`, never the whole `$HOME`.
 //! * Asserts the extension is in [`ALLOWED_IMAGE_EXTENSIONS`].
-//! * Routes the bytes through the `image` crate's full header parser
-//!   ([`image::ImageReader::with_guessed_format`] +
-//!   `into_dimensions`) so magic-byte forgery — a PNG-prefix file
-//!   followed by arbitrary content — is rejected. See
-//!   [`PlaceholderLoadError::NotAnImage`].
-//! * Rejects any canonical path containing a known sensitive-bundle
-//!   subtree (`.photoslibrary/`, `.musiclibrary/`, etc.) even when the
-//!   parent prefix is in the allowlist.
-//! * Enforces a per-image byte cap, a per-prompt placeholder count
-//!   cap, and a per-prompt aggregate-bytes cap so a single prompt
-//!   cannot trigger huge sequential syscall chains or memory spikes.
+//! * Routes the bytes through the `image` crate's full header parser ([`image::ImageReader::with_guessed_format`] and `into_dimensions`).
+//!   A magic-byte forgery (a PNG-prefix file followed by arbitrary content) is rejected. See [`PlaceholderLoadError::NotAnImage`].
+//! * Rejects any canonical path containing a known sensitive-bundle subtree (`.photoslibrary/`, `.musiclibrary/`, etc.).
+//!   This holds even when the parent prefix is in the allowlist.
+//! * Enforces a per-image byte cap, a per-prompt placeholder count cap, and a per-prompt aggregate-bytes cap.
+//!   A single prompt therefore cannot trigger huge sequential syscall chains or memory spikes.
 //!
-//! Wire format: `[Image #<n>: <absolute_path>]` — the producer is
-//! [`xai_grok_pager::prompt_images::display_text`]. The shape of this
-//! placeholder is part of the chat-history contract — do NOT change
-//! it. The regex requires the literal `": "` separator that the
-//! producer always emits; see [`extract_placeholders`].
+//! Wire format: `[Image #<n>: <absolute_path>]`; the producer is [`xai_grok_pager::prompt_images::display_text`].
+//! The shape of this placeholder is part of the chat-history contract; do NOT change it.
+//! The regex requires the literal `": "` separator that the producer always emits; see [`extract_placeholders`].
 //!
 //! ## `file://` URI convention
 //!
-//! Both the TUI's `prompt_images::build_content_blocks_with_workspace`
-//! and the server-side recovery in [`recover_orphan_placeholders`]
-//! emit `file://{canonical.display()}` URIs **without** percent-encoding
-//! the path. This deviates from RFC 3986 (a path with spaces should be
-//! `%20`-encoded) but it is internally consistent across producer and
-//! consumer: [`canonical_from_file_uri`] parses inbound URIs using both
-//! the relaxed unencoded form **and** percent-decoded form so dedup
-//! works against either convention. Do **not** add percent-encoding on
-//! one side without also doing it on the other — past-issue: producer
-//! / consumer asymmetry breaks dedup.
+//! The TUI's `prompt_images::build_content_blocks_with_workspace` and [`recover_orphan_placeholders`] emit `file://{canonical.display()}` URIs.
+//! Neither side percent-encodes the path.
+//! This deviates from RFC 3986 (a path with spaces should be `%20`-encoded) but it is internally consistent across producer and consumer.
+//! [`canonical_from_file_uri`] parses inbound URIs in both the unencoded and percent-decoded forms, so dedup works against either convention.
+//! Do **not** add percent-encoding on one side without also doing it on the other; the asymmetry breaks dedup.
 
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use regex::Regex;
 
-/// Maximum size of a single placeholder-loaded image. Matches the TUI's
-/// `MAX_SEND_BYTES` (50 MB) so a path that loads on the TUI side cannot
-/// be silently rejected by the server-side fallback.
+/// Maximum size of a single placeholder-loaded image.
+/// Matches the TUI's `MAX_SEND_BYTES` (50 MB) so a path that loads on the TUI side cannot be silently rejected by the server-side fallback.
 pub const MAX_PLACEHOLDER_IMAGE_BYTES: usize = 50_000_000;
 
-/// Maximum number of placeholders the loader will process per call.
-/// Caps **on-disk loads** at 16 per prompt; the regex scan itself is
-/// unbounded but linear in input length and short-circuits via
-/// [`Iterator::take`] before `filter_map` runs.
+/// Caps **on-disk loads** at 16 per prompt.
+/// The regex scan itself is unbounded but linear in input length and short-circuits via [`Iterator::take`] before `filter_map` runs.
 pub const MAX_PLACEHOLDERS_PER_PROMPT: usize = 16;
 
 /// Per-prompt aggregate-bytes cap across recovered placeholder images.
-/// Prevents 16 × 50 MB worst-case RSS spikes on memory-constrained
-/// runners.
+/// Prevents 16 × 50 MB worst-case RSS spikes on memory-constrained runners.
 pub const MAX_PLACEHOLDER_AGGREGATE_BYTES: usize = 200 * 1024 * 1024;
 
-/// `_meta` key under which an attached image's `[Image #N]` display number
-/// is recorded on its ACP image block, so the server can resolve
-/// `[Image #N]` tokens to the right attachment by number rather than list
-/// position (the two diverge — see `AttachedImages` in `xai-grok-tools`).
+/// `_meta` key under which an attached image's `[Image #N]` display number is recorded on its ACP image block.
+/// The server resolves `[Image #N]` tokens by this number rather than by list position (the two diverge; see `AttachedImages` in `xai-grok-tools`).
 pub const IMAGE_DISPLAY_NUMBER_META_KEY: &str = "xai.dev/imageDisplayNumber";
 
-/// Build an ACP image-block `_meta` value carrying `display_number` under
-/// [`IMAGE_DISPLAY_NUMBER_META_KEY`].
+/// Build an ACP image-block `_meta` value carrying `display_number` under [`IMAGE_DISPLAY_NUMBER_META_KEY`].
 pub fn display_number_meta(display_number: usize) -> agent_client_protocol::Meta {
     let mut meta = agent_client_protocol::Meta::new();
     meta.insert(
@@ -93,8 +65,7 @@ pub fn display_number_meta(display_number: usize) -> agent_client_protocol::Meta
     meta
 }
 
-/// Read the `[Image #N]` display number recorded in an image block's
-/// `_meta`, if present.
+/// Read the `[Image #N]` display number recorded in an image block's `_meta`, if present.
 pub fn display_number_from_meta(meta: Option<&agent_client_protocol::Meta>) -> Option<usize> {
     meta?
         .get(IMAGE_DISPLAY_NUMBER_META_KEY)?
@@ -102,15 +73,12 @@ pub fn display_number_from_meta(meta: Option<&agent_client_protocol::Meta>) -> O
         .and_then(|n| usize::try_from(n).ok())
 }
 
-/// Build the per-turn `[Image #N]` → reference registry (see
-/// [`AttachedImages`](xai_grok_tools::types::resources::AttachedImages))
-/// from the user's inline attached images.
+/// Build the per-turn registry mapping `[Image #N]` numbers to references from the user's inline attached images.
+/// See [`AttachedImages`](xai_grok_tools::types::resources::AttachedImages).
 ///
-/// The display number comes from each block's `_meta` (set by the TUI),
-/// falling back to 1-based position for callers that don't record it. The
-/// reference is one `image_edit`'s resolver can read directly: the bare
-/// durable path (from the `file://` URI) when present, else a
-/// `data:<mime>;base64,<data>` URL.
+/// The display number comes from each block's `_meta` (set by the TUI), falling back to 1-based position for callers that don't record it.
+/// The reference is one `image_edit`'s resolver can read directly.
+/// It is the bare durable path (from the `file://` URI) when present, else a `data:<mime>;base64,<data>` URL.
 pub fn attached_image_references(
     images: &[agent_client_protocol::ImageContent],
 ) -> Vec<(usize, String)> {
@@ -131,31 +99,21 @@ pub fn attached_image_references(
 }
 
 /// File extensions accepted by the placeholder loader.
-///
-/// SVG is intentionally **not** in this list: SVG is XML text with no
-/// reliable magic-byte signature, and adding it would expand the attack
-/// surface (script tags, XXE) without a corresponding image-decoder
-/// validation pass. Any future SVG support must be gated by a script
-/// attack-surface review.
+/// SVG is intentionally **not** in this list: it is XML text with no reliable magic-byte signature.
+/// Adding it would expand the attack surface (script tags, XXE) without a corresponding image-decoder validation pass.
+/// Any future SVG support must be gated by a script attack-surface review.
 pub const ALLOWED_IMAGE_EXTENSIONS: &[&str] =
     &["png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif"];
 
-/// Substrings that, if present anywhere in a canonical path, deny the
-/// load even when the parent prefix is in the allowlist. Covers macOS
-/// bundle subtrees the user did not explicitly opt in to sharing
-/// (`~/Pictures/X.photoslibrary/originals/...`), Trash, and Keychain
-/// bundles.
+/// Substrings that, if present anywhere in a canonical path, deny the load even when the parent prefix is in the allowlist.
+/// Covers macOS bundle subtrees the user did not explicitly opt in to sharing (`~/Pictures/X.photoslibrary/originals/...`).
+/// Also covers Trash and Keychain bundles.
 ///
-/// **Platform contract.** Each needle uses forward-slash separators
-/// and is matched case-sensitively against the canonical path. The
-/// enforcement site
-/// ([`load_canonical_placeholder_image`]) normalises `\` → `/` before
-/// the substring check, so Windows paths are covered. macOS HFS+
-/// volumes (case-insensitive by default) and case-sensitive APFS both
-/// hit the case-sensitive match — every entry in this list is a
-/// system-emitted name and is case-stable in practice. If a future
-/// entry depends on user-typed casing, add a `to_ascii_lowercase` step
-/// at both sites.
+/// **Platform contract.** Each needle uses forward-slash separators and is matched case-sensitively against the canonical path.
+/// The enforcement site ([`load_canonical_placeholder_image`]) normalises `\` to `/` before the substring check, so Windows paths are covered.
+/// macOS HFS+ volumes (case-insensitive by default) and case-sensitive APFS both hit the case-sensitive match.
+/// Every entry in this list is a system-emitted name and is case-stable in practice.
+/// If a future entry depends on user-typed casing, add a `to_ascii_lowercase` step at both sites.
 pub const DENY_PATH_CONTAINS: &[&str] = &[
     ".photoslibrary/",
     ".musiclibrary/",
@@ -168,19 +126,13 @@ pub const DENY_PATH_CONTAINS: &[&str] = &[
     "/.gnupg/",
 ];
 
-/// Compiled regex matching the TUI placeholder format
-/// `[Image #<digits>: <path>]`.
+/// Compiled regex matching the TUI placeholder format `[Image #<digits>: <path>]`.
 ///
-/// * Producer emits exactly `": "` (colon, single space) as the
-///   separator — see [`xai_grok_pager::prompt_images::display_text`].
-///   The regex requires the same; a path token like `[Image #5:foo]`
-///   does **not** match.
-/// * The path capture excludes `]`, `\n`, and `\r` so the match
-///   terminates cleanly at the placeholder boundary even on
-///   Windows-style line endings or path strings containing other
-///   bracket forms.
-/// * Path captures may contain spaces (typical macOS paths in
-///   `~/My Pictures`).
+/// * The producer emits exactly `": "` (colon, single space) as the separator; see [`xai_grok_pager::prompt_images::display_text`].
+///   The regex requires the same; a path token like `[Image #5:foo]` does **not** match.
+/// * The path capture excludes `]`, `\n`, and `\r` so the match terminates cleanly at the placeholder boundary.
+///   That holds even on Windows-style line endings or path strings containing other bracket forms.
+/// * Path captures may contain spaces (typical macOS paths in `~/My Pictures`).
 static IMAGE_PLACEHOLDER_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\[Image #(\d+): ([^\]\r\n]+?)\]").expect("placeholder regex is valid")
 });
@@ -192,20 +144,16 @@ pub struct PlaceholderMatch {
     pub display_number: usize,
     /// The raw path string as it appeared in the text (no canonicalisation).
     pub path: String,
-    /// Byte offsets into the source text covered by the full
-    /// `[Image #N: …]` match — `text[start..end]` is the placeholder.
+    /// Byte offsets into the source text covered by the full `[Image #N: …]` match; `text[start..end]` is the placeholder.
     pub span: (usize, usize),
 }
 
 /// Scan `text` for every well-formed placeholder.
 ///
-/// Malformed forms (`[Image #3]`, `[Image #5: ]`, truncated, etc.) are
-/// skipped without failing the whole scan. The regex iterator is
-/// short-circuited via [`Iterator::take`] **before** `filter_map`, so a
-/// pathological prompt with 100 000 placeholders does not consume
-/// 100 000 captures — at most [`MAX_PLACEHOLDERS_PER_PROMPT`] are
-/// inspected. Trade-off: a prompt with one invalid placeholder among
-/// 16 valid ones may yield 15 results.
+/// Malformed forms (`[Image #3]`, `[Image #5: ]`, truncated, etc.) are skipped without failing the whole scan.
+/// The regex iterator is short-circuited via [`Iterator::take`] **before** `filter_map`, so 100 000 placeholders do not consume 100 000 captures.
+/// At most [`MAX_PLACEHOLDERS_PER_PROMPT`] are inspected.
+/// Trade-off: a prompt with one invalid placeholder among 16 valid ones may yield 15 results.
 pub fn extract_placeholders(text: &str) -> Vec<PlaceholderMatch> {
     IMAGE_PLACEHOLDER_RE
         .captures_iter(text)
@@ -226,25 +174,19 @@ pub fn extract_placeholders(text: &str) -> Vec<PlaceholderMatch> {
         .collect()
 }
 
-/// Rewrites every `[Image #N: <path>]` placeholder in `text` to the
-/// shorter `[Image #N]` form, dropping the path component.
+/// Rewrites every `[Image #N: <path>]` placeholder in `text` to the shorter `[Image #N]` form, dropping the path component.
 ///
-/// Run **after** the orphan-recovery pipeline has finished extracting
-/// paths it needs to load. Once the image is attached inline the path
-/// is redundant *and harmful*: the model treats it as a hint and may
-/// call the `Read` tool on the path even though the bytes are already
-/// in context. The bracketed anchor `[Image #N]` is preserved so the
-/// model can still tell where in the prose the image was referenced.
+/// Run **after** the orphan-recovery pipeline has finished extracting paths it needs to load.
+/// Once the image is attached inline the path is redundant *and harmful*.
+/// The model treats it as a hint and may call the `Read` tool on the path even though the bytes are already in context.
+/// The bracketed anchor `[Image #N]` is preserved so the model can still tell where in the prose the image was referenced.
 ///
-/// Takes `String` by value so the common no-placeholder case returns
-/// the input unchanged with zero allocations.
+/// Takes `String` by value so the common no-placeholder case returns the input unchanged with zero allocations.
 ///
-/// The scan is bounded by [`MAX_PLACEHOLDERS_PER_PROMPT`]; any extra
-/// placeholders past the cap are left in their original form.
+/// The scan is bounded by [`MAX_PLACEHOLDERS_PER_PROMPT`]; any extra placeholders past the cap are left in their original form.
 pub fn strip_paths_from_image_placeholders(text: String) -> String {
     use std::fmt::Write as _;
-    // Fast path: probe with `is_match` (no `Captures` allocation) and
-    // return the owned input unchanged when there is nothing to do.
+    // Fast path: probe with `is_match` (no `Captures` allocation) and return the owned input unchanged when there is nothing to do
     if !IMAGE_PLACEHOLDER_RE.is_match(&text) {
         return text;
     }
@@ -254,8 +196,7 @@ pub fn strip_paths_from_image_placeholders(text: String) -> String {
         .captures_iter(&text)
         .take(MAX_PLACEHOLDERS_PER_PROMPT)
     {
-        // Group 0 is the full match and group 1 is `(\d+)` — both are
-        // structurally guaranteed by the regex.
+        // Group 0 is the full match and group 1 is `(\d+)`; both are structurally guaranteed by the regex
         let whole = cap.get(0).expect("regex match always has group 0");
         let n = cap.get(1).expect("regex always has group 1").as_str();
         out.push_str(&text[last..whole.start()]);
@@ -270,38 +211,26 @@ pub fn strip_paths_from_image_placeholders(text: String) -> String {
 /// Loaded image bytes plus a sniffed MIME type.
 #[derive(Debug, Clone)]
 pub struct LoadedPlaceholderImage {
-    /// Raw image bytes read from disk. Ownership transferred to the
-    /// caller so it can be base64-encoded or moved into a
-    /// `ContentBlock::Image` without an intermediate clone.
+    /// Raw image bytes read from disk.
+    /// Ownership transfers to the caller so it can be base64-encoded or moved into a `ContentBlock::Image` without an intermediate clone.
     pub data: Vec<u8>,
-    /// MIME type derived from the `image` crate's full header parser
-    /// ([`image::ImageReader::with_guessed_format`] +
-    /// `into_dimensions`). Always one of `image/png`, `image/jpeg`,
-    /// `image/gif`, `image/webp`, `image/bmp`, `image/tiff`.
+    /// MIME type derived from the `image` crate's full header parser ([`image::ImageReader::with_guessed_format`] and `into_dimensions`).
+    /// Always one of `image/png`, `image/jpeg`, `image/gif`, `image/webp`, `image/bmp`, `image/tiff`.
     pub mime_type: String,
 }
 
 /// Why a placeholder load was rejected.
 ///
-/// The error variants are deliberately coarse-grained: an attacker with
-/// log access should not be able to probe the filesystem by reading
-/// distinct error messages. In particular, no variant carries the raw
-/// `io::Error` string; an `io::ErrorKind` is retained where useful but
-/// renderer-side messages stay generic.
+/// The variants are deliberately coarse-grained so an attacker with log access cannot probe the filesystem by reading distinct error messages.
+/// No variant carries the raw `io::Error` string; an `io::ErrorKind` is retained where useful but renderer-side messages stay generic.
 #[derive(Debug, thiserror::Error)]
 pub enum PlaceholderLoadError {
-    /// Resolved path is outside every entry in the prefix allowlist
-    /// (or matches a [`DENY_PATH_CONTAINS`] entry inside an allowed
-    /// prefix).
-    ///
-    /// Returned **before** any further I/O so a path like `/etc/passwd`
-    /// returns this variant rather than leaking that `/etc/passwd`
-    /// exists.
+    /// Resolved path is outside every entry in the prefix allowlist (or matches a [`DENY_PATH_CONTAINS`] entry inside an allowed prefix).
+    /// Returned **before** any further I/O so a path like `/etc/passwd` returns this variant rather than leaking that `/etc/passwd` exists.
     #[error("path is outside allowed prefixes")]
     OutsideAllowedPrefixes,
-    /// Path could not be canonicalised (missing, permission denied,
-    /// etc.). We never include the raw filesystem error to avoid log
-    /// probing.
+    /// Path could not be canonicalised (missing, permission denied, etc.).
+    /// We never include the raw filesystem error to avoid log probing.
     #[error("path does not resolve")]
     CanonicalizeFailed,
     /// Extension is not in [`ALLOWED_IMAGE_EXTENSIONS`].
@@ -310,46 +239,31 @@ pub enum PlaceholderLoadError {
     /// Resolved path is not a regular file (e.g. directory, FIFO).
     #[error("path is not a regular file")]
     NotAFile,
-    /// `std::fs::read` failed after canonicalisation. The variant
-    /// retains only the `io::ErrorKind`, not the verbose message.
+    /// `std::fs::read` failed after canonicalisation.
+    /// The variant retains only the `io::ErrorKind`, not the verbose message.
     #[error("read failed: {0:?}")]
     ReadFailed(std::io::ErrorKind),
     /// File exceeds the configured per-image byte cap.
     #[error("file is {actual} bytes, exceeds {limit}-byte cap")]
     TooLarge { actual: usize, limit: usize },
-    /// Bytes do not decode as a supported image. Routed through
-    /// [`image::ImageReader::with_guessed_format`] +
-    /// `into_dimensions`, so a file with PNG magic bytes followed by
-    /// arbitrary content is rejected here.
+    /// Bytes do not decode as a supported image.
+    /// The bytes go through [`image::ImageReader::with_guessed_format`] and `into_dimensions`.
+    /// A file with PNG magic bytes followed by arbitrary content is rejected here.
     #[error("bytes do not decode as a supported image")]
     NotAnImage,
 }
 
-/// Build the canonical prefix allowlist with the workspace cwd plus a
-/// small, intentional set of common user-image directories under
-/// `$HOME`.
-///
-/// The list is canonicalised up-front so prefix checks against
-/// canonical resolved paths work. Non-canonical paths are **never**
-/// appended — if `dunce::canonicalize(workspace_cwd)` fails (transient
-/// permission, missing dir), the workspace prefix is dropped entirely.
-///
-/// `$HOME` itself is **not** an allowed prefix: that would let
-/// arbitrary placeholder paths under `~/.ssh`, `~/.aws`, `~/.config`,
-/// etc. be exfil-able. Instead, only the typical user-paste image
-/// directories are added.
+/// Build the canonical prefix allowlist: the workspace cwd plus a small set of common user-image directories under `$HOME`.
+/// The list is canonicalised up-front so prefix checks against canonical resolved paths work; non-canonical paths are **never** appended.
+/// If `dunce::canonicalize(workspace_cwd)` fails (transient permission, missing dir), the workspace prefix is dropped entirely.
+/// `$HOME` itself is **not** an allowed prefix: that would let arbitrary placeholders read files under `~/.ssh`, `~/.aws`, `~/.config`, etc.
 pub fn default_allowed_prefixes(workspace_cwd: &Path) -> Vec<PathBuf> {
     default_allowed_prefixes_with_home(workspace_cwd, xai_dirs::home_dir())
 }
 
-/// Test-injectable variant of [`default_allowed_prefixes`]. Production
-/// code should call [`default_allowed_prefixes`]; tests pass an
-/// explicit `home` so they don't depend on the ambient `$HOME`.
-///
-/// The returned `Vec` is canonical and deduplicated; **ordering is
-/// alphabetical by OS path, not insertion order**. The prefix check in
-/// [`load_placeholder_image`] uses `starts_with`, so order is
-/// functionally irrelevant.
+/// Variant of [`default_allowed_prefixes`] for tests: an explicit `home` avoids depending on the ambient `$HOME`.
+/// The returned `Vec` is canonical and deduplicated; **ordering is alphabetical by OS path, not insertion order**.
+/// The prefix check in [`load_placeholder_image`] uses `starts_with`, so order is functionally irrelevant.
 pub fn default_allowed_prefixes_with_home(
     workspace_cwd: &Path,
     home: Option<PathBuf>,
@@ -378,13 +292,9 @@ pub fn default_allowed_prefixes_with_home(
 }
 
 /// Subdirectories under `$HOME` that are part of the default allowlist.
-///
-/// Chosen to match the directories users actually paste images from in
-/// practice. Sensitive subtrees (`~/.ssh`, `~/.aws`, `~/.config`,
-/// `~/.gnupg`, `~/Library/Keychains`) are intentionally excluded — they
-/// are never added to the prefix list, and any path resolving into
-/// [`DENY_PATH_CONTAINS`] is rejected even from inside an allowed
-/// prefix.
+/// The entries match the directories users actually paste images from.
+/// Sensitive subtrees (`~/.ssh`, `~/.aws`, `~/.config`, `~/.gnupg`, `~/Library/Keychains`) are never added to the prefix list.
+/// Any path resolving into [`DENY_PATH_CONTAINS`] is rejected even from inside an allowed prefix.
 pub const HOME_IMAGE_SUBDIRS: &[&str] = &[
     "Downloads",
     "Desktop",
@@ -395,28 +305,17 @@ pub const HOME_IMAGE_SUBDIRS: &[&str] = &[
 
 /// Resolve and validate `path_str`, then read the file.
 ///
-/// Validation order is **prefix-first** by design: an out-of-allowlist
-/// path returns [`PlaceholderLoadError::OutsideAllowedPrefixes`]
-/// regardless of whether the file exists, the extension is recognised,
-/// or the bytes look like an image. This prevents log-level
-/// information disclosure (an attacker with read access to telemetry
-/// can no longer distinguish "file exists but is outside scope" from
-/// "file does not exist").
+/// Validation is **prefix-first**: an out-of-allowlist path returns [`PlaceholderLoadError::OutsideAllowedPrefixes`] before any other check runs.
+/// An attacker reading telemetry cannot distinguish "file exists but is outside scope" from "file does not exist".
 ///
-/// `allowed_prefixes` should already be canonical (see
-/// [`default_allowed_prefixes`]). The function does not canonicalise
-/// `allowed_prefixes` again — the caller pays that cost once.
+/// `allowed_prefixes` should already be canonical (see [`default_allowed_prefixes`]).
+/// The function does not canonicalise them again; the caller pays that cost once.
 ///
-/// Symlinks: this loader follows symlinks (via `canonicalize`), then
-/// checks the **resolved** path against the prefix allowlist. That is
-/// strictly stronger than the legacy
-/// [`xai_grok_pager::prompt_images::read_image_at_path`], which has no
-/// prefix allowlist at all. The new rule applies to both
-/// `[Image #N: <path>]` placeholder recovery callers — the
-/// server-side `handle_prompt` fallback and the TUI orphan-placeholder
-/// fallback. The legacy user-initiated drag/paste path in
-/// `read_image_at_path` is intentionally outside this allowlist (the
-/// user explicitly chose those files via the OS file picker).
+/// Symlinks: this loader follows symlinks (via `canonicalize`), then checks the **resolved** path against the prefix allowlist.
+/// That is strictly stronger than the legacy [`xai_grok_pager::prompt_images::read_image_at_path`], which has no prefix allowlist at all.
+/// Both placeholder-recovery callers get this rule: the server-side `handle_prompt` fallback and the TUI orphan-placeholder fallback.
+/// The legacy user-initiated drag/paste path in `read_image_at_path` stays outside this allowlist.
+/// The user explicitly chose those files via the OS file picker.
 pub fn load_placeholder_image(
     path_str: &str,
     allowed_prefixes: &[PathBuf],
@@ -424,10 +323,8 @@ pub fn load_placeholder_image(
     load_placeholder_image_with_cap(path_str, allowed_prefixes, MAX_PLACEHOLDER_IMAGE_BYTES)
 }
 
-/// Variant of [`load_placeholder_image`] that takes an explicit byte
-/// cap. Used by tests so they can exercise the
-/// [`PlaceholderLoadError::TooLarge`] path with a tiny cap and a small
-/// file rather than synthesising a 50 MB blob.
+/// Variant of [`load_placeholder_image`] that takes an explicit byte cap.
+/// Used by tests to exercise the [`PlaceholderLoadError::TooLarge`] path with a tiny cap and a small file rather than a synthetic 50 MB blob.
 pub fn load_placeholder_image_with_cap(
     path_str: &str,
     allowed_prefixes: &[PathBuf],
@@ -438,25 +335,20 @@ pub fn load_placeholder_image_with_cap(
     load_canonical_placeholder_image(&canonical, allowed_prefixes, max_bytes)
 }
 
-/// Variant of [`load_placeholder_image`] for callers that have already
-/// canonicalised the path (e.g. [`recover_orphan_placeholders`], which
-/// canonicalises once for dedup). Saves one `canonicalize` syscall per
-/// successful load.
+/// Variant of [`load_placeholder_image`] for callers that have already canonicalised the path.
+/// [`recover_orphan_placeholders`] canonicalises once for dedup; this saves one `canonicalize` syscall per successful load.
 pub fn load_canonical_placeholder_image(
     canonical: &Path,
     allowed_prefixes: &[PathBuf],
     max_bytes: usize,
 ) -> Result<LoadedPlaceholderImage, PlaceholderLoadError> {
-    // Prefix check first — out-of-scope paths return a single,
-    // file-system-independent variant.
+    // Prefix check first: out-of-scope paths return a single, file-system-independent variant
     if !allowed_prefixes.iter().any(|p| canonical.starts_with(p)) {
         return Err(PlaceholderLoadError::OutsideAllowedPrefixes);
     }
-    // Deny-list pass: even inside an allowed prefix, certain subtrees
-    // (macOS bundle internals, `.Trash`, secret stores) are off-limits.
-    // Normalise `\` → `/` so Windows paths hit the same forward-slash
-    // needles as Unix paths — see the `DENY_PATH_CONTAINS` doc-comment
-    // for the platform contract.
+    // Deny-list pass: even inside an allowed prefix, certain subtrees (macOS bundle internals, `.Trash`, secret stores) are off-limits
+    // Normalise `\` to `/` so Windows paths hit the same forward-slash needles as Unix paths
+    // See the `DENY_PATH_CONTAINS` doc-comment for the platform contract
     let canonical_str = canonical.to_string_lossy().replace('\\', "/");
     if DENY_PATH_CONTAINS
         .iter()
@@ -489,8 +381,7 @@ pub fn load_canonical_placeholder_image(
     }
 
     let data = std::fs::read(canonical).map_err(|e| PlaceholderLoadError::ReadFailed(e.kind()))?;
-    // Re-check after read: a sparse/grown file may exceed the cap
-    // even when the metadata snapshot was under it.
+    // Re-check after read: a sparse/grown file may exceed the cap even when the metadata snapshot was under it
     if data.len() > max_bytes {
         return Err(PlaceholderLoadError::TooLarge {
             actual: data.len(),
@@ -498,11 +389,8 @@ pub fn load_canonical_placeholder_image(
         });
     }
 
-    // Image-decoder validation: routed through the `image` crate's
-    // header parser so a file with PNG magic bytes followed by arbitrary
-    // content (e.g. a private key) is rejected. `into_dimensions` reads
-    // the header (cheap) but not the pixel payload (expensive), so a
-    // truncated/garbled image fails fast.
+    // Image-decoder validation: a file with PNG magic bytes followed by arbitrary content (e.g. a private key) is rejected here.
+    // `into_dimensions` reads the header (cheap) but not the pixel payload (expensive), so a truncated/garbled image fails fast
     let mime_type = decode_image_mime(&data).ok_or(PlaceholderLoadError::NotAnImage)?;
 
     Ok(LoadedPlaceholderImage {
@@ -519,22 +407,16 @@ fn decode_image_mime(data: &[u8]) -> Option<&'static str> {
         .map(|(_, _, mime)| mime)
 }
 
-/// Recover orphan `[Image #N: <path>]` placeholders embedded in the
-/// user query text by loading the referenced files from disk.
+/// Recover orphan `[Image #N: <path>]` placeholders embedded in the user query text by loading the referenced files from disk.
 ///
-/// Production wrapper over [`recover_orphan_placeholders_with_prefixes`]
-/// that derives the prefix allowlist from `workspace_cwd` via
-/// [`default_allowed_prefixes`].
+/// Production wrapper over [`recover_orphan_placeholders_with_prefixes`].
+/// It derives the prefix allowlist from `workspace_cwd` via [`default_allowed_prefixes`].
 ///
-/// **Note for integration tests.** This wrapper reads the ambient
-/// process `$HOME` via `xai_dirs::home_dir()` to construct
-/// [`HOME_IMAGE_SUBDIRS`] prefixes. An end-to-end test driving
-/// `handle_prompt` therefore inherits the test runner's `$HOME` and
-/// any subdirectories it materialises (`~/Downloads`, etc.) into the
-/// allowlist. For hermetic test isolation, call
-/// [`recover_orphan_placeholders_with_prefixes`] directly with an
-/// explicit prefix list — see the unit tests of this module for the
-/// pattern.
+/// This wrapper reads the ambient process `$HOME` via `xai_dirs::home_dir()` to construct [`HOME_IMAGE_SUBDIRS`] prefixes.
+/// An end-to-end test driving `handle_prompt` therefore inherits the test runner's `$HOME`.
+/// Any subdirectories the runner creates (`~/Downloads`, etc.) land in the allowlist.
+/// For hermetic isolation, call [`recover_orphan_placeholders_with_prefixes`] directly with an explicit prefix list.
+/// The unit tests of this module show the pattern.
 pub fn recover_orphan_placeholders(
     query: &str,
     raw_images: &mut Vec<agent_client_protocol::ImageContent>,
@@ -544,25 +426,19 @@ pub fn recover_orphan_placeholders(
     recover_orphan_placeholders_with_prefixes(query, raw_images, &allowed)
 }
 
-/// Inject-friendly variant of [`recover_orphan_placeholders`].
+/// Variant of [`recover_orphan_placeholders`] that takes an explicit prefix allowlist.
 ///
-/// "Orphan" = a placeholder whose canonical path is **not** already
-/// present in `raw_images` (i.e. the TUI did not send a matching
-/// `ContentBlock::Image`).
+/// An "orphan" is a placeholder whose canonical path is **not** already present in `raw_images`.
+/// That is, the TUI did not send a matching `ContentBlock::Image`.
 ///
-/// Dedup is performed against the **canonical** form of each existing
-/// `raw_images[i].uri` so a TUI-attached non-canonical `file://`
-/// URI (e.g. `file:///tmp/foo.png` when the canonical path is
-/// `/private/tmp/foo.png`) still matches the placeholder's canonical
-/// form. Percent-encoded forms are also handled (see
-/// [`canonical_from_file_uri`]).
+/// Dedup runs against the **canonical** form of each existing `raw_images[i].uri`.
+/// A TUI-attached non-canonical `file://` URI (e.g. `file:///tmp/foo.png` when the canonical path is `/private/tmp/foo.png`) still matches.
+/// Percent-encoded forms are also handled (see [`canonical_from_file_uri`]).
 ///
-/// Enforces [`MAX_PLACEHOLDER_AGGREGATE_BYTES`] across the recovered
-/// payloads: once the running total would exceed the cap, the
-/// remainder of the placeholders are skipped with a `warn` log.
+/// Enforces [`MAX_PLACEHOLDER_AGGREGATE_BYTES`] across the recovered payloads.
+/// Once the running total would exceed the cap, the remaining placeholders are skipped with a `warn` log.
 ///
-/// Returns the number of recovered images so the caller can log a
-/// summary.
+/// Returns the number of recovered images so the caller can log a summary.
 pub fn recover_orphan_placeholders_with_prefixes(
     query: &str,
     raw_images: &mut Vec<agent_client_protocol::ImageContent>,
@@ -577,21 +453,16 @@ pub fn recover_orphan_placeholders_with_prefixes(
     )
 }
 
-/// Test-injectable variant of
-/// [`recover_orphan_placeholders_with_prefixes`].
+/// Variant of [`recover_orphan_placeholders_with_prefixes`] with injectable caps.
 ///
-/// Production code calls the cap-defaulting wrapper; tests use this
-/// form to exercise the aggregate cap with small synthetic values
-/// (real 200 MB tests would burn disk/CPU per run).
+/// Production code calls the cap-defaulting wrapper.
+/// Tests use this form to exercise the aggregate cap with small synthetic values; real 200 MB tests would burn disk/CPU per run.
 ///
-/// Aggregate-cap semantics: the loop reads the next image, then checks
-/// `aggregate_bytes + image.len() > aggregate_max`. The first image
-/// that pushes the running total **strictly above** the cap is
-/// dropped and the loop `break`s; earlier images already in
-/// `raw_images` stay. The cap is therefore an **inclusive** upper
-/// bound on the aggregate — a running total exactly equal to the cap
-/// is admitted, the next byte trips the break. See test
-/// `recover_orphan_placeholders_aggregate_cap_inclusive_boundary`.
+/// The loop reads the next image, then checks `aggregate_bytes + image.len() > aggregate_max`.
+/// The first image that pushes the running total **strictly above** the cap is dropped and the loop `break`s.
+/// Earlier images already in `raw_images` stay.
+/// The cap is therefore an **inclusive** upper bound: a total exactly equal to the cap is admitted, the next byte trips the break.
+/// See test `recover_orphan_placeholders_aggregate_cap_inclusive_boundary`.
 pub fn recover_orphan_placeholders_with_prefixes_and_caps(
     query: &str,
     raw_images: &mut Vec<agent_client_protocol::ImageContent>,
@@ -606,9 +477,8 @@ pub fn recover_orphan_placeholders_with_prefixes_and_caps(
         return 0;
     }
 
-    // Pre-compute canonical paths of the already-attached images so the
-    // dedup is robust against non-canonical `file://` URIs from the
-    // TUI side as well as percent-encoded URIs from non-TUI clients.
+    // Pre-compute canonical paths of the already-attached images
+    // Dedup then matches non-canonical `file://` URIs from the TUI as well as percent-encoded URIs from non-TUI clients
     let attached_canonical: std::collections::HashSet<PathBuf> = raw_images
         .iter()
         .filter_map(|img| img.uri.as_deref().and_then(canonical_from_file_uri))
@@ -648,9 +518,8 @@ pub fn recover_orphan_placeholders_with_prefixes_and_caps(
                 raw_images.push(
                     agent_client_protocol::ImageContent::new(data, loaded.mime_type)
                         .uri(format!("file://{}", canonical.display()))
-                        // Record the real `[Image #N]` number so it resolves by
-                        // number, matching the TUI-attached images (which set it
-                        // too) and avoiding position-based collisions.
+                        // Record the real `[Image #N]` number so it resolves by number
+                        // TUI-attached images set it too, so position-based collisions are avoided
                         .meta(display_number_meta(ph.display_number)),
                 );
                 recovered += 1;
@@ -667,17 +536,14 @@ pub fn recover_orphan_placeholders_with_prefixes_and_caps(
     recovered
 }
 
-/// Parse a `file://...` URI into a canonical `PathBuf`, accepting both
-/// the relaxed unencoded form emitted by the TUI / server (see the
-/// `file://` URI convention note in the module header) and the
-/// percent-encoded RFC 3986 form. Returns `None` if the URI does not
-/// start with `file://`; otherwise returns the canonicalised path
-/// (falling back to the raw path when canonicalisation fails so the
-/// caller can still compare against attached URIs).
+/// Parse a `file://...` URI into a canonical `PathBuf`.
+/// Accepts both the relaxed unencoded form emitted by the TUI / server (see the module header) and the percent-encoded RFC 3986 form.
+/// Returns `None` if the URI does not start with `file://`; otherwise returns the canonicalised path.
+/// Falls back to the raw path when canonicalisation fails so the caller can still compare against attached URIs.
 pub fn canonical_from_file_uri(uri: &str) -> Option<PathBuf> {
     let raw_path_str = uri.strip_prefix("file://")?;
-    // Try percent-decoding first; fall back to the literal form. Both
-    // are valid per the module's `file://` URI convention.
+    // Try percent-decoding first; fall back to the literal form
+    // Both are valid per the module's `file://` URI convention
     let decoded: std::borrow::Cow<'_, str> = match urlencoding::decode(raw_path_str) {
         Ok(c) => c,
         Err(_) => std::borrow::Cow::Borrowed(raw_path_str),
@@ -711,8 +577,7 @@ mod tests {
 
     #[test]
     fn strip_paths_drops_path_keeps_anchor() {
-        // The whole point: the model should see the bracketed anchor
-        // `[Image #N]` but not the path that would tempt a `Read`.
+        // The whole point: the model should see the bracketed anchor `[Image #N]` but not the path that would tempt a `Read`
         assert_eq!(
             strip_paths_from_image_placeholders(
                 "what is that?[Image #1: /Users/me/Desktop/x.png] thanks".to_owned()
@@ -733,10 +598,7 @@ mod tests {
 
     #[test]
     fn strip_paths_returns_input_unchanged_when_no_placeholders() {
-        // Fast-path: the helper takes `String` by value and the
-        // no-match branch returns it verbatim — no allocation. The
-        // identity here pins the contract (input string ⇔ output
-        // string) byte-for-byte.
+        // Fast path: the helper takes `String` by value and the no-match branch returns it verbatim, with no allocation
         let text = "no placeholder here, just prose";
         assert_eq!(strip_paths_from_image_placeholders(text.to_owned()), text);
     }
@@ -754,10 +616,8 @@ mod tests {
 
     #[test]
     fn strip_paths_ignores_malformed_placeholders() {
-        // None of these match the regex (the last is unterminated, the
-        // middle two have empty paths). The leading `[Image #1]` is
-        // already in the short form, so the output is bit-identical
-        // to the input.
+        // None of these match the regex (the last is unterminated, the middle two have empty paths)
+        // The leading `[Image #1]` is already in the short form, so the output is bit-identical to the input
         let text = "[Image #1] [Image #2:] [Image #3: ] [Image #4: /ok.png";
         assert_eq!(strip_paths_from_image_placeholders(text.to_owned()), text);
     }
@@ -790,8 +650,7 @@ mod tests {
         assert!(extract_placeholders("[Image #5: /tmp/x.png").is_empty());
         assert!(extract_placeholders("[image #1: /tmp/x.png]").is_empty());
         assert!(extract_placeholders("[Image #: /tmp/x.png]").is_empty());
-        // Missing space after colon: producer always emits ": " so the
-        // shorthand form is intentionally rejected. Pinned here.
+        // Missing space after colon: producer always emits ": " so the shorthand form is intentionally rejected
         assert!(extract_placeholders("[Image #5:foo.png]").is_empty());
     }
 
@@ -864,11 +723,9 @@ mod tests {
 
     #[test]
     fn extract_placeholders_first_nested_bracket_terminates() {
-        // Pinning behaviour: `]` inside the path closes the match
-        // early. Result: the first segment is captured as the path,
-        // the rest of the text is left alone. Also pin the span so a
-        // future regex revision that consumes nested brackets is
-        // caught.
+        // Pinning behaviour: `]` inside the path closes the match early
+        // Result: the first segment is captured as the path, the rest of the text is left alone
+        // Also pin the span so a future regex revision that consumes nested brackets is caught
         let text = "[Image #1: /tmp/[odd].png]";
         let matches = extract_placeholders(text);
         assert_eq!(matches.len(), 1);
@@ -933,13 +790,8 @@ mod tests {
         assert!(matches!(err, PlaceholderLoadError::NotAnImage));
     }
 
-    /// Defence-in-depth regression for the exfil chain: a file whose
-    /// first 8 bytes are PNG magic but whose tail is arbitrary content
-    /// (e.g. a private key) is **rejected** by the loader. Earlier
-    /// rounds pinned the weaker `image::guess_format`-only behaviour
-    /// which accepted such forgeries; the full
-    /// `with_guessed_format` + `into_dimensions` check closes that
-    /// gap.
+    /// A file whose first 8 bytes are PNG magic but whose tail is arbitrary content (e.g. a private key) is **rejected** by the loader.
+    /// `image::guess_format` alone accepted such forgeries; the full `with_guessed_format` and `into_dimensions` check closes that gap.
     #[test]
     fn load_placeholder_image_rejects_png_magic_forgery_with_garbage_tail() {
         let dir = tempfile::tempdir().unwrap();
@@ -1053,9 +905,7 @@ mod tests {
 
     #[test]
     fn load_placeholder_image_rejects_deny_listed_subtree() {
-        // Construct a workspace whose canonical contains
-        // `/.photoslibrary/` so the path is inside the allowlist but
-        // hits the deny-list.
+        // Construct a workspace whose canonical contains `/.photoslibrary/` so the path is inside the allowlist but hits the deny-list
         let root = tempfile::tempdir().unwrap();
         let bundle = root
             .path()
@@ -1079,8 +929,7 @@ mod tests {
     fn default_allowed_prefixes_with_home_includes_workspace_and_every_subdir() {
         let dir = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
-        // Materialise every entry in HOME_IMAGE_SUBDIRS so the list
-        // drift is caught at test time, not at runtime.
+        // Create every entry in HOME_IMAGE_SUBDIRS so list drift is caught at test time, not at runtime
         let mut expected_subdir_canons: Vec<PathBuf> = Vec::new();
         for sub in HOME_IMAGE_SUBDIRS {
             let p = home.path().join(sub);
@@ -1098,14 +947,9 @@ mod tests {
                 "missing prefix for {canon:?} in {prefixes:?}"
             );
         }
-        // $HOME itself is NOT in the list.
         assert!(!prefixes.contains(&dunce::canonicalize(home.path()).unwrap()));
-        // At least workspace + each subdir, sorted+deduped. Uses `>=`
-        // not `==` so the test stays green if `$TMPDIR` happens to
-        // resolve inside one of the home subdirs (e.g. CI runners that
-        // set `TMPDIR=$HOME/Downloads/ci`) — in that case the
-        // workspace canonical would equal one of the subdir canonicals
-        // and the dedup pass collapses them.
+        // Uses `>=` not `==` so the test stays green if `$TMPDIR` resolves inside one of the home subdirs (e.g. `TMPDIR=$HOME/Downloads/ci` on CI).
+        // In that case the workspace canonical equals one of the subdir canonicals and the dedup pass collapses them
         assert!(
             prefixes.len() >= HOME_IMAGE_SUBDIRS.len(),
             "expected at least {} prefixes, got {prefixes:?}",
@@ -1172,9 +1016,7 @@ mod tests {
 
     // ----- recover_orphan_placeholders (hermetic, no ambient $HOME) -------
 
-    /// Build a non-empty ACP `ImageContent` so a future dedup change
-    /// that short-circuits on `data.is_empty()` cannot silently pass
-    /// these tests.
+    /// Build a non-empty ACP `ImageContent` so a future dedup change that short-circuits on `data.is_empty()` cannot silently pass these tests.
     fn make_acp_image(uri: &str) -> agent_client_protocol::ImageContent {
         agent_client_protocol::ImageContent::new("AAAA", "image/png").uri(Some(uri.to_string()))
     }
@@ -1193,8 +1035,7 @@ mod tests {
         assert_eq!(raw[0].mime_type, "image/png");
         assert!(!raw[0].data.is_empty());
         assert!(raw[0].uri.as_deref().unwrap().starts_with("file://"));
-        // The recovered image carries its real `[Image #N]` number so
-        // `image_edit` can resolve the token to it by number.
+        // The recovered image carries its real `[Image #N]` number so `image_edit` can resolve the token to it by number
         assert_eq!(display_number_from_meta(raw[0].meta.as_ref()), Some(1));
     }
 
@@ -1210,8 +1051,7 @@ mod tests {
         let n = recover_orphan_placeholders_with_prefixes(&query, &mut raw, &allowed);
         assert_eq!(n, 0, "canonical-canonical dedup must skip the load");
         assert_eq!(raw.len(), 1);
-        // The original entry must be untouched, not silently
-        // overwritten by a duplicate load.
+        // The original entry must be untouched, not silently overwritten by a duplicate load
         assert_eq!(raw[0].data, "AAAA");
     }
 
@@ -1260,15 +1100,12 @@ mod tests {
         assert_eq!(raw[0].data, "AAAA");
     }
 
-    /// Pin the inverse direction. The placeholder text wire
-    /// format is the unencoded path produced by
-    /// `xai_grok_pager::prompt_images::display_text`. A
-    /// percent-encoded path *inside the placeholder text* is **not**
-    /// supported — `extract_placeholders` captures the raw `%20`
-    /// substring and `canonicalize` rejects the synthetic name. The
-    /// orphan loader logs a warn and skips the placeholder. The
-    /// already-attached canonical URI in `raw_images` stays
-    /// untouched.
+    /// Pin the inverse direction.
+    /// The placeholder text wire format is the unencoded path produced by `xai_grok_pager::prompt_images::display_text`.
+    /// A percent-encoded path *inside the placeholder text* is **not** supported.
+    /// `extract_placeholders` captures the raw `%20` substring and `canonicalize` rejects the synthetic name.
+    /// The orphan loader logs a warn and skips the placeholder.
+    /// The already-attached canonical URI in `raw_images` stays untouched.
     #[test]
     fn recover_orphan_placeholders_percent_encoded_path_in_placeholder_is_not_supported() {
         let dir = tempfile::tempdir().unwrap();
@@ -1278,8 +1115,7 @@ mod tests {
         let canon = dunce::canonicalize(&png).unwrap();
         let attached_uri = format!("file://{}", canon.display());
         let mut raw = vec![make_acp_image(&attached_uri)];
-        // Percent-encoded path inside the placeholder text — not the
-        // documented wire format.
+        // The placeholder carries a percent-encoded path, not the documented wire format
         let encoded_in_text = format!("{}", canon.display()).replace(' ', "%20");
         let query = format!("[Image #1: {}]", encoded_in_text);
         let allowed = vec![dunce::canonicalize(dir.path()).unwrap()];
@@ -1319,8 +1155,7 @@ mod tests {
         let canon = dunce::canonicalize(&png).unwrap();
         let mut raw: Vec<agent_client_protocol::ImageContent> = Vec::new();
         let query = format!("[Image #1: {}]", canon.display());
-        // Allowlist is workspace only — the placeholder canon is
-        // outside it.
+        // Allowlist is workspace only; the placeholder canon is outside it
         let allowed = vec![dunce::canonicalize(workspace.path()).unwrap()];
         let n = recover_orphan_placeholders_with_prefixes(&query, &mut raw, &allowed);
         assert_eq!(n, 0);
@@ -1329,10 +1164,8 @@ mod tests {
 
     // ----- Aggregate cap -------------------------------------------------
 
-    /// Two placeholders, aggregate cap below the cumulative byte
-    /// total of both. The first image fits; the second pushes the
-    /// running total over and the loop breaks. Pin: `n == 1`, second
-    /// placeholder was NOT loaded into `raw`.
+    /// Two placeholders, aggregate cap below the cumulative byte total of both.
+    /// The first image fits; the second pushes the running total over and the loop breaks.
     #[test]
     fn recover_orphan_placeholders_aggregate_cap_breaks_loop() {
         let dir = tempfile::tempdir().unwrap();
@@ -1343,16 +1176,13 @@ mod tests {
         let query = format!("[Image #1: {}] [Image #2: {}]", c1.display(), c2.display());
         let mut raw: Vec<agent_client_protocol::ImageContent> = Vec::new();
         let allowed = vec![dunce::canonicalize(dir.path()).unwrap()];
-        // Per-image cap permissive; aggregate cap admits exactly one
-        // image (PNG_BYTES is 67 bytes; cap at 100 lets one through,
-        // blocks the second).
+        // Per-image cap permissive; aggregate cap admits exactly one image (PNG_BYTES is 67 bytes; cap at 100 lets one through, blocks the second)
         let n = recover_orphan_placeholders_with_prefixes_and_caps(
             &query, &mut raw, &allowed, 1_000, 100,
         );
         assert_eq!(n, 1, "aggregate cap must allow exactly one image");
         assert_eq!(raw.len(), 1);
-        // Order matters — the first placeholder's canonical URI is
-        // the one that landed in `raw`.
+        // Order matters: the first placeholder's canonical URI is the one that landed in `raw`
         let attached_uri = raw[0].uri.as_deref().unwrap();
         assert!(
             attached_uri.contains("a.png"),
@@ -1360,9 +1190,8 @@ mod tests {
         );
     }
 
-    /// Pin the aggregate-cap boundary semantics. The cap is
-    /// **inclusive** — `aggregate + image.len() > cap` triggers the
-    /// break. A single image exactly equal to the cap is admitted.
+    /// Pin the aggregate-cap boundary: the cap is **inclusive**; `aggregate + image.len() > cap` triggers the break.
+    /// A single image exactly equal to the cap is admitted.
     #[test]
     fn recover_orphan_placeholders_aggregate_cap_inclusive_boundary() {
         let dir = tempfile::tempdir().unwrap();
@@ -1371,7 +1200,7 @@ mod tests {
         let query = format!("[Image #1: {}]", c.display());
         let mut raw: Vec<agent_client_protocol::ImageContent> = Vec::new();
         let allowed = vec![dunce::canonicalize(dir.path()).unwrap()];
-        // Cap == image size: the `>` comparison admits this image.
+        // The cap equals the image size, so the `>` comparison admits this image
         let n = recover_orphan_placeholders_with_prefixes_and_caps(
             &query,
             &mut raw,
@@ -1384,9 +1213,7 @@ mod tests {
     }
 
     /// The reject side of the inclusive-boundary contract.
-    /// `cap == image_size - 1` is the smallest cap that rejects this
-    /// image. Two-sided boundary pinning locks down the inclusive vs
-    /// exclusive contract.
+    /// `cap == image_size - 1` is the smallest cap that rejects this image.
     #[test]
     fn recover_orphan_placeholders_aggregate_cap_inclusive_boundary_rejects_at_one_below() {
         let dir = tempfile::tempdir().unwrap();
@@ -1408,22 +1235,17 @@ mod tests {
 
     // ----- DENY_PATH_CONTAINS --------------------------------------------
 
-    /// Every entry of `DENY_PATH_CONTAINS` produces an
-    /// `OutsideAllowedPrefixes` rejection. Loops the constant so a
-    /// future PR that deletes a security-critical entry (e.g.
-    /// `/.ssh/`) ships a failing test.
+    /// Every entry of `DENY_PATH_CONTAINS` produces an `OutsideAllowedPrefixes` rejection.
+    /// The test loops the constant so a future PR that deletes a security-critical entry (e.g. `/.ssh/`) ships a failing test.
     #[test]
     fn load_placeholder_image_rejects_every_deny_list_entry() {
-        // Build a canonical that contains each needle by constructing
-        // a directory tree under a tempdir. Each needle is wrapped in
-        // a leading `<allowed>` and a trailing `<file>.png`. Forward
-        // slashes only — the enforcement site normalises Windows
-        // backslashes to forward slashes before the substring check.
+        // Build a canonical that contains each needle by constructing a directory tree under a tempdir
+        // Each needle is wrapped in a leading `<allowed>` and a trailing `<file>.png`
+        // Forward slashes only: the enforcement site normalises Windows backslashes to forward slashes before the substring check
         for needle in DENY_PATH_CONTAINS {
             let root = tempfile::tempdir().unwrap();
             let trimmed = needle.trim_matches('/');
-            // Materialise the directory tree implied by the needle so
-            // canonicalize succeeds.
+            // Create the directory tree implied by the needle so canonicalize succeeds
             let mut current = root.path().to_path_buf();
             for segment in trimmed.split('/') {
                 current = current.join(segment);
@@ -1431,8 +1253,7 @@ mod tests {
             }
             let png = write_png(&current, "x.png");
             let canon = dunce::canonicalize(&png).unwrap();
-            // Allowlist is the root — without the deny-list, this
-            // path would be accepted.
+            // Allowlist is the root; without the deny-list, this path would be accepted
             let allowed = vec![dunce::canonicalize(root.path()).unwrap()];
             let err = load_placeholder_image(canon.to_str().unwrap(), &allowed).unwrap_err();
             assert!(
@@ -1441,10 +1262,8 @@ mod tests {
             );
         }
 
-        // Positive control. A benign path inside an allowed
-        // prefix containing **none** of the deny needles must still
-        // load. Without this, a future regression that rejects every
-        // path would pass the loop above and ship.
+        // Positive control. A benign path inside an allowed prefix containing **none** of the deny needles must still load.
+        // Without it, a future regression that rejects every path would pass the loop above and ship
         let root = tempfile::tempdir().unwrap();
         let png = write_png(root.path(), "picture.png");
         let canon = dunce::canonicalize(&png).unwrap();
@@ -1453,19 +1272,16 @@ mod tests {
             load_placeholder_image(canon.to_str().unwrap(), &allowed).unwrap_or_else(|e| {
                 panic!("positive control: benign path inside allowed prefix must load, got: {e:?}")
             });
-        // Tighten the positive control — a regression that
-        // returned an empty `LoadedPlaceholderImage` would pass a
-        // bare `is_ok()` assertion. Pin the mime type and round-trip
-        // the bytes against the on-disk PNG.
+        // A regression that returned an empty `LoadedPlaceholderImage` would pass a bare `is_ok()` assertion
+        // Pin the mime type and round-trip the bytes against the on-disk PNG
         assert_eq!(loaded.mime_type, "image/png");
         assert_eq!(loaded.data, PNG_BYTES);
     }
 
     #[test]
     fn attached_image_references_prefers_file_path_over_data() {
-        // `[Image #N]` resolution should hand `image_edit` a bare on-disk
-        // path (from the durable `file://` URI) so it reads the session
-        // copy rather than re-decoding a large base64 blob.
+        // `[Image #N]` resolution should hand `image_edit` a bare on-disk path (from the durable `file://` URI)
+        // `image_edit` then reads the session copy rather than re-decoding a large base64 blob
         let img = agent_client_protocol::ImageContent::new("AAAA", "image/png")
             .uri(Some(
                 "file:///Users/me/.grok/sessions/s/images/image-1.png".into(),
@@ -1483,8 +1299,7 @@ mod tests {
 
     #[test]
     fn attached_image_references_falls_back_to_data_url() {
-        // No durable URI (e.g. persistence failed): keep the inline bytes
-        // as a data URL so the token still resolves to the right image.
+        // No durable URI (e.g. persistence failed): keep the inline bytes as a data URL so the token still resolves to the right image.
         let img = agent_client_protocol::ImageContent::new("BBBB", "image/jpeg")
             .meta(display_number_meta(2));
         let refs = attached_image_references(std::slice::from_ref(&img));
@@ -1493,9 +1308,8 @@ mod tests {
 
     #[test]
     fn attached_image_references_keys_by_meta_number_not_position() {
-        // Non-contiguous numbers (`#1`, `#3`) survive a mid-compose chip
-        // removal; the registry must key on the recorded number, not the
-        // list position.
+        // Non-contiguous numbers (`#1`, `#3`) survive a mid-compose chip removal
+        // The registry must key on the recorded number, not the list position
         let mk = |data: &str, n: usize| {
             agent_client_protocol::ImageContent::new(data, "image/png").meta(display_number_meta(n))
         };
@@ -1511,8 +1325,7 @@ mod tests {
 
     #[test]
     fn attached_image_references_falls_back_to_position_without_meta() {
-        // Older client / non-TUI caller with no recorded number: fall back
-        // to 1-based position so the common contiguous case still resolves.
+        // Older client / non-TUI caller with no recorded number: fall back to 1-based position so the common contiguous case still resolves
         let mk = |data: &str| agent_client_protocol::ImageContent::new(data, "image/png");
         let refs = attached_image_references(&[mk("first"), mk("second")]);
         assert_eq!(

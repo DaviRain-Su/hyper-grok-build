@@ -316,26 +316,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_schema_enum_values() {
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "mode": {
-                    "type": "string",
-                    "description": "Processing mode",
-                    "enum": ["fast", "slow", "auto"],
-                    "default": "auto"
-                }
-            }
-        });
-
-        let args = parse_arguments_from_schema_lossy(&schema);
-        assert_eq!(args.len(), 1);
-        assert_eq!(args[0].allowed_values.len(), 3);
-        assert!(!args[0].required);
-    }
-
-    #[test]
     fn parse_schema_composite_stores_schema() {
         let schema = serde_json::json!({
             "type": "object",

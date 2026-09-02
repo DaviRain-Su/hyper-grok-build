@@ -6,6 +6,7 @@ mod crash_handler;
 mod display_refresh;
 mod features;
 mod mcp;
+mod prompt_suggest;
 mod system_prompt;
 mod tool_approvals;
 mod toolset;
@@ -18,12 +19,13 @@ pub use crash_handler::*;
 pub use display_refresh::*;
 pub use features::*;
 pub use mcp::*;
+pub use prompt_suggest::*;
 pub use system_prompt::*;
 pub use tool_approvals::*;
 pub use toolset::*;
 pub use ui::*;
 pub use version::*;
 
-// Single crate-wide env-mutation mutex; `permissions.rs` tests name it via this module's path.
+// One crate-wide mutex serializes env mutation; `permissions.rs` tests name it via this module's path
 #[cfg(test)]
 pub(crate) use auto_mode::AUTO_PERMISSION_MODE_ENV_LOCK;

@@ -1,5 +1,3 @@
-//! Outbound events emitted by the sampler.
-
 use serde::{Deserialize, Serialize};
 
 use xai_grok_sampling_types::{
@@ -12,25 +10,22 @@ use crate::types::RequestId;
 
 /// Which content channel a token belongs to.
 ///
-/// Extensible — adding a new channel (e.g., `Planning`) only requires a
-/// new variant here, not new [`SamplingEvent`] variants. Mirrors the
-/// agentic-sampler's `AgentChannel` pattern.
+/// Extensible: adding a new channel (e.g., `Planning`) only requires a new variant here, not new [`SamplingEvent`] variants.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SamplingChannel {
     Text,
     Reasoning,
 }
 
-/// Why the in-flight request was stripped. What to do about it (e.g. persist
-/// the strip to stored history) is the consumer's decision, not the sampler's.
+/// Why the in-flight request was stripped.
+/// What to do about it (e.g. persist the strip to stored history) is the consumer's decision, not the sampler's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StripReason {
-    /// A 400 stamped with the invalid-image code: the server's
-    /// deterministic verdict on this exact payload.
+    /// A 400 stamped with the invalid-image code: the server's deterministic verdict on this exact payload.
     ServerRejected,
-    /// A size/transport heuristic (413, connection reset on upload) or a
-    /// non-deterministic rejection (proxy-wrapped 500, legacy phrase match,
-    /// mid-stream error): may be transient, blames no particular image.
+    /// A size/transport heuristic (413, connection reset on upload) or a non-deterministic rejection.
+    /// Non-deterministic covers a proxy-wrapped 500, a legacy phrase match, or a mid-stream error.
+    /// The failure may be transient and blames no particular image.
     PayloadHeuristic,
 }
 
@@ -46,8 +41,8 @@ impl StripReason {
 
 /// Events emitted by the sampler for a single in-flight request.
 ///
-/// Sent on the shared event channel that callers subscribe to. The
-/// session translates these into ACP notifications.
+/// Events are sent on the shared event channel that callers subscribe to.
+/// The session translates these into ACP notifications.
 #[derive(Debug, Clone)]
 pub enum SamplingEvent {
     /// HTTP stream established, headers read. Emitted before any content.
@@ -69,9 +64,8 @@ pub enum SamplingEvent {
 
     /// Streaming delta carrying a fragment of a tool call.
     ///
-    /// Emitted by the L2 transforms (Chat Completions, Responses, Messages)
-    /// per-chunk as the model streams tool-call arguments. Any single
-    /// `arguments_delta` is NOT necessarily valid JSON in isolation.
+    /// Emitted by the L2 transforms (Chat Completions, Responses, Messages) per-chunk as the model streams tool-call arguments.
+    /// Any single `arguments_delta` is NOT necessarily valid JSON in isolation.
     ToolCallDelta {
         request_id: RequestId,
         tool_index: u32,
@@ -80,17 +74,14 @@ pub enum SamplingEvent {
         arguments_delta: Option<String>,
     },
 
-    /// The provider opened a response (Messages `message_start`). Carries the
-    /// real message id, model, and input-side token counts exactly as they
-    /// arrive on the wire, before any content. Surfaced in order so partial-mode
-    /// consumers can emit the real `message_start` id/usage instead of a
-    /// synthesized placeholder. Emitted by the Messages L2 transform only; the
-    /// Responses/Chat transforms lack these fields at stream open and emit
-    /// nothing here.
+    /// The provider opened a response (Messages `message_start`).
+    /// Carries the real message id, model, and input-side token counts exactly as they arrive on the wire, before any content.
+    /// Emitted in order so partial-mode consumers can emit the real `message_start` id/usage instead of a synthesized placeholder.
+    /// Emitted by the Messages L2 transform only; the Responses/Chat transforms lack these fields at stream open and emit nothing here.
     ///
-    /// `input_tokens` is the uncached prompt portion; the Anthropic Messages API
-    /// reports cache hits and writes in the separate `cache_read_input_tokens`
-    /// and `cache_creation_input_tokens` buckets, both known at `message_start`.
+    /// `input_tokens` is the uncached prompt portion.
+    /// The Anthropic Messages API reports cache hits and writes in the separate `cache_read_input_tokens` and `cache_creation_input_tokens` buckets.
+    /// Both are known at `message_start`.
     ResponseStarted {
         request_id: RequestId,
         message_id: String,
@@ -100,10 +91,9 @@ pub enum SamplingEvent {
         cache_creation_input_tokens: u64,
     },
 
-    /// The reasoning (thinking) block finished and its encrypted signature is
-    /// known (Messages thinking `content_block_stop`). Surfaced in order so
-    /// partial-mode consumers can emit `signature_delta` before the thinking
-    /// block's `content_block_stop`. Emitted by the Messages L2 transform only.
+    /// The reasoning (thinking) block finished and its encrypted signature is known (Messages thinking `content_block_stop`).
+    /// Emitted in order so partial-mode consumers can emit `signature_delta` before the thinking block's `content_block_stop`.
+    /// Emitted by the Messages L2 transform only.
     ReasoningCompleted {
         request_id: RequestId,
         signature: String,
@@ -116,15 +106,15 @@ pub enum SamplingEvent {
         metrics: InferenceLatencyStats,
     },
 
-    /// All server-reported doom-loop labels observed on an attempt that is
-    /// being discarded before `Completed` can carry its response. Labels only;
-    /// recovery policy remains encoded separately on `Retrying`.
+    /// All server-reported doom-loop labels observed on an attempt that is being discarded before `Completed` can carry its response.
+    /// Labels only; recovery policy remains encoded separately on `Retrying`.
     DoomLoopSignals {
         request_id: RequestId,
         triggers: Vec<String>,
     },
 
-    /// In-flight strip before retry. Persist on `ServerRejected`.
+    /// Images were stripped from the in-flight request before a retry.
+    /// Persist the strip on `ServerRejected`.
     ImagesStripped {
         request_id: RequestId,
         /// URLs actually stripped from this request.
@@ -137,13 +127,12 @@ pub enum SamplingEvent {
         request_id: RequestId,
         attempt: u32,
         max_retries: u32,
-        /// Typed retry class so consumers never have to sniff `reason`
-        /// (e.g. the shell's doom-loop recovery counter).
+        /// Typed retry class so consumers never have to sniff `reason` (e.g. the shell's doom-loop recovery counter).
         kind: SamplingErrorKind,
         reason: String,
-        /// Recovery-action payload when `kind == DoomLoopDetected`: the
-        /// confident trigger labels plus the chunk index the mid-stream abort
-        /// fired at (`None` for terminal-response detections). Labels only.
+        /// Recovery-action payload when `kind == DoomLoopDetected`.
+        /// The confident trigger labels plus the chunk index the mid-stream abort fired at (`None` for terminal-response detections).
+        /// Labels only.
         doom_loop_triggers: Option<Vec<String>>,
         doom_loop_aborted_at_chunk: Option<u64>,
     },
@@ -160,9 +149,8 @@ pub enum SamplingEvent {
         metadata: ResponseModelMetadata,
     },
 
-    /// A backend-hosted tool call has started execution on the server
-    /// (e.g., web search is in progress). The client does NOT execute
-    /// these — the backend's agentic sampler handles them.
+    /// A backend-hosted tool call has started execution on the server (e.g., web search is in progress).
+    /// The client does NOT execute these; the backend's agentic sampler handles them.
     BackendToolCallStarted {
         request_id: RequestId,
         call_id: String,
@@ -213,10 +201,8 @@ impl SamplingEvent {
 
 /// Serializable mirror of [`SamplingError`].
 ///
-/// The rich `SamplingError` carries non-serializable inner values
-/// (`reqwest::Error`, `serde_json::Error`) so it cannot cross a network
-/// boundary. `SamplingErrorInfo` extracts the bits that downstream
-/// consumers (UIs, gRPC adapters) actually need.
+/// The rich `SamplingError` carries non-serializable inner values (`reqwest::Error`, `serde_json::Error`) so it cannot cross a network boundary.
+/// `SamplingErrorInfo` extracts the bits that downstream consumers (UIs, gRPC adapters) actually need.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SamplingErrorInfo {
     pub kind: SamplingErrorKind,
@@ -224,49 +210,41 @@ pub struct SamplingErrorInfo {
     pub message: String,
     pub is_retryable: bool,
     pub retry_after_secs: Option<u64>,
-    /// Parsed `x-should-retry` response header. `Some(false)` = the server
-    /// says the failure is request-content-caused; never retry. `None` =
-    /// header absent, or payload from an older peer.
+    /// Parsed `x-should-retry` response header.
+    /// `Some(false)` means the server blames the request content; never retry.
+    /// `None` means the header was absent, or the payload came from an older peer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub should_retry: Option<bool>,
     /// The server error envelope's `code` slot (e.g. `invalid_image`).
-    /// Serializes as the plain wire string; `None` when absent or from an
-    /// older peer.
+    /// Serializes as the plain wire string; `None` when absent or from an older peer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_code: Option<ApiErrorCode>,
     pub model_metadata: Option<ResponseModelMetadata>,
-    /// Present only when `kind == EmptyResponse`. Carries the structured
-    /// context from the L2 stream so downstream consumers can distinguish
-    /// reasoning-only completions from transport failures.
+    /// Present only when `kind == EmptyResponse`.
+    /// Carries the structured context from the L2 stream so downstream consumers can distinguish reasoning-only completions from transport failures.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub empty_response_context: Option<EmptyResponseContext>,
-    /// Present only when `kind == DoomLoopDetected`. Raw trigger labels
-    /// (never generation content) so the retry loop can reconstruct the
-    /// rich error from a synthesized L2 failure.
+    /// Present only when `kind == DoomLoopDetected`.
+    /// Raw trigger labels (never generation content) so the retry loop can reconstruct the rich error from a synthesized L2 failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doom_loop_triggers: Option<Vec<String>>,
     /// Stream chunk index the mid-stream doom-loop abort fired at.
     /// Telemetry only; `None` for terminal-response detections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doom_loop_aborted_at_chunk: Option<u64>,
-    /// Meaningful only when `kind == Auth`: whether the rejected request
-    /// actually carried a credential on the wire. Defaults to `Unknown`
-    /// (charge-the-budget behavior) for payloads from older peers.
+    /// Meaningful only when `kind == Auth`: whether the rejected request actually carried a credential on the wire.
+    /// Defaults to `Unknown` (charge-the-budget behavior) for payloads from older peers.
     #[serde(default, skip_serializing_if = "SentCredential::is_unknown")]
     pub credential: SentCredential,
 }
 
 /// Coarse-grained classification of a sampling failure.
 ///
-/// Intentionally narrow — context-window-exceeded does NOT have its own
-/// variant because the sampler cannot reliably detect it (it lacks
-/// tracked token counts). Context-window errors arrive as
-/// `Api { status: 400, .. }` with model metadata; the session inspects
-/// the metadata and decides whether to compact.
+/// Intentionally narrow: context-window-exceeded has NO variant because the sampler lacks the tracked token counts to detect it reliably.
+/// Context-window errors arrive as `Api { status: 400, .. }` with model metadata; the session inspects the metadata and decides whether to compact.
 ///
-/// The derived serde form (PascalCase, in `SamplingErrorInfo`) is frozen
-/// wire format and intentionally differs from [`Self::as_str`]'s snake_case
-/// tags — do not "clean up" with `rename_all`.
+/// The derived serde form (PascalCase, in `SamplingErrorInfo`) is frozen wire format and differs from [`Self::as_str`]'s snake_case tags.
+/// Do not "clean up" with `rename_all`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SamplingErrorKind {
     Auth,
@@ -281,11 +259,8 @@ pub enum SamplingErrorKind {
 }
 
 impl SamplingErrorKind {
-    /// Stable, lowercase string form suitable for telemetry tags
-    /// (e.g., analytics `error_type` columns and signals histograms).
-    /// Mirrors the strings used in the shell's
-    /// `stream_conversation_with_retries` error classifier so tags stay
-    /// consistent across surfaces.
+    /// Stable, lowercase string form suitable for telemetry tags (e.g., analytics `error_type` columns and signals histograms).
+    /// Mirrors the strings used in the shell's `stream_conversation_with_retries` error classifier so both emit the same tags.
     pub fn as_str(self) -> &'static str {
         match self {
             SamplingErrorKind::Auth => "auth",
@@ -301,13 +276,11 @@ impl SamplingErrorKind {
     }
 }
 
-/// [`SamplingErrorKind::from_str`] error: the wire string matched no known
-/// kind (a newer peer's kind); callers degrade to untyped via `.ok()`.
+/// [`SamplingErrorKind::from_str`] error: the wire string matched no known kind (a newer peer's kind); callers degrade to untyped via `.ok()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnknownSamplingErrorKind;
 
-/// Inverse of [`SamplingErrorKind::as_str`]; the round-trip test exercises
-/// both maps for every listed variant.
+/// Inverse of [`SamplingErrorKind::as_str`]; the round-trip test exercises both maps for every listed variant.
 impl std::str::FromStr for SamplingErrorKind {
     type Err = UnknownSamplingErrorKind;
 
@@ -426,7 +399,7 @@ mod tests {
         let info = SamplingErrorInfo::from(&err);
         assert_eq!(info.should_retry, Some(false));
 
-        // Non-Api variants have no header — stays None.
+        // Non-Api variants have no header
         let stream_err = SamplingError::StreamError {
             error_type: "overloaded_error".into(),
             message: "Overloaded".into(),
@@ -479,8 +452,7 @@ mod tests {
         assert!(info.message.contains("bad token"));
     }
 
-    /// A payload from a peer that predates `credential` must still parse,
-    /// defaulting to `Unknown` (charge-the-budget behavior).
+    /// A payload from a peer that predates `credential` must still parse, defaulting to `Unknown` (charge-the-budget behavior).
     #[test]
     fn info_without_credential_field_deserializes_to_unknown() {
         let info: SamplingErrorInfo = serde_json::from_str(
@@ -608,10 +580,9 @@ mod tests {
             DoomLoopDetected,
         ];
         for kind in all {
-            // Exhaustive match, no `_` arm: a new variant refuses to compile
-            // this test until an arm is added — the flag to also extend
-            // `all` and `from_str`. Only variants listed in `all` are
-            // round-trip-checked; the compiler cannot force those two edits.
+            // Exhaustive match, no `_` arm: a new variant refuses to compile this test until an arm is added
+            // That failure is the reminder to also extend `all` and `from_str`
+            // Only variants listed in `all` are round-trip-checked; the compiler cannot force those two edits
             match kind {
                 Auth | Http | Api | Serialization | IdleTimeout | RateLimited | EmptyResponse
                 | MaxTokensTruncation | DoomLoopDetected => {}

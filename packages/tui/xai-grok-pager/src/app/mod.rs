@@ -185,6 +185,32 @@ pub(crate) fn mouse_reporting_toggle_enabled() -> bool {
 /// Process-global voice gate for view code without an `AppView`.
 /// Written only by [`crate::app::app_view::AppView::apply_voice_mode_enabled`].
 pub(crate) static VOICE_MODE_ENABLED: AtomicBool = AtomicBool::new(false);
+fn dock_flag_in(layer: &toml::Value) -> Option<bool> {
+    layer
+        .get("features")?
+        .get(xai_grok_shell::agent::config::Feature::Dock.key())?
+        .as_bool()
+}
+/// `[features] dock` from merged `requirements.toml`.
+pub(crate) fn dock_requirement_pin() -> Option<bool> {
+    dock_flag_in(&xai_grok_config::load_merged_requirements()?)
+}
+/// `[features] dock` from effective config (user + managed).
+pub(crate) fn dock_config_value() -> Option<bool> {
+    dock_flag_in(&xai_grok_shell::config::load_effective_config().ok()?)
+}
+/// Registry precedence: pin, `GROK_DOCK` / `GROK_DOCK_V2`, config, remote `dock_enabled`, default off.
+pub(crate) fn resolve_dock_enabled(remote: Option<bool>) -> bool {
+    use xai_grok_shell::agent::config::{Feature, FeatureSources};
+    let mut sources = FeatureSources::from_process_env(Feature::Dock);
+    if sources.env.is_none() {
+        sources.env = xai_grok_config::env_bool("GROK_DOCK_V2");
+    }
+    sources.pin = dock_requirement_pin();
+    sources.config = dock_config_value();
+    sources.remote = remote;
+    Feature::Dock.resolve(sources).value
+}
 pub(crate) fn voice_mode_enabled() -> bool {
     VOICE_MODE_ENABLED.load(Ordering::Acquire)
 }
@@ -497,30 +523,9 @@ fn print_leader_disabled_by_sandbox(profile: &str, w: &mut impl Write) {
          managed requirement) to use the leader."
     );
 }
-/// Join early prefetch to get remote settings (with timeout).
-///
-/// Remote settings come from the product settings API and contain `leader_mode`, announcements, etc.
-/// Waits up to 2 s for the background thread.
-pub fn join_early_prefetch(
-    handle: Option<xai_grok_shell::agent::models::EarlyPrefetchHandle>,
-) -> Option<xai_grok_shell::util::config::RemoteSettings> {
-    let handle = handle?;
-    if handle.is_finished() {
-        return match handle.join() {
-            Ok(r) => r.settings,
-            Err(_) => None,
-        };
-    }
-    let _wait_span = region!("startup.prefetch_join_wait", Parent::Inherit);
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(handle.join());
-    });
-    match rx.recv_timeout(std::time::Duration::from_secs(2)) {
-        Ok(Ok(r)) => r.settings,
-        _ => None,
-    }
-}
+/// Startup proceeds without remote settings (`leader_mode`, announcements)
+/// after this; the fetch keeps running and the agent boot consumes it.
+pub const EARLY_PREFETCH_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 /// First non-blank value of CLI, then env, then config.
 /// `None` means nothing was set; `acp::initialize` canonicalizes and applies the default.
 fn resolve_hunk_tracker_mode(
@@ -645,9 +650,11 @@ pub async fn run(
     )
     .await
     .unwrap_or(None);
-    let early_prefetch = match refreshed_auth {
-        Some(auth) => xai_grok_shell::agent::models::start_early_prefetch_with_auth(Some(auth)),
-        None => xai_grok_shell::agent::models::start_early_prefetch(Some(grok_com_config.clone())),
+    let had_prefetch = match refreshed_auth {
+        Some(auth) => xai_grok_shell::agent::models::startup_prefetch::begin_with_auth(Some(auth)),
+        None => {
+            xai_grok_shell::agent::models::startup_prefetch::begin(Some(grok_com_config.clone()))
+        }
     };
     xai_grok_shell::agent::mvp_agent::warm_async_http_client();
     tokio::task::spawn_blocking(|| {});
@@ -655,13 +662,22 @@ pub async fn run(
         crate::git_info::populate_from_cwd_async(cwd);
     }
     let prefetch_wait_started = std::time::Instant::now();
-    let had_prefetch = early_prefetch.is_some();
-    let remote_settings = join_early_prefetch(early_prefetch);
-    if had_prefetch {
+    let remote_settings = if had_prefetch {
+        let _wait_span = region!("startup.prefetch_join_wait", Parent::Inherit);
+        let settings =
+            xai_grok_shell::agent::models::startup_prefetch::wait_settings(EARLY_PREFETCH_WAIT);
         xai_grok_telemetry::startup::record_prefetch_wait(prefetch_wait_started.elapsed());
-    }
+        settings
+    } else {
+        None
+    };
     xai_grok_shell::util::config::cache_remote_auto_mode(
         remote_settings.as_ref().and_then(|s| s.auto_mode.clone()),
+    );
+    xai_grok_shell::util::config::cache_remote_prompt_suggestions(
+        remote_settings
+            .as_ref()
+            .and_then(|s| s.prompt_suggestions.clone()),
     );
     xai_grok_shell::util::config::set_remote_campaigns_from_settings(remote_settings.as_ref());
     let raw_config = xai_grok_shell::config::load_effective_config()
@@ -1457,11 +1473,11 @@ fn init_terminal(
                     Ok(true) => None,
                     _ => Some("unsupported"),
                 });
-        crate::terminal::da2::probe_at_startup();
-        let flags = crate::terminal::negotiated_kitty_flags(
-            skip_reason,
-            crate::terminal::da2::detected_packed(),
-        );
+        let alacritty_conservative_version = (ctx.brand
+            == crate::terminal::TerminalName::Alacritty)
+            .then_some(crate::terminal::kitty_keyboard::ALACRITTY_BROKEN_EVENT_TYPES_MAX_PACKED);
+        let flags =
+            crate::terminal::negotiated_kitty_flags(skip_reason, alacritty_conservative_version);
         if flags.is_empty() {
             tracing::info!(
                 kitty.flags = "none",
@@ -1482,6 +1498,10 @@ fn init_terminal(
             );
         }
         crate::terminal::set_pushed_kitty_flags(flags);
+        startup_typeahead.extend(event_loop::capture_startup_typeahead(
+            std::time::Duration::from_millis(20),
+        ));
+        event_loop::normalize_startup_submissions(&mut startup_typeahead);
         if mode.is_fullscreen() {
             let backend = CrosstermBackend::new(
                 crate::render::draw::TermWriter::new(frame_tx, writer_sync)
@@ -1978,6 +1998,12 @@ mod tests {
     #[test]
     fn cli_hidden_memory_compat_flags_conflict() {
         assert!(try_parse_pager(&["grok-pager", "--experimental-memory", "--no-memory"]).is_err());
+    }
+    #[test]
+    fn cli_memory_flush_flag_parses() {
+        let args = try_parse_pager(&["grok-pager", "--memory-flush"]).unwrap();
+        assert!(args.memory_flush);
+        assert!(!try_parse_pager(&["grok-pager"]).unwrap().memory_flush);
     }
     #[test]
     fn cli_neither_leader_flag_defaults_false() {

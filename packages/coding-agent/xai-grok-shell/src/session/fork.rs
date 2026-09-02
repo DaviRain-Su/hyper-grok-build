@@ -1,5 +1,3 @@
-//! Session forking functionality
-//!
 //! Forks a saved session to a new working directory with a new session ID.
 //! This creates new session files but does not start the session.
 
@@ -18,11 +16,9 @@ pub struct ForkSessionRequest {
     pub source_session_id: String,
     pub source_cwd: String,
     pub new_cwd: String,
-    /// Client-provided session ID for the forked session.
     /// If None, a new ID will be auto-generated.
     #[serde(default)]
     pub new_session_id: Option<String>,
-    /// Optional model ID override for the forked session.
     /// If None, the source session's model will be used.
     #[serde(default)]
     pub new_model_id: Option<String>,
@@ -44,24 +40,18 @@ pub struct ForkSessionResponse {
     pub chat_messages_copied: usize,
     pub updates_copied: usize,
     pub plan_state_copied: bool,
-    /// The working directory of the new forked session
     pub new_cwd: String,
-    /// The parent session ID (source session that was forked)
     pub parent_session_id: String,
     /// The model ID of the forked session (may differ from source if overridden)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_model_id: Option<String>,
 }
 
-/// Generate a forked session ID.
-///
-/// Uses a plain UUIDv7 -- no prefix or source embedding. This keeps IDs
-/// a constant 36 chars regardless of how many fork rounds occur.
+/// Uses a plain UUIDv7 with no prefix or source embedding, so IDs stay a constant 36 chars no matter how many fork rounds occur.
 fn generate_fork_session_id(_source_id: &str) -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
-/// Fork a saved session to a new working directory.
 pub async fn fork_session(
     request: ForkSessionRequest,
     agent_id: &str,
@@ -78,7 +68,6 @@ pub async fn fork_session(
         cwd: request.source_cwd.clone(),
     };
 
-    // Use client-provided session ID or generate one
     let new_session_id = request
         .new_session_id
         .clone()
@@ -90,18 +79,16 @@ pub async fn fork_session(
     };
 
     // Copy session data with parent tracking.
-    // Runs on the blocking thread pool so concurrent fork copies can execute
-    // truly in parallel (on a LocalSet, async copy_session_data serializes
-    // because the sync disk I/O blocks the single-threaded runtime).
+    // Runs on the blocking thread pool so concurrent fork copies can execute truly in parallel
+    // On a LocalSet, async copy_session_data serializes because the sync disk I/O blocks the single-threaded runtime
     let options = CopySessionOptions {
         parent_session_id: Some(request.source_session_id.clone()),
         new_model_id: request.new_model_id.clone(),
         target_prompt_index: request.target_prompt_index,
         session_kind: request.session_kind.clone(),
         source_workspace_dir: request.source_workspace_dir.clone(),
-        // Carry the parent's compaction segment archive into the fork so the
-        // child retains pre-compaction history (the live summary is already
-        // copied via chat_history.jsonl).
+        // Carry the parent's compaction segment archive into the fork so the child retains pre-compaction history
+        // The live summary is already copied via chat_history.jsonl
         copy_compaction_segments: true,
         ..Default::default()
     };
@@ -114,13 +101,9 @@ pub async fn fork_session(
 
     let copy_ms = t0.elapsed().as_millis() as u64;
 
-    // Writeback session to backend (fire-and-forget).
-    // This is telemetry-grade: the local fork works without it. All fork
-    // state lives locally (session files on disk), and the caller does not
-    // depend on synchronous backend registration. The backend eventually
-    // learns about the session when the background task completes.
-    // Spawning removes the network round-trip (~200-400ms) from the
-    // critical path.
+    // Register the fork with the backend from a spawned task
+    // The local fork works without it: all fork state is in session files on disk, and the backend learns of the session when the task completes
+    // Spawning keeps the network round-trip (~200-400ms) off the critical path
     if let Some(am) = auth_manager {
         let sid = new_session_id.clone();
         let cwd = request.new_cwd.clone();
@@ -174,7 +157,7 @@ async fn sync_forked_session_to_backend(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let client = BackendClient::new().with_auth_manager(auth_manager);
     let metadata = ExportedMetadata {
-        title: None, // Will be generated later when session runs
+        title: None, // The title is generated later when the session runs
         cwd: cwd.to_string(),
         model_id,
         created_at: Some(chrono::Utc::now().to_rfc3339()),
@@ -209,7 +192,6 @@ mod tests {
     fn test_generate_fork_session_id_format() {
         let fork_id = generate_fork_session_id("abc123");
 
-        // Should be a valid UUIDv7 (36 chars with dashes)
         assert_eq!(
             fork_id.len(),
             36,
@@ -223,7 +205,6 @@ mod tests {
 
     #[test]
     fn test_generate_fork_session_id_uniqueness() {
-        // Generate multiple IDs rapidly and ensure they're all unique
         let mut ids = std::collections::HashSet::new();
         for _ in 0..100 {
             let fork_id = generate_fork_session_id("any-source");
@@ -231,16 +212,14 @@ mod tests {
             ids.insert(fork_id);
         }
 
-        // All 100 should be unique
         assert_eq!(ids.len(), 100, "All generated IDs should be unique");
     }
 
     #[test]
     fn test_generate_fork_session_id_constant_length() {
-        // Forking from already-forked sessions should produce same-length IDs
         let id1 = generate_fork_session_id("019c43b5-c4ae-7190-b058-693e24669ba9");
-        let id2 = generate_fork_session_id(&id1); // fork of fork
-        let id3 = generate_fork_session_id(&id2); // fork of fork of fork
+        let id2 = generate_fork_session_id(&id1);
+        let id3 = generate_fork_session_id(&id2);
 
         assert_eq!(id1.len(), 36);
         assert_eq!(id2.len(), 36);
@@ -274,7 +253,6 @@ mod tests {
 
     #[test]
     fn test_fork_session_request_without_optional_fields() {
-        // Test that optional fields default to None when not provided
         let json = r#"{"sourceSessionId":"abc123","sourceCwd":"/old","newCwd":"/new"}"#;
         let deserialized: ForkSessionRequest = serde_json::from_str(json).unwrap();
 
@@ -320,7 +298,6 @@ mod tests {
         };
 
         let json = serde_json::to_string(&response).unwrap();
-        // new_model_id should not be present in JSON when None
         assert!(!json.contains("new_model_id"));
     }
 

@@ -5,12 +5,9 @@ use toml::Value as TomlValue;
 use toml::map::Map as TomlMap;
 use xai_grok_agent::prompt::skills::SkillsConfig;
 /// Process-wide write lock for `~/.grok/config.toml`.
-///
-/// Serializes the read-modify-write in `save_config` so two rapid
-/// settings toggles can't interleave and clobber each other.
+/// Serializes the read-modify-write in `save_config` so two rapid settings toggles can't interleave and clobber each other.
 static SAVE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-/// Blank (first-run 0-byte file) is an empty table; other unparseable TOML is
-/// an error so a silent fallback cannot drop unmodeled sections.
+/// Blank (first-run 0-byte file) is an empty table; other unparseable TOML is an error so a silent fallback cannot drop unmodeled sections.
 pub(crate) fn parse_existing_config_toml(s: &str) -> Result<TomlValue, toml::de::Error> {
     if s.trim().is_empty() {
         return Ok(TomlValue::Table(TomlMap::new()));
@@ -100,14 +97,13 @@ async fn save_config_locked(config: &Config) -> Result<()> {
     tokio::fs::rename(&tmp, &write_path).await?;
     Ok(())
 }
-/// Acquire the `config.toml` write lock used by [`save_config`], so callers that
-/// mutate the file directly (marketplace add/remove) can't interleave with a
-/// settings save and clobber it.
+/// Acquire the `config.toml` write lock used by [`save_config`].
+/// Callers that mutate the file directly (marketplace add/remove) hold it so they can't interleave with a settings save and clobber it.
 pub(crate) async fn lock_config_writes() -> tokio::sync::MutexGuard<'static, ()> {
     SAVE_LOCK.lock().await
 }
-/// Read a file, treating only `NotFound` as empty. Hard read errors (EACCES,
-/// EIO) propagate so callers don't clobber an unreadable file on the next write.
+/// Read a file, treating only `NotFound` as empty.
+/// Hard read errors (EACCES, EIO) propagate so callers don't clobber an unreadable file on the next write.
 pub(crate) fn read_to_string_or_empty(path: &std::path::Path) -> std::io::Result<String> {
     match std::fs::read_to_string(path) {
         Ok(s) => Ok(s),
@@ -115,8 +111,8 @@ pub(crate) fn read_to_string_or_empty(path: &std::path::Path) -> std::io::Result
         Err(e) => Err(e),
     }
 }
-/// Atomic write via temp file + `rename` (mirrors [`save_config`]) so a crash
-/// mid-write can't truncate `config.toml`. Preserves the dest mode on unix.
+/// Atomic write via temp file then `rename` (mirrors [`save_config`]) so a crash mid-write can't truncate `config.toml`.
+/// Preserves the dest mode on unix.
 pub(crate) fn atomic_write_string(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -156,10 +152,9 @@ pub(crate) fn atomic_write_string(path: &std::path::Path, content: &str) -> std:
     }
     Ok(())
 }
-/// Merge `[toolset.ask_user_question]` into the root table. `[toolset]` is
-/// deliberately NOT merged wholesale — it carries runtime-only structs
-/// (`web_search` sampler etc.) whose serialized defaults must never land in
-/// the user file — so only this settings-writable sub-table round-trips.
+/// Merge `[toolset.ask_user_question]` into the root table.
+/// `[toolset]` is deliberately NOT merged wholesale, so only this settings-writable sub-table round-trips.
+/// It carries runtime-only structs (`web_search` sampler etc.) whose serialized defaults must never land in the user file.
 fn merge_ask_user_question_section(
     table: &mut TomlMap<String, TomlValue>,
     ask: &crate::tools::config::AskUserQuestionToolConfig,
@@ -177,10 +172,8 @@ fn merge_ask_user_question_section(
         merge_section(toolset_table, "ask_user_question", ask);
     }
 }
-/// Merge serialized fields of `value` into `table[key]`, preserving any
-/// existing keys not present in the serialized output. This prevents
-/// unmodeled fields (e.g. pager-written `show_timestamps`, `auto_dark_theme`)
-/// from being silently dropped when `save_config` round-trips the struct.
+/// Merge serialized fields of `value` into `table[key]`, preserving any existing keys not present in the serialized output.
+/// This prevents `save_config` round-trips from silently dropping unmodeled fields (e.g. pager-written `show_timestamps`, `auto_dark_theme`).
 /// Deep-merge `incoming` into `existing`: nested tables recurse; scalars replace.
 fn merge_toml_tables(
     existing: &mut TomlMap<String, TomlValue>,

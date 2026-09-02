@@ -10,24 +10,22 @@ use crate::matcher::HookMatcher;
 
 /// The loaded set of hooks, indexed by event type for fast lookup.
 ///
-/// This is a point-in-time snapshot. Edits to hook files on disk are only
-/// picked up by new sessions.
+/// This is a point-in-time snapshot.
+/// Edits to hook files on disk are only picked up by new sessions.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HookRegistry {
     hooks: HashMap<HookEventName, Vec<HookSpec>>,
 }
 
 impl HookRegistry {
-    /// Hooks registered under the exact event key. Use
-    /// [`Self::hooks_for_canonical`] for dispatch.
+    /// Hooks registered under the exact event key.
+    /// Use [`Self::hooks_for_canonical`] for dispatch.
     pub fn hooks_for(&self, event: HookEventName) -> &[HookSpec] {
         self.hooks.get(&event).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
-    /// Returns true when any enabled hook is registered for `event` or its
-    /// alias spelling (reads the disabled-hooks file for non-managed specs).
-    /// Managed-policy hooks always count as enabled (not user-disableable),
-    /// matching `dispatcher::eligible_or_record_skip`.
+    /// Returns true when any enabled hook is registered for `event` or its alias spelling (reads the disabled-hooks file for non-managed specs).
+    /// Managed-policy hooks always count as enabled (not user-disableable), matching `dispatcher::eligible_or_record_skip`.
     pub fn has_enabled_hooks_for_canonical(&self, event: HookEventName) -> bool {
         let disabled = crate::trust::DisabledHooks::load();
         let enabled = |specs: &[HookSpec]| {
@@ -41,8 +39,7 @@ impl HookRegistry {
                 && enabled(self.hooks_for(HookEventName::SubagentEnd)))
     }
 
-    /// Hooks for `event` plus any registered under an alias spelling
-    /// (`SubagentEnd` ≡ `SubagentStop`), so dispatch treats both identically.
+    /// Hooks for `event` plus any registered under an alias spelling (`SubagentEnd` aliases `SubagentStop`), so dispatch treats both identically.
     pub fn hooks_for_canonical(&self, event: HookEventName) -> Vec<&HookSpec> {
         let canonical = event.canonical();
         let mut out: Vec<&HookSpec> = self.hooks_for(canonical).iter().collect();
@@ -66,8 +63,8 @@ impl HookRegistry {
         }
     }
 
-    /// Flatten the registry into a spec list in [`HookEventName::ALL`] order, so
-    /// rebuilding from the result is stable regardless of `HashMap` iteration.
+    /// Flatten the registry into a spec list in [`HookEventName::ALL`] order.
+    /// Rebuilding from the result is stable regardless of `HashMap` iteration.
     pub fn into_specs(self) -> Vec<HookSpec> {
         let mut hooks = self.hooks;
         let mut out = Vec::new();
@@ -102,16 +99,14 @@ impl HookRegistry {
         all
     }
 
-    /// Look up a spec by its full name, so disable/enable actions can consult
-    /// its provenance before mutating disabled-hooks state.
+    /// Look up a spec by its full name, so disable/enable actions can consult its provenance before mutating disabled-hooks state.
     pub fn find_by_name(&self, name: &str) -> Option<&HookSpec> {
         self.hooks.values().flatten().find(|s| s.name == name)
     }
 
-    /// Rebuild the `matcher` field (serde skips it) from `configured_matcher`
-    /// after any wire restore; until then a configured pattern acts as match-all.
-    /// An invalid pattern can't be rejected here (the registry is live), so it
-    /// installs [`HookMatcher::never`]: fail closed rather than match all.
+    /// Rebuild the `matcher` field (serde skips it) from `configured_matcher` after any wire restore.
+    /// Until then a configured pattern acts as match-all.
+    /// An invalid pattern can't be rejected here (the registry is live), so it installs [`HookMatcher::never`]: fail closed rather than match all.
     pub fn recompile_matchers(&mut self) {
         for specs in self.hooks.values_mut() {
             for spec in specs.iter_mut() {
@@ -143,10 +138,8 @@ pub enum HookSource<'a> {
     Directory(&'a Path),
 }
 
-/// Load hooks from global and project sources.
-///
-/// Sources are additive; global hooks run before project. An empty registry is
-/// valid.
+/// Sources are additive; global hooks run before project.
+/// An empty registry is valid.
 pub fn load_hooks_from_sources(
     global_sources: &[HookSource<'_>],
     project_sources: &[HookSource<'_>],
@@ -171,11 +164,10 @@ pub fn load_hooks_from_sources(
     (registry, errors)
 }
 
-/// Load hook specs from global and project sources WITHOUT deduplicating, so a
-/// caller can combine them with specs from other origins (e.g. config layers) and
-/// run a single dedup pass. Global specs are prefixed `global/` and project specs
-/// `project/`; global specs precede project specs so a later first-wins dedup
-/// keeps the global copy of an identical duplicate.
+/// Load hook specs from global and project sources WITHOUT deduplicating.
+/// A caller can combine them with specs from other origins (e.g. config layers) and run a single dedup pass.
+/// Global specs are prefixed `global/` and project specs `project/`.
+/// Global specs precede project specs so a later first-wins dedup keeps the global copy of an identical duplicate.
 pub fn collect_specs_from_sources(
     global_sources: &[HookSource<'_>],
     project_sources: &[HookSource<'_>],
@@ -220,17 +212,14 @@ pub fn collect_specs_from_sources(
     (all_specs, all_errors)
 }
 
-/// Build a registry from specs, deduping on (canonical event, command_raw,
-/// url_raw, configured_matcher) so a hook from several origins runs once; earlier
-/// specs win, so callers place higher-authority first. `timeout_ms`/`extra_env`
-/// are intentionally excluded from the key.
+/// Build a registry from specs, deduping on (canonical event, command_raw, url_raw, configured_matcher) so a hook from several origins runs once.
+/// Earlier specs win, so callers place higher-authority first.
+/// `timeout_ms`/`extra_env` are intentionally excluded from the key.
 ///
-/// Exception: the copy with the highest [`HookProvenance::authority_rank`]
-/// wins regardless of arrival order. Otherwise a byte-identical hook in a
-/// user-writable layer (which loads earlier) would shadow the root-owned
-/// copy's provenance — and with it the no-disable rule and the pinned
-/// timeout/env. Rank ordering also settles managed-vs-managed pairs
-/// (`$GROK_HOME/requirements.toml` arrives before `/etc/grok`).
+/// Exception: the copy with the highest [`HookProvenance::authority_rank`] wins regardless of arrival order.
+/// Otherwise a byte-identical hook in a user-writable layer (which loads earlier) would shadow the root-owned copy's provenance.
+/// With it would go the no-disable rule and the pinned timeout/env.
+/// Rank ordering also settles managed-vs-managed pairs (`$GROK_HOME/requirements.toml` arrives before `/etc/grok`).
 pub fn registry_from_specs_deduped(specs: Vec<HookSpec>) -> HookRegistry {
     let mut hooks: HashMap<HookEventName, Vec<HookSpec>> = HashMap::new();
     let mut seen_content: HashMap<(HookEventName, String, String, String), (HookEventName, usize)> =
@@ -259,9 +248,7 @@ pub fn registry_from_specs_deduped(specs: Vec<HookSpec>) -> HookRegistry {
                         "hooks: higher-authority copy of a duplicate hook wins over the earlier lower-tier copy"
                     );
                     let mut spec = spec;
-                    // Keep the registry invariant "specs live under their own
-                    // event key" when the duplicate pair used alias spellings
-                    // (SubagentStop vs SubagentEnd).
+                    // Keep specs under their own event key when the duplicate pair used alias spellings (SubagentStop vs SubagentEnd)
                     spec.event = kept_event;
                     *kept = spec;
                 } else {
@@ -278,8 +265,8 @@ pub fn registry_from_specs_deduped(specs: Vec<HookSpec>) -> HookRegistry {
     HookRegistry { hooks }
 }
 
-/// Convenience wrapper: load hooks from a single global directory and optional
-/// project directory. Used by the existing shell integration.
+/// Convenience wrapper: load hooks from a single global directory and optional project directory.
+/// The shell integration calls this.
 pub fn load_hooks(
     global_dir: Option<&Path>,
     project_dir: Option<&Path>,
@@ -296,8 +283,7 @@ fn load_from_source(source: &HookSource<'_>) -> (Vec<HookSpec>, Vec<HookError>) 
     }
 }
 
-/// Load hooks from a single JSON settings file. A missing file or absent
-/// `hooks` key returns empty results, not an error.
+/// A missing file or absent `hooks` key returns empty results, not an error.
 fn load_hooks_from_settings_file(path: &Path) -> (Vec<HookSpec>, Vec<HookError>) {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -326,8 +312,8 @@ fn load_hooks_from_directory(dir: &Path) -> (Vec<HookSpec>, Vec<HookError>) {
     let mut specs = Vec::new();
     let mut errors = Vec::new();
 
-    // Best-effort listing: a bad dirent is recorded and skipped so sibling
-    // hooks still load. (Sandbox fail-closed listing lives in xai_grok_config.)
+    // Best-effort listing: a bad dirent is recorded and skipped so sibling hooks still load
+    // (Sandbox fail-closed listing lives in xai_grok_config.)
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) => {
@@ -419,16 +405,10 @@ mod tests {
         .to_string()
     }
 
-    /// Drift guard: a new gate event fails here so the agent's client-gate
-    /// advertisement (`blockingEvents` in extensions/hooks.rs) gets a
-    /// deliberate decision. `UserPromptSubmit` is a file-hook gate that is not
-    /// client-advertised yet: the client `x.ai/hooks/run` gate for it has not
-    /// shipped.
     #[test]
     fn gate_events_are_the_known_set() {
         use crate::event::GateKind;
-        // Canonicalize first to dedup alias spellings into one set entry
-        // (`traits()` itself already canonicalizes, so it's safe on aliases).
+        // Canonicalize first to dedup alias spellings into one set entry (`traits()` itself already canonicalizes, so it's safe on aliases)
         let gates: std::collections::HashSet<_> = HookEventName::ALL
             .iter()
             .map(|e| e.canonical())
@@ -436,6 +416,7 @@ mod tests {
             .collect();
         let expected: std::collections::HashSet<_> = [
             HookEventName::PreToolUse,
+            HookEventName::PostToolUse,
             HookEventName::Stop,
             HookEventName::SubagentStop,
             HookEventName::UserPromptSubmit,
@@ -457,7 +438,7 @@ mod tests {
     #[test]
     fn load_nonexistent_dir() {
         let (registry, errors) = load_hooks(Some(Path::new("/nonexistent/path/hooks")), None);
-        assert!(errors.is_empty()); // NotFound is silent
+        assert!(errors.is_empty());
         assert!(registry.is_empty());
     }
 
@@ -656,7 +637,7 @@ mod tests {
             ))],
             &[],
         );
-        assert!(errors.is_empty()); // Missing file is fine, not an error.
+        assert!(errors.is_empty());
         assert!(registry.is_empty());
     }
 
@@ -729,10 +710,9 @@ mod tests {
         assert!(hooks[1].name.starts_with("project/"));
     }
 
-    /// A byte-identical duplicate must not launder a managed hook's provenance:
-    /// whichever order the copies arrive in, the surviving spec is the
-    /// managed-policy copy (so the no-disable rule and the pinned
-    /// timeout/env hold), while ordinary duplicates stay first-wins.
+    /// A byte-identical duplicate must not shadow a managed hook's provenance.
+    /// Whichever order the copies arrive in, the surviving spec is the managed-policy copy, so the no-disable rule and the pinned timeout/env hold.
+    /// Ordinary duplicates stay first-wins.
     #[test]
     fn dedup_keeps_the_managed_policy_copy_regardless_of_order() {
         let spec = |name: &str, layer, timeout_ms| crate::config::HookSpec {
@@ -781,10 +761,8 @@ mod tests {
         assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0].layer, HookProvenance::Requirements);
 
-        // Managed-vs-managed pair: `$GROK_HOME/requirements.toml` arrives
-        // before `/etc/grok`, but the root-owned tier outranks it — the
-        // exemption and pinned fields must not resolve under the
-        // user-writable copy.
+        // Managed-vs-managed pair: `$GROK_HOME/requirements.toml` arrives before `/etc/grok`, but the root-owned tier outranks it
+        // The no-disable rule and pinned fields must not resolve under the user-writable copy
         let registry = registry_from_specs_deduped(vec![
             spec(
                 "requirements/user:pre[0]",
@@ -800,8 +778,8 @@ mod tests {
         assert!(hooks[0].is_managed_policy());
     }
 
-    /// Managed-policy hooks count as enabled for the stop-gate hot-path guard
-    /// even when their name is in the disabled-hooks state; user hooks honor it.
+    /// Managed-policy hooks count as enabled for the stop-gate hot-path guard even when their name is in the disabled-hooks state.
+    /// User hooks honor it.
     #[test]
     fn has_enabled_hooks_counts_managed_hooks_despite_disable_state() {
         let mut spec = crate::config::HookSpec {
@@ -810,7 +788,7 @@ mod tests {
             handler_type: crate::config::HandlerType::Command,
             configured_matcher: None,
             matcher: None,
-            enabled: false, // disable signal — must be ignored for managed policy
+            enabled: false, // disable signal; managed policy must ignore it
             command: Some("stop.sh".into()),
             command_raw: Some("stop.sh".to_string()),
             url: None,
@@ -884,8 +862,7 @@ mod tests {
         );
     }
 
-    /// A hook registered under both `SubagentStop` and `SubagentEnd` dedups on
-    /// the canonical event, so it runs once.
+    /// A hook registered under both `SubagentStop` and `SubagentEnd` dedups on the canonical event, so it runs once.
     #[test]
     fn deduplicates_hooks_across_alias_spellings() {
         let dir = tempfile::tempdir().unwrap();
@@ -969,8 +946,7 @@ mod tests {
         assert_eq!(registry.hooks_for(HookEventName::SessionEnd).len(), 1);
     }
 
-    /// The same command in multiple files within one directory dedups to a
-    /// single run, preventing accidental duplicate execution.
+    /// The same command in multiple files within one directory dedups to a single run.
     #[test]
     fn same_command_in_same_directory_deduplicated() {
         let dir = tempfile::tempdir().unwrap();
@@ -1023,7 +999,7 @@ mod tests {
         assert_eq!(registry.len(), 1);
     }
 
-    /// Wire/serde-shaped spec: compiled matcher cleared, pattern still set.
+    /// A spec as serde restores it from the wire: compiled matcher cleared, pattern still set.
     fn recompile_test_spec(
         name: &str,
         configured_matcher: Option<&str>,

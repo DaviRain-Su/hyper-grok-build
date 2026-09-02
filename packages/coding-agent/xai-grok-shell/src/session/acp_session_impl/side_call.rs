@@ -1,5 +1,5 @@
-//! Shared cache-aligned side-call plumbing for recap-style auxiliary model
-//! calls (recap, turn summary). `/btw` reuses the request skeleton.
+//! Shared cache-aligned request building for recap-style auxiliary model calls (recap, turn summary).
+//! `/btw` reuses the request skeleton.
 
 use super::*;
 
@@ -63,7 +63,8 @@ pub(crate) fn log_prompt_cache_usage(
     );
 }
 
-/// What differs between the two calls that ride the parent's prompt cache. The shared parts live in [`SessionActor::parent_cached_request`].
+/// What differs between the two calls that reuse the parent's prompt cache.
+/// The shared parts live in [`SessionActor::parent_cached_request`].
 pub(crate) struct AuxCall {
     pub(crate) items: Vec<ConversationItem>,
     pub(crate) tools: Vec<ToolSpec>,
@@ -77,8 +78,7 @@ pub(crate) struct AuxCall {
     pub(crate) req_id: String,
 }
 
-/// Shared setup for a recap-style side-call; see
-/// [`SessionActor::prepare_side_call`].
+/// Shared setup for a recap-style side-call; see [`SessionActor::prepare_side_call`].
 pub(crate) struct SideCallSetup {
     pub(crate) client: xai_grok_sampler::SamplingClient,
     pub(crate) strip_reasoning: bool,
@@ -103,8 +103,9 @@ impl SessionActor {
     /// Temperature stays unset: cli-chat-proxy may inject a `thinking` config, and the Messages API then requires temperature == 1.
     pub(crate) fn parent_cached_request(&self, call: AuxCall) -> ConversationRequest {
         let session_id = self.session_info.id.to_string();
-        // Only the Responses mapping sends the cache key. On the other backends the conv id is what ties a call to its conversation,
-        // so it has to stay the parent session id; the `btw-`/`recap-` label still shows up in `x_grok_req_id`.
+        // Only the Responses mapping sends the cache key
+        // On the other backends the conv id is what ties a call to its conversation, so it has to stay the parent session id
+        // The `btw-`/`recap-` label still shows up in `x_grok_req_id`
         let conv_id = if call.backend.forwards_prompt_cache_key() {
             call.conv_id
         } else {
@@ -124,20 +125,17 @@ impl SessionActor {
             x_grok_session_id: Some(session_id.clone()),
             x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
             prompt_cache_key: Some(session_id),
-            // Side calls persist text and never execute tools (the attached
-            // tools only align the prompt-cache prefix), so a Length sample
-            // must fail rather than salvage.
+            // Side calls persist text and never execute tools (the attached tools only align the prompt-cache prefix)
+            // A Length sample must fail rather than salvage
             length_policy: xai_grok_sampling_types::LengthPolicy::Fail,
             ..Default::default()
         }
     }
 
-    /// Prepare the shared pieces of a recap-style side-call (recap and turn
-    /// summary): the sampling client plus the config both need.
+    /// Prepare the shared pieces of a recap-style side-call (recap and turn summary): the sampling client and the config both need.
     ///
-    /// Recap-style side-calls preserve reasoning so their conversation prefix
-    /// stays byte-identical to the parent turn. Messages strips reasoning only
-    /// when the matching effort cannot emit a top-level thinking configuration.
+    /// Recap-style side-calls preserve reasoning so their conversation prefix stays byte-identical to the parent turn.
+    /// Messages strips reasoning only when the matching effort cannot emit a top-level thinking configuration.
     pub(crate) async fn prepare_side_call(&self) -> Result<SideCallSetup, acp::Error> {
         let client = self.prepare_chat_completion(false).await?;
         // One config read serves the window, model, and reasoning effort.
@@ -159,17 +157,13 @@ impl SessionActor {
         })
     }
 
-    /// Build the cache-aligned request for a recap-style side-call via
-    /// [`Self::parent_cached_request`]: main-turn tool + hosted-tool specs and
-    /// matching reasoning effort so the prompt-cache prefix stays warm.
+    /// Build the cache-aligned request for a recap-style side-call via [`Self::parent_cached_request`].
+    /// Uses the main turn's tool and hosted-tool specs and matching reasoning effort so the prompt-cache prefix stays warm.
     ///
-    /// Leaves BOTH temperature and max_output_tokens unset: the
-    /// cli-chat-proxy layer may inject a `thinking` budget for
-    /// thinking-enabled models (which also forces temperature == 1), and a
-    /// small max_output_tokens below that budget makes the call error or
-    /// return empty. The instructions keep outputs short and the clean
-    /// helpers cap length as a safety net, so an explicit token cap isn't
-    /// needed.
+    /// Leaves BOTH temperature and max_output_tokens unset.
+    /// The cli-chat-proxy layer may inject a `thinking` budget for thinking-enabled models (which also forces temperature == 1).
+    /// A small max_output_tokens below that budget makes the call error or return empty.
+    /// The instructions keep outputs short and the clean helpers cap length as a safety net, so an explicit token cap isn't needed.
     pub(crate) async fn side_call_request(
         &self,
         setup: &SideCallSetup,
@@ -194,20 +188,18 @@ impl SessionActor {
         })
     }
 
-    /// Invalidate in-flight recap-style side-calls when a real user prompt is
-    /// accepted (queue time / turn start). Bumps the recap epoch so a finishing
-    /// recap cannot commit, and aborts an in-flight turn summary. Both would
-    /// describe a conversation this prompt is about to extend. Idempotent under
-    /// the queue-accept + turn-start double bump. Keep this the single place
-    /// that knows which side-calls to cancel on a new prompt.
+    /// Invalidate in-flight recap-style side-calls when a real user prompt is accepted (at queue time or turn start).
+    /// Bumps the recap epoch so a finishing recap cannot commit, and aborts an in-flight turn summary.
+    /// Both would describe a conversation this prompt is about to extend.
+    /// Idempotent under the queue-accept and turn-start double bump.
+    /// Keep this the single place that knows which side-calls to cancel on a new prompt.
     pub(crate) fn invalidate_side_calls_for_new_prompt(&self) {
         self.recap_epoch.set(self.recap_epoch.get().wrapping_add(1));
         self.abort_turn_summary();
-        // The title refresh is deliberately NOT aborted here: it describes the
-        // whole conversation, so completing against the pre-prompt snapshot is
-        // still valid, and it runs at most once per checkpoint (one at a time).
-        // Aborting on every prompt would leave the checkpoint unconsumed and
-        // re-spawn a call each turn.
+        // The title refresh is deliberately NOT aborted here
+        // It describes the whole conversation, so completing against the pre-prompt snapshot is still valid
+        // It runs at most once per checkpoint (one at a time)
+        // Aborting on every prompt would leave the checkpoint unconsumed and re-spawn a call each turn
     }
 }
 

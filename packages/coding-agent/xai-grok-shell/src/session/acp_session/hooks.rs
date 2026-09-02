@@ -6,7 +6,9 @@ use agent_client_protocol as acp;
 use agent_client_protocol::Client as _;
 use futures::stream::{FuturesUnordered, StreamExt as _};
 use serde_json::value::RawValue;
-use xai_grok_hooks::event::{HookEventEnvelope, HookEventName, HookPayload};
+use xai_grok_hooks::event::{
+    HookEventEnvelope, HookEventName, HookPayload, MAX_HOOK_FEEDBACK_CHARS, clip_text,
+};
 use xai_grok_telemetry::events::{ClientHookGateOutcome, HookBlockCause};
 
 use super::{SessionActor, ToolLoop};
@@ -20,7 +22,16 @@ const HOOK_RUN_METHOD: &str = "x.ai/hooks/run";
 
 const CLIENT_HOOK_TIMEOUT: Duration = Duration::from_secs(30);
 
-const CLIENT_STOP_GATE_TIMEOUT: Duration = Duration::from_secs(600);
+const CLIENT_VERIFICATION_GATE_TIMEOUT: Duration =
+    Duration::from_secs(xai_grok_hooks::config::DEFAULT_VERIFICATION_GATE_TIMEOUT_SECS);
+
+fn default_client_gate_timeout(gate: xai_grok_hooks::event::GateKind) -> Duration {
+    use xai_grok_hooks::event::GateKind;
+    match gate {
+        GateKind::Stop | GateKind::PostTool => CLIENT_VERIFICATION_GATE_TIMEOUT,
+        GateKind::Observe | GateKind::Tool | GateKind::Prompt => CLIENT_HOOK_TIMEOUT,
+    }
+}
 
 pub(super) enum RewriteProblem {
     FailsSchema(String),
@@ -107,6 +118,24 @@ fn dispatch_params(dispatch: &ClientHookDispatch<'_>) -> Option<Arc<RawValue>> {
         .inspect_err(|err| tracing::warn!(%err, "failed to serialize client hook dispatch"))
         .ok()
         .map(Into::into)
+}
+
+fn gate_failure_reason(outcome: ClientHookGateOutcome) -> Option<&'static str> {
+    match outcome {
+        ClientHookGateOutcome::TimedOut => Some("timed out"),
+        ClientHookGateOutcome::TransportError => Some("transport error"),
+        ClientHookGateOutcome::Denied
+        | ClientHookGateOutcome::Proceeded
+        | ClientHookGateOutcome::Malformed
+        | ClientHookGateOutcome::UnknownDecision => None,
+    }
+}
+
+struct OrderedGateResponse<'a> {
+    callback_id: &'a str,
+    response: ClientHookResponse,
+    elapsed: Duration,
+    outcome: ClientHookGateOutcome,
 }
 
 impl SessionActor {
@@ -233,12 +262,7 @@ impl SessionActor {
     ) -> FuturesUnordered<
         impl Future<Output = (&'a str, ClientHookResponse, Duration, ClientHookGateOutcome)> + 'a,
     > {
-        let default_timeout =
-            if envelope.hook_event_name.traits().gate == xai_grok_hooks::event::GateKind::Stop {
-                CLIENT_STOP_GATE_TIMEOUT
-            } else {
-                CLIENT_HOOK_TIMEOUT
-            };
+        let default_timeout = default_client_gate_timeout(envelope.hook_event_name.traits().gate);
         let mut seen = std::collections::HashSet::new();
         groups
             .iter()
@@ -277,6 +301,33 @@ impl SessionActor {
             .collect()
     }
 
+    async fn ordered_client_gate_responses<'a>(
+        &'a self,
+        groups: &'a [ClientHookGroup],
+        envelope: &'a HookEventEnvelope,
+    ) -> Vec<OrderedGateResponse<'a>> {
+        let match_value = envelope.payload.match_value();
+        let mut pending = self.client_gate_responses(groups, match_value, envelope);
+        let mut responses = std::collections::HashMap::new();
+        while let Some((callback_id, response, elapsed, gate_outcome)) = pending.next().await {
+            responses.insert(callback_id, (response, elapsed, gate_outcome));
+        }
+        groups
+            .iter()
+            .flat_map(|group| group.callback_ids.iter())
+            .filter_map(|id| {
+                responses
+                    .remove(id.as_str())
+                    .map(|(response, elapsed, outcome)| OrderedGateResponse {
+                        callback_id: id.as_str(),
+                        response,
+                        elapsed,
+                        outcome,
+                    })
+            })
+            .collect()
+    }
+
     pub(super) async fn run_pre_tool_use_client_hook(
         &self,
         call: &ToolCallResponse,
@@ -303,6 +354,7 @@ impl SessionActor {
                     .system_message
                     .filter(|s| !s.trim().is_empty())
                     .unwrap_or_else(|| "blocked by client hook".to_string());
+                let reason = clip_text(&reason, MAX_HOOK_FEEDBACK_CHARS);
                 return Ok(Some(
                     self.deny_tool(
                         &call.id,
@@ -334,23 +386,21 @@ impl SessionActor {
             return out;
         };
 
-        let match_value = envelope.payload.match_value();
-        let mut pending = self.client_gate_responses(&groups, match_value, envelope);
-        let mut responses = std::collections::HashMap::new();
-        while let Some((callback_id, response, elapsed, gate_outcome)) = pending.next().await {
-            responses.insert(callback_id, (response, elapsed, gate_outcome));
-        }
-        let ordered = groups
-            .iter()
-            .flat_map(|group| group.callback_ids.iter())
-            .filter_map(|id| responses.remove(id.as_str()).map(|r| (id.as_str(), r)));
-        for (callback_id, (response, elapsed, gate_outcome)) in ordered {
+        let ordered = self.ordered_client_gate_responses(&groups, envelope).await;
+        for OrderedGateResponse {
+            callback_id,
+            response,
+            elapsed,
+            outcome,
+        } in ordered
+        {
             let hook_name = format!("client:{callback_id}");
             let block_reason = (response.decision == ClientHookDecision::Deny).then(|| {
-                response
+                let reason = response
                     .system_message
                     .filter(|s| !s.trim().is_empty())
-                    .unwrap_or_else(|| "blocked by client hook".to_string())
+                    .unwrap_or_else(|| "blocked by client hook".to_string());
+                clip_text(&reason, MAX_HOOK_FEEDBACK_CHARS)
             });
             let stop_reason = (response.continue_ == Some(false)).then(|| {
                 response
@@ -364,14 +414,7 @@ impl SessionActor {
                 stop_reason.as_deref(),
                 block_reason.as_deref(),
             );
-            let unanswered = match gate_outcome {
-                ClientHookGateOutcome::TimedOut => Some("timed out"),
-                ClientHookGateOutcome::TransportError => Some("transport error"),
-                ClientHookGateOutcome::Denied
-                | ClientHookGateOutcome::Proceeded
-                | ClientHookGateOutcome::Malformed
-                | ClientHookGateOutcome::UnknownDecision => None,
-            };
+            let unanswered = gate_failure_reason(outcome);
             out.results.push(match (detail, unanswered) {
                 (Some(detail), _) => HookRunResult::Blocked {
                     hook_name: hook_name.clone(),
@@ -402,9 +445,73 @@ impl SessionActor {
                     stop_reason,
                     additional_context: response
                         .additional_context
-                        .filter(|c| !c.trim().is_empty()),
+                        .filter(|c| !c.trim().is_empty())
+                        .map(|c| clip_text(&c, MAX_HOOK_FEEDBACK_CHARS)),
                 },
             );
+        }
+        out
+    }
+
+    pub(super) async fn run_post_tool_use_client_hooks(
+        &self,
+        envelope: &HookEventEnvelope,
+    ) -> xai_grok_hooks::dispatcher::PostToolUseResult {
+        use xai_grok_hooks::result::HookRunResult;
+
+        let mut out = xai_grok_hooks::dispatcher::PostToolUseResult::default();
+        let Some(groups) = self
+            .client_hooks
+            .borrow()
+            .get(&envelope.hook_event_name.canonical())
+            .cloned()
+        else {
+            return out;
+        };
+
+        let ordered = self.ordered_client_gate_responses(&groups, envelope).await;
+        for OrderedGateResponse {
+            callback_id,
+            response,
+            elapsed,
+            outcome,
+        } in ordered
+        {
+            let hook_name = format!("client:{callback_id}");
+            if let Some(why) = gate_failure_reason(outcome) {
+                out.results.push(HookRunResult::Failed {
+                    hook_name,
+                    error: format!("client hook {why}"),
+                    elapsed,
+                    http_info: None,
+                    system_message: None,
+                });
+                continue;
+            }
+            out.results.push(HookRunResult::Success {
+                hook_name: hook_name.clone(),
+                elapsed,
+                http_info: None,
+                system_message: None,
+            });
+            if response.decision == ClientHookDecision::Deny {
+                let reason = response
+                    .system_message
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| "blocked by client hook".to_string());
+                out.blocks
+                    .push(xai_grok_hooks::dispatcher::PostToolUseBlock {
+                        hook_name: hook_name.clone(),
+                        reason: clip_text(&reason, MAX_HOOK_FEEDBACK_CHARS),
+                    });
+            }
+            if let Some(context) = response.additional_context.filter(|c| !c.trim().is_empty()) {
+                out.additional_context
+                    .push(xai_grok_hooks::dispatcher::AdditionalContext {
+                        hook_name,
+                        text: clip_text(&context, MAX_HOOK_FEEDBACK_CHARS),
+                    });
+            }
         }
         out
     }
@@ -494,6 +601,26 @@ mod tests {
         let (timeout, outcome) = classify(ReverseOutcome::Timeout);
         assert_eq!(timeout.decision, ClientHookDecision::Continue);
         assert!(matches!(outcome, ClientHookGateOutcome::TimedOut));
+    }
+
+    #[test]
+    fn verification_gates_get_the_long_deadline() {
+        use xai_grok_hooks::event::HookEventName;
+
+        for event in [HookEventName::Stop, HookEventName::PostToolUse] {
+            assert_eq!(
+                default_client_gate_timeout(event.traits().gate),
+                CLIENT_VERIFICATION_GATE_TIMEOUT,
+                "{event:?}"
+            );
+        }
+        for event in [HookEventName::PreToolUse, HookEventName::UserPromptSubmit] {
+            assert_eq!(
+                default_client_gate_timeout(event.traits().gate),
+                CLIENT_HOOK_TIMEOUT,
+                "{event:?}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

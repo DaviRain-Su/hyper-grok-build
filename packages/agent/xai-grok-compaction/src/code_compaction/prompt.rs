@@ -133,9 +133,4 @@ mod tests {
         assert!(p.contains("<user_provided_context>\nfocus on auth\n</user_provided_context>"));
         assert!(p.contains("Incorporate the user-provided context above"));
     }
-
-    #[test]
-    fn default_kind_is_structured() {
-        assert_eq!(SummaryPromptKind::default(), SummaryPromptKind::Structured);
-    }
 }

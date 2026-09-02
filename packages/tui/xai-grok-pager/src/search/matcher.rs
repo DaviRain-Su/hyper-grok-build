@@ -1,6 +1,3 @@
-//! [`TextMatcher`] — a compiled substring/regex query with smart-case matching.
-
-/// How a query string is interpreted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueryKind {
     /// Case-insensitive substring (compiled to a regex via `regex::escape`).
@@ -9,11 +6,8 @@ pub enum QueryKind {
     Regex,
 }
 
-/// A compiled query that answers whether text matches.
-///
-/// Both substring and regex queries compile to a `regex::Regex`. Matching is
-/// smart-case: case-insensitive unless the query contains an uppercase
-/// character (Vim `smartcase` / ripgrep `--smart-case`).
+/// Both substring and regex queries compile to a `regex::Regex`.
+/// Matching is smart-case: case-insensitive unless the query contains an uppercase character (Vim `smartcase` / ripgrep `--smart-case`).
 #[derive(Debug, Clone)]
 pub struct TextMatcher {
     regex: regex::Regex,
@@ -24,8 +18,7 @@ pub struct TextMatcher {
 impl TextMatcher {
     /// Compile `query` under the given interpretation.
     ///
-    /// A regex that fails to compile sets [`is_error`](Self::is_error) and falls
-    /// back to a pattern that never matches.
+    /// A regex that fails to compile sets [`is_error`](Self::is_error) and falls back to a pattern that never matches.
     pub fn new(query: impl Into<String>, kind: QueryKind) -> Self {
         let query = query.into();
         let smart_ci = !query.chars().any(|c| c.is_uppercase());
@@ -69,7 +62,6 @@ impl TextMatcher {
         &self.regex
     }
 
-    /// Whether `haystack` contains a match.
     pub fn is_match(&self, haystack: &str) -> bool {
         self.regex.is_match(haystack)
     }

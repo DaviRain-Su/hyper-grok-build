@@ -1,5 +1,4 @@
-//! Plugin hooks adapter: pre-filter plugin hook JSON, then feed it to
-//! `xai-grok-hooks`' parser and inject plugin env vars. Not a second engine.
+//! Plugin hooks adapter: pre-filter plugin hook JSON, then feed it to `xai-grok-hooks`' parser and inject plugin env vars.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -9,7 +8,7 @@ use xai_grok_hooks::event::HookEventName;
 
 use super::manifest::substitute_env_vars;
 
-/// Read, pre-filter, parse, and env-inject a plugin's hooks file.
+/// Read, pre-filter, and parse a plugin's hooks file, then inject the plugin env vars.
 pub fn parse_plugin_hooks(
     hooks_path: &Path,
     plugin_name: &str,
@@ -68,8 +67,7 @@ pub fn parse_plugin_hooks_from_value(
 
 /// Shared processing pipeline for plugin hooks (file-based or inline).
 ///
-/// Pre-filters unsupported events, parses via `parse_hook_file()`,
-/// injects plugin env vars, and namespaces hook names.
+/// Pre-filters unsupported events, parses via `parse_hook_file()`, injects plugin env vars, and namespaces hook names.
 fn process_hooks_content(
     content: &str,
     source_path: &Path,
@@ -108,8 +106,7 @@ fn process_hooks_content(
     ]);
 
     for spec in &mut specs {
-        // Plugin-owned keys always win over user-declared `env`, or a plugin
-        // author could repoint the plugin root and break the contract.
+        // Plugin-owned keys always win over user-declared `env`, or a plugin author could repoint the plugin root and break the contract
         for (k, v) in &plugin_env {
             spec.extra_env.insert(k.clone(), v.clone());
         }
@@ -120,8 +117,7 @@ fn process_hooks_content(
             plugin_name,
             spec.name
         );
-        // Resolve plugin path placeholders at load time (mirrors managed_mcp)
-        // so the command works regardless of the runner's spawn branch.
+        // Resolve plugin path placeholders at load time (mirrors managed_mcp) so the command works regardless of the runner's spawn branch
         if let Some(cmd) = &spec.command {
             let cmd_str = cmd.to_string_lossy();
             let substituted = substitute_env_vars(&cmd_str, plugin_root, plugin_data);
@@ -135,11 +131,9 @@ fn process_hooks_content(
     (specs, warnings)
 }
 
-/// Drop `hooks` event keys the parser wouldn't accept, returning the filtered
-/// JSON and the removed names. Not needed for correctness (the parser is lenient)
-/// but surfaces the drops to the plugin author as warnings. A key is supported
-/// exactly when [`HookEventName::parse_key`] accepts it, so there is no allowlist
-/// to drift.
+/// Drop `hooks` event keys the parser wouldn't accept, returning the filtered JSON and the removed names.
+/// The filter is not needed for correctness (the parser is lenient); it exists to warn the plugin author about the drops.
+/// A key is supported exactly when [`HookEventName::parse_key`] accepts it, so there is no allowlist to drift.
 fn prefilter_unsupported_events(json_content: &str) -> (String, Vec<String>) {
     let mut value: serde_json::Value = match serde_json::from_str(json_content) {
         Ok(v) => v,
@@ -231,7 +225,7 @@ mod tests {
     fn prefilter_handles_invalid_json() {
         let json = "not valid json{";
         let (filtered, skipped) = prefilter_unsupported_events(json);
-        assert_eq!(filtered, json); // returned as-is
+        assert_eq!(filtered, json);
         assert!(skipped.is_empty());
     }
 
@@ -275,7 +269,7 @@ mod tests {
         let (specs, warnings) =
             parse_plugin_hooks(&hooks_file, "my-plugin", "/path/to/plugin", "/path/to/data");
 
-        // Should have 1 spec from SessionStart, FutureEvent was filtered
+        // One spec from SessionStart; FutureEvent was filtered
         assert_eq!(specs.len(), 1);
         assert!(specs[0].name.starts_with("plugin/my-plugin/"));
         assert_eq!(
@@ -291,7 +285,6 @@ mod tests {
             "/path/to/data"
         );
 
-        // Should have a warning about FutureEvent
         assert!(warnings.iter().any(|w| w.contains("FutureEvent")));
     }
 
@@ -346,8 +339,7 @@ mod tests {
         assert!(warnings.iter().any(|w| w.contains("FutureEvent")));
     }
 
-    /// Regression: plugin path placeholders must resolve at load time, else the
-    /// runner's pre-spawn env check refuses to run the hook.
+    /// Regression: plugin path placeholders must resolve at load time, else the runner's pre-spawn env check refuses to run the hook.
     #[test]
     fn parse_plugin_hooks_substitutes_plugin_root_in_command() {
         let value = serde_json::json!({
@@ -380,8 +372,6 @@ mod tests {
         assert!(commands.contains(&"/opt/plugins/gb1183/hooks/alias.sh".to_string()));
         assert!(commands.contains(&"/var/plugins/gb1183/cache/post.sh".to_string()));
 
-        // None of the resolved commands should still contain the literal
-        // `${...}` placeholder.
         for cmd in &commands {
             assert!(
                 !cmd.contains("${"),
@@ -389,8 +379,7 @@ mod tests {
             );
         }
 
-        // `command_raw` must stay unmodified: it's the display form and rewriting
-        // it would leak `extra_env`-resolved secrets.
+        // `command_raw` must stay unmodified: it's the display form and rewriting it would leak `extra_env`-resolved secrets
         let raws: Vec<&str> = specs
             .iter()
             .map(|s| s.command_raw.as_deref().unwrap_or(""))
@@ -417,8 +406,8 @@ mod tests {
         assert!(warnings.is_empty());
     }
 
-    /// Regression: generic env vars (`${HOME}`) resolve at load time, and plugin
-    /// placeholders resolve exactly once (no leftover `$`, no double-expansion).
+    /// Regression: generic env vars (`${HOME}`) resolve at load time.
+    /// Plugin placeholders resolve exactly once (no leftover `$`, no double-expansion).
     #[test]
     fn parse_plugin_hooks_resolves_plugin_root_exactly_once() {
         let value = serde_json::json!({
@@ -487,7 +476,6 @@ mod tests {
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
         assert_eq!(specs.len(), 1);
 
-        // User-declared key the plugin doesn't own: preserved verbatim.
         assert_eq!(
             specs[0].extra_env.get("FOO").map(String::as_str),
             Some("bar"),

@@ -1,18 +1,12 @@
-//! End-to-end guard for `auth_provider_command`: a configured external auth
-//! provider must actually mint the session credential on the host platform.
+//! End-to-end guard for `auth_provider_command`: a configured external auth provider must actually mint the session credential on the host platform.
 //!
-//! Regression cover. The provider used to be spawned through a hardcoded
-//! `sh -c`. On Windows that either fails to spawn (no `sh` in a default
-//! install) or, where Git Bash is present, silently eats the backslashes in a
-//! native path — `C:\Windows\System32\whoami.exe` reaches the shell as
-//! `C:WindowsSystem32whoami.exe` and exits 127. Either way the auth flow fell
-//! through to the built-in browser login, so a configured provider looked like
-//! it had been ignored.
+//! The provider used to be spawned through a hardcoded `sh -c`.
+//! On Windows that either fails to spawn (no `sh` in a default install) or silently eats the backslashes in a native path where Git Bash is present.
+//! `C:\Windows\System32\whoami.exe` reaches the shell as `C:WindowsSystem32whoami.exe` and exits 127.
+//! Either way the auth flow fell through to the built-in browser login, so a configured provider looked like it had been ignored.
 //!
-//! The test drives the public entry point (`try_ensure_fresh_auth` →
-//! `AuthManager::auth` → external refresher → platform shell) and is hermetic:
-//! a throwaway `GROK_HOME`, no network, and a provider command that needs no
-//! binary beyond what the platform shell already provides.
+//! The test drives the public entry point: `try_ensure_fresh_auth`, then `AuthManager::auth`, the external refresher, and the platform shell.
+//! It is hermetic: a throwaway `GROK_HOME`, no network, and a provider command that needs no binary beyond what the platform shell already provides.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -22,9 +16,8 @@ use xai_grok_shell::auth::{AuthMode, GrokAuth, GrokComConfig, try_ensure_fresh_a
 
 const SEED_TOKEN: &str = "stale-token-that-must-be-replaced";
 
-/// Point the process at a throwaway grok home. `grok_home()` memoizes into a
-/// `OnceLock`, so every phase below shares this one directory — which is why
-/// they live in a single test rather than racing each other as separate ones.
+/// `grok_home()` memoizes into a `OnceLock`, so every phase below shares this one directory.
+/// That is why the phases live in a single test rather than racing each other as separate ones.
 fn use_temp_grok_home(dir: &Path) {
     // SAFETY: single-threaded test entry, before any thread that reads the
     // environment is spawned.
@@ -33,8 +26,7 @@ fn use_temp_grok_home(dir: &Path) {
     }
 }
 
-/// Seed an expired credential so `auth()` takes the refresh path; a cold home
-/// returns `NotLoggedIn` without ever consulting the provider.
+/// Seed an expired credential so `auth()` takes the refresh path; a cold home returns `NotLoggedIn` without ever consulting the provider.
 fn seed_expired_credential(home: &Path, scope: &str) {
     let expired = GrokAuth {
         key: SEED_TOKEN.to_owned(),
@@ -78,15 +70,12 @@ async fn auth_provider_command_mints_the_session_credential() {
     let home = tempfile::tempdir().expect("tempdir");
     use_temp_grok_home(home.path());
 
-    // `echo <token>` is valid in both `sh -c` and `cmd /C`, so this phase needs
-    // no external binary and runs identically on every platform.
+    // `echo <token>` is valid in both `sh -c` and `cmd /C`, so this phase needs no external binary and runs identically on every platform
     let token = mint_with_provider(home.path(), "echo grok-ext-token").await;
     assert_eq!(token, "grok-ext-token");
 
-    // Windows only: an absolute native path, the form an operator actually
-    // writes in config.toml, and the exact shape a POSIX shell mangles. Run
-    // after the portable phase so a failure here is unambiguously about
-    // backslash handling rather than the provider path in general.
+    // Windows only: an absolute native path, the form an operator actually writes in config.toml, and the exact shape a POSIX shell mangles
+    // Run after the portable phase so a failure here is unambiguously about backslash handling rather than the provider path in general
     #[cfg(windows)]
     {
         let token = mint_with_provider(home.path(), r"C:\Windows\System32\whoami.exe").await;

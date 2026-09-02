@@ -637,7 +637,7 @@ impl SessionActor {
                     snapshot,
                     tools_called: side,
                     structured_output,
-                    refusal,
+                    stop,
                 } => TurnOutcome::Completed {
                     snapshot,
                     // Side-channel should already include the full ordered list;
@@ -648,7 +648,7 @@ impl SessionActor {
                         side
                     },
                     structured_output,
-                    refusal,
+                    stop,
                 },
                 other => other,
             });
@@ -685,7 +685,7 @@ impl SessionActor {
             snapshot: Box::new(None),
             tools_called,
             structured_output,
-            refusal: None,
+            stop: CompletedStop::EndTurn,
         })
     }
 
@@ -757,6 +757,7 @@ impl SessionActor {
                     episode_start: None,
                     enabled: false,
                 },
+                false,
             )
             .await
         {
@@ -990,7 +991,7 @@ impl SessionActor {
             snapshot: Box::new(None),
             tools_called,
             structured_output: Some(validated),
-            refusal: None,
+            stop: CompletedStop::EndTurn,
         });
 
         Some(ToolBatchResult::Finish(vec![HostToolResult {

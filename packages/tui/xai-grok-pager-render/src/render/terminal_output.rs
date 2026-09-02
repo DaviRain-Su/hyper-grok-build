@@ -1,16 +1,10 @@
-//! Native terminal rendering for command output.
+//! Bash/terminal tool output arrives as a raw PTY byte stream.
+//! It can contain ANSI SGR (colors/styles), cursor movement, line erases, and carriage returns (progress bars rewriting a line).
+//! ratatui paints text verbatim and does not interpret these, so without this module the scrollback shows literal escape codes like `[1m[36m`.
 //!
-//! Bash/terminal tool output arrives as a raw PTY byte stream that can contain
-//! ANSI SGR (colors/styles), cursor movement, line erases, and carriage returns
-//! (progress bars rewriting a line). ratatui paints text verbatim and does not
-//! interpret these, so without this module the scrollback shows literal escape
-//! codes like `[1m[36m`.
-//!
-//! [`render_terminal_lines`] feeds the stream through a minimal, line-oriented
-//! VTE emulator (built on the `vte` parser) and produces styled
-//! [`Line`]s plus de-escaped plain text — what a terminal would actually
-//! display. Unlike a screen/grid emulator it keeps an unbounded, fully-styled
-//! transcript that maps onto the pager's line model.
+//! [`render_terminal_lines`] feeds the stream through a minimal, line-oriented VTE emulator (built on the `vte` parser).
+//! It produces styled [`Line`]s plus de-escaped plain text: what a terminal would actually display.
+//! Unlike a screen/grid emulator it keeps an unbounded, fully-styled transcript that maps onto the pager's line model.
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -18,8 +12,8 @@ use vte::{Params, Parser, Perform};
 
 use crate::theme::color_support::quantize;
 
-/// Bound transcript growth against pathological cursor jumps. Tool output is
-/// already truncated upstream; these only guard against escape-code abuse.
+/// Bound transcript growth against pathological cursor jumps.
+/// Tool output is already truncated upstream; these only guard against escape-code abuse.
 const MAX_ROWS: usize = 50_000;
 const MAX_COLS: usize = 8_192;
 
@@ -29,11 +23,10 @@ pub struct RenderedLine {
     pub plain: String,
 }
 
-/// Parse a raw terminal stream (ANSI SGR + cursor/erase + carriage return) into
-/// styled lines. `base` is the default style for text without an SGR override.
+/// Parse a raw terminal stream (ANSI SGR, cursor/erase, carriage return) into styled lines.
+/// `base` is the default style for text without an SGR override.
 ///
-/// Deterministic and idempotent: a fresh emulator per call, safe to invoke from
-/// both the render path and the height-cache path.
+/// Deterministic and idempotent: a fresh emulator per call, safe to invoke from both the render path and the height-cache path.
 pub fn render_terminal_lines(raw: &str, base: Style) -> Vec<RenderedLine> {
     if raw.is_empty() {
         return Vec::new();
@@ -44,8 +37,8 @@ pub fn render_terminal_lines(raw: &str, base: Style) -> Vec<RenderedLine> {
     sink.finish()
 }
 
-/// De-escaped, cursor-resolved plain text of a terminal stream, for
-/// clipboard/search. Lines are joined with `\n`.
+/// De-escaped, cursor-resolved plain text of a terminal stream, for clipboard/search.
+/// Lines are joined with `\n`.
 pub fn render_terminal_plain(raw: &str) -> String {
     render_terminal_lines(raw, Style::default())
         .into_iter()
@@ -193,8 +186,7 @@ impl TermSink {
     }
 
     fn finish(mut self) -> Vec<RenderedLine> {
-        // `str::lines()` ignores a single trailing newline; mirror that so a
-        // command ending in `\n` does not gain a spurious blank line.
+        // `str::lines()` ignores a single trailing newline; mirror that so a command ending in `\n` does not gain a spurious blank line
         if self.rows.last().is_some_and(|r| r.is_empty()) {
             self.rows.pop();
         }
@@ -249,8 +241,7 @@ impl Perform for TermSink {
     }
 }
 
-/// First parameter value, substituting `default` for a missing or `0` value
-/// (CSI cursor ops treat `0` as `1`; erase ops pass `0` as the default).
+/// First parameter value, substituting `default` for a missing or `0` value (CSI cursor ops treat `0` as `1`; erase ops pass `0` as the default).
 fn first_param(params: &Params, default: u16) -> u16 {
     match params.iter().next().and_then(|p| p.first().copied()) {
         Some(0) | None => default,
@@ -286,8 +277,8 @@ fn ansi16_bright(n: u16) -> Color {
     }
 }
 
-/// Resolve an extended color (`38`/`48`) in either `;` (advancing `i` over the
-/// consumed groups) or `:` subparameter form. Returns an un-quantized color.
+/// Resolve an extended color (`38`/`48`) in either `;` (advancing `i` over the consumed groups) or `:` subparameter form.
+/// Returns an un-quantized color.
 fn ext_color(groups: &[&[u16]], i: &mut usize) -> Option<Color> {
     let g = groups[*i];
     if g.len() >= 2 {
@@ -310,8 +301,8 @@ fn ext_color(groups: &[&[u16]], i: &mut usize) -> Option<Color> {
     }
 }
 
-/// Parse the subparameter form of an extended color, e.g. `[5, n]` (256) or
-/// `[2, r, g, b]` (with an optional leading colorspace id). Un-quantized.
+/// Parse the subparameter form of an extended color, e.g. `[5, n]` (256) or `[2, r, g, b]` (with an optional leading colorspace id).
+/// Returns an un-quantized color.
 fn parse_ext(sub: &[u16]) -> Option<Color> {
     match sub.first().copied()? {
         5 => sub.get(1).map(|n| Color::Indexed(*n as u8)),
@@ -457,12 +448,11 @@ mod tests {
         assert_eq!(parse_ext(&[2, 1]), None);
     }
 
-    // Cross-platform robustness. Bash/terminal output is captured via pipes
-    // (non-TTY) on macOS, Linux, and Windows alike, so the input is plain text
-    // plus line endings plus optionally forced SGR — never a ConPTY screen
-    // stream. Windows uses CRLF, and unsupported control sequences (DEC private
-    // modes, OSC, cursor save/restore, absolute positioning) must be ignored
-    // without corrupting surrounding text.
+    // Cross-platform robustness
+    // Bash/terminal output is captured via pipes (non-TTY) on macOS, Linux, and Windows alike
+    // The input is plain text plus line endings plus optionally forced SGR, never a ConPTY screen stream
+    // Windows uses CRLF, and unsupported control sequences must be ignored without corrupting surrounding text
+    // Those include DEC private modes, OSC, cursor save/restore, and absolute positioning
 
     #[test]
     fn windows_crlf_line_endings() {
@@ -490,13 +480,12 @@ mod tests {
         assert!(rendered[0].line.spans.iter().any(|s| s.style.fg.is_some()));
     }
 
-    // Real Windows shell output samples. Each pins a distinct parser behavior
-    // exercised by a sequence these shells actually emit on the wire.
+    // Real Windows shell output samples
+    // Each pins a distinct parser behavior exercised by a sequence these shells actually emit on the wire
 
-    // Git Bash / GNU `grep --color=always`: the match is wrapped in a bold-red
-    // SGR with an interleaved EL (`\x1b[K`) and closed by an empty-param reset
-    // (`\x1b[m`). The EL must not truncate already-printed text, and `\x1b[m`
-    // must restore the base style for the trailing run.
+    // Git Bash / GNU `grep --color=always` wraps the match in a bold-red SGR with an interleaved EL (`\x1b[K`)
+    // An empty-param reset (`\x1b[m`) closes it
+    // The EL must not truncate already-printed text, and `\x1b[m` must restore the base style for the trailing run
     #[test]
     fn git_bash_gnu_grep_color() {
         let rendered =
@@ -512,10 +501,9 @@ mod tests {
         assert_eq!(spans[1].style, Style::default());
     }
 
-    // PowerShell 7 (`$PSStyle`): 24-bit color via the semicolon form
-    // `\x1b[38;2;R;G;Bm`, which drives the multi-group extended-color branch of
-    // `ext_color` (consume-following-groups + advance). If that advance were
-    // wrong the trailing `0` param would reset and drop the color.
+    // PowerShell 7 (`$PSStyle`) emits 24-bit color in the semicolon form `\x1b[38;2;R;G;Bm`
+    // That drives the `ext_color` branch that consumes the following groups and advances `i`
+    // If that advance were wrong the trailing `0` param would reset and drop the color
     #[test]
     fn powershell_truecolor_psstyle() {
         let rendered = render_terminal_lines(
@@ -530,9 +518,8 @@ mod tests {
         assert_eq!(spans[1].style, Style::default());
     }
 
-    // Progress output (cargo/npm/pip style under cmd/PowerShell): a status line
-    // is wiped with EL mode 2 (`\x1b[2K`) regardless of cursor column, then
-    // rewritten, so the transcript collapses to the final line.
+    // Progress output (cargo/npm/pip style under cmd/PowerShell) wipes the status line with EL mode 2 (`\x1b[2K`) regardless of cursor column
+    // The line is then rewritten, so the transcript collapses to the final line
     #[test]
     fn progress_erase_entire_line_collapses() {
         assert_eq!(lines("loading 99%\x1b[2K\rdone\n"), vec!["done"]);

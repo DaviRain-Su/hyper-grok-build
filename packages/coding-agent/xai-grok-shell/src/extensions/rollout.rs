@@ -25,7 +25,6 @@ pub async fn handle(_agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             )
             .in_scope(|| {});
 
-            // Log the survey via telemetry (this will go to Mixpanel and BigQuery)
             log_event(RolloutSurvey {
                 session_id: req.session_id.clone(),
                 preferences: req.preferences.clone(),

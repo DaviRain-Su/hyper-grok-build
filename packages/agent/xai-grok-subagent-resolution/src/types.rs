@@ -113,22 +113,6 @@ pub enum ResolutionError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xai_tool_types::SubagentIsolationMode;
-
-    #[test]
-    fn effective_runtime_config_default_values() {
-        let config = EffectiveRuntimeConfig::default();
-        assert!(config.model.is_none());
-        assert!(config.reasoning_effort.is_none());
-        assert!(config.capability_mode.is_none());
-        assert!(config.persona.is_none());
-        assert!(config.persona_instructions.is_none());
-        assert!(config.role_prompt.is_none());
-        assert!(config.role_prompt_warning.is_none());
-        assert!(config.role_name.is_none());
-        assert!(config.persona_error.is_none());
-        assert_eq!(config.isolation, SubagentIsolationMode::None);
-    }
 
     #[test]
     fn resolution_error_persona_display() {
@@ -150,11 +134,5 @@ mod tests {
         assert!(msg.contains("resume validation failed"));
         assert!(msg.contains("explore"));
         assert!(msg.contains("general-purpose"));
-    }
-
-    #[test]
-    fn context_source_equality() {
-        assert_eq!(ContextSource::New, ContextSource::New);
-        assert_ne!(ContextSource::New, ContextSource::Resumed);
     }
 }

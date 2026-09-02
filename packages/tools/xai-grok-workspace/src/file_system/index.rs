@@ -3,14 +3,13 @@
 //! # Architecture Overview
 //!
 //! The file index is designed for three use cases:
-//! 1. **Memory-efficient storage** - Path segment interning reduces memory by ~60-80%
-//! 2. **Fast network transfer** - Binary format + zstd compression
-//! 3. **Incremental updates** - Delta encoding for fs_notify events
+//! 1. **Memory-efficient storage**: Path segment interning reduces memory by ~60-80%
+//! 2. **Fast network transfer**: Binary format and zstd compression
+//! 3. **Incremental updates**: Delta encoding for fs_notify events
 //!
 //! ## OS Path Support
 //!
-//! The index uses `bstr` to store path segments as arbitrary byte sequences,
-//! supporting OS-native paths that may not be valid UTF-8:
+//! The index uses `bstr` to store path segments as arbitrary byte sequences, supporting OS-native paths that may not be valid UTF-8:
 //! - **Unix**: Paths can contain any byte except NUL (stored directly)
 //! - **Windows**: UTF-16 paths are converted to UTF-8 (lossy for invalid sequences)
 //!
@@ -38,17 +37,6 @@
 //! │  path_to_idx: FxHashMap<PathKey, usize>  // for O(1) removal     │
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
-//!
-//! ## StringInterner Design
-//!
-//! The interner uses a hash-based lookup for O(1) segment interning:
-//! - **Primary lookup**: `U64NoHashMap` from 64-bit FxHash -> list of SegmentIds
-//! - **Collision handling**: SmallVec stores multiple IDs per hash bucket
-//! - **Arena storage**: Arbitrary bytes stored contiguously in `Vec<u8>`
-//! - **NoHashHasher**: Since keys are pre-hashed with FxHash, no re-hashing needed
-//!
-//! This gives O(1) average case for `intern()` and `get_id()` operations,
-//! compared to O(N) if we had to iterate through all segments.
 //!
 //! ## Wire Format (Binary)
 //!
@@ -138,14 +126,11 @@ use ignore::overrides::OverrideBuilder;
 use nohash_hasher::BuildNoHashHasher;
 use rustc_hash::FxHasher;
 
-/// Type alias for HashMap with u64 keys that are already hashed.
-/// Uses NoHashHasher since keys don't need re-hashing.
+/// HashMap whose u64 keys are already hashes, so `NoHashHasher` skips re-hashing.
 type U64NoHashMap<V> = HashMap<u64, V, BuildNoHashHasher<u64>>;
 
-/// FxHash-based BuildHasher for general HashMap usage.
 type FxBuildHasher = std::hash::BuildHasherDefault<FxHasher>;
 
-/// Type alias for HashMap with FxHash (fast, non-cryptographic).
 type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
 
 // ============================================================================
@@ -204,7 +189,6 @@ impl Default for WalkOptions {
 }
 
 impl WalkOptions {
-    /// Create options that include all files (no filtering).
     pub fn include_all() -> Self {
         Self {
             respect_gitignore: false,
@@ -215,19 +199,16 @@ impl WalkOptions {
         }
     }
 
-    /// Set maximum depth.
     pub fn with_max_depth(mut self, depth: usize) -> Self {
         self.max_depth = Some(depth);
         self
     }
 
-    /// Set whether to respect gitignore.
     pub fn with_gitignore(mut self, respect: bool) -> Self {
         self.respect_gitignore = respect;
         self
     }
 
-    /// Set whether to skip hidden files.
     pub fn with_hidden(mut self, skip: bool) -> Self {
         self.skip_hidden = skip;
         self
@@ -238,8 +219,7 @@ impl WalkOptions {
 // SegmentId - a handle into the string interner
 // ============================================================================
 
-/// A compact identifier for an interned path segment.
-/// Using u32 allows up to 4 billion unique segments (plenty).
+/// Handle to an interned path segment; u32 allows up to 4 billion unique segments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SegmentId(u32);
 
@@ -259,31 +239,14 @@ impl SegmentId {
 
 /// Arena-based string interner for path segments.
 ///
-/// Stores all strings in a single contiguous buffer to minimize allocations
-/// and improve cache locality. Uses a hash-based lookup for O(1) interning.
-///
-/// ## Design
-///
-/// The key insight is that we need to look up strings by their content, not by
-/// arena position. We use a two-level approach:
-///
-/// 1. **Primary lookup**: HashMap from hash -> list of SegmentIds with that hash
-///    This handles hash collisions by storing multiple IDs per bucket.
-///
-/// 2. **Collision resolution**: When hashes collide, we compare actual string content.
-///    In practice, collisions are very rare with a good 64-bit hash.
-///
-/// This gives us O(1) average case for `intern()` and `get_id()` operations.
-///
-/// The interner stores arbitrary byte sequences, supporting OS-native paths
-/// that may not be valid UTF-8 (e.g., Unix paths with non-UTF-8 bytes).
+/// All segments live in one contiguous buffer, cutting allocations and improving cache locality.
+/// A hash-based lookup gives O(1) average `intern()` and `get_id()`.
+/// Segments are arbitrary byte sequences, so OS-native paths that are not valid UTF-8 are stored losslessly.
 #[derive(Debug, Clone)]
 pub struct StringInterner {
     /// Contiguous storage for all interned byte strings
     arena: Vec<u8>,
-    /// Maps hash -> SegmentId(s). Most buckets have exactly one entry.
-    /// Using SmallVec<[SegmentId; 1]> optimizes for the common case of no collisions.
-    /// Uses NoHashHasher since keys are already hashed.
+    /// Maps a segment's hash to the ids sharing it; most buckets hold exactly one.
     lookup: U64NoHashMap<smallvec::SmallVec<[SegmentId; 1]>>,
     /// Maps SegmentId to (start, len) in arena
     offsets: Vec<(u32, u16)>,
@@ -318,8 +281,7 @@ impl StringInterner {
     /// Intern a byte string, returning its SegmentId.
     /// If the string is already interned, returns the existing id.
     ///
-    /// Complexity: O(1) average case, O(k) worst case where k is the number of
-    /// hash collisions (typically 0 or 1).
+    /// Complexity: O(1) average case, O(k) worst case where k is the number of hash collisions (typically 0 or 1).
     pub fn intern_bytes(&mut self, s: &[u8]) -> SegmentId {
         let hash = Self::hash_bytes(s);
 
@@ -331,7 +293,7 @@ impl StringInterner {
                     return id;
                 }
             }
-            // Hash collision - same hash but different string
+            // Hash collision: same hash but different string
             // Fall through to add new entry
         }
 
@@ -344,7 +306,6 @@ impl StringInterner {
         let id = SegmentId::new(self.offsets.len() as u32);
         self.offsets.push((start, len));
 
-        // Add to lookup
         self.lookup.entry(hash).or_default().push(id);
 
         id
@@ -364,8 +325,7 @@ impl StringInterner {
 
     #[cfg(windows)]
     pub fn intern_os(&mut self, s: &OsStr) -> SegmentId {
-        // On Windows, use lossy UTF-8 conversion since Windows paths are UTF-16
-        // and we need a byte representation for storage
+        // On Windows, use lossy UTF-8 conversion since Windows paths are UTF-16 and we need a byte representation for storage
         self.intern_bytes(s.to_string_lossy().as_bytes())
     }
 
@@ -478,11 +438,9 @@ impl StringInterner {
 // FileEntry - a single file/directory in the index
 // ============================================================================
 
-/// Inline storage for short paths (covers 99% of cases).
-/// Paths deeper than 6 segments will heap-allocate.
+/// Paths up to 6 segments store inline (covers 99% of cases); deeper paths heap-allocate.
 const INLINE_SEGMENTS: usize = 6;
 
-/// A single entry in the file index.
 #[derive(Debug, Clone)]
 pub struct FileEntry {
     /// Path segments (e.g., ["src", "lib", "foo.rs"])
@@ -523,7 +481,6 @@ impl FileEntry {
 // PathKey - for O(1) lookup by path
 // ============================================================================
 
-/// A key for looking up entries by path.
 /// Uses the segment IDs directly for fast comparison.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct PathKey(smallvec::SmallVec<[SegmentId; INLINE_SEGMENTS]>);
@@ -538,12 +495,9 @@ impl From<&[SegmentId]> for PathKey {
 // FileIndex - the main index structure
 // ============================================================================
 
-/// A compact, serializable file index.
 #[derive(Debug, Clone)]
 pub struct FileIndex {
-    /// String interner for path segments
     interner: StringInterner,
-    /// All file entries
     entries: Vec<FileEntry>,
     /// Path to entry index lookup (for O(1) removal)
     path_to_idx: FxHashMap<PathKey, usize>,
@@ -580,15 +534,6 @@ impl FileIndex {
     ///
     /// Uses the `ignore` crate to respect `.gitignore` files and other ignore patterns.
     /// Excludes the `.git` directory by default.
-    ///
-    /// # Arguments
-    /// * `root` - The root directory to walk
-    ///
-    /// # Example
-    /// ```ignore
-    /// let index = FileIndex::from_walk("/path/to/project")?;
-    /// println!("Indexed {} files", index.len());
-    /// ```
     pub fn from_walk(root: impl AsRef<Path>) -> io::Result<Self> {
         Self::from_walk_with_options(root, WalkOptions::default())
     }
@@ -620,7 +565,6 @@ impl FileIndex {
             builder.overrides(overrides);
         }
 
-        // Use parallel walking for better performance
         if options.parallel {
             builder.threads(num_cpus());
         }
@@ -635,29 +579,24 @@ impl FileIndex {
 
             let path = entry.path();
 
-            // Skip the root itself
             if path == root_canonical {
                 continue;
             }
 
-            // Get file type
             let file_type = match entry.file_type() {
                 Some(ft) => ft,
                 None => continue,
             };
 
-            // Only index files and directories
             if !file_type.is_file() && !file_type.is_dir() {
                 continue;
             }
 
-            // Get relative path
             let rel_path = match path.strip_prefix(&root_canonical) {
                 Ok(p) => p,
                 Err(_) => continue,
             };
 
-            // Skip empty paths
             if rel_path.as_os_str().is_empty() {
                 continue;
             }
@@ -668,12 +607,10 @@ impl FileIndex {
         Ok(index)
     }
 
-    /// Insert a path into the index.
     pub fn insert(&mut self, path: impl AsRef<Path>, is_dir: bool) {
         let segments = self.intern_path(path.as_ref());
         let key = PathKey::from(segments.as_slice());
 
-        // Check for duplicate
         if self.path_to_idx.contains_key(&key) {
             return;
         }
@@ -683,7 +620,6 @@ impl FileIndex {
         self.path_to_idx.insert(key, idx);
     }
 
-    /// Remove a path from the index.
     /// Returns true if the path was found and removed.
     pub fn remove(&mut self, path: impl AsRef<Path>) -> bool {
         let segments = self.intern_path(path.as_ref());
@@ -694,7 +630,6 @@ impl FileIndex {
             self.entries[idx].segments.clear();
             self.removed_count += 1;
 
-            // Compact if too many tombstones
             if self.removed_count > self.entries.len() / 4 {
                 self.compact();
             }
@@ -704,7 +639,6 @@ impl FileIndex {
         }
     }
 
-    /// Check if a path exists in the index.
     pub fn contains(&self, path: impl AsRef<Path>) -> bool {
         let segments = self.path_segments(path.as_ref());
         let key = PathKey::from(segments.as_slice());
@@ -752,7 +686,6 @@ impl FileIndex {
         self.entries.iter().filter(|e| !e.segments.is_empty())
     }
 
-    /// Reconstruct a path string from segments.
     /// Reconstruct a path as a BString (supports non-UTF-8 paths).
     pub fn reconstruct_path_bstr(&self, segments: &[SegmentId]) -> BString {
         let mut path = BString::new(Vec::new());
@@ -772,12 +705,10 @@ impl FileIndex {
         self.reconstruct_path_bstr(segments).to_string()
     }
 
-    /// Get a segment as bytes by id.
     pub fn get_segment_bytes(&self, id: SegmentId) -> Option<&[u8]> {
         self.interner.get_bytes(id)
     }
 
-    /// Get a segment as BStr by id.
     pub fn get_segment_bstr(&self, id: SegmentId) -> Option<&BStr> {
         self.interner.get_bstr(id)
     }
@@ -800,7 +731,7 @@ impl FileIndex {
     }
 
     fn path_segments(&self, path: &Path) -> smallvec::SmallVec<[SegmentId; INLINE_SEGMENTS]> {
-        // For lookup only - doesn't intern new segments
+        // For lookup only: doesn't intern new segments
         // Uses O(1) get_os_id instead of O(N) iteration
         path.components()
             .map(|c| c.as_os_str())
@@ -1001,24 +932,18 @@ impl FileIndex {
 // FileIndexDelta - incremental updates
 // ============================================================================
 
-/// An incremental update to the file index.
 #[derive(Debug, Clone)]
 pub enum FileIndexDelta {
-    /// Add new entries
     Add(Vec<(String, bool)>),
-    /// Remove entries by path
     Remove(Vec<String>),
-    /// Multiple operations batched
     Batch(Vec<FileIndexDelta>),
 }
 
 impl FileIndexDelta {
-    /// Create an add delta.
     pub fn add(entries: Vec<(String, bool)>) -> Self {
         Self::Add(entries)
     }
 
-    /// Create a remove delta.
     pub fn remove(paths: Vec<String>) -> Self {
         Self::Remove(paths)
     }
@@ -1032,7 +957,6 @@ impl FileIndexDelta {
         }
     }
 
-    /// Apply this delta to an index.
     pub fn apply_to(&self, index: &mut FileIndex) {
         match self {
             FileIndexDelta::Add(entries) => {
@@ -1079,7 +1003,6 @@ impl FileIndexDelta {
         }
     }
 
-    /// Deserialize from JSON.
     pub fn from_json(value: &serde_json::Value) -> Option<Self> {
         let op = value.get("op")?.as_str()?;
         match op {
@@ -1150,8 +1073,7 @@ mod tests {
         assert!(index.contains("src/lib.rs"));
         assert!(!index.contains("src/foo.rs"));
 
-        // Check interning worked
-        assert!(index.num_segments() < 6); // "src" should be shared
+        assert!(index.num_segments() < 6); // "src" is interned once across the three src/ paths
     }
 
     #[test]
@@ -1262,7 +1184,6 @@ mod tests {
         // Create hidden file (should be excluded by default)
         std::fs::write(root.join(".hidden"), "secret").unwrap();
 
-        // Build index
         let index = FileIndex::from_walk(root).unwrap();
 
         // Check expected files are present
@@ -1324,7 +1245,6 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let root = temp_dir.path();
 
-        // Create .gitignore
         std::fs::write(root.join(".gitignore"), "*.log\ntarget/\n").unwrap();
 
         // Create files
@@ -1379,22 +1299,16 @@ mod tests {
 
     #[test]
     fn test_delta_is_empty() {
-        // Empty add
         assert!(FileIndexDelta::Add(vec![]).is_empty());
 
-        // Non-empty add
         assert!(!FileIndexDelta::Add(vec![("src/main.rs".to_string(), false)]).is_empty());
 
-        // Empty remove
         assert!(FileIndexDelta::Remove(vec![]).is_empty());
 
-        // Non-empty remove
         assert!(!FileIndexDelta::Remove(vec!["src/main.rs".to_string()]).is_empty());
 
-        // Empty batch
         assert!(FileIndexDelta::Batch(vec![]).is_empty());
 
-        // Batch with empty deltas
         assert!(
             FileIndexDelta::Batch(vec![
                 FileIndexDelta::Add(vec![]),
@@ -1403,7 +1317,6 @@ mod tests {
             .is_empty()
         );
 
-        // Batch with one non-empty delta
         assert!(
             !FileIndexDelta::Batch(vec![
                 FileIndexDelta::Add(vec![]),
@@ -1464,7 +1377,7 @@ mod tests {
             let segment = format!("segment_{}", i);
             assert_eq!(interner.intern(&segment), id);
         }
-        assert_eq!(interner.len(), segment_count); // No new segments added
+        assert_eq!(interner.len(), segment_count);
     }
 
     #[test]
@@ -1494,16 +1407,13 @@ mod tests {
         // Total entries: 5 dirs + 5*5 subdirs + 5*5*5 files = 5 + 25 + 125 = 155
         assert_eq!(index.len(), 155);
 
-        // Interning should be efficient - many shared segments
         // dirs (5) + subdirs (5) + files (5) = 15 unique segments
         assert_eq!(index.num_segments(), 15);
 
-        // Lookup should be O(1)
         assert!(index.contains("src/utils/mod.rs"));
         assert!(index.contains("lib/core/main.rs"));
         assert!(!index.contains("nonexistent/path/file.rs"));
 
-        // Removal should work correctly
         assert!(index.remove("src/utils/mod.rs"));
         assert!(!index.contains("src/utils/mod.rs"));
         assert_eq!(index.len(), 154);
@@ -1521,11 +1431,9 @@ mod tests {
         let initial_segments = index.num_segments();
 
         // contains() uses path_segments() internally
-        // It should NOT intern new segments for non-existent paths
         assert!(!index.contains("foo/bar/baz.rs"));
         assert!(!index.contains("nonexistent.txt"));
 
-        // Segment count should be unchanged
         assert_eq!(index.num_segments(), initial_segments);
     }
 
@@ -1540,23 +1448,18 @@ mod tests {
         assert_eq!(interner.get_bytes(id_valid), Some(b"hello".as_slice()));
 
         // Intern raw bytes that are not valid UTF-8
-        let invalid_utf8: &[u8] = &[0x80, 0x81, 0x82]; // Invalid UTF-8 sequence
+        let invalid_utf8: &[u8] = &[0x80, 0x81, 0x82];
         let id_invalid = interner.intern_bytes(invalid_utf8);
 
-        // get() should return None for non-UTF-8
         assert_eq!(interner.get(id_invalid), None);
 
-        // get_bytes() should return the exact bytes
         assert_eq!(interner.get_bytes(id_invalid), Some(invalid_utf8));
 
-        // get_bstr() should work and preserve bytes
         assert_eq!(interner.get_bstr(id_invalid), Some(BStr::new(invalid_utf8)));
 
-        // Interning the same bytes again should return the same ID
         let id_invalid2 = interner.intern_bytes(invalid_utf8);
         assert_eq!(id_invalid, id_invalid2);
 
-        // get_bytes_id should find the bytes
         assert_eq!(interner.get_bytes_id(invalid_utf8), Some(id_invalid));
 
         // iter() returns BStr which works for all bytes

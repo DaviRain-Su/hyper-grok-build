@@ -6,9 +6,8 @@ use super::{
 use std::{fs, io};
 use tempfile::TempDir;
 
-/// Write a session summary under the *encoded* cwd dir (matching how the
-/// resume helpers locate sessions). `sandbox_profile` is included only when
-/// `Some`, mirroring older summaries that predate the field.
+/// Write a session summary under the *encoded* cwd dir (matching how the resume helpers locate sessions).
+/// `sandbox_profile` is included only when `Some`, mirroring older summaries that predate the field.
 fn write_session(
     root: &std::path::Path,
     cwd: &str,
@@ -87,8 +86,7 @@ fn explicit_remote_id_resolves_local_child_profile() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().join("sessions");
     let cwd = "/work/remote";
-    // A remote session restored into a local child: the child has a fresh
-    // id and records `parent_session_id` = the remote id.
+    // A remote session restored into a local child: the child has a fresh id and records the remote id as `parent_session_id`
     let encoded = crate::util::grok_home::encode_cwd_dirname(cwd);
     let dir = root.join(&encoded).join("local-child");
     fs::create_dir_all(&dir).unwrap();
@@ -109,7 +107,7 @@ fn explicit_remote_id_resolves_local_child_profile() {
         resumed_session_sandbox_profile_in_root(Some("remote-xyz"), Some(cwd), &root),
         Some("workspace".to_string())
     );
-    // Without a cwd the child can't be located -> None.
+    // Without a cwd the child can't be located, so the lookup returns None
     assert_eq!(
         resumed_session_sandbox_profile_in_root(Some("remote-xyz"), None, &root),
         None
@@ -325,7 +323,6 @@ fn most_recent_cwd_skips_hidden_session() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().join("sessions");
     let cwd = "/work/proj";
-    // Older, visible session.
     write_session(
         &root,
         cwd,
@@ -335,8 +332,7 @@ fn most_recent_cwd_skips_hidden_session() {
         Some("workspace"),
         false,
     );
-    // Newer, hidden (e.g. subagent) session — the most-recent peek must
-    // ignore it, matching what `list_sessions` resumes.
+    // Newer, hidden (e.g. subagent) session: the most-recent peek must ignore it, matching what `list_sessions` resumes.
     write_session(
         &root,
         cwd,

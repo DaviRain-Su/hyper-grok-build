@@ -50,7 +50,7 @@ fn test_actor_inner(
             pending_notification: None,
             rx,
             remote_sync,
-            // Resumed-style actor for these tests; upgrade backfill is fresh-only.
+            // These tests run the actor as resumed; the backfill on writeback upgrade only runs for a fresh session
             created_fresh: false,
             relay_sync: None,
             summary,
@@ -61,6 +61,9 @@ fn test_actor_inner(
             disk_full_notified: false,
             dirty_files: Default::default(),
             pending_write_error: None,
+            last_usage_live: None,
+            last_usage_turn: None,
+            last_incoming_turn: None,
         }
         .run(),
     );
@@ -1019,10 +1022,10 @@ async fn flush_and_ack_propagates_session_file_sync_error_through_the_ack() {
 }
 
 /// Baselines on APFS (M-series laptop SSD), 50 iterations, medians:
-/// prompt-send FlushAndAck round-trip ~26 ms (max ~48 ms); idle FlushAndAck
-/// ~30-40 us with zero file syncs (was ~5 ms for the fixed 5-file set before
-/// dirty tracking); barrier sync of 2 dirty files + dir ~4-5 ms; summary.json
-/// atomic rewrite (per-append bookkeeping) ~10 ms.
+/// prompt-send FlushAndAck round-trip ~26 ms (max ~48 ms);
+/// idle FlushAndAck ~30-40 us with zero file syncs (was ~5 ms for the fixed 5-file set before dirty tracking);
+/// barrier sync of 2 dirty files and their dir ~4-5 ms;
+/// summary.json atomic rewrite (per-append bookkeeping) ~10 ms.
 #[tokio::test]
 #[ignore = "manual durability-cost measurement; run with --ignored --nocapture and RUST_MIN_STACK=8388608"]
 async fn measure_prompt_barrier_idle_barrier_and_summary_rewrite_cost() {
@@ -1158,10 +1161,7 @@ async fn probe_writable(handle: &PersistenceHandle) -> io::Result<()> {
     rx.await.unwrap()
 }
 
-/// Manual rename → next `RemoteSync` flush must not revert the backend title.
-///
-/// Seeds `RemoteSync` with a pre-rename title (the cache at init), drives
-/// `PersistenceMsg::ManualTitleRenamed`, then queues an update and flushes.
+/// Seeds `RemoteSync` with a pre-rename title (the cache at init), drives `PersistenceMsg::ManualTitleRenamed`, then queues an update and flushes.
 /// The flush's `save_session_data` payload must carry the manual title.
 #[tokio::test]
 async fn manual_rename_next_flush_does_not_revert_backend_title() {
@@ -1586,10 +1586,10 @@ async fn manual_title_renamed_is_noop_without_remote_sync() {
     actor.stop().await;
 }
 
-/// Auto → manual → unpin: generator starts Done (as production `load` would),
-/// a ContentChunk before reset must not spawn, ResetTitleToAuto must
-/// `reset()` + clear the remote pin, and a later ContentChunk must adopt
-/// via the fallback (empty model, no live LLM).
+/// The title goes auto, then manual, then unpinned; the generator starts Done (as production `load` would).
+/// A ContentChunk before reset must not spawn.
+/// ResetTitleToAuto must `reset()` and clear the remote pin.
+/// A later ContentChunk must adopt via the fallback (empty model, no live LLM).
 #[tokio::test]
 async fn reset_title_to_auto_then_generated_title_is_adopted() {
     use std::sync::Arc;
@@ -1815,9 +1815,8 @@ async fn reset_title_to_auto_then_generated_title_is_adopted() {
     actor.stop().await;
 }
 
-/// In-flight first-chunk generation overlapping unpin: disk is already blank
-/// when the stale `GeneratedTitle` arrives, so if-absent adopts it as auto
-/// (never re-pins).
+/// A title generation from the first chunk is still running when the unpin lands.
+/// Disk is already blank when the stale `GeneratedTitle` arrives, so `set_generated_title_if_absent` adopts it as auto (never re-pins).
 #[tokio::test]
 async fn reset_title_to_auto_adopts_in_flight_generation_as_auto() {
     use std::sync::Arc;
@@ -1882,8 +1881,8 @@ async fn reset_title_to_auto_adopts_in_flight_generation_as_auto() {
     actor.stop().await;
 }
 
-/// Non-resident unpin only patches disk. The next load sees a blank
-/// `display_title()` so the generator stays Idle and a ContentChunk adopts.
+/// An unpin while the session is not resident only patches disk.
+/// The next load sees a blank `display_title()` so the generator stays Idle and a ContentChunk adopts.
 #[tokio::test]
 async fn non_resident_reset_then_load_regenerates() {
     use std::sync::Arc;
@@ -2074,14 +2073,13 @@ mod prompt_file_tests {
 
         let path = get_prompt_file_path_in(home.path(), &info, 0);
 
-        // The chain below prompts/ is ensure_owner_only_session_dir_in's job,
-        // pinned by ensure_owner_only_session_dir_tightens_chain — only the
-        // prompts/ level is this path's own creation.
+        // The chain below prompts/ is ensure_owner_only_session_dir_in's job, pinned by ensure_owner_only_session_dir_tightens_chain
+        // Only the prompts/ level is this path's own creation
         let prompts_dir = path.parent().unwrap();
         assert_eq!(unix_mode(prompts_dir), 0o700, "prompts dir must be 0700");
     }
 
-    /// The chat-kind (noop-persistence) writers' dir creator.
+    /// ensure_owner_only_session_dir_in is the dir creator for chat-kind (noop-persistence) writers.
     #[test]
     fn ensure_owner_only_session_dir_tightens_chain() {
         let home = tempfile::TempDir::new().unwrap();
@@ -2190,9 +2188,8 @@ mod prompt_file_tests {
         );
     }
 
-    /// Hash-encoded `.cwd` contents must hit stable media before the parent
-    /// dir sync that durableizes the direntry. Otherwise power loss can freeze
-    /// a present-but-torn marker and path recovery cannot fall back to missing.
+    /// Hash-encoded `.cwd` contents must hit stable media before the parent dir sync that makes the direntry durable.
+    /// Otherwise power loss can freeze a present-but-torn marker and path recovery cannot fall back to missing.
     #[test]
     fn hash_encoded_cwd_marker_is_synced_before_parent_dir_sync() {
         let home = tempfile::TempDir::new().unwrap();

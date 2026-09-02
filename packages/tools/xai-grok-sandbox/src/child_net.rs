@@ -77,8 +77,7 @@ mod ns_lockdown {
             SYS_fsconfig, SYS_fsmount, SYS_fsopen, SYS_mount, SYS_mount_setattr, SYS_move_mount,
             SYS_pivot_root, SYS_umount2,
         };
-        // open_tree is 428 in the architecture-generic Linux syscall table but
-        // is missing from some libc target headers.
+        // open_tree is 428 in the architecture-generic Linux syscall table but is missing from some libc target headers
         const SYS_OPEN_TREE: u32 = 428;
         [
             SYS_mount as u32,
@@ -100,10 +99,9 @@ mod ns_lockdown {
 
     /// Classic BPF namespace lockdown.
     ///
-    /// - mount API, `unshare`, `setns`, and legacy `clone(CLONE_NEW*)` → EPERM
-    /// - `clone3` → ENOSYS (flags live in a pointed-to struct classic BPF cannot
-    ///   inspect; ENOSYS makes libc fall back to legacy clone for ordinary
-    ///   spawn, while direct malicious clone3 cannot create namespaces)
+    /// The mount API, `unshare`, `setns`, and legacy `clone(CLONE_NEW*)` return EPERM.
+    /// `clone3` returns ENOSYS: its flags live in a pointed-to struct classic BPF cannot inspect.
+    /// ENOSYS makes libc fall back to legacy clone for ordinary spawn, while direct malicious clone3 cannot create namespaces.
     pub fn build_namespace_lockdown_filter() -> Vec<sock_filter> {
         use libc::{
             BPF_ABS, BPF_JEQ, BPF_JMP, BPF_JSET, BPF_K, BPF_LD, BPF_RET, BPF_W, SYS_clone,
@@ -179,8 +177,7 @@ mod ns_lockdown {
     }
 }
 
-/// Connect/send equivalents, including `io_uring_*` / `sendmmsg` which never
-/// enter `SYS_connect` / `SYS_sendmsg`.
+/// Connect/send equivalents, including `io_uring_*` / `sendmmsg` which never enter `SYS_connect` / `SYS_sendmsg`.
 #[cfg(target_os = "linux")]
 fn child_network_blocked_syscalls() -> [u32; 11] {
     use libc::{
@@ -222,10 +219,9 @@ fn build_child_network_filter() -> Vec<libc::sock_filter> {
 
 /// The child-network BPF program, built once in the parent process.
 ///
-/// `pre_exec` closures run between `fork` and `exec` in a multi-threaded
-/// process: another thread can hold the allocator lock at fork, so any heap
-/// allocation there can deadlock the child. Install therefore only references
-/// this parent-built buffer.
+/// `pre_exec` closures run between `fork` and `exec` in a multi-threaded process.
+/// Another thread can hold the allocator lock at fork, so any heap allocation there can deadlock the child.
+/// Install therefore only references this parent-built buffer.
 #[cfg(target_os = "linux")]
 pub fn prebuilt_child_network_filter() -> &'static [libc::sock_filter] {
     static FILTER: std::sync::OnceLock<Vec<libc::sock_filter>> = std::sync::OnceLock::new();
@@ -235,15 +231,13 @@ pub fn prebuilt_child_network_filter() -> &'static [libc::sock_filter] {
 /// Install a parent-built child-network filter.
 ///
 /// # Safety
-/// After fork / before exec. Only async-signal-safe work is allowed here:
-/// this performs two `prctl` syscalls against the parent-built program and
-/// must never allocate, lock, log, format, or read the environment.
+/// After fork / before exec. Only async-signal-safe work is allowed here.
+/// This performs two `prctl` syscalls against the parent-built program and must never allocate, lock, log, format, or read the environment.
 #[cfg(target_os = "linux")]
 pub unsafe fn install_child_network_filter(filter: &[libc::sock_filter]) -> std::io::Result<()> {
     use libc::{PR_SET_NO_NEW_PRIVS, PR_SET_SECCOMP, SECCOMP_MODE_FILTER, prctl, sock_fprog};
 
-    // PR_SET_SECCOMP copies the program into the kernel and never writes
-    // through this pointer; sock_fprog merely lacks a const field.
+    // PR_SET_SECCOMP copies the program into the kernel and never writes through this pointer; sock_fprog merely lacks a const field
     let prog = sock_fprog {
         len: filter.len() as u16,
         filter: filter.as_ptr().cast_mut(),
@@ -279,21 +273,17 @@ pub unsafe fn install_namespace_lockdown_filter() -> std::io::Result<()> {
 
 /// Deny child networking on `cmd` when the active sandbox restricts it.
 ///
-/// The launch-time runtime-socket masks (see [`crate::runtime_sockets`]) only
-/// cover sockets that existed at startup and do not survive a daemon
-/// unlink/recreate, so the session-long guarantee is this per-spawn seccomp
-/// filter: it denies the network syscalls themselves for the child's whole
-/// lifetime, regardless of when a socket appears.
+/// The launch-time runtime-socket masks (see [`crate::runtime_sockets`]) only cover sockets that existed at startup.
+/// They do not survive a daemon unlink/recreate, so the session-long guarantee is this per-spawn seccomp filter.
+/// It denies the network syscalls themselves for the child's whole lifetime, regardless of when a socket appears.
 ///
-/// The boundary this pair of wrappers draws: every spawn of an approved
-/// user- or workspace-authored executable (terminal commands, stdio MCP
-/// servers, hook commands, alternate bash tools, shell state capture, LSP
-/// servers, notification hooks, `.envrc` evaluators) must call this or
-/// [`restrict_child_network_std`] instead of hand-rolling the `pre_exec`
-/// install. Trusted infrastructure children the agent itself drives (git/VCS,
-/// the bwrap re-exec, clipboard/image helpers, the updater) intentionally keep
-/// the parent's network. No-op when the sandbox does not restrict child
-/// networking, and on non-Linux targets.
+/// This function and [`restrict_child_network_std`] draw the boundary between restricted and trusted children.
+/// Every spawn of an approved user- or workspace-authored executable must call one of them instead of hand-rolling the `pre_exec` install.
+/// That covers terminal commands, stdio MCP servers, hook commands, alternate bash tools, and shell state capture.
+/// It also covers LSP servers, notification hooks, and `.envrc` evaluators.
+/// Trusted infrastructure children the agent itself drives intentionally keep the parent's network.
+/// Those are git/VCS, the bwrap re-exec, clipboard/image helpers, and the updater.
+/// No-op when the sandbox does not restrict child networking, and on non-Linux targets.
 pub fn restrict_child_network(cmd: &mut tokio::process::Command) {
     #[cfg(target_os = "linux")]
     if crate::should_restrict_child_network() {

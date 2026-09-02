@@ -2,9 +2,9 @@
 //!
 //! Features:
 //! - Connection state machine with Disconnected, Connecting, Connected states
-//! - Disk-based sync cursor for offline resilience
+//! - The sync cursor persists to disk so a session can pick up after being offline
 //! - Status callbacks for TUI indicators
-//! - Graceful degradation when relay is unavailable
+//! - Sessions keep working when the relay is unavailable
 //!
 //! Reconnection is handled by `run_relay_loop` in the relay module.
 
@@ -34,8 +34,8 @@ pub(crate) fn build_share_url(session_id: &str) -> String {
 
 /// Connection state for the relay sync.
 ///
-/// Note: reconnection is handled internally by `run_relay_loop` in relay.rs.
-/// The sync task only observes Disconnected → Connecting → Connected transitions.
+/// Reconnection is handled internally by `run_relay_loop` in relay.rs.
+/// The sync task only observes the transitions from Disconnected through Connecting to Connected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectionState {
     /// Not connected to relay.
@@ -47,7 +47,6 @@ pub enum ConnectionState {
 }
 
 impl ConnectionState {
-    /// Returns true if currently connected.
     pub fn is_connected(&self) -> bool {
         matches!(self, ConnectionState::Connected)
     }
@@ -91,10 +90,8 @@ pub struct RelaySyncState {
 
 /// Status of relay sync for a session.
 ///
-/// This status is based solely on the relay sync state file (`relay_sync.json`),
-/// not on comparing against `updates.jsonl` line counts, since those two numbers
-/// measure different things and can diverge (e.g., historical sessions created
-/// before relay sync was enabled, filtered event types, etc.).
+/// This status is based solely on the relay sync state file (`relay_sync.json`), not on comparing against `updates.jsonl` line counts.
+/// Those two numbers measure different things and can diverge (e.g., sessions created before relay sync was enabled, filtered event types).
 #[derive(Debug, Clone)]
 pub struct SyncStatus {
     /// Whether relay sync state file exists (i.e., relay sync was enabled for this session).
@@ -108,7 +105,6 @@ pub struct SyncStatus {
 }
 
 impl RelaySyncState {
-    /// Load sync state from disk.
     pub fn load(session_dir: &std::path::Path) -> Self {
         let path = Self::state_path(session_dir);
         match std::fs::read_to_string(&path) {
@@ -131,12 +127,10 @@ impl RelaySyncState {
         std::fs::rename(tmp_path, path)
     }
 
-    /// Get the path to the sync state file.
     fn state_path(session_dir: &std::path::Path) -> PathBuf {
         session_dir.join("relay_sync.json")
     }
 
-    /// Check if sync state file exists for a session.
     pub fn exists(session_dir: &std::path::Path) -> bool {
         Self::state_path(session_dir).exists()
     }
@@ -155,16 +149,9 @@ impl RelaySyncState {
 
     /// Get the sync status for a session based on its relay sync state file.
     ///
-    /// This reads only the `relay_sync.json` file and does **not** compare against
-    /// `updates.jsonl` line counts, since `synced_count` and line count measure
-    /// different things (relay-queued events vs. all session updates) and can diverge
-    /// for sessions created before relay sync was enabled.
-    ///
-    /// # Arguments
-    /// * `session_dir` - Path to the session directory
-    ///
-    /// # Returns
-    /// A `SyncStatus` struct with sync statistics.
+    /// This reads only the `relay_sync.json` file and does **not** compare against `updates.jsonl` line counts.
+    /// `synced_count` and the line count measure different things (relay-queued events vs. all session updates).
+    /// They can diverge for sessions created before relay sync was enabled.
     pub fn get_sync_status(session_dir: &std::path::Path) -> SyncStatus {
         let has_sync_state = Self::exists(session_dir);
         let sync_state = Self::load(session_dir);
@@ -181,7 +168,6 @@ impl RelaySyncState {
 /// Callback for connection state changes (TUI status bar).
 pub type StatusCallback = Arc<dyn Fn(ConnectionState) + Send + Sync + 'static>;
 
-/// Messages for the relay sync task.
 enum RelaySyncMsg {
     /// Queue a notification to be sent to relay.
     Queue(Box<acp::SessionNotification>),
@@ -193,14 +179,14 @@ enum RelaySyncMsg {
 
 /// Syncs session updates to the relay via WebSocket.
 ///
-/// Provides a non-blocking API for queuing notifications. WebSocket communication
-/// happens in a background task, ensuring the main session loop is never blocked.
+/// Provides a non-blocking API for queuing notifications.
+/// WebSocket communication happens in a background task, so the main session loop never blocks.
 ///
-/// Reconnection is handled by `run_relay_loop` in relay.rs. This struct only
-/// manages the queue/flush lifecycle and connection state observation.
+/// Reconnection is handled by `run_relay_loop` in relay.rs.
+/// This struct only manages the queue/flush lifecycle and connection state observation.
 ///
 /// # Features
-/// - Disk-based sync cursor for offline resilience
+/// - The sync cursor persists to disk so a session can pick up after being offline
 /// - Connection state observation via [`Self::connection_state`]
 /// - Backpressure with configurable buffer limits
 pub struct RelaySync {
@@ -218,17 +204,8 @@ pub struct RelaySync {
 }
 
 impl RelaySync {
-    /// Create a new relay sync instance.
-    ///
-    /// Returns a `RelaySync` that queues notifications and syncs them to the relay
-    /// in a background task. Connection state can be observed via `connection_state()`.
-    ///
-    /// # Arguments
-    /// * `session_id` - The session ID to sync
-    /// * `config` - Relay connection configuration
-    /// * `agent_type` - Type of agent (TUI or headless)
-    /// * `session_dir` - Directory for persisting sync state
-    /// * `status_cb` - Optional callback for connection state changes
+    /// Returns a `RelaySync` that queues notifications and syncs them to the relay in a background task.
+    /// Connection state can be observed via `connection_state()`.
     pub fn new(
         session_id: String,
         config: RelayConfig,
@@ -269,7 +246,6 @@ impl RelaySync {
         }
     }
 
-    /// Queue a notification to be sent to relay.
     /// Skips replay notifications to prevent loops.
     pub fn queue(&self, notification: acp::SessionNotification) {
         let is_replay = notification
@@ -292,38 +268,31 @@ impl RelaySync {
         }
     }
 
-    /// Flush all pending notifications immediately.
     pub fn flush(&self) {
         let _ = self.tx.send(RelaySyncMsg::Flush);
     }
 
-    /// Get the session ID.
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
 
-    /// Get the agent type.
     pub fn agent_type(&self) -> AgentType {
         self.agent_type
     }
 
-    /// Get the current connection state.
     pub(crate) fn connection_state(&self) -> ConnectionState {
         *self.connection_state_rx.borrow()
     }
 
-    /// Check if currently connected to relay.
     pub fn is_connected(&self) -> bool {
         self.connection_state().is_connected()
     }
 
-    /// Get the number of pending events waiting to sync.
     pub fn pending_count(&self) -> usize {
         self.pending_count
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Subscribe to connection state changes.
     pub(crate) fn subscribe_state(&self) -> watch::Receiver<ConnectionState> {
         self.connection_state_rx.clone()
     }
@@ -337,7 +306,6 @@ impl Drop for RelaySync {
     }
 }
 
-/// Configuration for the relay sync background task.
 struct RelaySyncTaskConfig {
     session_id: String,
     config: RelayConfig,
@@ -346,12 +314,9 @@ struct RelaySyncTaskConfig {
     status_cb: Option<StatusCallback>,
 }
 
-/// Main relay sync task.
-///
-/// Reconnection is handled by `run_relay_loop` in relay.rs, so this task
-/// is a single flat loop that processes local queue/flush messages and
-/// incoming messages from the relay. The `Connected` state is only set
-/// after a successful initialize handshake with the relay.
+/// Reconnection is handled by `run_relay_loop` in relay.rs.
+/// This task is a single flat loop that processes local queue/flush messages and incoming messages from the relay.
+/// The `Connected` state is only set after a successful initialize handshake with the relay.
 async fn relay_sync_task(
     cfg: RelaySyncTaskConfig,
     mut rx: mpsc::UnboundedReceiver<RelaySyncMsg>,
@@ -369,7 +334,6 @@ async fn relay_sync_task(
         .map(|dir| RelaySyncState::load(dir))
         .unwrap_or_default();
 
-    // Helper to update state and notify callback
     let update_state = |state: ConnectionState| {
         let _ = state_tx.send(state);
         if let Some(cb) = &cfg.status_cb {
@@ -377,23 +341,19 @@ async fn relay_sync_task(
         }
     };
 
-    // Set initial state to Connecting
     update_state(ConnectionState::Connecting);
 
-    // Create channels for WebSocket communication
     let (from_relay_tx, mut from_relay_rx) = mpsc::unbounded_channel::<String>();
 
     // Spawn the relay connection (reconnection is handled internally by run_relay_loop)
     let (to_relay_tx, _relay_handle) =
         spawn_relay_connection(cfg.config, from_relay_tx, cancel.clone());
 
-    // Track if we've completed initialization.
     // Flush is deferred until the initialize handshake completes (see gate below).
     let mut initialized = false;
 
-    // Main message loop — flat, no outer reconnection loop.
-    // Uses random polling (no `biased;`); the `initialized` gate prevents
-    // premature flushes regardless of which branch fires first.
+    // Main message loop: flat, no outer reconnection loop
+    // Uses random polling (no `biased;`); the `initialized` gate prevents premature flushes regardless of which branch fires first
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
@@ -440,8 +400,7 @@ async fn relay_sync_task(
                         pending.push(*notification);
                     }
                     Some(RelaySyncMsg::Flush) => {
-                        // Don't flush until the initialize handshake is complete;
-                        // the relay may reject or drop messages before then.
+                        // Don't flush until the initialize handshake is complete; the relay may reject or drop messages before then
                         if !initialized {
                             tracing::debug!(
                                 session_id = %session_id,
@@ -452,13 +411,11 @@ async fn relay_sync_task(
                         }
 
                         // Send pending notifications, preserving unsent items on failure.
-                        // We iterate by index so that on send failure the remaining
-                        // items stay in `pending` instead of being consumed by drain.
+                        // We iterate by index so that on send failure the remaining items stay in `pending` instead of being consumed by drain
                         let mut sent_count = 0;
                         while sent_count < pending.len() {
                             let notification = &pending[sent_count];
-                            // Generate event ID for sync tracking
-                            // Use consistent {sessionId}-{counter} format to match agent event IDs
+                            // The {sessionId}-{counter} format matches the agent's event IDs
                             let event_id = resolve_event_id(notification);
 
                             let json_rpc = json!({
@@ -475,9 +432,8 @@ async fn relay_sync_task(
 
                             if to_relay_tx.send(json_rpc.to_string()).is_ok() {
                                 sent_count += 1;
-                                // Note: cursor tracks channel enqueue, not delivery.
-                                // Events may be lost if the connection drops between
-                                // enqueue and socket write.
+                                // The cursor tracks channel enqueue, not delivery
+                                // Events may be lost if the connection drops between enqueue and socket write
                                 sync_state.update_cursor(event_id);
                             } else {
                                 tracing::debug!(
@@ -494,7 +450,6 @@ async fn relay_sync_task(
                             pending.drain(0..sent_count);
                         }
 
-                        // Update pending count
                         pending_count.fetch_sub(sent_count, std::sync::atomic::Ordering::Relaxed);
 
                         // Persist sync state synchronously to guarantee write ordering.
@@ -525,10 +480,8 @@ async fn relay_sync_task(
 
 /// Resolve the event ID for a notification being flushed to the relay.
 ///
-/// Preserves the `eventId` from the notification's meta if present; otherwise
-/// generates a consistent `{sessionId}-{counter}` ID via the global event_id
-/// counter. This ensures event IDs are always monotonically increasing and
-/// comparable by the relay, avoiding gaps caused by random UUIDs.
+/// Preserves the `eventId` from the notification's meta if present; otherwise generates a `{sessionId}-{counter}` ID via the global event_id counter.
+/// Event IDs stay monotonically increasing and comparable by the relay, avoiding gaps caused by random UUIDs.
 fn resolve_event_id(notification: &acp::SessionNotification) -> String {
     notification
         .meta
@@ -539,7 +492,6 @@ fn resolve_event_id(notification: &acp::SessionNotification) -> String {
         .unwrap_or_else(|| crate::util::event_id::generate_event_id(&notification.session_id.0))
 }
 
-/// Handle an incoming message from the relay.
 fn handle_relay_message(
     session_id: &str,
     to_relay_tx: &mpsc::UnboundedSender<String>,
@@ -556,11 +508,10 @@ fn handle_relay_message(
 
     match method {
         Some("initialize") => {
-            // Relay is sending us an initialize request - respond with our metadata
+            // Relay is sending us an initialize request; respond with our metadata
             if let Some(request_id) = id {
                 tracing::debug!(session_id = %session_id, "RelaySync: received initialize request from relay");
 
-                // Get hostname
                 let hostname = gethostname::gethostname()
                     .into_string()
                     .unwrap_or_else(|_| "unknown".to_string());
@@ -812,7 +763,6 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let dir_path = temp_dir.path().join("nonexistent");
 
-        // Should return default when file doesn't exist
         let state = RelaySyncState::load(&dir_path);
         assert!(state.last_synced_event_id.is_none());
         assert_eq!(state.synced_count, 0);
@@ -921,20 +871,17 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let session_dir = temp_dir.path();
 
-        // Initially doesn't exist
         assert!(!RelaySyncState::exists(session_dir));
 
         // Create sync state
         let sync_state = RelaySyncState::default();
         sync_state.save(session_dir).unwrap();
 
-        // Now exists
         assert!(RelaySyncState::exists(session_dir));
     }
 
     // ===== resolve_event_id Tests =====
 
-    /// Helper to build a minimal SessionNotification for testing.
     fn make_notification(
         session_id: &str,
         meta: Option<serde_json::Value>,
@@ -999,8 +946,7 @@ mod tests {
             .map(|id| id.rsplit('-').next().unwrap().parse::<u64>().unwrap())
             .collect();
 
-        // Verify strictly increasing (the global counter is shared across
-        // parallel tests, so gaps are expected – only monotonicity matters).
+        // Verify strictly increasing (the global counter is shared across parallel tests, so gaps are expected; only monotonicity matters)
         for window in counters.windows(2) {
             assert!(
                 window[1] > window[0],

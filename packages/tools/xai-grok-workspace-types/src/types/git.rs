@@ -1,5 +1,4 @@
-//! Minimal serializable git/VCS shapes referenced from `WorkspaceOpsRequest`
-//! and `OpsChunk`.
+//! Minimal serializable git/VCS shapes referenced from `WorkspaceOpsRequest` and `OpsChunk`.
 //!
 //! TODO(workspace): align with the canonical git types in
 //! `xai_grok_shell::session::git` and `xai_grok_shell::extensions::git`
@@ -7,8 +6,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// VCS kind.
-///
 /// TODO(workspace): align with `xai_grok_shell::session::git::VcsKind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -117,7 +114,6 @@ pub struct GitMetadata {
     /// Default branch as known to the remote (e.g. `main`).
     #[serde(default)]
     pub default_branch: Option<String>,
-    /// VCS kind.
     #[serde(default)]
     pub vcs: VcsKind,
 }

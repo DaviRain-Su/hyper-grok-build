@@ -1,13 +1,11 @@
-//! The deployment-config fetch/response contract: the credential source and its
-//! errors, response parsing, envelope picking, fetched-envelope verification, and
-//! the apply outcome the sync orchestration consumes.
+//! The deployment-config fetch/response contract: the credential source and its errors, response parsing, and envelope picking.
+//! Also holds fetched-envelope verification and the apply outcome the sync orchestration consumes.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use xai_grok_config::signed_policy::now_unix;
 
-/// Which credential a config fetch used — tailors error messages and the
-/// post-fetch confirmation (team vs deployment).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Which credential a config fetch used; serde: recorded in the staged refresh.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum ManagedConfigSource {
     DeploymentKey,
     TeamOauth,
@@ -18,8 +16,7 @@ impl ManagedConfigSource {
         matches!(self, Self::TeamOauth)
     }
 
-    /// The 401/403 error tailored to the credential (don't tell a team user to
-    /// check `GROK_DEPLOYMENT_KEY`).
+    /// The 401/403 error tailored to the credential (don't tell a team user to check `GROK_DEPLOYMENT_KEY`).
     pub(super) fn auth_rejected_error(self) -> ManagedConfigError {
         if self.is_team() {
             ManagedConfigError::TeamAuthRejected
@@ -72,7 +69,7 @@ pub enum ManagedConfigError {
 }
 
 impl ManagedConfigError {
-    /// Transient failure (network / connection interruption / server 5xx) where retrying may succeed.
+    /// Transient failure (network, connection interruption, or server 5xx) where retrying may succeed.
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
@@ -80,13 +77,13 @@ impl ManagedConfigError {
         )
     }
 
-    /// Auth/eligibility rejection (no access or expired session) — not fixable by retrying.
+    /// Auth or eligibility rejection (no access or expired session); retrying cannot fix it.
     pub fn is_auth_rejection(&self) -> bool {
         matches!(self, Self::TeamAuthRejected | Self::DeploymentKeyRejected)
     }
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub(super) struct ManagedConfigResponse {
     #[serde(default)]
     pub(super) deployment_id: Option<String>,
@@ -94,13 +91,10 @@ pub(super) struct ManagedConfigResponse {
     pub(super) team_id: Option<String>,
     pub(super) managed_config: Option<String>,
     pub(super) requirements: Option<String>,
-    /// The signed envelopes (additive; absent from old servers), primary first —
-    /// a rollover server dual-signs, each payload signed by ITS OWN key. The
-    /// signed payload's policy is the trusted copy when verification is on.
+    /// The signed envelopes (additive; absent from old servers), primary first: a rollover server dual-signs, each payload signed by its own key.
     #[serde(default)]
     pub(super) signatures: Option<Vec<xai_grok_config::signed_policy::SignatureEnvelope>>,
-    /// The is-managed claim envelopes (additive; absent from old servers), same
-    /// rotation shape as `signatures`, persisted as their own sidecar.
+    /// The is-managed claim envelopes (additive; absent from old servers), same rotation shape as `signatures`, persisted as their own sidecar.
     #[serde(default)]
     pub(super) managed_identity_signatures:
         Option<Vec<xai_grok_config::signed_policy::SignatureEnvelope>>,
@@ -111,10 +105,9 @@ impl ManagedConfigResponse {
         self.deployment_id.is_some() || self.team_id.is_some()
     }
 
-    /// The signed envelope to verify, when the server included any: the first
-    /// `signatures` entry whose key_id is in the embedded trusted set, else the
-    /// first entry (so verification reports the real UnknownKeyId failure). The
-    /// outer key_id only PICKS — verification re-selects the key from the signed bytes.
+    /// The signed envelope to verify, when the server included any.
+    /// Picks the first `signatures` entry whose key_id is in the embedded trusted set, else the first entry.
+    /// The outer key_id only picks; verification re-selects the key from the signed bytes.
     pub(super) fn signature_sidecar(
         &self,
     ) -> Option<xai_grok_config::signed_policy::SignatureEnvelope> {
@@ -124,7 +117,7 @@ impl ManagedConfigResponse {
         )
     }
 
-    /// The claim envelope to verify — same picking rule as [`Self::signature_sidecar`].
+    /// The claim envelope to verify; same picking rule as [`Self::signature_sidecar`].
     pub(super) fn managed_identity_sidecar(
         &self,
     ) -> Option<xai_grok_config::signed_policy::SignatureEnvelope> {
@@ -134,7 +127,7 @@ impl ManagedConfigResponse {
         )
     }
 
-    /// Non-empty served content, recorded in the marker so staleness can later detect a deleted file.
+    /// Non-empty served content, recorded in the marker so the staleness check can later detect a deleted file.
     pub(super) fn has_managed_config(&self) -> bool {
         self.managed_config
             .as_deref()
@@ -145,7 +138,7 @@ impl ManagedConfigResponse {
         self.requirements.as_deref().is_some_and(|s| !s.is_empty())
     }
 
-    /// Served `fail_closed` from the payload (not disk). Non-bool → warn once, treat as false.
+    /// Served `fail_closed` from the payload (not disk).
     pub(super) fn requirements_fail_closed(&self) -> bool {
         let Some(req) = self.requirements.as_deref() else {
             return false;
@@ -165,14 +158,18 @@ impl ManagedConfigResponse {
     }
 }
 
-/// Result of applying a fetched managed-config response.
 pub(super) enum ApplyOutcome {
-    /// Locked, persisted policy, recorded marker. `wrote` = ≥1 artifact written or removed.
-    Applied { wrote: bool },
-    /// Nothing persisted/marked: lock held by another process, or credential vanished mid-fetch.
+    /// `wrote` = at least one artifact written or removed.
+    Applied {
+        wrote: bool,
+    },
+    /// Lock held by another process, or the credential vanished mid-fetch.
     Skipped,
-    /// Envelope failed verification — nothing persisted or marked.
     SignatureRejected,
+    /// Verified response parked for the next boot's pre-sandbox apply.
+    Staged,
+    /// A parked refresh older than the applied policy, refused under the lock.
+    StaleStage,
 }
 
 impl ApplyOutcome {
@@ -182,6 +179,10 @@ impl ApplyOutcome {
 
     pub(super) fn skipped(&self) -> bool {
         matches!(self, Self::Skipped)
+    }
+
+    pub(super) fn staged(&self) -> bool {
+        matches!(self, Self::Staged)
     }
 
     pub(super) fn signature_rejected(&self) -> bool {
@@ -202,16 +203,14 @@ fn pick_trusted_envelope(
         .cloned()
 }
 
-/// A fetched envelope that passed verification: the sidecar to persist, plus its
-/// parsed (now-trusted) payload.
+/// A fetched envelope that passed verification: the sidecar to persist, plus its parsed (now-trusted) payload.
 pub(super) struct VerifiedEnvelope {
     pub(super) sidecar: xai_grok_config::signed_policy::SignatureEnvelope,
     pub(super) payload: xai_grok_config::signed_policy::SignedPayload,
 }
 
-/// Verify the signed envelope without persisting anything. The legacy body fields must
-/// equal the signed copy, so what lands on disk is exactly what was signed (and the
-/// load-time gate can re-verify it). The error is a plain message: the caller only logs it.
+/// Verify the signed envelope without persisting anything.
+/// The legacy body fields must equal the signed copy, so what lands on disk is exactly what was signed (and the load-time gate can re-verify it).
 pub(super) fn verify_signed_envelope(
     body: &ManagedConfigResponse,
     active_team_id: Option<&str>,
@@ -233,9 +232,6 @@ pub(super) fn verify_signed_envelope(
 mod tests {
     use super::*;
 
-    /// Picking (shared by the policy and claim carriers): the first trusted-key_id
-    /// entry wins; no trusted entry → the first entry (picking must not invent
-    /// absence); no array (old/unsigned server) → None.
     #[test]
     fn pick_trusted_envelope_prefers_trusted_then_falls_back() {
         use xai_grok_config::signed_policy::SignatureEnvelope;
@@ -255,11 +251,11 @@ mod tests {
         let picked = pick_trusted_envelope(Some(&envelopes), |id| id == "v1").unwrap();
         assert_eq!(picked.key_id, "v1");
 
-        // No trusted id → the first entry, so verification reports UnknownKeyId.
+        // No trusted id picks the first entry, so verification reports UnknownKeyId
         let picked = pick_trusted_envelope(Some(&envelopes), |_| false).unwrap();
         assert_eq!(picked.key_id, "v1");
 
-        // Nothing signed at all → None.
+        // Nothing signed at all yields None
         assert!(pick_trusted_envelope(None, |_| true).is_none());
     }
 }

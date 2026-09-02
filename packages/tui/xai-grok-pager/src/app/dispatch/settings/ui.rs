@@ -736,6 +736,9 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("contextual_hints.word_select", SettingValue::Bool(b)) => {
             Some(Action::SetContextualHintWordSelect(*b))
         }
+        ("contextual_hints.export_copy", SettingValue::Bool(b)) => {
+            Some(Action::SetContextualHintExportCopy(*b))
+        }
         ("contextual_hints.ssh_wrap", SettingValue::Bool(b)) => {
             Some(Action::SetContextualHintSshWrap(*b))
         }
@@ -922,6 +925,9 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         }
         ("contextual_hints.word_select", SettingValue::Bool(b)) => {
             set_contextual_hint_inner(app, |h, v| h.word_select = v, *b)
+        }
+        ("contextual_hints.export_copy", SettingValue::Bool(b)) => {
+            set_contextual_hint_inner(app, |h, v| h.export_copy = v, *b)
         }
         ("contextual_hints.ssh_wrap", SettingValue::Bool(b)) => {
             set_contextual_hint_inner(app, |h, v| h.ssh_wrap = v, *b)

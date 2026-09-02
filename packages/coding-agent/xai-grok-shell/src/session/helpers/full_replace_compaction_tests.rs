@@ -2,6 +2,29 @@ use super::*;
 use crate::session::helpers::prepared_compaction_history::build_compaction_chat_history;
 
 #[test]
+fn compact_failure_maps_onto_engine_error_classes() {
+    let err = |msg: &str| acp::Error::internal_error().data(msg.to_string());
+
+    // Overflow → ContextOverflow with the message preserved, so the flag
+    // doesn't depend on message text.
+    let mapped = compact_failure_to_sample_error(CompactFailure::Overflow(err(
+        "compact failed: API error (status 413 Payload Too Large): Request failed (HTTP 413).",
+    )));
+    assert!(matches!(&mapped, CompactionSampleError::ContextOverflow(m)
+        if m.contains("HTTP 413")));
+    assert!(mapped.is_deterministic());
+
+    let mapped =
+        compact_failure_to_sample_error(CompactFailure::Deterministic(err("compact failed: 400")));
+    assert!(matches!(&mapped, CompactionSampleError::Build(_)));
+
+    let mapped =
+        compact_failure_to_sample_error(CompactFailure::Transient(err("compact failed: blip")));
+    assert!(matches!(&mapped, CompactionSampleError::Other(_)));
+    assert!(!mapped.is_deterministic());
+}
+
+#[test]
 fn sampler_state_keeps_exact_latest_prepared_items() {
     let mut state = SamplerState::default();
     let first = build_compaction_chat_history(vec![ConversationItem::user("first")], None, true, 0);

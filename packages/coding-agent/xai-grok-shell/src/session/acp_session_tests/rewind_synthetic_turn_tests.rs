@@ -1,25 +1,22 @@
-//! Regression tests: rewind must remove the rewound turn even when the
-//! session contains synthetic-origin turns (auto-wake task/subagent
-//! completions, notification drains, scheduler fires).
+//! Regression tests: rewind must remove the rewound turn even when the session contains synthetic-origin turns.
+//! Synthetic origins include auto-wake task/subagent completions, notification drains, and scheduler fires.
 //!
-//! Those turns increment `prompt_index` but push a *synthetic* `User` item;
-//! truncation that counts only non-synthetic `User` items therefore leaves
-//! the "rewound" turn in the model's context.
+//! Those turns increment `prompt_index` but push a *synthetic* `User` item.
+//! Truncation that counts only non-synthetic `User` items therefore leaves the "rewound" turn in the model's context.
 
 use super::support::create_test_actor;
 
 use crate::sampling::ConversationItem;
 use crate::session::{RewindMode, RewindRequest};
 
-/// Build the canonical bugged-session shape:
+/// Build the canonical session shape that triggered the bug:
 ///
 /// ```text
 /// [Sys, User(user_info), U0(real), A0, U1(auto-wake, synthetic), A1, U2(real), A2]
 /// prompt_index = 3, prompt_texts = [P0, TASK_WAKE, P2]
 /// ```
 ///
-/// Turn 1 is a background-task auto-wake (`PromptOrigin::TaskCompleted`):
-/// it consumed a prompt index but its user item is synthetic.
+/// Turn 1 is a background-task auto-wake (`PromptOrigin::TaskCompleted`): it consumed a prompt index but its user item is synthetic.
 fn seed_conversation(mark_turn_starts: bool) -> Vec<ConversationItem> {
     let turn_user = |text: &str, idx: usize| {
         let mut item = ConversationItem::user(text);
@@ -67,7 +64,7 @@ async fn run_rewind_over_synthetic_turn(mark_turn_starts: bool) {
     snap.last_compaction_prompt_index = None;
     actor.chat_state_handle.restore_snapshot(snap);
 
-    // Rewind to prompt #2 — "restore state before P2 ran".
+    // Rewind to prompt #2: "restore state before P2 ran"
     let resp = actor
         .handle_rewind(RewindRequest {
             target_prompt_index: 2,
@@ -102,25 +99,22 @@ async fn run_rewind_over_synthetic_turn(mark_turn_starts: bool) {
     assert_eq!(actor.chat_state_handle.get_prompt_index().await, 2);
 }
 
-/// Marker-less items (sessions persisted before `UserItem.prompt_index`
-/// existed): the counting fallback must classify the synthetic auto-wake
-/// item as a turn start.
+/// Marker-less items come from sessions persisted before `UserItem.prompt_index` existed.
+/// The counting fallback must classify the synthetic auto-wake item as a turn start.
 #[tokio::test(flavor = "current_thread")]
 async fn rewind_removes_turn_after_synthetic_auto_wake_unmarked() {
     let local = tokio::task::LocalSet::new();
     local.run_until(run_rewind_over_synthetic_turn(false)).await;
 }
 
-/// Marked items (what `turn.rs` stamps on every turn start): the explicit
-/// per-item prompt index takes priority.
+/// Marked items (what `turn.rs` stamps on every turn start): the explicit per-item prompt index takes priority.
 #[tokio::test(flavor = "current_thread")]
 async fn rewind_removes_turn_after_synthetic_auto_wake_marked() {
     let local = tokio::task::LocalSet::new();
     local.run_until(run_rewind_over_synthetic_turn(true)).await;
 }
 
-/// Rewind on a session with no prompts: the picker has nothing to offer and
-/// an execute request is rejected (no silent no-op "success").
+/// Rewind on a session with no prompts: the picker has nothing to offer and an execute request is rejected (no silent no-op "success").
 #[tokio::test(flavor = "current_thread")]
 async fn rewind_with_no_prompts_lists_no_points_and_rejects_execute() {
     let local = tokio::task::LocalSet::new();
@@ -156,9 +150,8 @@ async fn rewind_with_no_prompts_lists_no_points_and_rejects_execute() {
         .await;
 }
 
-/// Rewind to the start of the conversation (target = 0) keeps only the
-/// session preamble — System + user_info + pre-turn synthetic reminders —
-/// even when turn 0 exists alongside synthetic auto-wake turns.
+/// Rewind to the conversation start (target = 0) keeps only the session preamble, even when turn 0 exists alongside synthetic auto-wake turns.
+/// The preamble is the System item, the user_info item, and any pre-turn synthetic reminders.
 #[tokio::test(flavor = "current_thread")]
 async fn rewind_to_start_keeps_only_preamble() {
     let local = tokio::task::LocalSet::new();
@@ -205,8 +198,7 @@ async fn rewind_to_start_keeps_only_preamble() {
             );
             assert_eq!(actor.chat_state_handle.get_prompt_index().await, 0);
 
-            // With prompt_index back at 0 the session behaves like a fresh
-            // one: no points, further rewinds rejected.
+            // With prompt_index back at 0 the session behaves like a fresh one: no points, further rewinds rejected
             assert!(actor.get_rewind_points().await.rewind_points.is_empty());
             let again = actor
                 .handle_rewind(RewindRequest {
@@ -221,9 +213,8 @@ async fn rewind_to_start_keeps_only_preamble() {
         .await;
 }
 
-/// Two sequential rewinds narrow the history correctly each time — the
-/// second rewind operates on the already-truncated conversation (markers
-/// still present on the surviving items).
+/// Two sequential rewinds narrow the history correctly each time.
+/// The second rewind operates on the already-truncated conversation, with markers still present on the surviving items.
 #[tokio::test(flavor = "current_thread")]
 async fn rewind_twice_narrows_history_each_time() {
     let local = tokio::task::LocalSet::new();
@@ -334,8 +325,7 @@ async fn rewind_twice_narrows_history_each_time() {
         .await;
 }
 
-/// Midpoint rewind with synthetic turns on BOTH sides of the cut, in both
-/// marker and counting-fallback modes.
+/// Midpoint rewind with synthetic turns on both sides of the cut, in both marker and counting-fallback modes.
 #[tokio::test(flavor = "current_thread")]
 async fn rewind_to_midpoint_with_synthetic_turns_on_both_sides() {
     let local = tokio::task::LocalSet::new();
@@ -420,8 +410,7 @@ async fn rewind_to_midpoint_with_synthetic_turns_on_both_sides() {
         .await;
 }
 
-/// Rewind to the auto-wake turn itself (target = 1) must cut the auto-wake
-/// item and everything after it.
+/// Rewind to the auto-wake turn itself (target = 1) must cut the auto-wake item and everything after it.
 #[tokio::test(flavor = "current_thread")]
 async fn rewind_to_synthetic_auto_wake_turn_cuts_at_the_wake() {
     let local = tokio::task::LocalSet::new();

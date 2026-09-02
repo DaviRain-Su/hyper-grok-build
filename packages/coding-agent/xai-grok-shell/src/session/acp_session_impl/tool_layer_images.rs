@@ -1,11 +1,10 @@
-//! Tool-layer extracted-image helpers for the session tool pipeline.
-//!
-//! Pure drain / harness split — no `SessionActor` dependency.
+//! Pulls extracted images off tool output for the session's vision follow-up.
+//! Nothing here depends on `SessionActor`, so tests call these as plain functions.
 
 use super::*;
 use xai_grok_tools::util::base64_images::ExtractedImage;
 
-/// Drain pre-truncate image captures off the tool output for session vision.
+/// Drains the images the tool layer extracted from `output`, before truncation, so the session can attach them as vision content.
 pub(super) fn drain_tool_layer_extracted_images(
     output: &mut ToolsToolOutput,
 ) -> Vec<ExtractedImage> {
@@ -18,10 +17,8 @@ pub(super) fn drain_tool_layer_extracted_images(
     }
 }
 
-/// `ToolRunResult` with tool-layer images already drained off `output`.
-///
-/// Construct only via [`Self::new`] so PostToolUse serialize and bridge success
-/// handling cannot skip the harvest.
+/// `ToolRunResult` whose extracted images have already been drained off `output`.
+/// Construct only via [`Self::new`], so neither PostToolUse serialization nor the bridge's success path can skip the drain.
 pub(super) struct DrainedToolSuccess {
     result: ToolRunResult,
     tool_layer_images: Vec<ExtractedImage>,
@@ -37,7 +34,7 @@ impl DrainedToolSuccess {
         }
     }
 
-    /// Output after drain — for PostToolUse / hook-facing serialize.
+    /// The output with images already drained, so serializing it for PostToolUse hooks never touches the payloads.
     pub(super) fn output(&self) -> &ToolsToolOutput {
         &self.result.output
     }
@@ -47,7 +44,8 @@ impl DrainedToolSuccess {
     }
 }
 
-/// Multimodal harness: extend vision follow-ups. Text-only: discard (placeholders stay).
+/// On a multimodal harness the tool-layer images join the vision follow-up.
+/// On a text-only harness they are dropped; the output text keeps only the placeholders.
 pub(super) fn split_tool_layer_for_harness(
     text_only_harness: bool,
     vision: &mut Vec<ExtractedImage>,

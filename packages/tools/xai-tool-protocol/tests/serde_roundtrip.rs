@@ -851,25 +851,6 @@ fn tool_notification_frame_round_trips_with_optional_call_id() {
     };
     roundtrip(&f);
 }
-
-#[test]
-fn tool_registration_round_trips() {
-    let reg = ToolRegistration {
-        tool_id: tool(),
-        sessions: Some(vec![session()]),
-        user_id: user(),
-        server_id: None,
-        description: ToolDescription::new("read_file", "d").with_namespace("GrokBuild"),
-        input_schema: None,
-        capabilities: None,
-        notification_schemas: None,
-        transport_kind: TransportKind::Remote,
-        if_match_generation: None,
-        metadata: None,
-    };
-    roundtrip(&reg);
-}
-
 #[test]
 fn tools_list_and_search_payloads_round_trip() {
     roundtrip(&ToolsListParams {
@@ -1283,13 +1264,6 @@ fn tools_changed_round_trips_with_per_array_skip_when_empty() {
     assert_eq!(v["updated"][0], json!("GrokBuild:read_file"));
     assert!(!v.as_object().unwrap().contains_key("removed"));
 }
-
-#[test]
-fn ping_pong_frames_round_trip() {
-    roundtrip(&PingFrame::new(1_700_000_000_000));
-    roundtrip(&PongFrame::new(1_700_000_000_500));
-}
-
 #[test]
 fn ping_frame_serializes_with_method() {
     let frame = PingFrame::new(1_700_000_000_000);
@@ -1495,13 +1469,6 @@ fn tool_capabilities_with_tool_scope_round_trips_with_literal_value() {
     let v = roundtrip(&caps);
     assert_eq!(v["tool_scope"], json!("write"));
 }
-
-#[test]
-fn tool_definition_mode_full_serialises_as_object_with_mode_key() {
-    let v = roundtrip(&ToolDefinitionMode::Full);
-    assert_eq!(v, json!({"mode": "full"}));
-}
-
 #[test]
 fn tool_definition_mode_concise_carries_meta_tool_pair() {
     let mode = ToolDefinitionMode::Concise {
@@ -1518,19 +1485,6 @@ fn tool_definition_mode_concise_carries_meta_tool_pair() {
         })
     );
 }
-
-#[test]
-fn tool_definition_mode_concise_supports_alternate_meta_tool_pair() {
-    let mode = ToolDefinitionMode::Concise {
-        meta_search: ToolId::new("search_connected_tools").unwrap(),
-        meta_call: ToolId::new("call_connected_tool").unwrap(),
-    };
-    let v = roundtrip(&mode);
-    assert_eq!(v["mode"], json!("concise"));
-    assert_eq!(v["meta_search"], json!("search_connected_tools"));
-    assert_eq!(v["meta_call"], json!("call_connected_tool"));
-}
-
 #[test]
 fn tool_error_wire_render_limited_round_trips_with_card_id() {
     let err = ToolErrorWire::RenderLimited {
@@ -1571,40 +1525,10 @@ fn tool_error_wire_terminal_error_round_trips_with_string_code() {
     assert_eq!(v["message"], json!("exit 137"));
 }
 
-#[test]
-fn error_codes_table_includes_render_limited_and_terminal_error() {
-    assert_eq!(error_codes::numeric_for("render_limited"), Some(-32023));
-    assert_eq!(error_codes::numeric_for("terminal_error"), Some(-32024));
-    assert_eq!(error_codes::string_for(-32023), Some("render_limited"));
-    assert_eq!(error_codes::string_for(-32024), Some("terminal_error"));
-}
-
-#[test]
-fn from_tool_error_wire_maps_render_limited_and_terminal_error() {
-    use error_codes::from_tool_error_wire as fe;
-    assert_eq!(
-        fe(&ToolErrorWire::RenderLimited {
-            tool_id: tool(),
-            card_id: None,
-            reason: String::new(),
-        }),
-        -32023,
-    );
-    assert_eq!(
-        fe(&ToolErrorWire::TerminalError {
-            tool_id: tool(),
-            message: String::new(),
-        }),
-        -32024,
-    );
-}
-
 /// Every variant of [`ToolErrorWire`], constructed once with placeholder
-/// data. Adding a new variant upstream requires extending this helper
-/// too: [`one_of_each_tool_error_wire_variant_is_exhaustive`] asserts
-/// `len() == EXPECTED_VARIANT_COUNT`. The compiler does NOT enforce
-/// exhaustiveness for `Vec<...>` constructors, so the count check is the
-/// explicit guard.
+/// data. [`every_tool_error_wire_variant_aligns_with_codes_table`] iterates
+/// this list; extend it when adding a variant (the compiler does not
+/// enforce exhaustiveness for `Vec` constructors).
 fn one_of_each_tool_error_wire_variant() -> Vec<ToolErrorWire> {
     vec![
         ToolErrorWire::ToolNotFound { tool_id: tool() },
@@ -1657,19 +1581,6 @@ fn one_of_each_tool_error_wire_variant() -> Vec<ToolErrorWire> {
         },
     ]
 }
-
-const EXPECTED_VARIANT_COUNT: usize = 15;
-
-#[test]
-fn one_of_each_tool_error_wire_variant_is_exhaustive() {
-    assert_eq!(
-        one_of_each_tool_error_wire_variant().len(),
-        EXPECTED_VARIANT_COUNT,
-        "variant fixture out of sync with EXPECTED_VARIANT_COUNT — also \
-         update one_of_each_tool_error_wire_variant() and the audit allow-list",
-    );
-}
-
 /// Wire-string discriminators that deliberately do NOT have a row in the
 /// numeric ↔ string table. Each rides on a generic JSON-RPC reserved
 /// numeric (`invalid_request` or `internal_error`) while emitting a

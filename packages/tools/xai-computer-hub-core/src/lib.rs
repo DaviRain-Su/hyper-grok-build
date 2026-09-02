@@ -17,7 +17,8 @@ pub mod resolver;
 pub mod transport;
 
 pub use bot_tools::{
-    GROK_BOT_TOOL_DESCRIPTIONS, GROK_BOT_TOOL_IDS, grok_bot_tool_description, is_grok_bot_tool,
+    GROK_BOT_TOOL_DESCRIPTIONS, GROK_BOT_TOOL_IDS, grok_bot_tool_arguments_schema,
+    grok_bot_tool_description, is_grok_bot_tool,
 };
 pub use inner::InnerDispatchForResolver;
 pub use local::{LOCAL_INVOKE_SCOPE, LocalTransport};

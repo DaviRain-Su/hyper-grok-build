@@ -17,22 +17,11 @@ use xai_grok_tools::types::output::{BashOutput, ToolOutput};
 const DEFAULT_NOTIFICATION_INTERVAL_MS: u64 = 100;
 const READ_BUFFER_SIZE: usize = 8192;
 
-/// Upper bound on how long terminal teardown waits for a SIGKILL'd child to be
-/// reaped.
+/// Upper bound on how long terminal teardown waits for a SIGKILL'd child to be reaped.
 ///
-/// `child.wait()` after `start_kill()` normally resolves in milliseconds, but a
-/// process wedged in an uninterruptible kernel syscall (stuck network/disk I/O —
-/// e.g. a hung `git clone` / `npm install`) only leaves the kernel, and thus
-/// only becomes reapable, when that syscall returns, which can be many seconds
-/// or effectively never. An unbounded wait is dangerous because terminal
-/// teardown runs on the session actor's cancel path, and on the leader every
-/// session shares one `LocalSet` thread — see `kill_and_release_all_for_session`
-/// (which now reaps in a *detached* task to keep cancellation instant) and the
-/// inline `kill_terminal` / `release_terminal` paths. Bounding the wait stops a
-/// wedged child from making the reaper linger; the process is already SIGKILL'd
-/// (and `KillOnDrop` is armed), so the OS / tokio reaper still tears it down
-/// after we stop waiting. Mirrors the bound the `xai-grok-tools` local terminal
-/// backend already applies to the same call.
+/// `child.wait()` after `start_kill()` normally resolves in milliseconds, but a process stuck in an uninterruptible kernel syscall may never exit.
+/// Teardown runs on the session actor's cancel path, and on the leader every session shares one `LocalSet` thread, so the wait must be bounded.
+/// The child is already SIGKILL'd with `KillOnDrop` set, so the OS still tears it down after we stop waiting.
 const KILL_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn notification_interval() -> Duration {
@@ -64,12 +53,10 @@ pub enum KillOutcome {
 
 /// Sends ACP session notifications to the connected client.
 ///
-/// **Important**: Implementations **must not** block for extended periods.
-/// The terminal streaming loop calls [`SessionNotificationSender::session_notification`]
-/// inside a `tokio::select!` branch.  If the call blocks, the loop stalls and
-/// the command timeout cannot fire until the next iteration.  The default
-/// Blackbox implementation (`AcpAgentGatewaySender`) uses fire-and-forget
-/// delivery to satisfy this contract — see `gateway.rs`.
+/// Implementations must not block for extended periods.
+/// The terminal streaming loop calls [`SessionNotificationSender::session_notification`] inside a `tokio::select!` branch.
+/// If the call blocks, the loop stalls and the command timeout cannot fire until the next iteration.
+/// The default Blackbox implementation (`AcpAgentGatewaySender`) uses fire-and-forget delivery to satisfy this contract; see `gateway.rs`.
 #[async_trait::async_trait]
 pub trait SessionNotificationSender: Send + Sync {
     async fn session_notification(
@@ -88,9 +75,8 @@ impl SessionNotificationSender for xai_acp_lib::AcpAgentGatewaySender {
     }
 }
 
-/// A wrapper around a [`SessionNotificationSender`] that respects the
-/// `gateway_enabled` gate. When the gate is closed (e.g., for agent-initiated
-/// fork sessions before `session/load`), notifications are silently dropped.
+/// A wrapper around a [`SessionNotificationSender`] that respects the `gateway_enabled` gate.
+/// When the gate is closed (e.g., for agent-initiated fork sessions before `session/load`), notifications are silently dropped.
 /// This prevents tool/bash output from leaking to the client before replay.
 pub struct GatedNotifier {
     inner: Arc<dyn SessionNotificationSender>,
@@ -176,19 +162,12 @@ async fn deregister_entry(session_id: &str, terminal_id: &str) -> Option<Arc<Ter
     registry().lock().await.remove(&key)
 }
 
-/// Atomically drain all non-backgrounded terminals for a session, killing their
-/// child processes and removing them from the registry.
-///
-/// Backgrounded terminals (those the user explicitly asked to keep running) are
-/// left untouched.
-///
-/// This avoids the TOCTOU race that would exist if we listed IDs first and then
-/// killed them one-by-one (a new terminal could be registered between the two
-/// steps).
+/// Atomically drain all non-backgrounded terminals for a session, killing their child processes and removing them from the registry.
+/// Backgrounded terminals (those the user explicitly asked to keep running) are left untouched.
+/// Draining under one registry lock avoids the race where a new terminal registers between listing IDs and killing them one by one.
 pub async fn kill_and_release_all_for_session(session_id: &str) {
     // Phase 1: Remove all entries for this session under a short registry lock.
-    // We don't check `backgrounded` here to avoid holding a nested async lock
-    // (registry + output_state) which could deadlock with the streaming loop.
+    // We don't check `backgrounded` here: holding the registry and output_state locks together could deadlock with the streaming loop
     let candidates: Vec<(TerminalKey, Arc<TerminalEntry>)> = {
         let mut reg = registry().lock().await;
         let keys: Vec<TerminalKey> = reg
@@ -202,9 +181,8 @@ pub async fn kill_and_release_all_for_session(session_id: &str) {
     };
     // Registry lock released here.
 
-    // Phase 2: Partition into backgrounded (kept alive) and foreground
-    // (killed). Deliver SIGKILL to each foreground child *synchronously* so
-    // teardown begins immediately, but do NOT wait for it to exit here.
+    // Phase 2: Partition into backgrounded (kept alive) and foreground (killed)
+    // Deliver SIGKILL to each foreground child *synchronously* so teardown begins immediately, but do NOT wait for it to exit here
     let mut reinsert = Vec::new();
     let mut to_reap = Vec::new();
     for (key, entry) in candidates {
@@ -232,18 +210,11 @@ pub async fn kill_and_release_all_for_session(session_id: &str) {
 
     // Phase 4: Reap the killed children OFF this task.
     //
-    // This function is awaited inline in the session actor's cancel path
-    // (`cancel_running_task`), and on the leader every session shares one
-    // `LocalSet` thread. Awaiting `child.wait()` here would keep this session's
-    // command loop parked until each process is reaped — delaying its
-    // `session/prompt` resolution and, worse, its idle-unload (`Shutdown` /
-    // `IsBusy` queue behind the in-flight cancel, so the leader cannot evict a
-    // session stuck waiting on a slow-dying child). Reaping in a detached task
-    // lets cancellation return immediately. The children are already SIGKILL'd
-    // and `KillOnDrop` is armed, so they are torn down regardless of whether
-    // this reaper is later cancelled; the bounded wait (`KILL_REAP_TIMEOUT`)
-    // just keeps the reaper from lingering on a process wedged in the kernel.
-    // The waits run concurrently so one wedged child can't delay the others.
+    // This function is awaited inline in the session actor's cancel path (`cancel_running_task`)
+    // On the leader every session shares one `LocalSet` thread, so waiting here would park the session until each child is reaped
+    // Worse, `Shutdown` / `IsBusy` queue behind the in-flight cancel, so the leader cannot evict a session stuck on a slow-dying child
+    // The children are already SIGKILL'd with `KillOnDrop` set, so they are torn down even if this reaper is cancelled
+    // The bounded waits (`KILL_REAP_TIMEOUT`) run concurrently, so one wedged child can't delay the others
     if !to_reap.is_empty() {
         tokio::task::spawn_local(async move {
             future::join_all(to_reap.into_iter().map(|entry| async move {
@@ -275,8 +246,8 @@ pub async fn create_terminal(
             .to_string(),
     };
 
-    // Non-empty args → spawn program directly (argv preserved verbatim).
-    // Empty args → treat command as a shell snippet (bash -c / cmd /C).
+    // Non-empty args spawn the program directly with argv preserved verbatim
+    // Empty args treat the command as a shell snippet (bash -c / cmd /C)
     let child = if args.is_empty() {
         spawn_shell_command(command, &working_dir, &env)
     } else {
@@ -325,14 +296,14 @@ pub async fn get_terminal_output(session_id: &str, terminal_id: &str) -> Option<
 pub async fn wait_for_terminal_exit(session_id: &str, terminal_id: &str) -> Option<ExitStatus> {
     let entry = get_entry(session_id, terminal_id).await?;
 
-    // Notify::notified() captures notifications that occur either before or after the call,
-    // so checking exit_status first, then awaiting is safe - we won't miss the notification.
+    // Notify::notified() captures notifications that occur either before or after the call
+    // Checking exit_status first, then awaiting, is safe: we won't miss the notification
     {
         let state = entry.output_state.lock().await;
         if let Some(status) = &state.exit_status {
             return Some(status.clone());
         }
-        // If backgrounded, return None immediately so agent can continue
+        // If backgrounded, return None so the agent can continue without waiting
         if state.backgrounded {
             return None;
         }
@@ -341,7 +312,7 @@ pub async fn wait_for_terminal_exit(session_id: &str, terminal_id: &str) -> Opti
     entry.exit_notify.notified().await;
 
     let state = entry.output_state.lock().await;
-    // If backgrounded, return None (process still running but agent should continue)
+    // If backgrounded, return None even though the process is still running
     if state.backgrounded {
         return None;
     }
@@ -366,13 +337,12 @@ pub async fn kill_terminal(
         return Ok(Some(KillOutcome::AlreadyExited));
     }
 
-    // `process_wrap::tokio::ChildWrapper::kill()` returns a boxed future that isn't guaranteed to be
-    // `Unpin`, so we use `start_kill()` + `wait()` instead.
+    // `process_wrap::tokio::ChildWrapper::kill()` returns a boxed future that isn't guaranteed to be `Unpin`
+    // We use `start_kill()` and `wait()` instead
     match child.start_kill() {
         Ok(()) => {}
         Err(e) => {
-            // Best-effort race handling: if it exited between our `try_wait()` and now, treat as
-            // AlreadyExited instead of surfacing an error.
+            // Best-effort race handling: if it exited between our `try_wait()` and now, treat as AlreadyExited instead of returning an error
             if let Ok(Some(_)) = child.try_wait() {
                 return Ok(Some(KillOutcome::AlreadyExited));
             }
@@ -380,8 +350,7 @@ pub async fn kill_terminal(
         }
     }
 
-    // Bounded reap: the process has been SIGKILL'd; don't let a wedged child
-    // (stuck in an uninterruptible syscall) block the caller indefinitely.
+    // Bounded reap: the process has been SIGKILL'd; don't let a wedged child (stuck in an uninterruptible syscall) block the caller indefinitely
     let _ = tokio::time::timeout(KILL_REAP_TIMEOUT, child.wait()).await;
     Ok(Some(KillOutcome::Killed))
 }
@@ -398,7 +367,7 @@ pub async fn release_terminal(session_id: &str, terminal_id: &str) {
     }
 }
 
-/// Mark a terminal as backgrounded. This notifies any waiters so the agent can continue.
+/// Notifies any waiters so the agent can continue without waiting for the exit.
 /// The process keeps running and will send completion notifications when done.
 pub async fn background_terminal(session_id: &str, terminal_id: &str) {
     let Some(entry) = get_entry(session_id, terminal_id).await else {
@@ -409,7 +378,6 @@ pub async fn background_terminal(session_id: &str, terminal_id: &str) {
         let mut state = entry.output_state.lock().await;
         state.backgrounded = true;
     }
-    // Notify waiters so they can return early
     entry.exit_notify.notify_waiters();
 }
 
@@ -492,8 +460,7 @@ impl AsyncTerminalRunner for StreamingLocalTerminalRunner {
             )
             .await;
 
-        // Only deregister if process completed (not backgrounded)
-        // If backgrounded, keep the entry so streaming continues
+        // Only deregister on completion; a backgrounded run keeps its entry so streaming continues
         let was_backgrounded = {
             let state = output_state.lock().await;
             state.backgrounded
@@ -547,17 +514,14 @@ impl StreamingLocalTerminalRunner {
         let mut last_sent_len = 0usize;
         let mut truncated = false;
         let mut ticker = tokio::time::interval(notification_interval());
-        // Compute an absolute deadline so the timeout fires as a competing
-        // branch inside `tokio::select!`.  This ensures the timeout is checked
-        // even when another branch (e.g. `send_update`) is blocked.
-        // Pinned once here to avoid re-creating the timer entry on every loop iteration.
+        // Compute an absolute deadline so the timeout fires as a competing branch inside `tokio::select!` even when another branch is blocked
+        // The sleep is pinned once so the timer entry is not re-created on every loop iteration
         let sleep = tokio::time::sleep(request.timeout);
         tokio::pin!(sleep);
 
         // Open file handle once at start (more efficient than open/close per write)
         let mut file_handle: Option<tokio::fs::File> = match &output_file {
             Some(path) => {
-                // Ensure parent directory exists
                 if let Some(parent) = path.parent() {
                     let _ = tokio::fs::create_dir_all(parent).await;
                 }
@@ -591,7 +555,7 @@ impl StreamingLocalTerminalRunner {
         .await;
 
         loop {
-            // Check if backgrounded - return early with partial output
+            // If backgrounded, return early with partial output
             {
                 let state = output_state.lock().await;
                 if state.backgrounded {
@@ -642,8 +606,7 @@ impl StreamingLocalTerminalRunner {
             tokio::pin!(stderr_fut);
 
             // The timeout lives inside `tokio::select!` as a competing branch
-            // so it fires even when another branch (e.g. `send_update` inside
-            // the ticker arm) is blocked on a stale relay connection.
+            // It fires even when another branch (e.g. `send_update` inside the ticker arm) is blocked on a stale relay connection.
             tokio::select! {
                 result = stdout_fut.as_mut() => {
                     match result {
@@ -652,8 +615,7 @@ impl StreamingLocalTerminalRunner {
                             let bytes = &stdout_tmp[..n];
                             output_buf.extend_from_slice(bytes);
 
-                            // Write IMMEDIATELY to file (before any truncation can happen)
-                            // This ensures file always has complete output even if buffer is truncated
+                            // Write to the file before any truncation so it always has the complete output
                             if let Some(ref mut file) = file_handle && let Err(e) = file.write_all(bytes).await {
                                     tracing::warn!("Failed to write stdout to output file: {}", e);
                             }
@@ -667,7 +629,6 @@ impl StreamingLocalTerminalRunner {
                             let bytes = &stderr_tmp[..n];
                             output_buf.extend_from_slice(bytes);
 
-                            // Write IMMEDIATELY to file
                             if let Some(ref mut file) = file_handle && let Err(e) = file.write_all(bytes).await {
                                     tracing::warn!("Failed to write stderr to output file: {}", e);
                             }
@@ -675,8 +636,7 @@ impl StreamingLocalTerminalRunner {
                     }
                 }
                 _ = ticker.tick() => {
-                    // Truncation only affects in-memory buffer, NOT the file
-                    // File already has all bytes written immediately on read
+                    // Truncation only affects the in-memory buffer; the file already has every byte, written on read
                     if truncate_buffer(&mut output_buf, request.output_byte_limit) {
                         truncated = true;
                         last_sent_len = 0;
@@ -689,10 +649,8 @@ impl StreamingLocalTerminalRunner {
                     }
 
                     if output_buf.len() > last_sent_len {
-                        // NOTE: This `send_update` is safe because `session_notification`
-                        // is fire-and-forget (see gateway.rs).  If it ever becomes blocking
-                        // again, the deadline branch above won't save us once the ticker
-                        // arm is selected — both changes are required for correctness.
+                        // NOTE: This `send_update` is safe because `session_notification` is fire-and-forget (see gateway.rs)
+                        // If it ever becomes blocking again, the deadline branch above won't save us once the ticker arm is selected
                         self.send_update(
                             &request.tool_call_id,
                             &request.command,
@@ -709,7 +667,6 @@ impl StreamingLocalTerminalRunner {
                     }
                 }
                 _ = &mut sleep => {
-                    // Flush file before returning
                     if let Some(ref mut file) = file_handle {
                         let _ = file.flush().await;
                     }
@@ -738,7 +695,7 @@ impl StreamingLocalTerminalRunner {
         exit_notify: &Arc<tokio::sync::Notify>,
     ) -> Result<TerminalRunResult, TerminalError> {
         {
-            // best-effort killing, not waiting for the process to exit
+            // Best-effort kill; we don't wait for the process to exit
             let mut c = child.lock().await;
             let _ = c.start_kill();
         }
@@ -854,8 +811,7 @@ impl StreamingLocalTerminalRunner {
     }
 }
 
-/// Spawn `command` via the detected shell (`bash -c` on Unix,
-/// cascading pwsh / powershell.exe / Git Bash / cmd.exe on Windows).
+/// Spawn `command` via the detected shell (`bash -c` on Unix, cascading pwsh / powershell.exe / Git Bash / cmd.exe on Windows).
 fn spawn_shell_command(
     command: &str,
     cwd: &impl AsRef<std::path::Path>,
@@ -889,9 +845,8 @@ fn spawn_program_with_args(
     })
 }
 
-/// Shared spawn ceremony for [`spawn_shell_command`] and
-/// [`spawn_program_with_args`]. `set_argv` populates argv only;
-/// cwd/env/stdio/teardown are configured here.
+/// Shared spawn path for [`spawn_shell_command`] and [`spawn_program_with_args`].
+/// `set_argv` populates argv only; cwd/env/stdio/teardown are configured here.
 fn spawn_with_argv(
     program: &str,
     cwd: &impl AsRef<std::path::Path>,
@@ -913,7 +868,7 @@ fn spawn_with_argv(
 
             xai_grok_sandbox::child_net::restrict_child_network(cmd);
         });
-        // setsid: detach from TTY + new process group for tree teardown.
+        // setsid: detach from the TTY and start a new process group for tree teardown
         cmd.wrap(ProcessSession);
         cmd.wrap(KillOnDrop);
         cmd.spawn()
@@ -934,7 +889,7 @@ fn spawn_with_argv(
         });
         // CreationFlags must precede JobObject per process-wrap docs.
         cmd.wrap(CreationFlags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW));
-        // JobObject + KillOnDrop: dropping terminates every descendant.
+        // JobObject and KillOnDrop: dropping terminates every descendant
         cmd.wrap(JobObject);
         cmd.wrap(KillOnDrop);
         cmd.spawn()
@@ -978,12 +933,9 @@ async fn take_child_io(
 
 /// Truncate buffer to keep only the last `limit` bytes (drops oldest bytes).
 /// Returns true if truncation occurred.
-///
-/// This function ensures we don't split UTF-8 characters when truncating
-/// by using char_indices to find a valid character boundary.
+/// The cut lands on a char boundary so a UTF-8 character is never split.
 fn truncate_buffer(buf: &mut Vec<u8>, limit: usize) -> bool {
     if buf.len() > limit {
-        // Convert to string to work with character boundaries
         let s = String::from_utf8_lossy(buf);
         let excess = buf.len().saturating_sub(limit);
 
@@ -994,7 +946,6 @@ fn truncate_buffer(buf: &mut Vec<u8>, limit: usize) -> bool {
             .map(|(i, _)| i)
             .unwrap_or(s.len());
 
-        // Slice from that boundary and update buffer
         *buf = s[start_idx..].as_bytes().to_vec();
 
         true
@@ -1028,8 +979,7 @@ async fn finalize_output_state(
 }
 
 /// Waits for a backgrounded process to complete and sends the final notification.
-/// Called when a process is backgrounded - the main run() returns but this keeps running
-/// to wait for completion and clean up.
+/// The main run() has already returned; this task keeps running to clean up.
 async fn wait_background_completion(
     child_handle: ChildHandle,
     output_state: Arc<Mutex<OutputState>>,
@@ -1047,7 +997,6 @@ async fn wait_background_completion(
         if let Some(process_status) = try_get_exit_status(&child_handle).await {
             let exit_status = extract_exit_status(process_status);
 
-            // Get final output from state
             let (output_buf, truncated) = {
                 let state = output_state.lock().await;
                 (state.output.clone(), state.truncated)
@@ -1063,8 +1012,7 @@ async fn wait_background_completion(
             .await;
 
             // For backgrounded commands, always mark as Completed regardless of exit code.
-            // The user explicitly chose to background this command and continue, so we
-            // shouldn't show it as "failed" even if the process exits with non-zero.
+            // The user chose to background this command and continue, so we shouldn't show it as "failed" even if it exits non-zero
             let final_status = acp::ToolCallStatus::Completed;
 
             let bash_output = BashOutput {
@@ -1100,7 +1048,6 @@ async fn wait_background_completion(
             return;
         }
 
-        // Sleep briefly before checking again
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
@@ -1381,23 +1328,19 @@ mod tests {
                 // Wait for both to start.
                 tokio::time::sleep(Duration::from_millis(100)).await;
 
-                // Mark one as backgrounded.
                 background_terminal(&session_id, &bg_id).await;
 
                 // Sanity: both are in the registry.
                 assert!(get_terminal_output(&session_id, &normal_id).await.is_some());
                 assert!(get_terminal_output(&session_id, &bg_id).await.is_some());
 
-                // Kill all non-backgrounded terminals for the session.
                 kill_and_release_all_for_session(&session_id).await;
 
-                // Normal terminal should be gone.
                 assert!(
                     get_terminal_output(&session_id, &normal_id).await.is_none(),
                     "non-backgrounded terminal should be removed from registry"
                 );
 
-                // Backgrounded terminal should still be present.
                 assert!(
                     get_terminal_output(&session_id, &bg_id).await.is_some(),
                     "backgrounded terminal should remain in registry"
@@ -1409,9 +1352,8 @@ mod tests {
             .await;
     }
 
-    /// Verify that `ProcessSession` (setsid) prevents child processes from
-    /// opening `/dev/tty`. After setsid(), the child has no controlling
-    /// terminal, so `open("/dev/tty")` must fail with ENXIO.
+    /// Verify that `ProcessSession` (setsid) prevents child processes from opening `/dev/tty`.
+    /// After setsid(), the child has no controlling terminal, so `open("/dev/tty")` must fail with ENXIO.
     #[tokio::test]
     #[cfg(unix)]
     async fn test_child_cannot_open_dev_tty() {
@@ -1451,59 +1393,6 @@ mod tests {
         );
     }
 
-    /// Verify that process group kill still works after switching from
-    /// ProcessGroup::leader() to ProcessSession. A parent shell spawns
-    /// a background child; killing the terminal should reap both.
-    #[tokio::test]
-    async fn test_process_group_kill_with_session() {
-        tokio::task::LocalSet::new()
-            .run_until(async {
-                let session_id = format!("pgkill-{}", std::process::id());
-                let tool_id = format!("pgkill-tool-{}", std::process::id());
-
-                let notifier = Arc::new(TestNotifier {
-                    notifications: Mutex::new(vec![]),
-                });
-                let session_id_clone = session_id.clone();
-                let tool_id_clone = tool_id.clone();
-                let runner = StreamingLocalTerminalRunner {
-                    notifier: notifier.clone(),
-                    session_id: acp::SessionId::new(session_id_clone),
-                };
-
-                let handle = tokio::task::spawn_local(async move {
-                    runner
-                        .run(make_request(&tool_id_clone, "sleep 300 & sleep 300 & wait"))
-                        .await
-                });
-
-                // Wait for the process to start.
-                let mut attempts = 0;
-                loop {
-                    tokio::time::sleep(Duration::from_millis(25)).await;
-                    let statuses = extract_statuses(&notifier.notifications.lock().await);
-                    if statuses.contains(&acp::ToolCallStatus::InProgress) {
-                        break;
-                    }
-                    attempts += 1;
-                    assert!(attempts < 40, "process did not start in time");
-                }
-
-                // Kill — should reap the whole process group.
-                assert_eq!(
-                    kill_terminal(&session_id, &tool_id).await,
-                    Ok(Some(KillOutcome::Killed))
-                );
-
-                let result = handle.await.unwrap().unwrap();
-                assert!(
-                    result.signal.is_some(),
-                    "process should have been killed by signal"
-                );
-            })
-            .await;
-    }
-
     #[tokio::test]
     async fn test_kill_and_release_all_noop_for_other_sessions() {
         tokio::task::LocalSet::new()
@@ -1511,7 +1400,6 @@ mod tests {
                 let session_a = format!("kill-all-a-{}", std::process::id());
                 let session_b = format!("kill-all-b-{}", std::process::id());
 
-                // Create a terminal in session B.
                 let id_b = create_terminal(
                     &session_b,
                     "sleep",
@@ -1525,16 +1413,13 @@ mod tests {
 
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
-                // Kill all for session A (different session).
                 kill_and_release_all_for_session(&session_a).await;
 
-                // Session B terminal should be untouched.
                 assert!(
                     get_terminal_output(&session_b, &id_b).await.is_some(),
                     "terminals in other sessions should not be affected"
                 );
 
-                // Clean up.
                 release_terminal(&session_b, &id_b).await;
             })
             .await;

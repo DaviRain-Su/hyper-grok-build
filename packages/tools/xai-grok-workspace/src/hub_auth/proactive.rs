@@ -1,10 +1,9 @@
 //! Proactive, jittered OIDC token refresh owned by the workspace server.
 //!
-//! [`ProactiveOidcAuthProvider::current`] is a lock-free snapshot read and
-//! never performs I/O. The background task refreshes ahead of expiry when
-//! remaining lifetime exceeds `safety_margin`. `min_refresh_interval` floors
-//! the gap after a successful refresh so a short TTL cannot hot-loop the
-//! IdP; it does not delay a cold-start refresh that is already due.
+//! [`ProactiveOidcAuthProvider::current`] is a lock-free snapshot read and never performs I/O.
+//! The background task refreshes ahead of expiry when remaining lifetime exceeds `safety_margin`.
+//! `min_refresh_interval` floors the gap after a successful refresh so a short TTL cannot hammer the IdP.
+//! It does not delay a cold-start refresh that is already due.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
@@ -24,7 +23,7 @@ use xai_computer_hub_sdk::{
 
 use crate::status_config::ProactiveRefreshConfig;
 
-/// Cadence used when the token has no `expires_at` (opaque / no-expiry).
+/// Refresh interval when the token has no `expires_at`.
 const DEFAULT_NO_EXPIRY_INTERVAL: Duration = Duration::from_secs(3600);
 
 /// Failure-retry base; doubles each attempt up to [`RETRY_CAP`].
@@ -32,8 +31,7 @@ const RETRY_BASE: Duration = Duration::from_secs(1);
 /// Failure-retry ceiling. Not applied to the success-path schedule.
 const RETRY_CAP: Duration = Duration::from_secs(30);
 /// Upper bound on `Retry-After` so a malicious header cannot park the loop.
-/// A zero / past value is treated as absent (see [`parse_retry_after_value`])
-/// and [`bound_retry_after`] still floors at [`RETRY_BASE`].
+/// A zero or past value is treated as absent (see [`parse_retry_after_value`]) and [`bound_retry_after`] still floors at [`RETRY_BASE`].
 const RETRY_AFTER_CAP: Duration = Duration::from_secs(24 * 3600);
 
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -70,8 +68,7 @@ static REFRESH_LEAD: LazyLock<Histogram> = LazyLock::new(|| {
         "Remaining lifetime of the token being replaced (old expires_at − now) \
          at a successful background refresh; negative means the refresh landed \
          after expiry",
-        // Negative/zero bounds keep a post-expiry refresh out of the first
-        // positive bucket (Prometheus treats the first bound as starting at 0).
+        // Negative/zero bounds keep a post-expiry refresh out of the first positive bucket (Prometheus treats the first bound as starting at 0)
         vec![
             -1440.0, -720.0, -360.0, -180.0, -60.0, -30.0, 0.0, 10.0, 30.0, 60.0, 120.0, 300.0,
             600.0, 900.0, 1200.0, 1800.0, 2400.0, 3600.0, 7200.0,
@@ -112,12 +109,10 @@ pub(crate) fn init_metrics() {
 struct TokenSnapshot {
     access_token: Arc<str>,
     expires_at: Option<DateTime<Utc>>,
-    /// `None` at cold start (auth.json has no TTL); set from `expires_in`
-    /// after the first successful refresh.
+    /// `None` at cold start (auth.json has no TTL); set from `expires_in` after the first successful refresh.
     observed_ttl: Option<Duration>,
 }
 
-/// Inputs for [`ProactiveOidcAuthProvider::new`].
 pub struct ProactiveOidcParams {
     pub access_token: String,
     pub refresh_token: String,
@@ -152,7 +147,7 @@ struct RefreshOutcome {
 struct RefreshError {
     error: anyhow::Error,
     new_refresh_token: Option<String>,
-    /// `400` / `invalid_grant` / `401` / `403`: stop the loop for the process life.
+    /// `400`, `invalid_grant`, `401`, or `403`: stop the loop for the process life.
     terminal: bool,
     /// Honored on retryable errors (`429` `Retry-After`, etc.).
     retry_after: Option<Duration>,
@@ -183,8 +178,7 @@ fn refresh_err(error: impl Into<anyhow::Error>) -> RefreshError {
 pub struct ProactiveOidcAuthProvider {
     inner: Arc<Inner>,
     cancel: CancellationToken,
-    // JoinHandle detaches on drop; cancel + abort so a dropped provider
-    // stops refreshing without leaving an IdP loop running.
+    // JoinHandle detaches on drop; cancel and abort so a dropped provider stops refreshing without leaving an IdP loop running
     _task_guard: Option<AbortOnDropHandle<()>>,
 }
 
@@ -206,8 +200,7 @@ impl std::fmt::Debug for ProactiveOidcAuthProvider {
 
 impl ProactiveOidcAuthProvider {
     /// Spawn the background refresher. Must be called from a Tokio runtime.
-    /// When `params.refresh.enabled` is false, no task is spawned and no
-    /// IdP traffic is issued; `current()` still serves the seed snapshot.
+    /// When `params.refresh.enabled` is false, no task is spawned and no IdP traffic is issued; `current()` still serves the seed snapshot.
     pub fn new(params: ProactiveOidcParams) -> Self {
         let mut refresh = params.refresh;
         refresh.validate();
@@ -285,9 +278,8 @@ impl AuthProvider for ProactiveOidcAuthProvider {
     }
 
     fn principal_key(&self) -> PrincipalKey {
-        // Match the SDK's `oidc:{issuer}:{client_id}:{user_id}` (empty
-        // user_id still gets the trailing colon) so a drop-in swap cannot
-        // fragment the connection pool.
+        // Match the SDK's `oidc:{issuer}:{client_id}:{user_id}` (empty user_id still gets the trailing colon)
+        // Swapping this provider in for the SDK's must not fragment the connection pool
         PrincipalKey::opaque(format!(
             "oidc:{}:{}:{}",
             self.inner.issuer, self.inner.client_id, self.inner.identity.user_id
@@ -417,9 +409,9 @@ fn next_sleep(inner: &Inner, fail_attempt: u32) -> (Duration, Option<f64>) {
     }
 }
 
-/// Success-path target. `jitter_unit` is clamped to `[-1, 1]` and scales
-/// the `±jitter_fraction · scale` window. Floors run after jitter; the
-/// returned jitter is the post-constraint displacement from nominal.
+/// Success-path target.
+/// `jitter_unit` is clamped to `[-1, 1]` and scales the `±jitter_fraction · scale` window.
+/// Floors run after jitter, and the returned jitter is the final displacement from nominal.
 pub(crate) fn compute_success_refresh_at(
     now: DateTime<Utc>,
     expires_at: Option<DateTime<Utc>>,
@@ -456,9 +448,9 @@ pub(crate) fn compute_success_refresh_at(
     {
         refresh_at = cap;
     }
-    // Floor only after a successful refresh. A cold-start seed that is
-    // already expired or inside the safety window must refresh now —
-    // `current()` never I/Os, so delaying would serve a stale bearer.
+    // Floor only after a successful refresh
+    // A cold-start seed that is already expired or inside the safety window must refresh now
+    // `current()` never does I/O, so delaying would serve a stale bearer
     if observed_ttl.is_some() {
         if let Some(floor) = datetime_plus(now, cfg.min_refresh_interval) {
             if refresh_at < floor {
@@ -475,9 +467,8 @@ pub(crate) fn compute_success_refresh_at(
     (refresh_at, effective_jitter)
 }
 
-/// Capped exponential backoff. Not floored by `min_refresh_interval` so a
-/// last-ditch retry near expiry is not delayed. Before expiry the delay is
-/// capped to remaining lifetime; at or after expiry [`RETRY_CAP`] avoids a spin.
+/// Capped exponential backoff, not floored by `min_refresh_interval` so a last-ditch retry near expiry is not delayed.
+/// Before expiry the delay is capped to remaining lifetime; at or after expiry [`RETRY_CAP`] avoids a spin.
 pub(crate) fn compute_retry_delay(
     attempt: u32,
     now: DateTime<Utc>,
@@ -557,9 +548,8 @@ async fn do_refresh(inner: &Inner, refresh_token: &str) -> Result<RefreshOutcome
             match datetime_plus(now, ttl) {
                 Some(exp) => (Some(ttl), Some(exp)),
                 None => {
-                    // Keep the rotated RT in memory for the next retry, but
-                    // do not persist this failed exchange — a late write
-                    // would clobber a later successful persist.
+                    // Keep the rotated refresh token in memory for the next retry, but do not persist this failed exchange
+                    // A late write would clobber a later successful persist
                     return Err(RefreshError {
                         error: anyhow::anyhow!("OIDC expires_in out of range: {secs}"),
                         new_refresh_token: tokens.refresh_token,
@@ -623,8 +613,8 @@ fn persist_refresh_event_after(
     };
     let seq = inner.persist.seq.fetch_add(1, Ordering::AcqRel) + 1;
     let persist = inner.persist.clone();
-    // Off the refresh task so flock cannot stall cancel/select!. The seq
-    // + mutex drop a stale write that finishes after a newer persist.
+    // Runs off the refresh task so a contended flock cannot stall its cancel/select!
+    // The seq and mutex drop a stale write that finishes after a newer persist
     std::thread::spawn(move || {
         if !delay.is_zero() {
             std::thread::sleep(delay);
@@ -655,8 +645,7 @@ fn parse_retry_after(resp: &reqwest::Response) -> Option<Duration> {
     parse_retry_after_value(raw)
 }
 
-/// `Retry-After: 0` or a past HTTP-date is `None` so the loop keeps
-/// exponential backoff instead of sleeping zero and hammering the IdP.
+/// `Retry-After: 0` or a past HTTP-date is `None` so the loop keeps exponential backoff instead of sleeping zero and hammering the IdP.
 fn parse_retry_after_value(raw: &str) -> Option<Duration> {
     let after = if let Ok(secs) = raw.parse::<u64>() {
         Duration::from_secs(secs)
@@ -679,8 +668,8 @@ fn bound_retry_after(after: Duration, inner: &Inner) -> Duration {
     bounded.max(RETRY_BASE)
 }
 
-/// `400`/`401`/`403` are terminal. `429`/`408`/`425`/`5xx` stay on the retry
-/// backoff so a rate-limit cannot permanently stop `current()`.
+/// `400`/`401`/`403` are terminal.
+/// `429`/`408`/`425`/`5xx` stay on the retry backoff so a rate-limit cannot permanently stop `current()`.
 async fn require_success(resp: reqwest::Response) -> Result<reqwest::Response, RefreshError> {
     let status = resp.status();
     if status.is_success() {

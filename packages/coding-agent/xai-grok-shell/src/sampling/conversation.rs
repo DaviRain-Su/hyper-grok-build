@@ -1,5 +1,4 @@
-//! Conversation types: re-exports the canonical set from
-//! `xai_grok_sampling_types` plus grok-shell-specific additions.
+//! Conversation types: re-exports the canonical set from `xai_grok_sampling_types` plus grok-shell-specific additions.
 
 use std::collections::HashSet;
 
@@ -9,9 +8,8 @@ pub use xai_grok_sampling_types::conversation::*;
 #[path = "conversation_tests.rs"]
 mod tests;
 
-/// Tracing context for conversation requests; satisfies `TraceContext`
-/// through its blanket impl. Lives in grok-shell because it references
-/// shell-internal config and upload types.
+/// Tracing context for conversation requests; satisfies `TraceContext` through its blanket impl.
+/// Lives in grok-shell because it references shell-internal config and upload types.
 #[derive(Debug, Clone)]
 pub struct ConversationRequestTrace {
     pub gcs_config: crate::session::repo_changes::TraceExportConfig,
@@ -22,13 +20,11 @@ pub struct ConversationRequestTrace {
     pub(crate) artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
 }
 
-/// Fork-safety filter for copied chat history: drops synthetic user messages,
-/// then truncates at the last complete turn so the child never sees a partial
-/// one. A turn is complete when the Assistant's tool calls are all answered;
-/// Reasoning and BackendToolCall items are transparent to the scan.
+/// Filters chat history copied into a fork.
+/// Drops synthetic user messages, then truncates at the last complete turn so the child never sees a partial one.
+/// A turn is complete when the Assistant's tool calls are all answered; Reasoning and BackendToolCall items are transparent to the scan.
 ///
-/// NOTE: keep the "complete turn" definition in sync with
-/// `count_complete_turns` in `xai-grok-subagent-resolution/src/context.rs`.
+/// Keep the "complete turn" definition in sync with `count_complete_turns` in `xai-grok-subagent-resolution/src/context.rs`.
 pub(crate) fn fork_filter_chat(items: &mut Vec<ConversationItem>) {
     items.retain(|item| match item {
         ConversationItem::User(u) => u.synthetic_reason.is_none(),
@@ -67,7 +63,7 @@ pub(crate) fn fork_filter_chat(items: &mut Vec<ConversationItem>) {
                     last_complete_end = j;
                     i = j;
                 } else {
-                    break; // dangling tool calls -> stop at the last complete boundary
+                    break; // Dangling tool calls: stop at the last complete boundary
                 }
             }
             _ => {

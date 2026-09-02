@@ -17,4 +17,6 @@ fn marker_constructors_set_principal_and_preserve_grant() {
 fn queue_operation_set_authorizes_queue_and_rejects_steer() {
     assert!(authorize_operation(OperationSet::QUEUE, Operation::Queue).is_ok());
     assert!(authorize_operation(OperationSet::QUEUE, Operation::Steer).is_err());
+    assert!(authorize_operation(OperationSet::QUEUE_AND_STEER, Operation::Queue).is_ok());
+    assert!(authorize_operation(OperationSet::QUEUE_AND_STEER, Operation::Steer).is_ok());
 }

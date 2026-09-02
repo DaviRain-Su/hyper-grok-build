@@ -49,15 +49,20 @@ fn immediate_outcomes_are_a_closed_content_free_contract() {
     assert_eq!(
         serde_json::to_value(ActiveAgentMessageCompleted {
             outcome: ActiveAgentMessageOutcome::Accepted,
+            requested_operation: ActiveAgentMessageOperation::Steer,
             duration_ms: 7,
         })
         .expect("serialize completion"),
-        serde_json::json!({"outcome": "accepted", "duration_ms": 7}),
+        serde_json::json!({
+            "outcome": "accepted",
+            "requested_operation": "steer",
+            "duration_ms": 7,
+        }),
     );
 }
 
 #[test]
-fn limit_and_settlement_payloads_use_fixed_width_content_free_fields() {
+fn limit_and_settlement_payloads_use_fixed_content_free_fields() {
     assert_eq!(
         serde_json::to_value(ActiveAgentMessageLimitHit {
             max_bytes: 8_u64,
@@ -89,9 +94,41 @@ fn limit_and_settlement_payloads_use_fixed_width_content_free_fields() {
     assert_eq!(
         serde_json::to_value(ActiveAgentMessageSettled {
             disposition: ActiveAgentMessageSettlementDisposition::Completed,
+            requested_operation: ActiveAgentMessageOperation::Steer,
+            effective_operation: ActiveAgentMessageOperation::Steer,
+            fallback_disposition: ActiveAgentMessageFallbackDisposition::NotApplicable,
+            fallback_reason: None,
+            safe_point_latency_ms: Some(3),
             duration_ms: 11,
         })
         .expect("serialize settlement"),
-        serde_json::json!({"disposition": "completed", "duration_ms": 11}),
+        serde_json::json!({
+            "disposition": "completed",
+            "requested_operation": "steer",
+            "effective_operation": "steer",
+            "fallback_disposition": "not_applicable",
+            "safe_point_latency_ms": 3,
+            "duration_ms": 11,
+        }),
+    );
+    assert_eq!(
+        serde_json::to_value(ActiveAgentMessageSettled {
+            disposition: ActiveAgentMessageSettlementDisposition::Completed,
+            requested_operation: ActiveAgentMessageOperation::Steer,
+            effective_operation: ActiveAgentMessageOperation::Queue,
+            fallback_disposition: ActiveAgentMessageFallbackDisposition::Queued,
+            fallback_reason: Some(ActiveAgentMessageFallbackReason::Completion),
+            safe_point_latency_ms: None,
+            duration_ms: 11,
+        })
+        .expect("serialize fallback settlement"),
+        serde_json::json!({
+            "disposition": "completed",
+            "requested_operation": "steer",
+            "effective_operation": "queue",
+            "fallback_disposition": "queued",
+            "fallback_reason": "completion",
+            "duration_ms": 11,
+        }),
     );
 }

@@ -2,13 +2,10 @@
 //!
 //! The same layered API serves three consumers:
 //!
-//! 1. **Regression scenarios** (e.g. `scenarios::plan_approval_resume`,
-//!    exercised via `tests/` in this crate and `pty-scenario` YAML under
-//!    `xai-grok-pager/tests/scenarios/`) — assert screen contents and
-//!    multi-process resume behavior.
-//! 2. **Benchmarks** (`benches/pty_bench.rs`) — run timing scenarios, collect
-//!    per-frame timings, emit JSON / compare against baselines.
-//! 3. **Ad-hoc scenario runs** — spin up the harness to reproduce issues locally.
+//! 1. **Regression scenarios** (e.g. `scenarios::plan_approval_resume`) assert screen contents and multi-process resume behavior.
+//!    They run via `tests/` in this crate and via `pty-scenario` YAML under `xai-grok-pager/tests/scenarios/`.
+//! 2. **Benchmarks** (`benches/pty_bench.rs`) run timing scenarios, collect per-frame timings, emit JSON, and compare against baselines.
+//! 3. **Ad-hoc scenario runs** spin up the harness to reproduce issues locally.
 //!
 //! ## Layers
 //!
@@ -28,6 +25,7 @@ pub mod flows;
 pub mod host_clipboard;
 pub mod leader;
 pub mod pty;
+mod pty_spawn;
 pub mod results;
 pub mod scenarios;
 pub mod screen;
@@ -61,8 +59,7 @@ pub use scripted::{
 };
 pub use timing::{FrameTiming, FrameTimingParser};
 
-// Re-export ptyctl types for richer terminal emulation, vim key notation,
-// and styled output support.
+// Re-export ptyctl types for richer terminal emulation, vim key notation, and styled output support
 pub use ptyctl::keys::parse_keys;
 pub use ptyctl::styled::{StyledLine, StyledRun};
 pub use ptyctl::term::{ScreenOutput, Terminal as AlacrittyTerminal};
@@ -82,35 +79,28 @@ enum PtyPump {
 
 /// High-level harness that composes PTY control, screen state, and frame timing.
 ///
-/// The key method is [`update`](PtyHarness::update), which receives PTY output
-/// chunks inline and feeds each to **both** the [`ScreenTracker`] and
-/// [`FrameTimingParser`] as it arrives. This preserves inter-chunk timing for
-/// accurate frame measurement.
+/// [`update`](PtyHarness::update) feeds each PTY output chunk to both the [`ScreenTracker`] and the [`FrameTimingParser`] as it arrives.
+/// Feeding inline preserves inter-chunk timing for accurate frame measurement.
 pub struct PtyHarness {
     pty: PtyController,
     screen: ScreenTracker,
     timing: FrameTimingParser,
     raw_output: Vec<u8>,
-    /// Spawn instant — the time origin for asciinema cast event timestamps.
+    /// Spawn instant, the time origin for asciinema cast event timestamps.
     spawned_at: Instant,
     /// Per-chunk cast events as `(elapsed_secs, end_offset_into_raw_output)`.
-    /// Each event's bytes are `raw_output[prev_end..end]`, so the chunks are
-    /// not duplicated in memory.
+    /// Each event's bytes are `raw_output[prev_end..end]`, so the chunks are not duplicated in memory.
     cast_events: Vec<(f64, usize)>,
     /// Terminal size at spawn as `(cols, rows)` for the cast header.
     cast_size: (u16, u16),
-    /// When true, [`update`](Self::update) forwards terminal-generated replies
-    /// (cursor-position reports, device attributes, …) back to the child.
-    /// Off by default so tests that script their own probe replies (e.g.
-    /// `pty_xtversion`) keep full control; minimal-mode tests turn it on so the
-    /// inline viewport's startup cursor query completes instead of timing out.
+    /// When true, [`update`](Self::update) forwards terminal-generated replies (cursor-position reports, device attributes, …) back to the child.
+    /// Off by default; see [`Self::set_respond_to_queries`].
     respond_to_queries: bool,
 }
 
 impl PtyHarness {
-    /// Inherit the parent environment for terminal/shell behavior tests
-    /// (XTVERSION probes and grok wrap). Content-backed launches must use
-    /// [`Self::new_in_sandbox`].
+    /// Inherit the parent environment for terminal/shell behavior tests (XTVERSION probes and grok wrap).
+    /// Content-backed launches must use [`Self::new_in_sandbox`].
     pub fn new_inherited_env(
         binary: &Path,
         rows: u16,
@@ -130,8 +120,7 @@ impl PtyHarness {
         Ok(Self::from_pty(pty, rows, cols))
     }
 
-    /// Spawn from a canonical [`xai_grok_test_support::TestSandbox`] baseline
-    /// plus Set-only convenience overrides.
+    /// Spawn from a canonical [`xai_grok_test_support::TestSandbox`] baseline plus Set-only convenience overrides.
     pub fn new_in_sandbox(
         binary: &Path,
         rows: u16,
@@ -182,12 +171,10 @@ impl PtyHarness {
         }
     }
 
-    /// Enable (or disable) forwarding terminal-generated replies back to the
-    /// child during [`update`](Self::update). Real terminals answer device
-    /// queries automatically; the harness leaves this off by default so probe
-    /// tests can script their own replies. Minimal-mode tests enable it so the
-    /// inline viewport's startup cursor-position query (`ESC[6n`) is answered
-    /// and `--minimal` is not silently downgraded to full-screen inline.
+    /// Enable (or disable) forwarding terminal-generated replies back to the child during [`update`](Self::update).
+    /// Real terminals answer device queries automatically; the harness leaves this off by default so probe tests can script their own replies.
+    /// Minimal-mode tests enable it so the inline viewport's startup cursor-position query (`ESC[6n`) is answered.
+    /// Without an answer, `--minimal` silently downgrades to full-screen inline.
     pub fn set_respond_to_queries(&mut self, enabled: bool) {
         self.respond_to_queries = enabled;
     }
@@ -232,8 +219,8 @@ impl PtyHarness {
         Self::spawn_with_content_env_in_dir(binary, rows, cols, content, extra_args, &[], cwd)
     }
 
-    /// Content-backed spawn with Set-only convenience overrides applied after
-    /// the sandbox baseline. Duplicate keys are last-wins.
+    /// Content-backed spawn with Set-only convenience overrides applied after the sandbox baseline.
+    /// Duplicate keys are last-wins.
     pub fn spawn_with_content_env(
         binary: &Path,
         rows: u16,
@@ -321,12 +308,10 @@ impl PtyHarness {
 
     // ── Update: receive PTY output inline → feed both parsers ────────
 
-    /// Receive PTY output for up to `timeout`, feeding each chunk to both
-    /// the screen state tracker and the frame timing parser as it arrives.
+    /// Receive PTY output for up to `timeout`, feeding each chunk to both the screen state tracker and the frame timing parser as it arrives.
     ///
-    /// Processing inline (rather than buffering all chunks first) preserves
-    /// inter-chunk timing so that `FrameTimingParser` records accurate
-    /// wall-clock frame durations.
+    /// Processing inline (rather than buffering all chunks first) preserves inter-chunk timing.
+    /// `FrameTimingParser` then records accurate wall-clock frame durations.
     pub fn update(&mut self, timeout: Duration) {
         let deadline = Instant::now() + timeout;
         loop {
@@ -360,15 +345,11 @@ impl PtyHarness {
         }
     }
 
-    /// Feed bytes **directly into the virtual screen only**, bypassing the
-    /// child (grok).
+    /// Feed bytes **directly into the virtual screen only**, bypassing the child (grok).
     ///
-    /// Simulates an out-of-band repaint/reflow by an outer layer (tmux, or an
-    /// nvim/vim `:terminal`) that changes what's on screen without going
-    /// through grok's stdout. Used to reproduce the doubled-line class of bugs
-    /// where grok's diff renderer never re-asserts a region it didn't write
-    /// itself (since the harness is a single faithful emulator and cannot nest
-    /// a real tmux/nvim).
+    /// Simulates an outer layer (tmux, or an nvim/vim `:terminal`) repainting the screen without going through grok's stdout.
+    /// Used to reproduce the doubled-line class of bugs where grok's diff renderer never re-asserts a region it didn't write itself.
+    /// The harness is a single faithful emulator and cannot nest a real tmux/nvim.
     pub fn feed_screen(&mut self, bytes: &[u8]) {
         self.screen.feed(bytes);
     }
@@ -390,17 +371,14 @@ impl PtyHarness {
         self.screen.contents()
     }
 
-    /// Return the full screen with style information.
     pub fn screen_styled(&self) -> Vec<StyledLine> {
         self.screen.styled()
     }
 
-    /// Render the current screen as HTML.
     pub fn screen_html(&self) -> String {
         self.screen.html()
     }
 
-    /// Check whether the screen contains the given text.
     pub fn contains_text(&self, text: &str) -> bool {
         self.screen.contains(text)
     }
@@ -413,8 +391,8 @@ impl PtyHarness {
 
     /// Pump PTY output until `condition` becomes true or `timeout` expires.
     ///
-    /// The condition is checked before the first pump and after each output
-    /// slice. `description` names the semantic state in timeout diagnostics.
+    /// The condition is checked before the first pump and after each output slice.
+    /// `description` names the state being waited for in timeout diagnostics.
     pub fn wait_until(
         &mut self,
         description: &str,
@@ -452,8 +430,7 @@ impl PtyHarness {
 
     /// Like [`Self::wait_until`], but the condition must remain true for `hold`.
     ///
-    /// The single `timeout` covers both reaching the condition and holding it;
-    /// PTY output continues to be pumped throughout the stability window.
+    /// The single `timeout` covers both reaching the condition and holding it; PTY output continues to be pumped throughout the stability window.
     pub fn wait_until_stable(
         &mut self,
         description: &str,
@@ -515,8 +492,7 @@ impl PtyHarness {
 
     /// Wait for a rendered response to reach the idle prompt state.
     ///
-    /// Call this after observing turn output: the running status and cancel
-    /// keybar disappear only after the pager finalizes the turn.
+    /// Call this after observing turn output: the running status and cancel keybar disappear only after the pager finalizes the turn.
     pub fn wait_for_turn_idle(&mut self, timeout: Duration) -> Result<()> {
         self.wait_until_stable(
             "turn to become idle",
@@ -535,14 +511,13 @@ impl PtyHarness {
         &self.raw_output
     }
 
-    /// Write everything the child PTY emitted so far as an asciinema v2 cast
-    /// (`.cast`), one output event per received chunk with its original
-    /// arrival timestamp. Replayable locally with `asciinema play`. Bytes are
-    /// decoded lossily so binary escapes cannot poison the JSON encoding.
+    /// Write everything the child PTY emitted so far as an asciinema v2 cast (`.cast`).
+    /// Each received chunk becomes one output event with its original arrival timestamp.
+    /// Replayable locally with `asciinema play`.
+    /// Bytes are decoded lossily so binary escapes cannot poison the JSON encoding.
     ///
-    /// Limitation: the header is pinned to the spawn-time size and no `"r"`
-    /// resize events are emitted, so a cast from a test that calls
-    /// [`resize`](Self::resize) plays back at the original geometry.
+    /// Limitation: the header is pinned to the spawn-time size and no `"r"` resize events are emitted.
+    /// A cast from a test that calls [`resize`](Self::resize) plays back at the original geometry.
     pub fn write_cast(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -555,10 +530,9 @@ impl PtyHarness {
         let mut start = 0usize;
         for (elapsed, end) in &self.cast_events {
             let mut end = *end;
-            // A multi-byte codepoint split across two PTY reads must not be
-            // lossy-decoded in halves: back off to the char boundary and let
-            // the partial bytes ride in the next event (a dangling tail at
-            // end-of-capture still decodes lossily — nothing to carry into).
+            // A multi-byte codepoint split across two PTY reads must not be lossy-decoded in halves
+            // Back off to the char boundary and let the partial bytes ride in the next event
+            // A dangling tail at end-of-capture still decodes lossily; there is no next event to carry into
             while end > start
                 && end < self.raw_output.len()
                 && (self.raw_output[end] & 0xC0) == 0x80
@@ -583,21 +557,20 @@ impl PtyHarness {
         self.screen.scrollback_text()
     }
 
-    /// Scrollback history + the visible screen, joined oldest→newest. Use for
-    /// minimal-mode assertions: a committed block may be on-screen or scrolled
-    /// above the pinned viewport depending on how much has accumulated.
+    /// Scrollback history plus the visible screen, joined oldest to newest.
+    /// Use for minimal-mode assertions: a committed block may be on-screen or scrolled above the pinned viewport.
+    /// Where it lands depends on how much has accumulated.
     pub fn full_text(&self) -> String {
         self.screen.full_text()
     }
 
-    /// Whether scrollback + visible screen contains `text`.
+    /// Whether scrollback plus visible screen contains `text`.
     pub fn contains_full_text(&self, text: &str) -> bool {
         self.screen.full_contains(text)
     }
 
-    /// Block until scrollback + visible screen contains `text`, or `timeout`
-    /// expires. The scrollback-aware companion to [`Self::wait_for_text`] for
-    /// content that may have scrolled above the viewport (minimal mode).
+    /// Block until scrollback plus visible screen contains `text`, or `timeout` expires.
+    /// The scrollback-aware companion to [`Self::wait_for_text`] for content that may have scrolled above the viewport (minimal mode).
     pub fn wait_for_full_text(&mut self, text: &str, timeout: Duration) -> Result<()> {
         let result = self.wait_until(&format!("full text {text:?}"), timeout, |h| {
             h.contains_full_text(text)
@@ -607,7 +580,7 @@ impl PtyHarness {
         })
     }
 
-    /// Block until scrollback + visible screen no longer contains `text`.
+    /// Block until scrollback plus visible screen no longer contains `text`.
     pub fn wait_for_full_text_absent(&mut self, text: &str, timeout: Duration) -> Result<()> {
         let result = self.wait_until(&format!("full text {text:?} to disappear"), timeout, |h| {
             !h.contains_full_text(text)
@@ -617,21 +590,18 @@ impl PtyHarness {
         })
     }
 
-    /// Count Kitty graphics APC sequences that carry image data or placement in
-    /// the raw PTY output so far (delete / capability-query escapes excluded).
+    /// Count Kitty graphics APC sequences that carry image data or placement in the raw PTY output so far.
+    /// Delete and capability-query escapes are excluded.
     ///
-    /// These escapes are written into the synchronized-update frame buffer
-    /// (outside the vt100 cell grid), so they aren't visible to `wait_for_text`;
-    /// scanning the raw bytes is the only way to observe them.
+    /// These escapes are written into the synchronized-update frame buffer (outside the vt100 cell grid), so `wait_for_text` cannot see them.
+    /// Scanning the raw bytes is the only way to observe them.
     pub fn count_kitty_graphics(&self) -> usize {
         scripted::count_kitty_graphics(&self.raw_output)
     }
 
-    /// Block until at least `min` Kitty graphics APC sequences (`ESC _ G`) have
-    /// appeared in the raw PTY output, or `timeout` expires.
+    /// Block until at least `min` Kitty graphics APC sequences (`ESC _ G`) have appeared in the raw PTY output, or `timeout` expires.
     ///
-    /// Polling the raw bytes avoids a fixed sleep (flake under load) and returns
-    /// as soon as the image is transmitted/placed.
+    /// Polling the raw bytes avoids a fixed sleep (flaky under load) and returns as soon as the image is transmitted/placed.
     pub fn wait_for_kitty_graphics(&mut self, min: usize, timeout: Duration) -> Result<()> {
         let deadline = Instant::now() + timeout;
         loop {
@@ -657,7 +627,6 @@ impl PtyHarness {
 
     // ── Frame timing queries ─────────────────────────────────────────
 
-    /// Return all recorded frame timings.
     pub fn frame_timings(&self) -> &[FrameTiming] {
         self.timing.timings()
     }
@@ -672,7 +641,6 @@ impl PtyHarness {
         self.timing.frame_count()
     }
 
-    /// Reset all frame timing data.
     pub fn reset_timing(&mut self) {
         self.timing.reset();
     }
@@ -685,16 +653,16 @@ impl PtyHarness {
     }
 
     /// Wait without collapsing exit, pending-status, liveness, or poll errors.
-    /// Returns [`PtyExitPoll::PendingStatus`] immediately for an already-exited
-    /// child and [`PtyExitPoll::Running`] only when the live-child deadline expires.
+    /// Returns [`PtyExitPoll::PendingStatus`] immediately for an already-exited child.
+    /// Returns [`PtyExitPoll::Running`] only when the live-child deadline expires.
     pub fn wait_exit_code(&mut self, timeout: Duration) -> Result<PtyExitPoll<u32>> {
         self.pty.wait_exit_code(timeout)
     }
 
     /// Wait for child exit, then drain final PTY output through EOF or quiet.
     ///
-    /// `exit_timeout` applies only until exit. Once exit is observed, the known
-    /// status is preserved while a separate bounded drain phase runs.
+    /// `exit_timeout` applies only until exit.
+    /// Once exit is observed, the known status is preserved while a separate bounded drain phase runs.
     pub fn wait_for_exit_and_drain(
         &mut self,
         exit_timeout: Duration,

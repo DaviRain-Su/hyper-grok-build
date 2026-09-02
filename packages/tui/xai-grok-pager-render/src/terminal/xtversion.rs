@@ -1,27 +1,19 @@
-//! Runtime XTVERSION probe (`CSI > 0 q` → `DCS > | text ST`), run when
-//! env-based brand detection yields Unknown (SSH, plain xterm) or a
-//! headfully-validated allowlisted brand (see [`gate_allows_probe`]).
+//! Runtime XTVERSION probe (query `CSI > 0 q`, reply `DCS > | text ST`).
+//! It runs when env-based brand detection yields Unknown (SSH, plain xterm) or an allowlisted brand validated by hand (see [`gate_allows_probe`]).
 //!
-//! Fire-and-forget, parser-integrated model (as in helix and similar TUIs):
-//! the query is written once at startup with no timed read; the reply is
-//! recognized and swallowed by the event loop's `XtversionFilter` whenever
-//! it arrives.
+//! Fire-and-forget, as in helix and similar TUIs: the query is written once at startup with no timed read.
+//! The event loop's `XtversionFilter` recognizes and swallows the reply whenever it arrives.
 //!
 //! Safety invariants:
-//! - Query write must happen after `enable_raw_mode()` and before the
-//!   `EventStream` filter is constructed.
-//! - Accepted residuals: SSH *from* JediTerm still probes (its env marker
-//!   doesn't cross SSH) and leaks the query there; a reply whose first
-//!   event arrives only after the filter's 5s arm window types as
-//!   Alt+Shift+P + literal text; on a silent terminal with a fully idle
-//!   session the `OnceLock` stays unset (`record_no_reply` only runs from
-//!   the filter, which only runs on input) — `detected()` is None either
-//!   way, so both consumers are unaffected.
+//! - Query write must happen after `enable_raw_mode()` and before the `EventStream` filter is constructed.
+//! - Accepted residuals: SSH *from* JediTerm still probes (its env marker doesn't cross SSH) and leaks the query there.
+//!   A reply whose first event arrives only after the filter's 5s arm window types as Alt+Shift+P followed by literal text.
+//!   On a silent, fully idle session the `OnceLock` stays unset: `record_no_reply` only runs from the filter, which only runs on input.
+//!   `detected()` is None either way, so both consumers are unaffected.
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Startup probe outcome.
 #[derive(Debug)]
 enum ProbeResult {
     Skipped,
@@ -35,14 +27,12 @@ static XTVERSION: OnceLock<ProbeResult> = OnceLock::new();
 /// True once the query bytes were written to the terminal.
 static QUERY_SENT: AtomicBool = AtomicBool::new(false);
 
-/// XTVERSION query alone — no DA1 sentinel: nothing waits on reply
-/// ordering here, and a stale unsolicited DA1 reply could mis-answer a
-/// future crossterm DA1-waiting probe.
+/// The query is sent alone, without a DA1 sentinel: nothing here waits on reply ordering.
+/// A stale unsolicited DA1 reply could mis-answer a future crossterm probe that waits on DA1.
 #[cfg(unix)]
 const QUERY: &[u8] = b"\x1b[>0q";
 
-/// Returns the terminal's self-reported name/version, if the terminal
-/// answered (e.g. `"kitty 0.35.2"`, `"foot(1.22.0)"`).
+/// Returns the terminal's self-reported name/version, if the terminal answered (e.g. `"kitty 0.35.2"`, `"foot(1.22.0)"`).
 pub fn detected() -> Option<&'static str> {
     match XTVERSION.get() {
         Some(ProbeResult::Identified(v)) => Some(v),
@@ -50,8 +40,7 @@ pub fn detected() -> Option<&'static str> {
     }
 }
 
-/// True when the query was sent and no reply has been recorded yet — the
-/// event loop arms its response filter on this.
+/// True when the query was sent and no reply has been recorded yet; the event loop arms its response filter on this.
 pub fn reply_pending() -> bool {
     QUERY_SENT.load(Ordering::Relaxed) && XTVERSION.get().is_none()
 }
@@ -66,17 +55,15 @@ pub fn record_reply(payload: &str) {
     let _ = XTVERSION.set(result);
 }
 
-/// Record that the filter disarmed without seeing a reply. Only invoked
-/// from the filter on input, so a fully idle session can leave the
-/// `OnceLock` unset (benign — see module doc).
+/// Record that the filter disarmed without seeing a reply.
+/// It is only invoked from the filter on input, so a fully idle session can leave the `OnceLock` unset (benign; see module doc).
 pub fn record_no_reply() {
     if XTVERSION.set(ProbeResult::NoReply).is_ok() {
         tracing::info!("XTVERSION probe: no reply");
     }
 }
 
-/// Send the XTVERSION query once at startup (fire-and-forget); no-ops when
-/// the gate rejects the brand/multiplexer or stdin is not a TTY.
+/// Send the XTVERSION query once at startup (fire-and-forget); no-ops when the gate rejects the brand/multiplexer or stdin is not a TTY.
 pub fn probe_at_startup() {
     use std::io::IsTerminal;
 
@@ -91,11 +78,9 @@ pub fn probe_at_startup() {
     send_query();
 }
 
-/// Crush-style brand allowlist: Unknown plus brands headfully validated as
-/// clean XTVERSION responders (version fidelity is the payoff there).
-/// CSI-intercepting multiplexers skip — the innermost layer answers as
-/// itself, which the `multiplexer` field already records. Transparent muxes
-/// (e.g. cmux) need no special case.
+/// Brand allowlist, as in Crush: Unknown plus brands validated by hand as clean XTVERSION responders (version fidelity is the payoff there).
+/// CSI-intercepting multiplexers skip: the innermost layer answers as itself, which the `multiplexer` field already records.
+/// Transparent muxes (e.g. cmux) need no special case.
 ///
 /// `pub(super)` for [`super::da2`], which must stay disjoint from this list.
 pub(super) fn gate_allows_probe(ctx: &super::TerminalContext) -> bool {
@@ -111,8 +96,7 @@ fn send_query() {
     if super::probe::write_query(QUERY) {
         QUERY_SENT.store(true, Ordering::Relaxed);
     } else {
-        // Brand-Unknown TTY whose query can't reach the terminal is a
-        // feedback-triage signal worth tracing.
+        // A TTY with brand Unknown whose query can't reach the terminal is worth a trace when triaging feedback
         tracing::debug!("XTVERSION probe skipped: query write failed or output is not a TTY");
         let _ = XTVERSION.set(ProbeResult::Skipped);
     }
@@ -185,7 +169,7 @@ mod tests {
                 gate_allows_probe(&ctx(brand, MultiplexerKind::Undetected)),
                 "{brand:?} should be probed"
             );
-            // Transparent mux (cmux) does not intercept CSI; probe still runs.
+            // A transparent mux (cmux) does not intercept CSI
             assert!(
                 gate_allows_probe(&ctx(brand, MultiplexerKind::Cmux)),
                 "{brand:?} under cmux should still be probed"
@@ -207,8 +191,7 @@ mod tests {
         )));
     }
 
-    // Sets the process-global OnceLock — safe under nextest's
-    // process-per-test isolation.
+    // Sets the process-global OnceLock, which is safe under nextest's process-per-test isolation
     #[test]
     fn telemetry_snapshot_includes_recorded_reply() {
         record_reply("PtyHarnessTerm 9.9");

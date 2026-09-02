@@ -1,7 +1,5 @@
-//! Process-wide cache for normalized images: `moka::future::Cache`
-//! collapses concurrent identical-content compute via `try_get_with`,
-//! byte-weighted eviction caps memory at [`CACHE_MAX_BYTES`], and
-//! TTL / TTI keep long-running daemons hygienic.
+//! Process-wide cache for normalized images.
+//! Byte-weighted eviction caps memory at [`CACHE_MAX_BYTES`]; TTL and TTI expire stale entries in long-running daemons.
 
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,8 +16,7 @@ const CACHE_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 const CACHE_TTI: Duration = Duration::from_secs(15 * 60);
 
-/// Cacheable normalize outcome. [`bytes::Bytes`] keeps cache-hit
-/// clones O(1) (refcount bump, no memcpy).
+/// [`bytes::Bytes`] keeps cache-hit clones O(1) (refcount bump, no memcpy).
 #[derive(Debug, Clone)]
 pub(crate) enum NormalizedEntry {
     Unchanged {
@@ -31,23 +28,21 @@ pub(crate) enum NormalizedEntry {
         mime: Cow<'static, str>,
         info: ImageCompressionInfo,
     },
-    /// Re-encode could not meet the byte cap; original bytes kept.
-    /// Caller emits an `image_re_encode_fallback` notice.
+    /// Re-encoding could not meet the byte cap, so the original bytes are kept.
+    /// The caller emits an `image_re_encode_fallback` notice.
     ReEncodingOversized {
         bytes: Bytes,
         mime: Cow<'static, str>,
     },
 }
 
-/// Error from the normalize compute step. `try_get_with` never
-/// inserts on `Err`, so transient failures (slow disks, join errors)
-/// do not pin a sticky failure slot in front of a future success.
+/// `try_get_with` never inserts on `Err`, so a transient failure (slow disk, join error) is not cached in front of a later success.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("{0}")]
 pub(crate) struct NormalizeError(pub String);
 
-/// Cache-key namespace per harness profile. Enum (not `bool`) so
-/// future variants land in a fresh slot rather than colliding.
+/// Cache-key namespace per harness profile.
+/// Enum (not `bool`) so future variants land in a fresh slot rather than colliding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum HarnessVariant {
     Default,
@@ -111,10 +106,8 @@ impl NormalizeCache {
         self.enabled.load(Ordering::Relaxed)
     }
 
-    /// Compute-once via moka's `try_get_with`: concurrent callers
-    /// share one computation; `Err` leaves the slot empty for retry.
-    /// When the cache is disabled (the default), bypasses moka entirely
-    /// and calls `compute` directly.
+    /// Compute-once via moka's `try_get_with`: concurrent callers share one computation; `Err` leaves the slot empty for retry.
+    /// When the cache is disabled (the default), bypasses moka entirely and calls `compute` directly.
     pub(crate) async fn get_or_try_insert_with<F, Fut>(
         &self,
         raw_bytes: Vec<u8>,
@@ -154,7 +147,7 @@ fn weigh_entry(_k: &CacheKey, v: &NormalizedEntry) -> u32 {
         .unwrap_or(u32::MAX)
 }
 
-/// `spawn_blocking` adapter mapping `JoinError` → [`NormalizeError`].
+/// `spawn_blocking` adapter that maps `JoinError` to [`NormalizeError`].
 pub(crate) async fn run_blocking<F, T>(work: F) -> Result<T, NormalizeError>
 where
     F: FnOnce() -> Result<T, NormalizeError> + Send + 'static,
@@ -318,8 +311,7 @@ mod tests {
 
     #[tokio::test]
     async fn byte_budget_evicts_lru() {
-        // Capacity sized so exactly two 609-byte entries fit; a third
-        // insert forces LRU eviction of `a`.
+        // The capacity is sized so exactly two 609-byte entries fit; a third insert forces LRU eviction of `a`
         let cache = enabled_cache(1500);
         let big_payload = Bytes::from(vec![0u8; 600]);
 

@@ -1,32 +1,15 @@
-//! Test-only helpers shared across `xai-grok-hooks` unit + integration tests.
-//!
-//! This module is gated on `#[cfg(test)]` and is exported as `pub(crate)`
-//! so any in-crate `#[cfg(test)] mod tests` can use it. Integration tests
-//! under `tests/` cannot reach it; for those, copy or re-implement the
-//! handful of functions here that they need (the only one currently used
-//! by integration tests is unrelated).
+//! This module is gated on `#[cfg(test)]` and is exported as `pub(crate)` so any in-crate `#[cfg(test)] mod tests` can use it.
+//! Integration tests under `tests/` cannot reach it; for those, copy or re-implement the handful of functions here that they need.
 
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
-/// Run `f` with the env var `name` set to `value` (or unset if `value`
-/// is `None`), restoring the previous value on return.
+/// Run `f` with the env var `name` set to `value` (or unset if `value` is `None`), restoring the previous value on return.
 ///
-/// Uses `catch_unwind` so a panic inside `f` does not leak the env var
-/// into the rest of the test process.
+/// Uses `catch_unwind` so a panic inside `f` does not leak the env var into the rest of the test process.
 ///
-/// `cargo test` runs tests in parallel by default. Process env vars are
-/// process-global, so callers should pick uniquely-named vars to avoid
-/// inter-test races. The lifecycle here (save -> set -> run -> restore)
-/// is panic-safe but not race-safe.
-///
-/// **FOLLOW-UP**: the helper does not
-/// enforce the unique-name discipline -- a future contributor passing
-/// a common name like `HOME` could trigger flaky tests. The standard
-/// fix is to add `serial_test` as a dev-dep and decorate every
-/// env-touching test with `#[serial(env_var)]` so the test runner
-/// serialises them. For now the unique-name
-/// convention plus `catch_unwind` restoration is sufficient for the
-/// tests that ship today.
+/// `cargo test` runs tests in parallel by default.
+/// Process env vars are process-global, so callers should pick uniquely-named vars to avoid inter-test races; nothing here enforces that.
+/// The save, set, run, restore sequence here is panic-safe but not race-safe.
 pub(crate) fn with_env_var<R>(name: &str, value: Option<&str>, f: impl FnOnce() -> R) -> R {
     let previous = std::env::var_os(name);
     // SAFETY: env-var writes are not thread-safe. Callers use uniquely

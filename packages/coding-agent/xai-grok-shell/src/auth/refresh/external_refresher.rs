@@ -7,9 +7,8 @@ use super::ExternalCommandRunner;
 use super::RefreshOutcome;
 use super::TokenRefresher;
 
-/// Refreshes by re-running the operator's external auth binary via the async
-/// external-command runner. Returns data only; mutation lives in
-/// `refresh_chain` (honors the [`TokenRefresher`] no-mutation contract).
+/// Refreshes by re-running the operator's external auth binary via the async external-command runner.
+/// Returns data only; mutation lives in `refresh_chain` (honors the [`TokenRefresher`] no-mutation contract).
 pub(crate) struct ExternalBinaryRefresher {
     runner: Arc<dyn ExternalCommandRunner>,
     command: String,
@@ -20,9 +19,8 @@ impl ExternalBinaryRefresher {
         Self { runner, command }
     }
 
-    /// A failed or timed-out binary run is a single-strike permanent failure;
-    /// the reason is non-sticky so a flaky or briefly slow binary still
-    /// recovers without the user.
+    /// A failed or timed-out binary run is a single-strike permanent failure.
+    /// The reason is non-sticky so a flaky or briefly slow binary still recovers without the user.
     fn record_failure(&self, message: &str) -> RefreshOutcome {
         tracing::warn!(%message, "auth: external binary refresh failed permanently");
         // No token key in the binary flow; the caller scopes the verdict.
@@ -86,8 +84,7 @@ mod tests {
         }
     }
 
-    /// A failed binary run must stay NON-sticky: it has to age out via the
-    /// TTL, never lock an external-binary user out forever.
+    /// A failed binary run must stay NON-sticky: it has to age out via the TTL, never lock an external-binary user out forever.
     #[tokio::test]
     async fn external_binary_failure_is_single_strike_non_sticky_permanent() {
         let runner = Arc::new(FakeRunner::new(vec![None]));

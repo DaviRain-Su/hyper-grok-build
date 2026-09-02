@@ -7,9 +7,8 @@ use std::collections::BTreeSet;
 use xai_chat_state::compaction_utils::{
     CompactedHistoryInput, build_compacted_history as build_compacted_history_shared,
 };
-/// Thin wrapper around the shared `build_compacted_history` from
-/// `xai-chat-state`, rendering the system-reminder synchronously (no
-/// memory backend) to match the old test-local helper signature.
+/// Thin wrapper around the shared `build_compacted_history` from `xai-chat-state`.
+/// Renders the system-reminder synchronously (no memory backend) to match the old test-local helper signature.
 fn build_compacted_history(
     system_prompt: &str,
     user_message_prefix: &str,
@@ -31,10 +30,9 @@ fn build_compacted_history(
         summary_count: 1,
     })
 }
-/// Full compaction scenario: system prompt, user_info prefix, a multi-turn
-/// conversation with tool calls, background tasks, edited files, and
-/// discovered AGENTS.md files.  Asserts the exact raw string of every
-/// user-role message in the compacted history.
+/// Full compaction scenario: system prompt, user_info prefix, and a multi-turn conversation with tool calls.
+/// The conversation also has background tasks, edited files, and discovered AGENTS.md files.
+/// Asserts the exact raw string of every user-role message in the compacted history.
 #[tokio::test]
 async fn test_compacted_history_raw_strings() {
     let conversation = vec![
@@ -162,9 +160,7 @@ async fn test_compacted_history_raw_strings() {
     assert!(msg_reminder_text.contains("/Users/test/project/AGENTS.md"));
     assert_eq!(compacted.len(), 10);
 }
-/// Compaction with no background tasks, no edited files, no AGENTS.md:
-/// the summary message should be just the summary wrapped in <user_query>
-/// with no <system-reminder> appended.
+/// Compaction with no background tasks, no edited files, no AGENTS.md.
 #[tokio::test]
 async fn test_compacted_history_minimal_no_state_context() {
     let conversation = vec![
@@ -205,11 +201,9 @@ async fn test_compacted_history_minimal_no_state_context() {
     );
     assert_eq!(compacted.len(), 5);
 }
-/// Regression guard: grok-build must DROP the working
-/// tail post-compaction. A prior change routed grok-build to keep `recent_messages`,
-/// which survive only as `Tool call omitted...` stubs (dead tokens). Mirrors
-/// `summary_before_recent_compaction_with_no_user_query_yields_three_messages` for grok-build
-/// (`summary_before_recent = false`).
+/// Regression guard: grok-build must DROP the working tail post-compaction.
+/// A prior change routed grok-build to keep `recent_messages`, which survive only as `Tool call omitted...` stubs (dead tokens).
+/// Mirrors `summary_before_recent_compaction_with_no_user_query_yields_three_messages` for grok-build (`summary_before_recent = false`).
 #[tokio::test]
 async fn grok_build_compaction_drops_working_tail_regression_206460() {
     let conversation = vec![
@@ -264,8 +258,7 @@ async fn grok_build_compaction_drops_working_tail_regression_206460() {
         "no tail (ToolResult or stub) may leak into the grok-build compacted history",
     );
 }
-/// Verify that the auto-continue prompt (sent after compaction) is also
-/// raw text without <user_query> wrapping.
+/// Verify that the auto-continue prompt (sent after compaction) is also raw text without <user_query> wrapping.
 #[test]
 fn test_auto_continue_prompt_has_no_user_query_tags() {
     let auto_continue = "Continue with the work described in the summary above. Pick up where you left off based on the 'Current Work' and 'Next Step' sections. If the previous task was completed, confirm completion and await further instructions.";
@@ -277,10 +270,8 @@ fn test_auto_continue_prompt_has_no_user_query_tags() {
         "Auto-continue prompt must NOT contain <user_query> tags"
     );
 }
-/// Prove that the sanitizer + validator pipeline produces a valid
-/// compacted history even when the raw output has an orphaned ToolResult.
-/// This exercises the same code path as `run_compact_inner` in
-/// `acp_session.rs`: build → sanitize → validate → (fallback if needed).
+/// Prove that the sanitizer and validator pipeline produces a valid compacted history even when the raw output has an orphaned ToolResult.
+/// This exercises the same code path as `run_compact_inner` in `acp_session.rs`: build, sanitize, validate, then fall back if needed.
 #[test]
 fn sanitize_then_validate_produces_valid_history() {
     use xai_chat_state::compaction_utils::{
@@ -308,9 +299,8 @@ fn sanitize_then_validate_produces_valid_history() {
         "post-sanitize validation must pass, but found: {violations:?}"
     );
 }
-/// When sanitization cannot fix the history (e.g. result-before-call
-/// that the sanitizer strips but the caller re-introduces somehow),
-/// the fallback path should produce a minimal valid history.
+/// When sanitization cannot fix the history, the fallback path should produce a minimal valid history.
+/// An example is a result-before-call that the sanitizer strips but the caller re-introduces somehow.
 #[test]
 fn fallback_minimal_history_has_no_tool_results() {
     use xai_chat_state::compaction_utils::validate_compacted_history;
@@ -325,6 +315,9 @@ fn fallback_minimal_history_has_no_tool_results() {
         running_subagents: vec![],
         connected_mcp_servers: vec![],
         todos: vec![],
+        scheduled_loops: vec![],
+        workflows: vec![],
+        workflow_tool_name: None,
     };
     let fallback = build_compacted_history(
         "You are a helpful assistant.",
@@ -345,8 +338,7 @@ fn fallback_minimal_history_has_no_tool_results() {
         "fallback history must contain no ToolResult items"
     );
 }
-/// Compaction with running subagents: the `## Running Subagents` section
-/// must appear in the `<system-reminder>` with correct content and tool names.
+/// Compaction with running subagents: their ids must appear under `## Running Background Tasks`.
 #[tokio::test]
 async fn test_compacted_history_with_running_subagents() {
     let conversation = vec![
@@ -391,6 +383,10 @@ async fn test_compacted_history_with_running_subagents() {
     let system_reminder =
         to_system_reminder_sync(&state_context, &[], &[], Some(&tool_names), None, None);
     let reminder = system_reminder.expect("should produce a system-reminder");
+    assert!(
+        reminder.contains("## Running Background Tasks"),
+        "must contain Running Background Tasks heading"
+    );
     assert!(
         reminder.contains("## Running Subagents"),
         "must contain Running Subagents heading"
@@ -442,9 +438,8 @@ async fn test_compacted_history_with_running_subagents() {
         "Running Background Tasks must appear before Running Subagents"
     );
 }
-/// A monitor task renders `(running, monitor)` and a bash task
-/// `(running, run_terminal_command)` so the post-compaction model can tell
-/// which background task is the monitor.
+/// A monitor task renders `(running, monitor)` and a bash task `(running, run_terminal_command)`.
+/// The post-compaction model can then tell which background task is the monitor.
 #[tokio::test]
 async fn background_tasks_are_labeled_by_creator_tool() {
     let conversation = vec![
@@ -492,8 +487,6 @@ async fn background_tasks_are_labeled_by_creator_tool() {
         "task IDs must not be decorated with a task- prefix: {reminder}"
     );
 }
-/// When there are no running subagents, the `## Running Subagents` section
-/// must NOT appear (no empty heading or spurious section).
 #[tokio::test]
 async fn no_subagents_means_no_section() {
     let conversation = vec![
@@ -522,8 +515,7 @@ async fn no_subagents_means_no_section() {
         "should still have the edited files section"
     );
 }
-/// The fallback path (sanitization failure) must preserve running subagent
-/// data from the original state context.
+/// The fallback path (sanitization failure) must preserve running subagent data from the original state context.
 #[test]
 fn fallback_preserves_subagents() {
     let original = CompactionStateContext {
@@ -555,6 +547,9 @@ fn fallback_preserves_subagents() {
         ],
         connected_mcp_servers: vec![],
         todos: vec![],
+        scheduled_loops: vec![],
+        workflows: vec![],
+        workflow_tool_name: None,
     };
     let fallback = CompactionStateContext {
         cwd_generation: original.cwd_generation,
@@ -567,6 +562,9 @@ fn fallback_preserves_subagents() {
         running_subagents: original.running_subagents.clone(),
         connected_mcp_servers: original.connected_mcp_servers.clone(),
         todos: original.todos.clone(),
+        scheduled_loops: original.scheduled_loops.clone(),
+        workflows: original.workflows.clone(),
+        workflow_tool_name: original.workflow_tool_name.clone(),
     };
     assert_eq!(
         fallback.running_subagents.len(),

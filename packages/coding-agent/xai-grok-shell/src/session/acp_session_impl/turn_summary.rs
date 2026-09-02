@@ -1,4 +1,4 @@
-//! Per-turn dashboard summary lifecycle on `SessionActor`.
+//! `SessionActor` methods that start, abort, and commit the per-turn dashboard summary.
 //!
 //! Pure prompt helpers live in [`crate::session::helpers::turn_summary`].
 //! Shared sampling setup is in [`super::side_call`].
@@ -6,23 +6,18 @@
 use super::*;
 
 impl SessionActor {
-    /// (Re)start the per-turn dashboard summary side-call for the turn
-    /// `prompt_id` that just completed successfully, aborting any in-flight
-    /// generation (its result would describe an older turn).
+    /// (Re)start the per-turn dashboard summary side-call for the turn `prompt_id` that just completed successfully.
+    /// Any generation still running is aborted: its result would describe an older turn.
     ///
-    /// Abort is safe mid-call: the persist + broadcast commit block in
-    /// `generate_turn_summary` has no await points, so cancellation can only
-    /// land before it, never inside it. Generation is also checked again
-    /// immediately before commit so a task that finishes after abort cannot
-    /// write a stale summary.
+    /// Abort is safe mid-call: the persist and broadcast commit block in `generate_turn_summary` has no await points.
+    /// Cancellation can only land before that block, never inside it.
+    /// Generation is also checked immediately before commit, so a task that finishes after abort cannot write a stale summary.
     pub(crate) fn restart_turn_summary(self: &Arc<Self>, prompt_id: String) {
         if !self.turn_summary_enabled || self.startup_hints.is_subagent {
             return;
         }
-        // A queued follow-up promoted by `maybe_start_running_task` is
-        // already running when this fires from the completion arm; a snapshot
-        // taken now would contain that turn's user message. Bail — the
-        // running turn's own completion re-fires.
+        // A queued follow-up promoted by `maybe_start_running_task` is already running when this fires from the completion arm
+        // A snapshot taken now would contain that turn's user message, so bail; the running turn's own completion re-fires
         if self
             .current_prompt_id
             .lock()
@@ -37,8 +32,8 @@ impl SessionActor {
         let actor = self.clone();
         let task = tokio::task::spawn_local(async move {
             actor.generate_turn_summary(&prompt_id, generation).await;
-            // Drop the slot only if we are still the registered task. An
-            // abort-and-respawn can replace the handle before we finish.
+            // Drop the slot only if we are still the registered task
+            // An abort-and-respawn can replace the handle before we finish
             if actor.turn_summary_generation.get() == generation {
                 *actor.turn_summary_task.borrow_mut() = None;
             }
@@ -46,14 +41,11 @@ impl SessionActor {
         *self.turn_summary_task.borrow_mut() = Some(task);
     }
 
-    /// Abort an in-flight turn-summary generation. Callers: real prompt
-    /// accept ([`Self::invalidate_side_calls_for_new_prompt`]), conversation
-    /// rewind, and session shutdown. Not cancel: an in-flight summary
-    /// describes a prior successful turn and should finish under
-    /// show-until-replaced.
+    /// Abort a running turn-summary generation.
+    /// Callers: real prompt accept ([`Self::invalidate_side_calls_for_new_prompt`]), conversation rewind, and session shutdown.
+    /// Cancel is not one of them: a running summary describes a prior successful turn, so it finishes and shows until the next one replaces it.
     pub(crate) fn abort_turn_summary(&self) {
-        // Invalidate so a finishing aborted task cannot clear a later spawn
-        // or pass the pre-commit generation gate.
+        // Invalidate so a finishing aborted task cannot clear a later spawn or pass the pre-commit generation gate.
         self.turn_summary_generation
             .set(self.turn_summary_generation.get().wrapping_add(1));
         if let Some(task) = self.turn_summary_task.borrow_mut().take() {
@@ -61,11 +53,9 @@ impl SessionActor {
         }
     }
 
-    /// The turn-summary side-call body: snapshot, one tool-free model call,
-    /// then persist to `summary.json` + broadcast transiently to attached
-    /// clients. Display-only and best-effort — failures log and drop, the
-    /// turn is already over. `generation` is the spawn-time token; if it no
-    /// longer matches at commit time, this result is stale and is dropped.
+    /// The turn-summary side-call body: snapshot, one tool-free model call, then persist to `summary.json` and broadcast transiently to clients.
+    /// Display-only and best-effort: failures log and drop, the turn is already over.
+    /// `generation` is the spawn-time token; if it no longer matches at commit time, this result is stale and is dropped.
     async fn generate_turn_summary(&self, prompt_id: &str, generation: u64) {
         use crate::session::helpers::turn_summary;
 
@@ -116,14 +106,13 @@ impl SessionActor {
             return;
         }
 
-        // Stale after abort / newer spawn: do not persist or broadcast.
+        // Stale after an abort or a newer spawn: do not persist or broadcast
         if self.turn_summary_generation.get() != generation {
             tracing::debug!("turn summary: discarded stale generation");
             return;
         }
 
-        // Commit block: no await between here and the end, so an abort can
-        // never leave the persisted and broadcast copies disagreeing.
+        // Commit block: no await between here and the end, so an abort can never leave the persisted and broadcast copies disagreeing
         tracing::info!(chars = summary.len(), "turn summary generated");
         let _ = self
             .notifications

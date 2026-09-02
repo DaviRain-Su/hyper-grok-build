@@ -1,7 +1,5 @@
-//! Shared PCM-over-pipe plumbing for the subprocess capture backends
-//! (Linux system recorder, macOS `__mic-capture` helper): the capture child's
-//! stop handle, a reader-thread loop that forwards the child's stdout to the
-//! async STT sender, and a stderr drain.
+//! PCM-over-pipe code shared by the subprocess capture backends (Linux system recorder, macOS `__mic-capture` helper).
+//! This module holds the capture child's stop handle, a reader loop that forwards the child's stdout to the async STT sender, and a stderr drain.
 
 use std::io::Read;
 use std::process::Child;
@@ -11,10 +9,9 @@ use std::thread::{self, JoinHandle};
 
 use tokio::sync::mpsc as async_mpsc;
 
-/// Stop handle for a capture child process (recorder or self-exec helper) and
-/// its PCM reader thread.
+/// Stop handle for a capture child process (recorder or self-exec helper) and its PCM reader thread.
 pub struct ChildCaptureHandle {
-    /// `Some` until `stop()` or `Drop` consumes it (kill + reap).
+    /// `Some` until `stop()` or `Drop` consumes it (kill and reap).
     child: Option<Child>,
     stop: Arc<AtomicBool>,
     reader: Option<JoinHandle<()>>,
@@ -29,8 +26,7 @@ impl ChildCaptureHandle {
         }
     }
 
-    /// Stop capture: kill the child, reap it, and join the reader thread so
-    /// the input device is released before returning.
+    /// Stop capture: kill the child, reap it, and join the reader thread so the input device is released before returning.
     pub fn stop(mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(mut child) = self.child.take() {
@@ -45,17 +41,14 @@ impl ChildCaptureHandle {
 
 impl Drop for ChildCaptureHandle {
     fn drop(&mut self) {
-        // Always kill the child so the mic is released even when `stop()` was
-        // never called (e.g. the STT session ended on its own). Killing closes
-        // the child's stdout, so the reader thread's blocking `read` returns 0
-        // and it exits. `Drop` must never block (it may run on an async
-        // executor), so the reap happens on a detached thread — without it,
-        // drop-path teardowns would leave zombies until the pager exits.
+        // Always kill the child so the mic is released even when `stop()` was never called (e.g. the STT session ended on its own).
+        // Killing closes the child's stdout, so the reader thread's blocking `read` returns 0 and it exits
+        // `Drop` must never block (it may run on an async executor), so the reap happens on a detached thread
+        // Without it, a teardown that comes through `Drop` would leave a zombie until the pager exits
         self.stop.store(true, Ordering::Release);
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
-            // `Builder::spawn` so spawn failure under thread exhaustion
-            // degrades to kill-without-reap instead of a panicking `Drop`.
+            // `Builder::spawn` so spawn failure under thread exhaustion degrades to a kill without a reap instead of a panicking `Drop`
             let _ = thread::Builder::new()
                 .name("voice-capture-reap".into())
                 .spawn(move || {
@@ -65,13 +58,11 @@ impl Drop for ChildCaptureHandle {
     }
 }
 
-/// PCM read size from the child's stdout (bytes) — ~64 ms at 16 kHz mono
-/// PCM16. Small enough to stream responsively, large enough to avoid syscall
-/// churn on the reader thread.
+/// PCM read size from the child's stdout (bytes), ~64 ms at 16 kHz mono PCM16.
+/// Small enough to stream responsively, large enough to avoid syscall churn on the reader thread.
 pub(super) const READ_CHUNK: usize = 2048;
 
-/// Forward raw PCM from the child's stdout to the async STT sender until the
-/// child stops (EOF on kill), the consumer goes away, or `stop` is set.
+/// Forward raw PCM from the child's stdout to the async STT sender until the child stops (EOF on kill), the consumer goes away, or `stop` is set.
 /// Generic over the reader for tests; production passes the child's stdout.
 pub(super) fn forward_pcm(
     mut stdout: impl Read,
@@ -89,11 +80,9 @@ pub(super) fn forward_pcm(
             // EOF: the child closed stdout (killed by teardown or exited).
             Ok(0) => break,
             Ok(n) => {
-                // Never park this thread on the channel: `stop()` joins it, so
-                // a send that waits on a stalled STT consumer would turn
-                // teardown into a hang. Shed load instead. (`read` itself is
-                // unblocked by the kill-on-stop path: killing the child closes
-                // stdout, so a waiting `read` returns 0.)
+                // Never park this thread on the channel: `stop()` joins it
+                // A send that waits on a stalled STT consumer would turn teardown into a hang. Shed load instead.
+                // (`read` itself is unblocked by the kill-on-stop path: killing the child closes stdout, so a waiting `read` returns 0.)
                 match pcm_tx.try_send(buf[..n].to_vec()) {
                     Ok(()) => {}
                     Err(async_mpsc::error::TrySendError::Full(_)) => dropped += 1,
@@ -116,10 +105,9 @@ pub(super) fn forward_pcm(
     }
 }
 
-/// Drain the child's stderr to EOF on a detached thread so a chatty child
-/// can't fill the pipe buffer and block its own writes (the hot path never
-/// reads stderr). Non-empty output is logged at debug. The thread ends on its
-/// own when the child exits, so it is not joined.
+/// Drain the child's stderr to EOF on a detached thread so a chatty child can't fill the pipe buffer and block its own writes.
+/// The hot path never reads stderr; non-empty output is logged at debug.
+/// The thread ends on its own when the child exits, so it is not joined.
 pub(super) fn drain_stderr(child: &mut Child, device: &'static str) {
     let Some(mut stderr) = child.stderr.take() else {
         return;

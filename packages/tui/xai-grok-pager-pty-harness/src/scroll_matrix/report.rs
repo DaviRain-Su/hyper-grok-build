@@ -1,6 +1,5 @@
-//! Cell verdicts: the `report.json` artifact, the stdout summary table, and
-//! the exit-code policy shared by the curated CI tests and the
-//! `scroll-matrix` sweep binary.
+//! Cell verdicts: the `report.json` artifact, the stdout summary table, and the exit-code policy.
+//! The curated CI tests and the `scroll-matrix` sweep binary share all three.
 
 use std::path::{Path, PathBuf};
 
@@ -17,14 +16,12 @@ pub enum InvariantStatus {
     Fail,
     /// Violated inside the xfail set (the declared known bug).
     XFail,
-    /// Held despite being in the xfail set — the bug got fixed or the cell
-    /// rotted; either way the cell must be promoted out of xfail, so this
-    /// fails the run exactly like [`InvariantStatus::Fail`].
+    /// Held despite being in the xfail set: the bug got fixed or the cell rotted.
+    /// Either way the cell must be promoted out of xfail, so this fails the run exactly like [`InvariantStatus::Fail`].
     XPass,
 }
 
-/// Cell-level verdict: the worst of its invariant rows
-/// (`Fail > XPass > XFail > Pass` — see `runner::classify`).
+/// Cell-level verdict: the worst of its invariant rows (`Fail > XPass > XFail > Pass`; see `runner::classify`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CellStatus {
@@ -49,7 +46,7 @@ impl CellStatus {
 /// One invariant row of a [`CellReport`].
 #[derive(Clone, Debug, Serialize)]
 pub struct InvariantReport {
-    /// Design vocabulary id (`I-ORD`, …).
+    /// The I-* id (`I-ORD`, …).
     pub id: String,
     pub status: InvariantStatus,
     /// Violation detail, or the promote-out-of-xfail note on XPass.
@@ -64,23 +61,20 @@ pub struct CellReport {
     /// `curated` | `full`.
     pub tier: String,
     pub status: CellStatus,
-    /// One row per declared invariant; empty when the run aborted before
-    /// evaluation (see `note`).
+    /// One row per declared invariant; empty when the run aborted before evaluation (see `note`).
     pub invariants: Vec<InvariantReport>,
     /// The cell's `GROK_SCROLL_LOG` capture (kept for post-mortems).
     pub log_path: String,
     /// Streams grouped out of the capture (finalized + trailing in-flight).
     pub streams: usize,
     pub duration_ms: u64,
-    /// Phase note for runs that never reached invariant evaluation (setup
-    /// panic, finalize-wait timeout, the per-cell hard cap).
+    /// Phase note for runs that never reached invariant evaluation (setup panic, finalize-wait timeout, the per-cell hard cap).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }
 
-/// Exit-code policy: nonzero iff any cell **Fail** or **XPass** — expected
-/// failures (XFail) are green, but a fixed-or-rotted xfail cell must break
-/// the run so it gets promoted instead of silently absorbed.
+/// Exit-code policy: nonzero iff any cell is **Fail** or **XPass**.
+/// Expected failures (XFail) are green, but a fixed-or-rotted xfail cell must break the run so it gets promoted instead of silently absorbed.
 pub fn exit_code(reports: &[CellReport]) -> u8 {
     let failed = reports
         .iter()
@@ -88,8 +82,7 @@ pub fn exit_code(reports: &[CellReport]) -> u8 {
     u8::from(failed)
 }
 
-/// Write `report.json` (pretty, array of [`CellReport`]) into `dir`,
-/// creating it as needed; returns the file path.
+/// Write `report.json` (pretty, array of [`CellReport`]) into `dir`, creating it as needed; returns the file path.
 pub fn write_report_json(reports: &[CellReport], dir: &Path) -> Result<PathBuf> {
     std::fs::create_dir_all(dir)
         .with_context(|| format!("create artifacts dir {}", dir.display()))?;
@@ -99,8 +92,7 @@ pub fn write_report_json(reports: &[CellReport], dir: &Path) -> Result<PathBuf> 
     Ok(path)
 }
 
-/// Detail column source: the run's phase note, else the first non-Pass
-/// invariant row's `id: detail`.
+/// Detail column source: the run's phase note, else the first non-Pass invariant row's `id: detail`.
 fn detail_for(report: &CellReport) -> String {
     if let Some(note) = &report.note {
         return note.clone();
@@ -116,12 +108,11 @@ fn detail_for(report: &CellReport) -> String {
         .unwrap_or_else(|| "-".to_owned())
 }
 
-/// Truncation width for the table's detail column (full text lives in
-/// `report.json`).
+/// Truncation width for the table's detail column (full text lives in `report.json`).
 const DETAIL_WIDTH: usize = 72;
 
-/// Render the aligned one-row-per-cell summary table. Plain ASCII, no
-/// ANSI/TTY dependence — safe for CI logs and `| tee`.
+/// Render the aligned one-row-per-cell summary table.
+/// The output is plain ASCII with no ANSI/TTY dependence, safe for CI logs and `| tee`.
 pub fn summary_table(reports: &[CellReport]) -> String {
     let mut rows: Vec<[String; 6]> = vec![[
         "CELL".into(),

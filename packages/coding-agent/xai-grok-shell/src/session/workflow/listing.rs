@@ -1,19 +1,15 @@
-//! Model-facing listing of discovered workflows.
-//!
-//! Rendered under the skill catalog in the baseline `<system-reminder>` so
-//! the model can launch a saved workflow by name the same way it sees skills.
+//! Rendered under the skill catalog in the baseline `<system-reminder>` so the model can launch a saved workflow by name the same way it sees skills.
 
 use super::registry::WorkflowListing;
 use xai_grok_tools::util::truncate_str_with_marker;
 
-/// Per-entry cap on description + when_to_use combined. The script body is
-/// loaded on launch, so the listing stays terse.
+/// Per-entry cap on description and when_to_use combined.
+/// The script body is loaded on launch, so the listing stays terse.
 const MAX_LISTING_COMBINED_BYTES: usize = 400;
 const MIN_FIELD_BYTES: usize = 20;
 
 pub(crate) const WORKFLOW_LISTING_HEADER: &str = "The following workflows are available:\n\n";
 
-/// Render the discovered workflow catalog, or `None` when there are none.
 pub(crate) fn format_workflow_listing(workflows: &[WorkflowListing]) -> Option<String> {
     if workflows.is_empty() {
         return None;

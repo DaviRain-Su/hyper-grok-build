@@ -1,23 +1,13 @@
 use reqwest::RequestBuilder;
 use std::sync::Arc;
-/// Credentials for authenticating with grok backend services.
-///
-/// Two construction modes:
-/// - `with_auth_manager(am)` — live mode. `resolve_async()` drives
-///   `AuthManager::get_valid_token()` (memory -> disk -> OIDC refresh).
-/// - `new(token)` — static mode. For one-shot callers that don't have
-///   an `AuthManager` (visibility checks, bundle fetches, tests).
-///
 /// Deployment key (enterprise) sends bare `Bearer`, routed to management key auth.
-/// User token (xAI users) sends `Bearer` + `X-XAI-Token-Auth: xai-grok-cli`.
+/// User token (xAI users) sends `Bearer` and `X-XAI-Token-Auth: xai-grok-cli`.
 /// Deployment key takes precedence when both are present.
 #[derive(Clone)]
 pub struct GrokAuthCredentials {
     pub user_token: Option<String>,
     pub deployment_key: Option<String>,
     pub alpha_test_key: Option<String>,
-    /// Live auth source. When set, `resolve_async()` drives the full
-    /// refresh chain; `resolve()` reads the in-memory cache.
     auth_manager: Option<Arc<crate::auth::AuthManager>>,
 }
 impl std::fmt::Debug for GrokAuthCredentials {
@@ -52,18 +42,16 @@ impl GrokAuthCredentials {
             auth_manager: None,
         }
     }
-    /// Live credentials backed by an `AuthManager`. `resolve_async()`
-    /// drives memory -> disk -> OIDC refresh; `resolve()` reads the
-    /// in-memory cache for sync contexts.
+    /// Live credentials backed by an `AuthManager`.
+    /// `resolve_async()` refreshes from memory, then disk, then OIDC; `resolve()` reads the in-memory cache for sync contexts.
     pub fn with_auth_manager(mut self, am: Arc<crate::auth::AuthManager>) -> Self {
         self.auth_manager = Some(am);
         self
     }
-    /// Return a reference to the internal `AuthManager`, if any.
     pub fn auth_manager(&self) -> Option<&Arc<crate::auth::AuthManager>> {
         self.auth_manager.as_ref()
     }
-    /// Error hint for 401 responses, based on which credential was sent.
+    /// Error hint for 401 responses.
     pub fn auth_error_hint(&self) -> &'static str {
         if self.deployment_key.is_some() {
             "Your GROK_DEPLOYMENT_KEY is invalid or expired. Please contact a team admin."
@@ -73,15 +61,10 @@ impl GrokAuthCredentials {
             "Not authenticated."
         }
     }
-    /// Return a snapshot with the live token from the internal `AuthManager`
-    /// if available, falling back to the static `user_token`.
+    /// Return a snapshot with the live token from the internal `AuthManager` if available, falling back to the static `user_token`.
     ///
-    /// Uses `current_or_expired()` instead of `current()` so that a token
-    /// in the early-invalidation refresh window (expired for proactive
-    /// refresh but still accepted by the server) is still returned.
-    /// Without this, the `resolve_async()` error fallback returns
-    /// credentials with no token, causing requests to be sent without
-    /// an Authorization header.
+    /// Uses `current_or_expired()` instead of `current()` so a token in the early-invalidation refresh window is still returned.
+    /// Such a token is expired for proactive refresh but still accepted by the server.
     pub fn resolve(&self) -> GrokAuthCredentials {
         if let Some(ref am) = self.auth_manager
             && let Some(auth) = am.current_or_expired()
@@ -93,10 +76,8 @@ impl GrokAuthCredentials {
             self.clone()
         }
     }
-    /// Async resolve via the internal `AuthManager::get_valid_token()`
-    /// (memory -> disk -> active OIDC refresh). Falls back to sync
-    /// `resolve()` on error so transient refresh failures don't drop
-    /// the bearer.
+    /// Async resolve via the internal `AuthManager::get_valid_token()` (memory, then disk, then an active OIDC refresh).
+    /// Falls back to sync `resolve()` on error so transient refresh failures don't drop the bearer.
     pub async fn resolve_async(&self) -> GrokAuthCredentials {
         let Some(ref am) = self.auth_manager else {
             return self.clone();

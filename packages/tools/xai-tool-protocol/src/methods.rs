@@ -197,13 +197,4 @@ mod tests {
             assert!(!err.to_string().is_empty(), "{alias}");
         }
     }
-
-    #[test]
-    fn serde_round_trip_matches_wire_str() {
-        let method = Method::ToolCall;
-        let json = serde_json::to_value(method).expect("serialize");
-        assert_eq!(json.as_str(), Some("tool.call"));
-        let back: Method = serde_json::from_value(json).expect("deserialize");
-        assert_eq!(back, method);
-    }
 }

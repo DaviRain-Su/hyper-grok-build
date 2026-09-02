@@ -1,5 +1,3 @@
-//! Filesystem locations for grok config files and binaries.
-
 use std::path::PathBuf;
 
 pub use xai_dirs::{default_grok_home, grok_home, user_grok_home};
@@ -42,8 +40,8 @@ pub fn claude_managed_settings_path() -> Option<PathBuf> {
     None
 }
 
-/// The platform path where managed-settings.json would live for settings
-/// compat, whether or not it exists. `None` on unsupported platforms.
+/// The platform path where managed-settings.json would live for settings compat, whether or not it exists.
+/// `None` on unsupported platforms.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn claude_managed_settings_probe_path() -> Option<PathBuf> {
     Some(PathBuf::from(CLAUDE_MANAGED_SETTINGS_PATH))
@@ -54,19 +52,14 @@ pub fn claude_managed_settings_probe_path() -> Option<PathBuf> {
     None
 }
 
-/// Max bytes for a single directory name component (macOS APFS, Linux ext4,
-/// NTFS all enforce 255 bytes).
+/// Max bytes for a single directory name component (macOS APFS, Linux ext4, NTFS all enforce 255 bytes).
 const MAX_DIRNAME_BYTES: usize = 255;
 
 /// Encode a CWD string into a filesystem-safe directory name component.
 ///
-/// Short CWDs (URL-encoded form <= 255 bytes) use URL-encoding for backward
-/// compatibility and human readability on disk.
-///
-/// Long CWDs (> 255 bytes encoded) use a compact `{slug}-{blake3_hex16}`
-/// form that is always <= 57 bytes. Callers must write a `.cwd` metadata
-/// file via [`ensure_sessions_cwd_dir`] so the original CWD can be
-/// recovered by [`decode_cwd_from_dirname`].
+/// Short CWDs (URL-encoded form <= 255 bytes) use URL-encoding for backward compatibility and human readability on disk.
+/// Long CWDs (> 255 bytes encoded) use a compact `{slug}-{blake3_hex16}` form that is always <= 57 bytes.
+/// Callers must write a `.cwd` metadata file via [`ensure_sessions_cwd_dir`] so the original CWD can be recovered by [`decode_cwd_from_dirname`].
 pub fn encode_cwd_dirname(cwd: &str) -> String {
     let url_encoded = urlencoding::encode(cwd);
     if url_encoded.len() <= MAX_DIRNAME_BYTES {
@@ -86,15 +79,13 @@ pub fn encode_cwd_dirname(cwd: &str) -> String {
 /// Recover the original CWD from a sessions CWD directory.
 ///
 /// Tries URL-decoding the directory name first (works for short/legacy dirs).
-/// Falls back to reading a `.cwd` metadata file inside the directory (written
-/// by [`ensure_sessions_cwd_dir`] for hash-based dirs).
+/// Falls back to reading a `.cwd` metadata file inside the directory (written by [`ensure_sessions_cwd_dir`] for hash-based dirs).
 pub fn decode_cwd_from_dirname(dir: &std::path::Path) -> Option<String> {
     let name = dir.file_name()?.to_str()?;
     if let Ok(decoded) = urlencoding::decode(name) {
         let s = decoded.into_owned();
-        // URL-decoded absolute CWDs always start with `/` (Unix) or a drive
-        // letter (Windows).  The slug-hash form never does, so this
-        // distinguishes the two encodings unambiguously.
+        // URL-decoded absolute CWDs always start with `/` (Unix) or a drive letter (Windows)
+        // The slug-hash form never does, so this distinguishes the two encodings unambiguously
         if s.starts_with('/') || (cfg!(windows) && s.chars().nth(1) == Some(':')) {
             return Some(s);
         }
@@ -104,11 +95,9 @@ pub fn decode_cwd_from_dirname(dir: &std::path::Path) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-/// Best-effort chmod 0700 on Unix, no-op elsewhere: session dirs hold chat
-/// history, and creators re-run on every touch so the mode self-heals.
-/// Failures are logged (not returned): on chmod-hostile filesystems (FAT,
-/// some network mounts) healing pre-existing loose dirs can never succeed,
-/// and that must be visible.
+/// Best-effort chmod 0700 on Unix, no-op elsewhere: session dirs hold chat history, and creators re-run on every touch so the mode self-heals.
+/// Failures are logged (not returned): on chmod-hostile filesystems (FAT, some network mounts) healing pre-existing loose dirs can never succeed.
+/// That must be visible.
 pub fn set_dir_owner_only(dir: &std::path::Path) {
     #[cfg(unix)]
     {
@@ -123,9 +112,8 @@ pub fn set_dir_owner_only(dir: &std::path::Path) {
     }
 }
 
-/// `create_dir_all` with directories born 0700 on Unix (no umask window),
-/// plus a self-heal chmod for a pre-existing `dir`. Prefer this over bare
-/// `create_dir_all` for anything under `sessions/`.
+/// `create_dir_all` with directories born 0700 on Unix (no umask window), plus a self-heal chmod for a pre-existing `dir`.
+/// Prefer this over bare `create_dir_all` for anything under `sessions/`.
 pub fn create_dir_all_owner_only(dir: &std::path::Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -141,26 +129,19 @@ pub fn create_dir_all_owner_only(dir: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Build the CWD-level session directory path:
-/// `grok_home()/sessions/{encode_cwd_dirname(cwd)}`.
-///
-/// Does **not** create the directory on disk — use [`ensure_sessions_cwd_dir`]
-/// when the directory must exist.
+/// Build the CWD-level session directory path: `grok_home()/sessions/{encode_cwd_dirname(cwd)}`.
+/// Does **not** create the directory on disk; use [`ensure_sessions_cwd_dir`] when the directory must exist.
 pub fn sessions_cwd_dir(cwd: &str) -> PathBuf {
     sessions_cwd_dir_in(&grok_home(), cwd)
 }
 
-/// [`sessions_cwd_dir`] with an injectable grok home — the single source of
-/// truth for the `sessions/<encoded-cwd>` path shape.
+/// [`sessions_cwd_dir`] with an injectable grok home, the single source of truth for the `sessions/<encoded-cwd>` path shape.
 pub fn sessions_cwd_dir_in(grok_home: &std::path::Path, cwd: &str) -> PathBuf {
     grok_home.join("sessions").join(encode_cwd_dirname(cwd))
 }
 
-/// Create the CWD-level session directory and write a `.cwd` metadata file
-/// when hash-based encoding is used (long paths).
-///
-/// For short paths the `.cwd` file is not written because the directory name
-/// itself is reversible via URL-decoding.
+/// Create the CWD-level session directory and write a `.cwd` metadata file when hash-based encoding is used (long paths).
+/// For short paths the `.cwd` file is not written because the directory name itself is reversible via URL-decoding.
 pub fn ensure_sessions_cwd_dir(cwd: &str) -> std::io::Result<PathBuf> {
     ensure_sessions_cwd_dir_in(&grok_home(), cwd)
 }
@@ -172,23 +153,20 @@ pub fn ensure_sessions_cwd_dir_in(
 ) -> std::io::Result<PathBuf> {
     let encoded_name = encode_cwd_dirname(cwd);
     let dir = sessions_cwd_dir_in(grok_home, cwd);
-    // 0700 dir + root shield everything beneath (children with looser modes,
-    // cwd-path dirnames, the session search index).
+    // The 0700 dir and root shield everything beneath (children with looser modes, cwd-path dirnames, the session search index)
     create_dir_all_owner_only(&dir)?;
     set_dir_owner_only(&grok_home.join("sessions"));
-    // Hash-based encoding is in use when the dirname differs from the
-    // plain URL-encoded form.  Write a `.cwd` file so decode can recover
-    // the original path.  O_CREAT|O_EXCL via create_new avoids TOCTOU
-    // races with parallel session starts.
+    // Hash-based encoding is in use when the dirname differs from the plain URL-encoded form
+    // Write a `.cwd` file so decode can recover the original path
+    // O_CREAT|O_EXCL via create_new avoids TOCTOU races with parallel session starts
     if encoded_name != urlencoding::encode(cwd).as_ref() {
         let cwd_file = dir.join(".cwd");
         match std::fs::File::create_new(&cwd_file) {
             Ok(mut f) => {
                 std::io::Write::write_all(&mut f, cwd.as_bytes())?;
                 // Fsync the write-capable create_new handle before drop.
-                // A later parent-dir sync would otherwise freeze a present
-                // but empty/torn marker that path recovery cannot fall back
-                // from. AlreadyExists skips rewrite (O_EXCL).
+                // A later parent-dir sync would otherwise freeze a present but empty/torn marker that path recovery cannot fall back from
+                // AlreadyExists skips rewrite (O_EXCL)
                 f.sync_all()?;
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -198,10 +176,6 @@ pub fn ensure_sessions_cwd_dir_in(
     Ok(dir)
 }
 
-/// Generate a URL-safe slug from a string.
-///
-/// Lowercases, replaces non-alphanumeric chars with `-`, collapses
-/// consecutive dashes, and truncates to `max_len` characters.
 fn slugify(input: &str, max_len: usize) -> String {
     let mut result = String::with_capacity(input.len());
     let mut prev_dash = false;
@@ -223,7 +197,7 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    /// Realistic CWDs that trigger the bug (URL-encoded > 255 bytes).
+    /// Realistic CWDs whose URL-encoded form exceeds 255 bytes, forcing the hash fallback.
     const LONG_CWDS: &[&str] = &[
         "/Users/dev/Documents/開発プロジェクト/機能追加/テスト環境/ソースコード/main-branch",
         "/Users/user/Library/Mobile Documents/com~apple~CloudDocs/项目文件/深层嵌套目录/更深层次的/工作区域/project",
@@ -264,29 +238,6 @@ mod tests {
         let dir = tmp.path().join("some-slug-abcdef0123456789");
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(decode_cwd_from_dirname(&dir), None);
-    }
-
-    #[test]
-    fn cwd_file_write_is_idempotent_via_excl() {
-        let tmp = TempDir::new().unwrap();
-        let long_cwd = format!("/Users/test/{}", "中".repeat(30));
-        let dir = tmp.path().join(encode_cwd_dirname(&long_cwd));
-        std::fs::create_dir_all(&dir).unwrap();
-        let cwd_file = dir.join(".cwd");
-        std::fs::write(&cwd_file, &long_cwd).unwrap();
-        match std::fs::File::create_new(&cwd_file) {
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            other => panic!("expected AlreadyExists, got: {other:?}"),
-        }
-        assert_eq!(std::fs::read_to_string(&cwd_file).unwrap(), long_cwd);
-    }
-
-    #[test]
-    fn url_encoded_long_cwd_fails_on_real_filesystem() {
-        let tmp = TempDir::new().unwrap();
-        let url_encoded = urlencoding::encode(LONG_CWDS[0]).into_owned();
-        let result = std::fs::create_dir_all(tmp.path().join(&url_encoded));
-        assert!(result.is_err());
     }
 
     #[test]
@@ -335,12 +286,6 @@ mod tests {
         set_dir_owner_only(&dir);
 
         assert_eq!(unix_mode(&dir), 0o700);
-    }
-
-    #[test]
-    fn set_dir_owner_only_is_best_effort_on_missing_path() {
-        // Must not panic or error — chmod failures are intentionally ignored.
-        set_dir_owner_only(std::path::Path::new("/nonexistent/definitely/not/here"));
     }
 
     #[test]

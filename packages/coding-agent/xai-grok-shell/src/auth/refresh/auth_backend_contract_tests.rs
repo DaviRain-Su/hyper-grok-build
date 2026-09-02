@@ -1,6 +1,5 @@
-//! End-to-end auth-backend contract tests: a mock IdP whose `/token` response
-//! is forced per case, asserting the refresh outcome, the storm cap, and the
-//! emitted `manual_auth` instrumentation on the live recovery path.
+//! Auth-backend contract tests against a mock IdP whose `/token` response is forced per case.
+//! They assert the refresh outcome, the storm cap, and the `manual_auth` event emitted on the live recovery path.
 
 use super::*;
 use crate::auth::error::RefreshTokenFailedReason;
@@ -11,10 +10,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use xai_grok_telemetry::events::{AuthTokenKind, ManualAuthReason};
 
-/// Mock IdP: OIDC discovery + a `/token` endpoint returning a fixed
-/// `(status, body)` and counting every hit, plus the `/user` endpoint
-/// `AuthManager::update` calls after a successful refresh. `delay_ms` widens
-/// the in-lock window so concurrent callers queue on `refresh_lock`.
+/// Mock IdP: OIDC discovery, a `/token` endpoint returning a fixed `(status, body)` and counting every hit, and a `/user` endpoint.
+/// `AuthManager::update` calls `/user` after a successful refresh.
+/// `delay_ms` widens the in-lock window so concurrent callers queue on `refresh_lock`.
 async fn start_idp(
     token_status: u16,
     token_body: String,
@@ -88,8 +86,7 @@ enum Expect {
 }
 
 /// The IdP token-endpoint contract: each response shape maps to one outcome.
-/// `invalid_grant`/`invalid_client` are the only permanent verdicts; status
-/// blips and unrecognized codes stay transient (never permanent-lock).
+/// `invalid_grant` and `invalid_client` are the only permanent verdicts; status blips and unrecognized codes stay transient.
 #[tokio::test]
 async fn auth_backend_contract_token_responses_map_to_outcomes() {
     use RefreshTokenFailedReason::{ClientRejected, RefreshTokenRejected};
@@ -122,9 +119,8 @@ async fn auth_backend_contract_token_responses_map_to_outcomes() {
         ),
         ("bare_4xx_no_body", 400, "", Expect::Transient),
         ("malformed_body", 400, "not json", Expect::Transient),
-        // Proxy/WAF-mangled bodies must degrade to retry, never a false permanent
-        // lock: a nested error object or a non-string `error` is not a recognized
-        // top-level code, so it stays transient.
+        // A body mangled by a proxy or WAF must degrade to retry, never a false permanent lock
+        // A nested error object or a non-string `error` is not a recognized top-level code, so it stays transient
         (
             "nested_error_object",
             400,
@@ -164,15 +160,14 @@ async fn auth_backend_contract_token_responses_map_to_outcomes() {
     }
 }
 
-/// A burst of concurrent 401s on the same revoked refresh token must hit the
-/// IdP exactly once. The callers serialize on `refresh_lock`; the leader records
-/// the verdict before releasing, so the in-lock re-check (`refresh_chain` step
-/// 1b) short-circuits every follower. Delete step 1b and the count climbs to N.
+/// A burst of concurrent 401s on the same revoked refresh token must hit the IdP exactly once.
+/// The callers serialize on `refresh_lock`; the leader records the verdict before releasing, so `RefreshStep::Recheck` short-circuits every follower.
+/// Delete that re-check and the count climbs to N.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auth_backend_contract_concurrent_401s_hit_idp_once() {
     let hits = Arc::new(AtomicU32::new(0));
-    // 100ms /token delay so every caller passes the pre-lock check and queues
-    // on refresh_lock before the leader records the verdict, exercising step 1b.
+    // The 100ms /token delay lets every caller pass the pre-lock check and queue on refresh_lock before the leader records the verdict
+    // That ordering is what exercises the in-lock `RefreshStep::Recheck`
     let (base_url, server) = start_idp(
         400,
         r#"{"error":"invalid_grant"}"#.to_string(),
@@ -215,16 +210,14 @@ async fn auth_backend_contract_concurrent_401s_hit_idp_once() {
     server.abort();
 }
 
-/// The instrumentation loop through the live recovery state machine: a dead
-/// refresh token on each user-facing source (`Turn`, `Relay`) emits one
-/// `manual_auth` event carrying the typed reason, the matching surface, and the
-/// rejected principal; a refreshable token auto-refreshes and emits nothing.
+/// A dead refresh token on each user-facing source (`Turn`, `Relay`) emits one `manual_auth` event.
+/// The event carries the typed reason, the matching surface, and the rejected principal.
+/// A refreshable token auto-refreshes and emits nothing.
 #[tokio::test]
 async fn auth_backend_contract_dead_token_emits_typed_manual_auth_event() {
     use xai_grok_telemetry::events::ManualAuthSurface;
 
-    // A dead refresh token on each user-facing source emits the typed event
-    // with the surface that produced it.
+    // A dead refresh token on each user-facing source emits the typed event with the surface that produced it
     for (source, want_surface) in [
         (RecoverySource::Turn, ManualAuthSurface::Turn),
         (RecoverySource::Relay, ManualAuthSurface::Relay),
@@ -308,9 +301,8 @@ async fn auth_backend_contract_dead_token_emits_typed_manual_auth_event() {
     ok_server.abort();
 }
 
-/// Consecutive transient failures self-heal up to a bound, then escalate to a
-/// non-sticky `Other` permanent failure (which ages out via the TTL). A
-/// regression here would turn recoverable blips into a permanent `/login`.
+/// Consecutive transient failures self-heal up to a bound, then escalate to a non-sticky `Other` permanent failure (which ages out via the TTL).
+/// A regression here would turn recoverable blips into a permanent `/login`.
 #[tokio::test]
 async fn auth_backend_contract_transient_failures_escalate_to_non_sticky_permanent() {
     let hits = Arc::new(AtomicU32::new(0));
@@ -324,8 +316,7 @@ async fn auth_backend_contract_transient_failures_escalate_to_non_sticky_permane
     auth_manager.hot_swap(expired_oidc(&base_url));
 
     // One refresher instance: it owns the consecutive-failure counter.
-    // Budget is above try_recover_unauthorized's per-recovery attempts so a
-    // single 401 recovery cannot alone escalate; exhaust the full budget here.
+    // The budget exceeds try_recover_unauthorized's per-recovery attempts, so a single 401 recovery cannot escalate; exhaust the full budget here
     let refresher = OidcRefresher::new(auth_manager.clone());
     let mut outcomes = Vec::new();
     for _ in 0..5 {
@@ -360,10 +351,9 @@ async fn auth_backend_contract_transient_failures_escalate_to_non_sticky_permane
     server.abort();
 }
 
-/// Two `AuthManager`s sharing one auth.json stand in for two CLI processes: the
-/// auth.json flock must serialize their refreshes so the shared refresh token is
-/// spent at the IdP exactly once. The loser adopts the rotated token from disk
-/// instead of racing a second exchange (which the IdP could revoke as reuse).
+/// Two `AuthManager`s sharing one auth.json stand in for two CLI processes.
+/// The auth.json flock must serialize their refreshes so the shared refresh token is spent at the IdP exactly once.
+/// The loser adopts the rotated token from disk instead of racing a second exchange (which the IdP could revoke as reuse).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auth_backend_contract_two_instances_share_one_idp_call() {
     let hits = Arc::new(AtomicU32::new(0));
@@ -376,8 +366,7 @@ async fn auth_backend_contract_two_instances_share_one_idp_call() {
     .await;
     let dir = tempfile::tempdir().unwrap();
 
-    // Distinct managers, same on-disk auth.json (separate flock OFDs => they
-    // genuinely contend, like two processes).
+    // Distinct managers, same on-disk auth.json: separate flock OFDs, so they genuinely contend like two processes
     let new_instance = || {
         let m = Arc::new(
             AuthManager::new_test_isolated(dir.path(), GrokComConfig::default())

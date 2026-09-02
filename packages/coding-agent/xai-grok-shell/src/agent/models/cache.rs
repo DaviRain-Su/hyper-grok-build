@@ -22,6 +22,14 @@ pub(crate) fn models_cache_path() -> std::path::PathBuf {
     crate::util::grok_home::grok_home().join(MODELS_CACHE_FILE)
 }
 
+pub(crate) fn is_fresh(fetched_at: DateTime<Utc>, ttl: std::time::Duration) -> bool {
+    let Ok(ttl) = ChronoDuration::from_std(ttl) else {
+        return false;
+    };
+    let age = Utc::now().signed_duration_since(fetched_at);
+    age >= ChronoDuration::zero() && age < ttl
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct ModelsCache {
     pub(crate) fetched_at: DateTime<Utc>,
@@ -29,22 +37,13 @@ pub(crate) struct ModelsCache {
     pub(crate) grok_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) auth_method: Option<CacheAuthMethod>,
-    /// Models-list URL this catalog was fetched from; compared on load so a cache written against another backend is a miss.
+    /// The models-list URL this catalog was fetched from.
+    /// `load_fresh` compares it, so a cache written against another backend is a miss.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) origin: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) etag: Option<String>,
     pub(crate) models: IndexMap<String, ModelEntry>,
-}
-
-impl ModelsCache {
-    fn is_fresh(&self, ttl: std::time::Duration) -> bool {
-        let Ok(ttl) = ChronoDuration::from_std(ttl) else {
-            return false;
-        };
-        let age = Utc::now().signed_duration_since(self.fetched_at);
-        age >= ChronoDuration::zero() && age < ttl
-    }
 }
 
 pub(crate) struct CacheResult {
@@ -96,7 +95,7 @@ impl ModelsCacheManager {
             );
             return None;
         }
-        if !cache.is_fresh(self.ttl) {
+        if !is_fresh(cache.fetched_at, self.ttl) {
             tracing::debug!("models cache is stale");
             return None;
         }
@@ -158,55 +157,15 @@ impl ModelsCacheManager {
         }
     }
 
-    /// Per-writer temp path: `~/.grok` is shared across concurrent CLI
-    fn unique_tmp_path(&self) -> std::path::PathBuf {
-        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.path
-            .with_extension(format!("json.tmp.{}.{n}", std::process::id()))
-    }
-
-    /// Best-effort removal of temp files a crash left in the write→rename window; only sweeps entries older than the TTL.
-    fn sweep_stale_tmp(&self) {
-        let (Some(parent), Some(stem)) = (
-            self.path.parent(),
-            self.path.file_name().and_then(|s| s.to_str()),
-        ) else {
-            return;
-        };
-        let prefix = format!("{stem}.tmp.");
-        let Ok(entries) = std::fs::read_dir(parent) else {
-            return;
-        };
-        let now = std::time::SystemTime::now();
-        for entry in entries.flatten() {
-            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-                continue;
-            };
-            if !name.starts_with(&prefix) {
-                continue;
-            }
-            let is_stale = entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| now.duration_since(t).ok())
-                .is_some_and(|age| age > self.ttl);
-            if is_stale {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
-    }
-
     pub(crate) fn atomic_write(&self, cache: &ModelsCache) {
         if let Some(parent) = self.path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        self.sweep_stale_tmp();
+        sweep_stale_tmp(&self.path, self.ttl);
         let Ok(json) = serde_json::to_vec_pretty(cache) else {
             return;
         };
-        let tmp = self.unique_tmp_path();
+        let tmp = unique_tmp_path(&self.path);
         if std::fs::write(&tmp, &json).is_ok() {
             if std::fs::rename(&tmp, &self.path).is_err() {
                 let _ = std::fs::remove_file(&tmp);
@@ -220,11 +179,11 @@ impl ModelsCacheManager {
         if let Some(parent) = self.path.parent() {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
-        self.sweep_stale_tmp();
+        sweep_stale_tmp(&self.path, self.ttl);
         let Ok(json) = serde_json::to_vec_pretty(cache) else {
             return;
         };
-        let tmp = self.unique_tmp_path();
+        let tmp = unique_tmp_path(&self.path);
         if tokio::fs::write(&tmp, &json).await.is_ok() {
             if tokio::fs::rename(&tmp, &self.path).await.is_err() {
                 let _ = tokio::fs::remove_file(&tmp).await;
@@ -233,4 +192,88 @@ impl ModelsCacheManager {
             let _ = tokio::fs::remove_file(&tmp).await;
         }
     }
+}
+
+pub(crate) fn read_capped(path: &std::path::Path, max: u64) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(max + 1)
+        .read_to_end(&mut buf)
+        .ok()?;
+    if buf.len() as u64 > max {
+        tracing::debug!("settings cache exceeds size cap");
+        return None;
+    }
+    Some(buf)
+}
+
+pub(crate) fn unique_tmp_path(path: &std::path::Path) -> std::path::PathBuf {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    path.with_extension(format!("json.tmp.{}.{n}", std::process::id()))
+}
+
+pub(crate) fn sweep_stale_tmp(path: &std::path::Path, ttl: std::time::Duration) {
+    let (Some(parent), Some(stem)) = (path.parent(), path.file_name().and_then(|s| s.to_str()))
+    else {
+        return;
+    };
+    let prefix = format!("{stem}.tmp.");
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        let is_stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age > ttl);
+        if is_stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+pub(crate) fn write_private_atomic(path: &std::path::Path, ttl: std::time::Duration, bytes: &[u8]) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    sweep_stale_tmp(path, ttl);
+    let tmp = unique_tmp_path(path);
+    let written = {
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)
+                .and_then(|mut f| f.write_all(bytes))
+                .is_ok()
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&tmp, bytes).is_ok()
+        }
+    };
+    if written && std::fs::rename(&tmp, path).is_ok() {
+        return;
+    }
+    let _ = std::fs::remove_file(&tmp);
 }

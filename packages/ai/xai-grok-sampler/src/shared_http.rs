@@ -68,6 +68,34 @@ pub(crate) fn client() -> Result<reqwest::Client, reqwest::Error> {
     shared(&SHARED_H2, build_http_client, sharing_disabled())
 }
 
+pub(crate) enum PooledClient {
+    SharingDisabled,
+    Unavailable(reqwest::Error),
+    Ready(reqwest::Client),
+}
+
+/// The pooled client worth prewarming, or why there is none.
+pub(crate) fn pooled_client() -> PooledClient {
+    if sharing_disabled() {
+        return PooledClient::SharingDisabled;
+    }
+    match client() {
+        Ok(client) => PooledClient::Ready(client),
+        Err(error) => PooledClient::Unavailable(error),
+    }
+}
+
+/// Idle timeout the shared pool evicts after; read once so prewarm's re-warm window stays in step.
+pub(crate) fn pool_idle_timeout() -> Duration {
+    static SECS: OnceLock<u64> = OnceLock::new();
+    Duration::from_secs(*SECS.get_or_init(|| {
+        std::env::var("GROK_POOL_IDLE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(90)
+    }))
+}
+
 /// Shared HTTP/1.1 fallback client. Pool-less by construction, so sharing it
 /// is behaviorally identical to building a fresh one.
 pub(crate) fn client_http1() -> Result<reqwest::Client, reqwest::Error> {
@@ -135,10 +163,6 @@ fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(2);
-    let pool_idle_timeout_secs: u64 = std::env::var("GROK_POOL_IDLE_TIMEOUT_SECS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(90);
     let connect_timeout_secs: u64 = std::env::var("GROK_CONNECT_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -147,7 +171,7 @@ fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
     xai_grok_extra_ca::build_reqwest_client(|builder| {
         builder
             .pool_max_idle_per_host(pool_max_idle)
-            .pool_idle_timeout(Duration::from_secs(pool_idle_timeout_secs))
+            .pool_idle_timeout(pool_idle_timeout())
             .connect_timeout(Duration::from_secs(connect_timeout_secs))
             .tcp_nodelay(true)
             .redirect(same_origin_https_redirect_policy())

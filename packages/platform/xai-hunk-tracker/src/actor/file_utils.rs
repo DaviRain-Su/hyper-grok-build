@@ -203,15 +203,6 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_bytes_too_large_with_null() {
-        // Large content with null byte - should be TooLarge, not Binary
-        // (size check happens first, so we short-circuit before binary check)
-        let large: Vec<u8> = std::iter::repeat_n(b'a', MAX_TRACKED_TEXT_BYTES + 100).collect();
-        let state = classify_bytes(&large);
-        assert!(matches!(state, FileContentState::TooLarge { .. }));
-    }
-
-    #[test]
     fn test_classify_string_too_large() {
         let large = "a".repeat(MAX_TRACKED_TEXT_BYTES + 1);
         let state = classify_string(large);

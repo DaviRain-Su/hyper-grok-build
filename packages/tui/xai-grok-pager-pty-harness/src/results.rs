@@ -26,8 +26,8 @@ pub struct BenchResults {
 impl BenchResults {
     /// Compute aggregate statistics from per-frame timings.
     ///
-    /// `wall_time` is the total elapsed time during which frames were collected,
-    /// used to compute `avg_fps`. This should be measured by the caller.
+    /// `wall_time` is the total elapsed time during which frames were collected, used to compute `avg_fps`.
+    /// This should be measured by the caller.
     pub fn from_timings(scenario: &str, timings: &[FrameTiming], wall_time: Duration) -> Self {
         let total_frames = timings.len() as u64;
 
@@ -61,7 +61,7 @@ impl BenchResults {
         let p99_ms = percentile(&durations_ms, 99.0);
         let max_ms = durations_ms.last().copied().unwrap_or(0.0);
 
-        // Jank threshold: frame time > 2x median (p50).
+        // Jank threshold: frame time over 2x the median (p50)
         let jank_threshold = p50_ms * 2.0;
         let jank_count = durations_ms.iter().filter(|&&d| d > jank_threshold).count() as u64;
         let jank_rate = jank_count as f64 / total_frames as f64;
@@ -85,14 +85,12 @@ impl BenchResults {
 
 // ── Baseline comparison ────────────────────────────────────────────────────
 
-/// Regression threshold: fail if a scenario's p99 frame time grows by more
-/// than this fraction (0.15 = 15%). Matches the RFC's proposal.
+/// Regression threshold: fail if a scenario's p99 frame time grows by more than this fraction (0.15 = 15%).
 pub const DEFAULT_REGRESSION_THRESHOLD: f64 = 0.15;
 
 /// On-disk baseline schema: `{ "<scenario>": BenchResults, ... }`.
 pub type Baseline = HashMap<String, BenchResults>;
 
-/// Load a baseline file from disk.
 pub fn load_baseline(path: &Path) -> Result<Baseline> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("read baseline file {}", path.display()))?;
@@ -124,11 +122,9 @@ pub struct ScenarioRegression {
     pub pct_delta: f64,
 }
 
-/// Compare the given `results` against `baseline`, returning every scenario
-/// whose p99 grew by more than `threshold` (as a fraction, e.g. 0.15 = 15%).
+/// Compare the given `results` against `baseline`, returning every scenario whose p99 grew by more than `threshold` (as a fraction, e.g. 0.15 = 15%).
 ///
-/// Scenarios missing from the baseline are skipped (first run of a new
-/// scenario is not a regression).
+/// Scenarios missing from the baseline are skipped (first run of a new scenario is not a regression).
 pub fn compare_baseline(
     results: &[BenchResults],
     baseline: &Baseline,
@@ -157,8 +153,8 @@ pub fn compare_baseline(
 
 /// Compute the `pct`-th percentile from a **sorted** slice of values.
 ///
-/// `pct` must be in `[0.0, 100.0]`. The input slice must be sorted in
-/// ascending order; this is enforced by debug assertion.
+/// `pct` must be in `[0.0, 100.0]`.
+/// The input slice must be sorted in ascending order; this is enforced by debug assertion.
 pub fn percentile(sorted: &[f64], pct: f64) -> f64 {
     debug_assert!(
         (0.0..=100.0).contains(&pct),
@@ -238,17 +234,15 @@ mod tests {
     #[test]
     fn percentile_multiple_elements() {
         let sorted: Vec<f64> = (1..=100).map(|i| i as f64).collect();
-        // p50 of 1..=100 should be around 50
         let p50 = percentile(&sorted, 50.0);
         assert!((p50 - 50.0).abs() < 1.1);
-        // p99 should be around 99
         let p99 = percentile(&sorted, 99.0);
         assert!((p99 - 99.0).abs() < 1.1);
     }
 
     #[test]
     fn jank_detection() {
-        // 9 frames at 10ms, 1 frame at 50ms (>2x median = jank)
+        // Nine 10ms frames plus one 50ms frame, which exceeds 2x the median
         let mut timings: Vec<FrameTiming> = (0..9)
             .map(|_| FrameTiming {
                 duration: Duration::from_millis(10),

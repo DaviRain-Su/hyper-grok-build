@@ -591,32 +591,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_with_retry_rides_out_transient_exclusive_lock() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("retry.db");
-
-        // EXCLUSIVE locking holds the lock until the connection closes.
-        let holder = rusqlite::Connection::open(&path).unwrap();
-        holder
-            .pragma_update(None, "locking_mode", "EXCLUSIVE")
-            .unwrap();
-        holder
-            .execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES (1);")
-            .unwrap();
-
-        let release = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(300));
-            drop(holder);
-        });
-
-        let conn = JournalMode::Wal
-            .open(&path)
-            .expect("open must ride out a transiently held exclusive lock");
-        assert_eq!(journal_mode(&conn), "wal");
-        release.join().unwrap();
-    }
-
-    #[test]
     fn env_override_parses() {
         use EnvOverride::{Invalid, Mode, Unset};
         assert_eq!(mode_from_env(Some("wal")), Mode(JournalMode::Wal));

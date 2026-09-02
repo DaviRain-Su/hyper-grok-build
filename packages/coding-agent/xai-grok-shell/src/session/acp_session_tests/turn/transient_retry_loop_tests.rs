@@ -1,5 +1,5 @@
-//! Turn-loop coverage for the transient-retry arm: resubmit-until-success,
-//! exhaustion, kill switch. Paused-clock elapsed time pins the backoff.
+//! Coverage of the turn loop's transient-retry arm: resubmit until success, exhaustion, the kill switch.
+//! Elapsed time on the paused clock pins the backoff.
 
 use super::rate_limit_backoff_tests::{
     CapturedRetries, SessionKind, actor_under_test, pump_local_tasks,
@@ -8,8 +8,7 @@ use super::*;
 use std::time::Duration;
 use xai_grok_test_support::{MockInferenceServer, MockModelEntry, ScriptedResponse};
 
-/// The turn future needs a session-sized stack (spawn.rs: 8 MiB); default
-/// test stacks overflow.
+/// The turn future needs a session-sized stack (spawn.rs: 8 MiB); default test stacks overflow.
 fn on_session_stack(test: impl FnOnce() + Send + 'static) {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
@@ -54,6 +53,7 @@ fn retrying_events(retries: &CapturedRetries) -> Vec<(u32, u32, String)> {
                 attempt,
                 max_retries,
                 reason,
+                error_type: _,
             } => Some((*attempt, *max_retries, reason.clone())),
             _ => None,
         })
@@ -76,7 +76,13 @@ async fn run_turn(
     let started = tokio::time::Instant::now();
     let outcome = tokio::time::timeout(
         Duration::from_secs(300),
-        actor.process_conversation_turn_with_recovery("req-transient-loop-test", None, None, None),
+        actor.process_conversation_turn_with_recovery(
+            "req-transient-loop-test",
+            None,
+            None,
+            None,
+            &mut length_salvage::LengthSalvage::new(None),
+        ),
     )
     .await
     .expect("turn must finish within timeout");
@@ -96,7 +102,7 @@ fn transient_5xx_resubmits_until_success() {
                 .expect("mock inference server");
             server.enqueue_response("/v1/responses", overloaded_503());
             server.enqueue_response("/v1/responses", overloaded_503());
-            // Queue drained afterwards -> default success response.
+            // Once the queue drains, the mock serves its default success response
 
             let (outcome, retries, elapsed, submissions) = run_turn(&server, true).await;
 
@@ -142,8 +148,7 @@ fn transient_5xx_exhausts_to_the_original_terminal() {
                 "a 5xx past the retry budget must surface the original terminal"
             );
             assert_eq!(submissions, 4, "original + full 3-resubmit budget");
-            // Jitter floor: each rung sleeps at least 80% of its base
-            // (2+10+30)*0.8 = 33.6s.
+            // Jitter floor: each rung sleeps at least 80% of its base, (2+10+30)*0.8 = 33.6s
             assert!(
                 elapsed >= Duration::from_millis(33_600),
                 "the whole jittered 2s/10s/30s ladder must be slept before terminal: {elapsed:?}"
@@ -153,7 +158,7 @@ fn transient_5xx_exhausts_to_the_original_terminal() {
                 3,
                 "exactly one Retrying per resubmit, none for the terminal attempt"
             );
-            // The terminal must be the pre-feature internal error, not a new shape.
+            // The terminal must be the legacy internal error, not a new error shape
             if let Err(err) = outcome {
                 assert_eq!(
                     err.code,
@@ -182,22 +187,19 @@ fn kill_switch_off_fails_on_first_transient() {
                 retrying_events(&retries).is_empty(),
                 "no Retrying notifications from the disabled arm"
             );
-            // No elapsed upper bound: auto-advance jumps virtual time on any
-            // unrelated timer, so only lower bounds are meaningful here.
+            // No elapsed upper bound: auto-advance jumps virtual time on any unrelated timer, so only lower bounds are meaningful here
             let _ = elapsed;
         })
     });
 }
 
-// Not covered here: IdleTimeout through the loop. The sampler's stall
-// detection is I/O-time based, so it cannot fire under the paused clock;
-// eligibility for the kind is pinned at the handler level instead.
+// Not covered here: IdleTimeout through the loop
+// The sampler's stall detection is I/O-time based, so it cannot fire under the paused clock
+// Eligibility for the kind is pinned at the handler level instead
 
-/// The cumulative budget is prompt-scoped: re-entering the turn loop the way
-/// auto-recovery does (repeated `process_conversation_turn_with_recovery`
-/// calls without a new prompt) must share one 10-resubmit budget, not re-arm
-/// 3 per entry. Entries: 4+4+4+2+1 submissions = 15; a loop-local counter
-/// regression would make it 20.
+/// The cumulative budget is prompt-scoped: turn-loop re-entries must share one 10-resubmit budget, not get a fresh 3 per entry.
+/// Auto-recovery re-enters this way, calling `process_conversation_turn_with_recovery` repeatedly without a new prompt.
+/// Entries submit 4+4+4+2+1 = 15 times; a counter that reset per loop entry would make it 20.
 #[test]
 fn prompt_budget_spans_turn_loop_reentries() {
     on_session_stack(|| {
@@ -220,6 +222,7 @@ fn prompt_budget_spans_turn_loop_reentries() {
                         None,
                         None,
                         None,
+                        &mut length_salvage::LengthSalvage::new(None),
                     ),
                 )
                 .await

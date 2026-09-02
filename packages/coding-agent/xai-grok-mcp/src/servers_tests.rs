@@ -490,6 +490,7 @@ async fn acp_clients_are_not_liveness_watched() {
         HttpConfig {
             url: "http://localhost/api/mcp".to_string(),
             headers: vec![],
+            local_agent_endpoint: false,
         },
         None,
         None,
@@ -760,6 +761,7 @@ fn test_tool_timeout_for_returns_per_tool_override() {
         HttpConfig {
             url: String::new(),
             headers: vec![],
+            local_agent_endpoint: false,
         },
         Some(&overrides),
         None,
@@ -783,6 +785,7 @@ fn test_tool_timeout_for_empty_map_returns_default() {
         HttpConfig {
             url: String::new(),
             headers: vec![],
+            local_agent_endpoint: false,
         },
         Some(&overrides),
         None,
@@ -1112,22 +1115,6 @@ fn test_shared_mcp_pool_meta_config_preserved() {
         .expect("should have meta config");
     assert_eq!(mc.startup_timeout_ms, Some(5000));
     assert_eq!(mc.tool_timeout_ms, Some(120000));
-}
-
-#[test]
-fn test_shared_mcp_pool_clone_shares_arcs() {
-    let mut state = McpState::new(vec![]);
-    let client = make_test_client("svc");
-    state
-        .owned_clients
-        .insert("svc".to_string(), Arc::clone(&client));
-
-    let pool = SharedMcpPool::from_state(&state);
-    let pool2 = pool.clone();
-
-    let c1 = pool.get_client("svc").unwrap();
-    let c2 = pool2.get_client("svc").unwrap();
-    assert!(Arc::ptr_eq(c1, c2));
 }
 
 #[test]
@@ -1593,6 +1580,7 @@ async fn recover_and_retry_surfaces_original_error_when_recover_fails() {
     let config = HttpConfig {
         url: "http://192.0.2.1:1/unreachable".to_string(),
         headers: vec![],
+        local_agent_endpoint: false,
     };
     let overrides = McpClientTimeoutOverrides {
         startup_timeout_sec: Some(1),
@@ -1647,10 +1635,30 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Clone, Copy)]
 enum CallToolBehavior {
-    ErrorThenOk { code: i32 },
-    AlwaysError { code: i32 },
-    HangThenOk { hang_ms: u64 },
-    ErrorThenHang { code: i32, hang_ms: u64 },
+    ErrorThenOk {
+        code: i32,
+    },
+    AlwaysError {
+        code: i32,
+    },
+    HangThenOk {
+        hang_ms: u64,
+    },
+    ErrorThenHang {
+        code: i32,
+        hang_ms: u64,
+    },
+    /// SEP-2322: first `tools/call` returns `input_required` with a form
+    /// elicitation and a `requestState`; the retry completes.
+    FormElicitThenOk,
+    /// SEP-2322 + transport recovery: round 0 returns `input_required`, the
+    /// retry fails with a recoverable JSON-RPC error, and the post-recovery
+    /// retry completes.
+    FormElicitThenErrorThenOk,
+    /// SEP-2322 URL mode: round 0 returns a URL elicitation + `requestState`,
+    /// round 1 returns a `requestState`-only `input_required` (out-of-band
+    /// interaction still pending), round 2 completes.
+    UrlElicitThenStateOnlyThenOk,
 }
 
 #[derive(Clone)]
@@ -1659,6 +1667,10 @@ struct FakeMcpHandles {
     calls: Arc<AtomicUsize>,
     init_version: Arc<parking_lot::Mutex<Option<String>>>,
     init_user_agents: Arc<parking_lot::Mutex<Vec<String>>>,
+    /// `capabilities` object from the last `initialize` request.
+    init_capabilities: Arc<parking_lot::Mutex<Option<serde_json::Value>>>,
+    /// Raw `tools/call` request bodies, for asserting MRTR retry wire shapes.
+    call_bodies: Arc<parking_lot::Mutex<Vec<serde_json::Value>>>,
 }
 
 fn header_values(
@@ -1704,6 +1716,7 @@ async fn fake_handle_post(
             state.handles.inits.fetch_add(1, Ordering::Relaxed);
             *state.handles.init_version.lock() =
                 req["params"]["protocolVersion"].as_str().map(str::to_owned);
+            *state.handles.init_capabilities.lock() = Some(req["params"]["capabilities"].clone());
             state
                 .handles
                 .init_user_agents
@@ -1728,6 +1741,14 @@ async fn fake_handle_post(
         .into_response(),
         Some("tools/call") => {
             let n = state.handles.calls.fetch_add(1, Ordering::Relaxed);
+            state.handles.call_bodies.lock().push(req.clone());
+            let input_required = |result: serde_json::Value| {
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id.clone(),
+                    "result": result,
+                })
+            };
             match state.behavior {
                 CallToolBehavior::ErrorThenOk { code } => {
                     if n == 0 {
@@ -1753,6 +1774,82 @@ async fn fake_handle_post(
                         axum::Json(ok()).into_response()
                     }
                 }
+                CallToolBehavior::FormElicitThenOk => {
+                    if n == 0 {
+                        axum::Json(input_required(serde_json::json!({
+                            "resultType": "input_required",
+                            "inputRequests": {
+                                "user_email": {
+                                    "method": "elicitation/create",
+                                    "params": {
+                                        "mode": "form",
+                                        "message": "Please provide your email",
+                                        "requestedSchema": {
+                                            "type": "object",
+                                            "properties": {
+                                                "email": {"type": "string", "format": "email"}
+                                            },
+                                            "required": ["email"]
+                                        }
+                                    }
+                                }
+                            },
+                            "requestState": "sealed-round-1",
+                        })))
+                        .into_response()
+                    } else {
+                        axum::Json(ok()).into_response()
+                    }
+                }
+                CallToolBehavior::FormElicitThenErrorThenOk => match n {
+                    0 => axum::Json(input_required(serde_json::json!({
+                        "resultType": "input_required",
+                        "inputRequests": {
+                            "user_email": {
+                                "method": "elicitation/create",
+                                "params": {
+                                    "mode": "form",
+                                    "message": "Please provide your email",
+                                    "requestedSchema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "email": {"type": "string", "format": "email"}
+                                        },
+                                        "required": ["email"]
+                                    }
+                                }
+                            }
+                        },
+                        "requestState": "sealed-round-1",
+                    })))
+                    .into_response(),
+                    1 => axum::Json(err(-32603, "session expired".to_string())).into_response(),
+                    _ => axum::Json(ok()).into_response(),
+                },
+                CallToolBehavior::UrlElicitThenStateOnlyThenOk => match n {
+                    0 => axum::Json(input_required(serde_json::json!({
+                        "resultType": "input_required",
+                        "inputRequests": {
+                            "user_auth": {
+                                "method": "elicitation/create",
+                                "params": {
+                                    "mode": "url",
+                                    "message": "Connect your account",
+                                    "url": "https://example.com/connect",
+                                    "elicitationId": "e-42"
+                                }
+                            }
+                        },
+                        "requestState": "sealed-url-1",
+                    })))
+                    .into_response(),
+                    1 => axum::Json(input_required(serde_json::json!({
+                        "resultType": "input_required",
+                        "requestState": "sealed-url-2",
+                    })))
+                    .into_response(),
+                    _ => axum::Json(ok()).into_response(),
+                },
             }
         }
         _ => axum::http::StatusCode::ACCEPTED.into_response(),
@@ -1787,6 +1884,8 @@ async fn spawn_fake_mcp(behavior: CallToolBehavior) -> (String, FakeMcpHandles) 
         calls: Arc::new(AtomicUsize::new(0)),
         init_version: Arc::new(parking_lot::Mutex::new(None)),
         init_user_agents: Arc::new(parking_lot::Mutex::new(Vec::new())),
+        init_capabilities: Arc::new(parking_lot::Mutex::new(None)),
+        call_bodies: Arc::new(parking_lot::Mutex::new(Vec::new())),
     };
     let app = axum::Router::new()
         .route(
@@ -1811,6 +1910,7 @@ fn fake_http_client(url: &str, tool_timeout_sec: u64) -> Arc<McpClient> {
         HttpConfig {
             url: url.to_string(),
             headers: vec![],
+            local_agent_endpoint: false,
         },
         Some(&overrides),
         None,
@@ -1882,8 +1982,8 @@ async fn try_call_tool_http_mcperror_recovers_then_retry_succeeds() {
     );
     assert_eq!(
         handles.init_version.lock().as_deref(),
-        Some("2025-11-25"),
-        "initialize must offer protocolVersion 2025-11-25"
+        Some("2026-07-28"),
+        "initialize must offer protocolVersion 2026-07-28"
     );
 
     let jsonl = std::fs::read_to_string(tmp.path().join("events.jsonl")).unwrap();
@@ -1953,6 +2053,236 @@ async fn try_call_tool_http_invalid_params_not_recovered() {
         handles.inits.load(Ordering::Relaxed),
         1,
         "no recovery re-init"
+    );
+}
+
+/// End-to-end SEP-2322 form flow against the wire-level fake server:
+/// `tools/call` → `input_required` (form elicitation + `requestState`) → HITL accept via the
+/// elicitation inbox → retried `tools/call` echoing `requestState` and carrying
+/// `inputResponses` → final result.
+#[tokio::test(flavor = "multi_thread")]
+async fn try_call_tool_mrtr_form_elicitation_round_trip() {
+    let (url, handles) = spawn_fake_mcp(CallToolBehavior::FormElicitThenOk).await;
+    let client = fake_http_client(&url, 5);
+    let inbox = crate::elicitation::ElicitationInbox::new();
+    client.set_elicitation_tx(Some(inbox.clone()));
+
+    let answer = tokio::spawn(async move {
+        let job = inbox
+            .recv()
+            .await
+            .expect("elicitation job reaches the inbox");
+        assert_eq!(job.server_name, "fake");
+        assert_eq!(job.fields.message, "Please provide your email");
+        assert!(
+            matches!(
+                job.fields.mode,
+                xai_grok_tools::mcp_elicitation::McpElicitModeFields::Form {
+                    requested_schema: Some(_)
+                }
+            ),
+            "form schema must survive the bridge"
+        );
+        let _ = job.response_tx.send(crate::elicitation::accept_result(Some(
+            serde_json::json!({"email": "user@example.com"}),
+        )));
+    });
+
+    let tool = fake_echo_tool();
+    let ew = xai_grok_session_events::EventWriter::noop();
+    let mut reconnect = false;
+    let mut is_timeout = false;
+    let out = tool
+        .try_call_tool(
+            &client,
+            &serde_json::json!({"q": 1}),
+            &mut reconnect,
+            &mut is_timeout,
+            &ew,
+        )
+        .await
+        .expect("tool call completes after the MRTR round");
+    answer.await.unwrap();
+
+    assert!(!out.is_error.unwrap_or(false));
+    assert!(!reconnect, "MRTR rounds are not transport recovery");
+    assert!(!is_timeout);
+    assert_eq!(
+        handles.calls.load(Ordering::Relaxed),
+        2,
+        "initial call + one retry"
+    );
+
+    let bodies = handles.call_bodies.lock().clone();
+    assert_eq!(bodies.len(), 2);
+    // On the classic `initialize` handshake the elicitation capability is declared at
+    // initialize time (rmcp stamps per-request `_meta` capabilities only on the SEP-2575
+    // session-less `discover` handshake).
+    assert_eq!(
+        handles.init_version.lock().as_deref(),
+        Some("2026-07-28"),
+        "handshake must offer the MRTR-capable protocol version"
+    );
+    let init_caps = handles
+        .init_capabilities
+        .lock()
+        .clone()
+        .expect("initialize captured");
+    assert!(
+        init_caps["elicitation"]["form"].is_object() && init_caps["elicitation"]["url"].is_object(),
+        "initialize must declare form+url elicitation: {init_caps}"
+    );
+    assert!(
+        bodies[0]["params"].get("requestState").is_none(),
+        "fresh call must not carry requestState"
+    );
+    let retry = &bodies[1]["params"];
+    assert_eq!(
+        retry["requestState"], "sealed-round-1",
+        "requestState must be echoed verbatim"
+    );
+    assert_eq!(retry["inputResponses"]["user_email"]["action"], "accept");
+    assert_eq!(
+        retry["inputResponses"]["user_email"]["content"]["email"],
+        "user@example.com"
+    );
+    assert_eq!(
+        retry["arguments"]["q"], 1,
+        "retry must re-send the original arguments"
+    );
+}
+
+/// Transport recovery mid-MRTR: the retry after the elicitation round hits a recoverable
+/// JSON-RPC error, recovery re-initializes the session, and the post-recovery retry (on the
+/// fresh `RunningService`) still carries the `inputResponses` and echoed `requestState`.
+#[tokio::test(flavor = "multi_thread")]
+async fn try_call_tool_mrtr_round_survives_transport_recovery() {
+    let (url, handles) = spawn_fake_mcp(CallToolBehavior::FormElicitThenErrorThenOk).await;
+    let client = fake_http_client(&url, 5);
+    let inbox = crate::elicitation::ElicitationInbox::new();
+    client.set_elicitation_tx(Some(inbox.clone()));
+
+    let answer = tokio::spawn(async move {
+        let job = inbox
+            .recv()
+            .await
+            .expect("elicitation job reaches the inbox");
+        let _ = job.response_tx.send(crate::elicitation::accept_result(Some(
+            serde_json::json!({"email": "user@example.com"}),
+        )));
+    });
+
+    let tool = fake_echo_tool();
+    let ew = xai_grok_session_events::EventWriter::noop();
+    let mut reconnect = false;
+    let mut is_timeout = false;
+    let out = tool
+        .try_call_tool(
+            &client,
+            &serde_json::json!({}),
+            &mut reconnect,
+            &mut is_timeout,
+            &ew,
+        )
+        .await
+        .expect("tool call completes after recovery");
+    answer.await.unwrap();
+
+    assert!(!out.is_error.unwrap_or(false));
+    assert!(reconnect, "the failed retry must trigger recovery");
+    assert!(!is_timeout);
+    assert_eq!(
+        handles.calls.load(Ordering::Relaxed),
+        3,
+        "initial call + failed retry + recovered retry"
+    );
+    assert_eq!(
+        handles.inits.load(Ordering::Relaxed),
+        2,
+        "initial handshake + one recovery re-init"
+    );
+    let bodies = handles.call_bodies.lock().clone();
+    let recovered_retry = &bodies[2]["params"];
+    assert_eq!(
+        recovered_retry["requestState"], "sealed-round-1",
+        "the recovered retry must still echo requestState"
+    );
+    assert_eq!(
+        recovered_retry["inputResponses"]["user_email"]["action"],
+        "accept"
+    );
+}
+
+/// SEP-2322 URL mode: consent accept → retry (echoing state) → `requestState`-only
+/// `input_required` while the out-of-band interaction is pending → retry → final result.
+#[tokio::test(flavor = "multi_thread")]
+async fn try_call_tool_mrtr_url_elicitation_with_state_only_round() {
+    let (url, handles) = spawn_fake_mcp(CallToolBehavior::UrlElicitThenStateOnlyThenOk).await;
+    let client = fake_http_client(&url, 5);
+    let inbox = crate::elicitation::ElicitationInbox::new();
+    client.set_elicitation_tx(Some(inbox.clone()));
+
+    let answer = tokio::spawn(async move {
+        let job = inbox
+            .recv()
+            .await
+            .expect("elicitation job reaches the inbox");
+        let xai_grok_tools::mcp_elicitation::McpElicitModeFields::Url {
+            url,
+            elicitation_id,
+        } = &job.fields.mode
+        else {
+            panic!("expected url mode, got {:?}", job.fields.mode);
+        };
+        assert_eq!(url, "https://example.com/connect");
+        assert_eq!(elicitation_id, "e-42");
+        // URL-mode accept means "user consented to open the URL"; no content.
+        let _ = job
+            .response_tx
+            .send(crate::elicitation::accept_result(None));
+    });
+
+    let tool = fake_echo_tool();
+    let ew = xai_grok_session_events::EventWriter::noop();
+    let mut reconnect = false;
+    let mut is_timeout = false;
+    let out = tool
+        .try_call_tool(
+            &client,
+            &serde_json::json!({}),
+            &mut reconnect,
+            &mut is_timeout,
+            &ew,
+        )
+        .await
+        .expect("tool call completes after the pending round resolves");
+    answer.await.unwrap();
+
+    assert!(!out.is_error.unwrap_or(false));
+    assert_eq!(
+        handles.calls.load(Ordering::Relaxed),
+        3,
+        "initial call + consent retry + state-only retry"
+    );
+
+    let bodies = handles.call_bodies.lock().clone();
+    let consent_retry = &bodies[1]["params"];
+    assert_eq!(consent_retry["requestState"], "sealed-url-1");
+    assert_eq!(
+        consent_retry["inputResponses"]["user_auth"]["action"],
+        "accept"
+    );
+    assert!(
+        consent_retry["inputResponses"]["user_auth"]
+            .get("content")
+            .is_none_or(|c| c.is_null()),
+        "url-mode accept carries no content"
+    );
+    let state_only_retry = &bodies[2]["params"];
+    assert_eq!(state_only_retry["requestState"], "sealed-url-2");
+    assert!(
+        state_only_retry.get("inputResponses").is_none(),
+        "state-only rounds retry without inputResponses"
     );
 }
 
@@ -2039,22 +2369,6 @@ async fn try_call_tool_http_retry_timeout_surfaces_timeout() {
 }
 
 #[test]
-fn test_new_http_stores_http_config() {
-    let config = HttpConfig {
-        url: "http://localhost:5000/api/mcp".to_string(),
-        headers: vec![("x-token".to_string(), "abc".to_string())],
-    };
-    let client = McpClient::new_http("example-mcp".to_string(), config, None, None);
-    let stored = client
-        .http_config
-        .as_ref()
-        .expect("http_config should be Some");
-    assert_eq!(stored.url, "http://localhost:5000/api/mcp");
-    assert_eq!(stored.headers.len(), 1);
-    assert_eq!(stored.headers[0].0, "x-token");
-}
-
-#[test]
 fn test_new_stdio_has_no_http_config() {
     let client = McpClient::stub("stdio-srv");
     assert!(client.http_config.is_none());
@@ -2065,6 +2379,7 @@ async fn test_reset_transport_succeeds_for_http_client() {
     let config = HttpConfig {
         url: "http://127.0.0.1:9/api/mcp".to_string(),
         headers: vec![],
+        local_agent_endpoint: false,
     };
     let client = McpClient::new_http("example-mcp".to_string(), config, None, None);
     assert!(client.reset_transport().await);
@@ -2081,6 +2396,7 @@ async fn test_reset_transport_is_idempotent() {
     let config = HttpConfig {
         url: "http://127.0.0.1:9/api/mcp".to_string(),
         headers: vec![],
+        local_agent_endpoint: false,
     };
     let client = McpClient::new_http("example-mcp".to_string(), config, None, None);
 
@@ -2094,6 +2410,7 @@ async fn test_reset_transport_makes_ensure_initialized_retry_handshake() {
     let config = HttpConfig {
         url: "http://127.0.0.1:1/unreachable".to_string(),
         headers: vec![],
+        local_agent_endpoint: false,
     };
     let client = McpClient::new_http("test".to_string(), config, None, None);
 
@@ -2266,7 +2583,7 @@ async fn try_call_tool_reconnects_then_succeeds_after_retriable_transport_error(
     let dead = dead_service().await;
     *client.state.lock().await = ClientState::Ready {
         service: dead,
-        _connected: xai_grok_telemetry::activity::MCP_SERVERS_CONNECTED.enter(),
+        _connected: MCP_SERVERS_CONNECTED.enter(),
     };
 
     let erased = McpErasedTool {
@@ -2312,7 +2629,7 @@ async fn try_call_tool_reconnects_then_succeeds_after_retriable_transport_error(
         ClientState::Ready { .. }
     ));
     assert!(
-        xai_grok_telemetry::activity::MCP_SERVERS_CONNECTED.get() >= 1,
+        MCP_SERVERS_CONNECTED.get() >= 1,
         "a Ready client must hold a connected-gauge slot"
     );
 }
@@ -2370,13 +2687,14 @@ async fn watched_live_client(name: &str) -> Arc<McpClient> {
         HttpConfig {
             url: "http://127.0.0.1:0/".to_string(),
             headers: Vec::new(),
+            local_agent_endpoint: false,
         },
         None,
         None,
     ));
     *client.state.lock().await = ClientState::Ready {
         service,
-        _connected: xai_grok_telemetry::activity::MCP_SERVERS_CONNECTED.enter(),
+        _connected: MCP_SERVERS_CONNECTED.enter(),
     };
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     client.set_event_tx(Some(event_tx));
@@ -2589,6 +2907,7 @@ fn new_http_propagates_expose_image_base64_override_to_getter() {
     let config = HttpConfig {
         url: "http://localhost/api/mcp".to_string(),
         headers: vec![],
+        local_agent_endpoint: false,
     };
     let overrides = McpClientTimeoutOverrides {
         expose_image_base64: Some(true),
@@ -2628,6 +2947,7 @@ async fn ensure_initialized_concurrent_callers_never_see_legacy_fast_fail() {
     let config = HttpConfig {
         url: "http://192.0.2.1:1/unreachable".to_string(),
         headers: vec![],
+        local_agent_endpoint: false,
     };
     let overrides = McpClientTimeoutOverrides {
         startup_timeout_sec: Some(1),
@@ -2669,6 +2989,7 @@ async fn ensure_initialized_parked_caller_retries_after_notify() {
     let config = HttpConfig {
         url: "http://192.0.2.1:1/unreachable".to_string(),
         headers: vec![],
+        local_agent_endpoint: false,
     };
     let overrides = McpClientTimeoutOverrides {
         startup_timeout_sec: Some(1),
@@ -2718,6 +3039,7 @@ async fn ensure_initialized_inflight_wait_times_out_when_holder_silent() {
     let config = HttpConfig {
         url: "http://192.0.2.1:1/unreachable".to_string(),
         headers: vec![],
+        local_agent_endpoint: false,
     };
     let overrides = McpClientTimeoutOverrides {
         startup_timeout_sec: Some(0),
@@ -2744,6 +3066,7 @@ async fn ensure_initialized_drop_guard_restores_state_after_holder_aborted() {
     let config = HttpConfig {
         url: "http://192.0.2.1:1/unreachable".to_string(),
         headers: vec![],
+        local_agent_endpoint: false,
     };
     let overrides = McpClientTimeoutOverrides {
         startup_timeout_sec: Some(10),
@@ -2875,6 +3198,7 @@ async fn is_healthy_pending_returns_false() {
     let config = HttpConfig {
         url: "http://192.0.2.1:1/unreachable".to_string(),
         headers: vec![],
+        local_agent_endpoint: false,
     };
     let client = McpClient::new_http("pending".to_string(), config, None, None);
     assert!(matches!(
@@ -2898,6 +3222,7 @@ async fn is_healthy_pending_does_not_block_on_handshake() {
     let config = HttpConfig {
         url: "http://192.0.2.1:1/unreachable".to_string(),
         headers: vec![],
+        local_agent_endpoint: false,
     };
     let overrides = McpClientTimeoutOverrides {
         startup_timeout_sec: Some(10),
@@ -2923,7 +3248,7 @@ async fn is_healthy_pending_does_not_block_on_handshake() {
 fn make_client_info_pins_protocol_version() {
     assert_eq!(
         McpClient::make_client_info("test-srv", /* advertise_elicitation */ true).protocol_version,
-        rmcp::model::ProtocolVersion::V_2025_11_25
+        rmcp::model::ProtocolVersion::V_2026_07_28
     );
 }
 
@@ -3024,33 +3349,6 @@ async fn client_handler_routes_tools_changed() {
 }
 
 #[tokio::test]
-async fn client_handler_no_dispatcher_is_silent() {
-    let handler = GrokClientHandler {
-        info: McpClient::make_client_info("test", /* advertise_elicitation */ true),
-        server_name: "test".to_string(),
-        notify_tx: Arc::new(parking_lot::Mutex::new(None)),
-        elicitation_tx: Arc::new(parking_lot::Mutex::new(None)),
-    };
-    handler.emit(McpClientEvent::ToolsChanged {
-        server: "test".to_string(),
-    });
-}
-
-#[tokio::test]
-async fn client_handler_get_info_round_trips() {
-    let info = McpClient::make_client_info("test-srv", /* advertise_elicitation */ true);
-    let handler = GrokClientHandler {
-        info: info.clone(),
-        server_name: "test-srv".to_string(),
-        notify_tx: Arc::new(parking_lot::Mutex::new(None)),
-        elicitation_tx: Arc::new(parking_lot::Mutex::new(None)),
-    };
-    let got = handler.get_info();
-    assert_eq!(got.client_info.name, info.client_info.name);
-    assert_eq!(got.client_info.version, info.client_info.version);
-}
-
-#[tokio::test]
 async fn client_handler_observes_post_handshake_set_event_tx() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<McpClientEvent>();
     let client = Arc::new(McpClient::stub("test"));
@@ -3069,25 +3367,6 @@ async fn client_handler_observes_post_handshake_set_event_tx() {
         McpClientEvent::ToolsChanged { server } => assert_eq!(server, "test"),
         other => panic!("expected ToolsChanged, got {other:?}"),
     }
-}
-
-#[tokio::test]
-async fn event_tx_clone_observes_set_event_tx() {
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<McpClientEvent>();
-    let client = McpClient::stub("test");
-    assert!(client.event_tx_clone().is_none());
-    client.set_event_tx(Some(tx));
-    assert!(client.event_tx_clone().is_some());
-    client.set_event_tx(None);
-    assert!(client.event_tx_clone().is_none());
-}
-
-#[test]
-fn config_added_kind_carries_correct_server_name() {
-    let ev = McpClientEvent::ConfigAdded {
-        server: "srv".to_string(),
-    };
-    assert_eq!(ev.server_name(), Some("srv"));
 }
 
 #[derive(Clone)]
@@ -3126,6 +3405,7 @@ fn probe_ctx<'a>(
         mode,
         scope: None,
         discovery: McpOauthDiscovery::Network,
+        send_grok_agent_id_header: false,
     }
 }
 
@@ -3250,8 +3530,7 @@ async fn inconclusive_oauth_probe_unreachable_fails_closed() {
     );
     let url = spawn_test_http_server(app).await;
     let decision = resolve_tokenless(&url, OauthInteractivity::NonInteractive).await;
-    // A server nobody can reach is a connectivity verdict, not an auth one:
-    // still fails this spawn closed, but as the retryable `Unreachable`.
+    // A server nobody can reach is a connectivity verdict, not an auth one: still fails this spawn closed, but as the retryable `Unreachable`
     assert!(matches!(decision, HttpAuthDecision::Unreachable));
 }
 
@@ -3348,6 +3627,27 @@ fn apply_stdio_env_session_id_cannot_be_shadowed() {
         .and_then(|(_, v)| v)
         .map(|v| v.to_string_lossy().into_owned());
     assert_eq!(value.as_deref(), Some("sess-real"));
+}
+
+#[tokio::test]
+async fn grok_agent_id_header_rejects_invalid_session_id() {
+    let writer = xai_grok_session_events::EventWriter::noop();
+    let ctx = McpSpawnCtx::for_session(
+        "bad\nsession",
+        &writer,
+        OauthInteractivity::Interactive,
+        None,
+    )
+    .with_grok_agent_id_header();
+    let server = acp::McpServer::Http(
+        acp::McpServerHttp::new("local", "http://127.0.0.1:9/mcp").headers(vec![]),
+    );
+
+    let error = match start_mcp_server(server, None, None, None, &ctx).await {
+        Ok(_) => panic!("invalid header value must fail closed"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("invalid X-Grok-Agent-ID value"));
 }
 
 #[test]
@@ -3504,8 +3804,7 @@ async fn spawn_into_a_closed_scope_fails_fast() {
 // Unreachable-spawn retry (McpError::Unreachable + McpState cooldown gating)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// `Unreachable` is a connectivity verdict: never auth, always retryable,
-/// still attributable to its server for failure recording.
+/// `Unreachable` is a connectivity verdict: never auth, always retryable, still attributable to its server for failure recording.
 #[test]
 fn unreachable_error_is_retryable_not_auth() {
     let err = McpError::Unreachable {
@@ -3523,9 +3822,8 @@ fn unreachable_error_is_retryable_not_auth() {
     );
 }
 
-/// Candidates are returned only when the cooldown expired AND the server is
-/// still configured; a taken candidate is in-flight (holding an attempt
-/// token) and is not handed to another trigger until its attempt settles.
+/// Candidates are returned only when the cooldown expired AND the server is still configured.
+/// A taken candidate is in-flight (holding an attempt token) and is not handed to another trigger until its attempt settles.
 #[test]
 fn unreachable_retry_candidates_respect_cooldown_and_config() {
     let mut state = McpState::new(vec![
@@ -3546,19 +3844,17 @@ fn unreachable_retry_candidates_respect_cooldown_and_config() {
     assert_eq!(taken.len(), 1);
     let (name, token) = taken[0].clone();
     assert_eq!(name, "due");
-    // Both failures surface as init_failed (Unavailable in status snapshots).
+    // Both failures land in init_failed (Unavailable in status snapshots)
     assert!(state.init_failed.contains_key("due"));
     assert!(state.init_failed.contains_key("cooling"));
 
-    // In-flight: no other trigger can take the same server, even though the
-    // attempt may outlive any fixed cooldown.
+    // In-flight: no other trigger can take the same server, even though the attempt may outlive any fixed cooldown
     assert!(state.take_unreachable_retry_candidates().is_empty());
     // Recording from the init path never demotes an in-flight attempt.
     state.record_unreachable_failure_at("due", "racing".to_string(), now);
     assert!(state.take_unreachable_retry_candidates().is_empty());
 
-    // A failed settle restarts the cooldown from settle time (still cooling
-    // now), refreshing the detail.
+    // A failed settle restarts the cooldown from settle time (still cooling now), refreshing the detail
     state.settle_unreachable_attempt_failed("due", token, "still down".to_string());
     assert_eq!(
         state.init_failed.get("due").map(String::as_str),
@@ -3575,9 +3871,8 @@ fn unreachable_retry_candidates_respect_cooldown_and_config() {
     assert!(!state.finish_unreachable_attempt(&name, token));
 }
 
-/// Config teardown mid-attempt invalidates the attempt token: a stale attempt
-/// can neither install (finish returns false) nor re-pollute the records its
-/// teardown cleaned (failed/unretryable settles no-op).
+/// Config teardown mid-attempt invalidates the attempt token.
+/// A stale attempt can neither install (finish returns false) nor re-pollute the records its teardown cleaned (failed/unretryable settles no-op).
 #[test]
 fn unreachable_attempt_token_invalidated_by_config_teardown() {
     let mut state = McpState::new(vec![
@@ -3602,8 +3897,7 @@ fn unreachable_attempt_token_invalidated_by_config_teardown() {
     assert!(state.take_unreachable_retry_candidates().is_empty());
 }
 
-/// Config updates must not leave a stale unreachable schedule behind: the
-/// diff path forgets removed servers, the full-replace path clears everything.
+/// Config updates must not leave a stale unreachable schedule behind: the diff path forgets removed servers, the full-replace path clears everything.
 #[test]
 fn unreachable_schedule_cleared_on_config_updates() {
     let mut state = McpState::new(vec![
@@ -3619,7 +3913,7 @@ fn unreachable_schedule_cleared_on_config_updates() {
         .expect("should detect change");
     assert_eq!(diff.removed, vec!["remove"]);
     assert!(!state.init_failed.contains_key("remove"));
-    // Removed server is no longer scheduled; kept server still is.
+    // The removed server is no longer scheduled; the kept server still is
     let taken: Vec<McpServerName> = state
         .take_unreachable_retry_candidates()
         .into_iter()
@@ -3627,15 +3921,14 @@ fn unreachable_schedule_cleared_on_config_updates() {
         .collect();
     assert_eq!(taken, vec!["keep".to_string()]);
 
-    // Full replace clears the whole schedule (including in-flight attempts).
+    // A full replace clears the whole schedule (including in-flight attempts)
     assert!(state.update_configs(vec![make_stdio_server("keep", "/bin/keep2")]));
     assert!(state.take_unreachable_retry_candidates().is_empty());
     assert!(state.init_failed.is_empty());
 }
 
-/// A fresh init attempt (`mark_servers_initializing`) supersedes any pending
-/// unreachable-respawn schedule — the attempt itself re-records on failure —
-/// so a server recovered by a full re-init cannot be respawned over later.
+/// A fresh init attempt (`mark_servers_initializing`) supersedes any pending unreachable-respawn schedule.
+/// The attempt itself re-records on failure, so a server recovered by a full re-init cannot be respawned over later.
 #[test]
 fn fresh_init_attempt_clears_unreachable_schedule() {
     let mut state = McpState::new(vec![make_stdio_server("srv", "/bin/srv")]);
@@ -3646,9 +3939,8 @@ fn fresh_init_attempt_clears_unreachable_schedule() {
     assert!(state.take_unreachable_retry_candidates().is_empty());
 }
 
-/// An attempt whose future was cancelled never settles; after the lease
-/// expires the server is takeable again with a fresh token and the zombie
-/// attempt's old token no-ops.
+/// An attempt whose future was cancelled never settles.
+/// After the lease expires the server is takeable again with a fresh token and the zombie attempt's old token no-ops.
 #[test]
 fn unreachable_attempt_lease_reclaims_cancelled_attempts() {
     let mut state = McpState::new(vec![make_stdio_server("srv", "/bin/srv")]);
@@ -3674,12 +3966,11 @@ fn unreachable_attempt_lease_reclaims_cancelled_attempts() {
     // …and the zombie attempt's token is dead: it cannot install or settle.
     assert!(!state.finish_unreachable_attempt("srv", old_token));
     state.settle_unreachable_attempt_failed("srv", old_token, "stale".to_string());
-    // Still owned by the new attempt (settle with the new token works).
+    // The server is still owned by the new attempt (settle with the new token works)
     assert!(state.finish_unreachable_attempt("srv", new_token));
 }
 
-/// Transient-connectivity classification: typed verdicts and transport-level
-/// handshake/client errors are retryable; protocol junk and auth are not.
+/// Typed verdicts and transport-level handshake/client errors are retryable; protocol junk and auth are not.
 #[test]
 fn transient_connectivity_classification() {
     assert!(

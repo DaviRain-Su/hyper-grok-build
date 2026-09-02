@@ -1,8 +1,6 @@
 //! Shared URL-opening and scheme validation utilities.
 //!
-//! Extracted from the `OpenSupergrokUrl` dispatch handler so that any
-//! code path (keyboard navigation, mouse click, action dispatch) can
-//! open a link safely without duplicating platform-specific logic.
+//! Keyboard navigation, mouse clicks, and action dispatch all open links through these helpers.
 
 use std::collections::HashMap;
 
@@ -11,27 +9,25 @@ use crate::terminal::hyperlinks::SchemeFilter;
 /// Outcome of attempting to open a URL in the system browser/handler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenUrlResult {
-    /// Opener was launched (or the test seam recorded the URL).
+    /// Opener was launched (or `GROK_TEST_OPEN_URL_FILE` recorded the URL).
     Opened,
     /// Scheme was rejected by the safety filter.
     RejectedScheme,
-    /// Browser cannot run here (headless / no display) or the opener
-    /// failed to spawn. Callers should surface the URL for manual open.
+    /// Browser cannot run here (headless / no display) or the opener failed to spawn.
+    /// Callers should show the URL so the user can open it manually.
     BrowserUnavailable,
 }
 
 /// Whether the environment looks capable of opening a GUI browser.
 ///
-/// Pure helper for tests. On Linux/BSD, requires a non-empty `DISPLAY` or
-/// `WAYLAND_DISPLAY` (or a non-empty `BROWSER` override). macOS/Windows
-/// are treated as available at the env level (spawn failure is still
-/// reported by [`open_url`]).
+/// Pure so tests can drive it with a fixed env map.
+/// On Linux/BSD this needs a non-empty `DISPLAY` or `WAYLAND_DISPLAY`, or a non-empty `BROWSER` override.
+/// macOS and Windows always count as available here; [`open_url`] still reports a failed spawn.
 pub fn browser_open_likely_available_from_env(env: &HashMap<String, String>) -> bool {
     if cfg!(any(target_os = "macos", target_os = "windows")) {
         return true;
     }
-    // Explicit BROWSER override: allow even without a display server so
-    // scripted/headless setups that point at a CLI browser still try.
+    // Explicit BROWSER override: allow even without a display server so scripted/headless setups that point at a CLI browser still try
     if env.get("BROWSER").is_some_and(|v| !v.is_empty()) {
         return true;
     }
@@ -47,15 +43,13 @@ pub fn browser_open_likely_available() -> bool {
 
 const BROWSER_UNAVAILABLE_NOTICE: &str = "Could not open a browser. Open this URL manually";
 
-/// Multi-line copy for agent scrollback: notice, then the full URL alone
-/// so it is easy to select/copy in the TUI.
+/// Multi-line copy for agent scrollback: notice, then the full URL alone so it is easy to select/copy in the TUI.
 pub fn browser_unavailable_message(url: &str) -> String {
     format!("{BROWSER_UNAVAILABLE_NOTICE}:\n{url}")
 }
 
-/// Single-line welcome toast: URL first so prefix truncation keeps the
-/// destination. `copied` is true only when clipboard delivery reported
-/// success — never claim a copy that did not happen.
+/// Single-line welcome toast: URL first so prefix truncation keeps the destination.
+/// `copied` is true only when clipboard delivery reported success, so the toast never claims a copy that did not happen.
 pub fn browser_unavailable_line(url: &str, copied: bool) -> String {
     if copied {
         format!("{url} \u{00b7} {BROWSER_UNAVAILABLE_NOTICE} (URL copied)")
@@ -66,26 +60,19 @@ pub fn browser_unavailable_line(url: &str, copied: bool) -> String {
 
 /// Open a URL in the system's default browser/handler.
 ///
-/// Uses the platform-native opener: `open` on macOS and `xdg-open` on
-/// Linux (spawned with fully detached stdio so it cannot block the pager),
-/// and `ShellExecuteW` on Windows — never `cmd /c start`, whose `&`
-/// metacharacter splitting and `%VAR%` expansion would let a crafted URL
-/// run arbitrary commands.
+/// Uses the native opener: `open` on macOS, `xdg-open` on Linux (with detached stdio so it cannot block the pager), and `ShellExecuteW` on Windows.
 ///
-/// Returns `true` when the opener was launched (or the test seam recorded
-/// the URL). Returns `false` when the environment looks headless or spawn
-/// fails — callers should surface the URL via [`browser_unavailable_message`]
-/// (scrollback) or [`browser_unavailable_line`] (welcome toast).
+/// Returns `true` when the opener was launched (or `GROK_TEST_OPEN_URL_FILE` recorded the URL).
+/// Returns `false` when the environment looks headless or the spawn fails.
+/// Callers should then show the URL via [`browser_unavailable_message`] (scrollback) or [`browser_unavailable_line`] (welcome toast).
 ///
-/// **Callers handling untrusted input** should call [`is_safe_to_open`]
-/// first, or use [`open_url_if_safe`] / [`try_open_url`] which combine both.
+/// **Callers handling untrusted input** should call [`is_safe_to_open`] first, or use [`open_url_if_safe`] or [`try_open_url`], which combine both.
 pub fn open_url(url: &str) -> bool {
-    // Test seam: PTY e2e must observe the open without launching a real
-    // browser. When set, append the URL to the file and skip the OS opener.
+    // PTY e2e tests must see the open without launching a real browser
+    // When this env var is set, append the URL to the file and skip the OS opener
     if let Ok(path) = std::env::var("GROK_TEST_OPEN_URL_FILE") {
         use std::io::Write;
-        // Surface misconfiguration: a swallowed write leaves the PTY test
-        // failing with a generic timeout and no clue why.
+        // Report the failed write: swallowing it leaves the PTY test failing with a generic timeout and no clue why
         if let Err(e) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -98,9 +85,8 @@ pub fn open_url(url: &str) -> bool {
         return true;
     }
 
-    // Skip the doomed spawn on headless Linux VMs (no DISPLAY / Wayland)
-    // so billing Upgrade / Buy-credits clicks can fall back to showing the
-    // URL instead of silently no-op'ing.
+    // Skip the doomed spawn on headless Linux VMs (no DISPLAY or Wayland)
+    // Billing Upgrade and Buy-credits clicks then fall back to showing the URL instead of silently doing nothing
     if !browser_open_likely_available() {
         tracing::info!("skipping browser open: no display server / BROWSER");
         return false;
@@ -121,10 +107,9 @@ pub fn open_url(url: &str) -> bool {
     opened
 }
 
-/// Hand the URL to the default browser via `ShellExecuteW`, which takes it
-/// as a single argument. The URL must never pass through `cmd.exe`: `start`
-/// splits on `&` and expands `%VAR%`, so a server-supplied URL such as
-/// `https://example.com/&calc.exe` would execute a command.
+/// Hand the URL to the default browser via `ShellExecuteW`, which takes it as a single argument.
+/// The URL must never pass through `cmd.exe`: `start` splits on `&` and expands `%VAR%`.
+/// A server-supplied URL such as `https://example.com/&calc.exe` would execute a command.
 #[cfg(target_os = "windows")]
 fn spawn_url_opener(url: &str) -> bool {
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
@@ -177,14 +162,11 @@ fn spawn_url_opener(url: &str) -> bool {
     }
 }
 
-/// Build the `open`/`xdg-open` opener command (macOS / Linux / BSD).
+/// Build the `open`/`xdg-open` opener command (macOS, Linux, BSD); Windows uses [`reveal_in_explorer`] instead.
 ///
-/// The returned command is TTY-guarded via [`xai_tty_utils::detach_std_command`]
-/// (`setsid`/`setpgid`) so the spawned GUI helper and its children can't grab
-/// the TUI's `/dev/tty`, with stdio fully redirected to null. Split from
-/// [`open_path`] so it can be unit-tested without spawning. The path is a single
-/// argument, never interpolated into a shell string. Windows uses
-/// [`reveal_in_explorer`] instead.
+/// [`xai_tty_utils::detach_std_command`] (`setsid`/`setpgid`) keeps the spawned GUI helper and its children from grabbing the TUI's `/dev/tty`.
+/// Split from [`open_path`] so it can be unit-tested without spawning.
+/// The path is passed as a single argument, never interpolated into a shell string.
 #[cfg(not(target_os = "windows"))]
 fn build_open_path_command(path: &std::path::Path) -> std::process::Command {
     #[cfg(target_os = "macos")]
@@ -202,13 +184,11 @@ fn build_open_path_command(path: &std::path::Path) -> std::process::Command {
 
 /// Reveal/open a local file in the OS file manager or default application.
 ///
-/// Returns `true` on success. Takes a trusted filesystem path (no scheme
-/// validation, unlike [`open_url`]).
+/// Returns `true` on success.
+/// Takes a trusted filesystem path (no scheme validation, unlike [`open_url`]).
 ///
-/// - **Windows**: `explorer.exe /select,<path>` reveals + highlights the file
-///   in Explorer. We deliberately avoid `cmd /c start`, whose `%VAR%`
-///   expansion corrupts the percent-encoded session-directory segment in
-///   imagine media paths (e.g. `…\C%3A%5CUsers…`).
+/// - **Windows**: `explorer.exe /select,<path>` reveals and highlights the file in Explorer.
+///   We avoid `cmd /c start`: its `%VAR%` expansion would corrupt the percent-encoded session-directory segment in imagine media paths.
 /// - **macOS / Linux**: `open` / `xdg-open` open the file in its default app.
 #[allow(clippy::disallowed_methods)] // fire and forget; the child is reaped when this process exits
 pub fn open_path(path: &std::path::Path) -> bool {
@@ -235,21 +215,20 @@ pub fn open_path(path: &std::path::Path) -> bool {
 
 /// Reveal `path` in a new Explorer window with the file selected.
 ///
-/// Uses `raw_arg` so Explorer's required `/select,"<path>"` quoting is passed
-/// verbatim — the default arg quoting wraps the whole token and breaks the
-/// switch. Launched directly (not via `cmd`), so percent characters in the
-/// path are not expanded by the shell. Session dirs embed a urlencoded cwd
-/// segment (`C%3A%5CUsers…`); those `%` chars must reach Explorer intact.
+/// Uses `raw_arg` so Explorer's required `/select,"<path>"` quoting reaches it verbatim.
+/// The default arg quoting wraps the whole token and breaks the switch.
+/// Launched directly (not via `cmd`), so percent characters in the path are not expanded by the shell.
+/// Session dirs embed a urlencoded cwd segment (`C%3A%5CUsers…`); those `%` chars must reach Explorer intact.
 ///
-/// Prefer the on-disk path as-is. When the file is missing, open the parent
-/// folder (no `/select`) so the user lands near the media instead of Home.
+/// Prefer the on-disk path as-is.
+/// When the file is missing, open the parent folder (no `/select`) so the user lands near the media instead of Home.
 #[cfg(all(not(test), target_os = "windows"))]
 #[allow(clippy::disallowed_methods)] // fire and forget; the child is reaped when this process exits
 fn reveal_in_explorer(path: &std::path::Path) -> bool {
     use std::os::windows::process::CommandExt;
 
-    // Prefer the real on-disk location (absolute). Fall back to parent when
-    // the file was deleted so Explorer does not dump the user in Home.
+    // Prefer the real on-disk location (absolute)
+    // Fall back to the parent when the file was deleted so Explorer does not dump the user in Home
     let target = if path.is_file() || path.is_dir() {
         path.to_path_buf()
     } else if let Some(parent) = path.parent().filter(|p| p.is_dir()) {
@@ -265,16 +244,13 @@ fn reveal_in_explorer(path: &std::path::Path) -> bool {
 
     let select_file = target.is_file();
     let mut command = std::process::Command::new("explorer");
-    // Escape embedded double-quotes in the path so the `/select,"<path>"`
-    // quoting does not break. Windows file-system paths cannot legally contain
-    // `"`, but percent-decoded display paths or future user-chosen filenames
-    // could, so be defensive.
+    // Escape embedded double-quotes in the path so the `/select,"<path>"` quoting does not break
+    // Windows file-system paths cannot legally contain `"`, but percent-decoded display paths or future user-chosen filenames could, so be defensive
     let escaped = target.display().to_string().replace('"', "\"\"");
     if select_file {
         command.raw_arg(format!("/select,\"{}\"", escaped));
     } else {
-        // Open the folder itself (no /select) — works for dirs and as a
-        // fallback when we only have a parent path.
+        // Open the folder itself (no /select); this works for dirs and as a fallback when we only have a parent path
         command.raw_arg(format!("\"{}\"", escaped));
     }
     command
@@ -282,8 +258,7 @@ fn reveal_in_explorer(path: &std::path::Path) -> bool {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     xai_tty_utils::detach_std_command(&mut command);
-    // explorer.exe returns exit code 1 even on success, so a successful spawn
-    // is the best signal we have.
+    // explorer.exe returns exit code 1 even on success, so a successful spawn is the best signal we have
     match command.spawn() {
         Ok(_) => true,
         Err(e) => {
@@ -295,20 +270,17 @@ fn reveal_in_explorer(path: &std::path::Path) -> bool {
 
 /// Check if a URL's scheme is safe to open.
 ///
-/// Uses the `url` crate for robust scheme extraction. Falls back to
-/// prefix matching for non-standard URLs that `url::Url::parse` rejects.
+/// Uses the `url` crate for scheme extraction, falling back to prefix matching for non-standard URLs that `url::Url::parse` rejects.
 pub fn is_safe_to_open(url: &str, filter: SchemeFilter) -> bool {
     let url = url.trim();
     if let Ok(parsed) = url::Url::parse(url) {
         return filter.allows(parsed.scheme());
     }
-    // Fallback: check for scheme via "://" prefix, lowercasing for
-    // case-insensitive comparison (SchemeFilter matches lowercase literals).
+    // Fallback: check for scheme via "://" prefix, lowercasing for case-insensitive comparison (SchemeFilter matches lowercase literals)
     if let Some((scheme, _)) = url.split_once("://") {
         return filter.allows(&scheme.to_ascii_lowercase());
     }
-    // Defensive: url::Url::parse handles well-formed mailto, but guard
-    // against edge cases where the parser rejects a mailto-like string.
+    // Defensive: url::Url::parse handles well-formed mailto, but guard against edge cases where the parser rejects a mailto-like string
     if let Some((scheme, _)) = url.split_once(':')
         && scheme.eq_ignore_ascii_case("mailto")
     {
@@ -319,15 +291,14 @@ pub fn is_safe_to_open(url: &str, filter: SchemeFilter) -> bool {
 
 /// Validate scheme and open a URL if permitted.
 ///
-/// Returns `true` only when the scheme is allowed **and** the opener was
-/// launched. Distinguishes scheme rejection from browser unavailability
-/// via [`try_open_url`].
+/// Returns `true` only when the scheme is allowed **and** the opener was launched.
+/// Use [`try_open_url`] to distinguish scheme rejection from browser unavailability.
 pub fn open_url_if_safe(url: &str, filter: SchemeFilter) -> bool {
     matches!(try_open_url(url, filter), OpenUrlResult::Opened)
 }
 
-/// Validate scheme and attempt to open. Prefer this when the caller needs
-/// to show a manual-URL fallback on [`OpenUrlResult::BrowserUnavailable`].
+/// Validate scheme and attempt to open.
+/// Prefer this when the caller needs to show the URL for manual opening on [`OpenUrlResult::BrowserUnavailable`].
 pub fn try_open_url(url: &str, filter: SchemeFilter) -> OpenUrlResult {
     if !is_safe_to_open(url, filter) {
         tracing::debug!(url, "URL scheme not permitted");
@@ -342,14 +313,11 @@ pub fn try_open_url(url: &str, filter: SchemeFilter) -> OpenUrlResult {
 
 /// Ensure `url` carries the given query parameter, returning the rewritten URL.
 ///
-/// If the URL already contains a parameter with that name, its value is left
-/// untouched (the caller upstream may have intentionally set one). On parse
-/// failure, the original string is returned unchanged so this is safe to apply
-/// to opener input from untrusted sources.
+/// If the URL already contains a parameter with that name, its value is left untouched (the caller upstream may have intentionally set one).
+/// On parse failure, the original string is returned unchanged so this is safe to apply to opener input from untrusted sources.
 ///
-/// Used by the SuperGrok upsell flow to attribute clicks to `referrer=grok-build`,
-/// matching the OAuth consent screen and x.ai/cli marketing links regardless of
-/// what the remote settings `gate_url` value happens to be.
+/// Used by the SuperGrok upsell flow to attribute clicks to `referrer=grok-build`, matching the OAuth consent screen and x.ai/cli marketing links.
+/// The parameter is added whatever the remote settings `gate_url` value happens to be.
 pub fn ensure_query_param(url: &str, key: &str, value: &str) -> String {
     let Ok(mut parsed) = url::Url::parse(url) else {
         return url.to_string();
@@ -402,7 +370,6 @@ mod tests {
             "file:///home/user/doc.pdf",
             SchemeFilter::Standard
         ));
-        // But allowed under EditorExtended.
         assert!(is_safe_to_open(
             "file:///home/user/doc.pdf",
             SchemeFilter::EditorExtended
@@ -544,8 +511,8 @@ mod tests {
 
     #[test]
     fn ensure_query_param_preserves_fragment() {
-        // The current remote settings value uses a hash fragment for client-side
-        // routing (`grok.com/#supergrok`); we still want the referrer attached.
+        // The current remote settings value uses a hash fragment for client-side routing (`grok.com/#supergrok`)
+        // We still want the referrer attached
         let out = ensure_query_param("https://grok.com/#supergrok", "referrer", "grok-build");
         assert_eq!(out, "https://grok.com/?referrer=grok-build#supergrok");
     }
@@ -564,8 +531,7 @@ mod tests {
 
     #[test]
     fn fallback_scheme_case_insensitive() {
-        // Uppercase scheme that url::Url::parse rejects triggers fallback path;
-        // the fallback must lowercase before matching SchemeFilter.
+        // Uppercase scheme that url::Url::parse rejects triggers fallback path; the fallback must lowercase before matching SchemeFilter
         assert!(!is_safe_to_open(
             "CUSTOM://something",
             SchemeFilter::Standard

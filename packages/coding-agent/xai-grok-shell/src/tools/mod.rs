@@ -1,5 +1,3 @@
-//! Tool infrastructure for xai-grok-shell.
-//!
 //! All tool execution goes through `xai-grok-tools` via the `ToolBridge`.
 //! Types (ToolOutput, ToolInput, TodoState, etc.) come from `xai-grok-tools` directly.
 

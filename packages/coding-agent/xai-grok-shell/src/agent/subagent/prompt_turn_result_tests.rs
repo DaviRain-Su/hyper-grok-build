@@ -46,6 +46,74 @@ fn reduce(
     })
 }
 
+/// The truncation contract: a MaxTokens child marks every non-Ok surface —
+/// the free-text note, the error suffixes — while a validated document stays
+/// raw JSON and a non-truncated turn carries no note anywhere.
+#[test]
+fn max_tokens_turn_marks_every_non_ok_surface() {
+    let truncated_turn = |completion, structured| {
+        let mut ok = prompt_turn_ok(completion, structured);
+        ok.stop_reason = agent_client_protocol::StopReason::MaxTokens;
+        ok
+    };
+
+    // Free-text success: note appended.
+    let out = reduce(
+        Ok(Ok(truncated_turn(PromptCompletionKind::Completed, None))),
+        schema_free_initial(),
+        "cut report",
+        false,
+    );
+    assert!(out.result.success);
+    assert!(
+        out.result
+            .output
+            .contains("truncated by the output token limit"),
+        "free-text output must carry the note: {}",
+        out.result.output
+    );
+
+    // Structured error arms: suffix stated.
+    let out = reduce(
+        Ok(Ok(truncated_turn(
+            PromptCompletionKind::Completed,
+            Some(Err("bad shape".to_string())),
+        ))),
+        schema_initial(),
+        "cut report",
+        false,
+    );
+    assert!(
+        out.result
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("truncated by the output token limit")),
+        "structured error must state the truncation: {:?}",
+        out.result.error
+    );
+
+    // Validated document: raw JSON by contract, no note.
+    let out = reduce(
+        Ok(Ok(truncated_turn(
+            PromptCompletionKind::Completed,
+            Some(Ok(serde_json::json!({"a": 1}))),
+        ))),
+        schema_initial(),
+        "cut report",
+        false,
+    );
+    assert_eq!(out.result.output.as_ref(), "{\"a\":1}");
+
+    // Non-truncated free-text turn: no note.
+    let out = reduce(
+        Ok(Ok(prompt_turn_ok(PromptCompletionKind::Completed, None))),
+        schema_free_initial(),
+        "whole report",
+        false,
+    );
+    assert_eq!(out.result.output.as_ref(), "whole report");
+}
+
 fn schema_initial() -> PromptTurnResultMode {
     PromptTurnResultMode::Initial {
         requires_structured_output: true,

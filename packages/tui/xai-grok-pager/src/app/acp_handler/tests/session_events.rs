@@ -140,6 +140,7 @@
             attempt: 1,
             max_retries: 3,
             reason: "rate limited".into(),
+            error_type: None,
         };
         apply_retry_state(&retry, &mut session, &mut scrollback, false);
         assert!(
@@ -613,11 +614,12 @@
     /// `PromptResponse` then suppresses the redundant `TurnFailed`.
     #[test]
     fn apply_retry_state_context_length_shows_context_too_large() {
+        use xai_grok_shell::extensions::notification::CONTEXT_LENGTH_ERROR_TYPE;
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
         apply_retry_state(
             &RetryState::Failed {
-                error_type: "context_length".into(),
+                error_type: CONTEXT_LENGTH_ERROR_TYPE.into(),
                 message: "API error (status 500): the prompt is too long for this model's \
                           context window"
                     .into(),
@@ -663,6 +665,7 @@
     /// The overflow path then does NOT stack a second `ContextTooLarge` prompt on top.
     #[test]
     fn apply_retry_state_context_length_does_not_duplicate_compaction_failed() {
+        use xai_grok_shell::extensions::notification::CONTEXT_LENGTH_ERROR_TYPE;
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
         scrollback.push_block(RenderBlock::session_event(SessionEvent::CompactionFailed {
@@ -670,7 +673,7 @@
         }));
         apply_retry_state(
             &RetryState::Failed {
-                error_type: "context_length".into(),
+                error_type: CONTEXT_LENGTH_ERROR_TYPE.into(),
                 message: "the prompt is too long for this model's context window".into(),
             },
             &mut session,
@@ -1089,6 +1092,7 @@
                     attempt: 1,
                     max_retries: 3,
                     reason: "overloaded".into(),
+                    error_type: None,
                 }));
             agent.running_wake_turn = Some(crate::app::agent_view::RunningWakeTurn {
                 prompt_id: "task-completed-1".into(),
@@ -1412,5 +1416,96 @@
             agent.generated_session_title.as_deref(),
             Some(expected.as_str())
         );
+    }
+
+    // ── HooksChanged (x.ai/session/update push) ─────────────────────────
+
+    fn hooks_changed_ext(
+        session_id: &str,
+        hooks: Vec<xai_hooks_plugins_types::HookInfo>,
+    ) -> acp::ExtNotification {
+        let notif = SessionNotification {
+            session_id: acp::SessionId::new(session_id),
+            update: XaiSessionUpdate::HooksChanged {
+                hooks,
+                project_trusted: true,
+                load_errors: Vec::new(),
+            },
+            meta: None,
+        };
+        let raw = serde_json::value::to_raw_value(&notif).unwrap();
+        acp::ExtNotification::new("x.ai/session_notification", std::sync::Arc::from(raw))
+    }
+
+    fn push_hook(name: &str, source_dir: &str) -> xai_hooks_plugins_types::HookInfo {
+        xai_hooks_plugins_types::HookInfo {
+            name: name.to_string(),
+            event: xai_hooks_plugins_types::HookEvent::PreToolUse,
+            handler_type: xai_hooks_plugins_types::HookHandlerType::Command,
+            matcher: None,
+            command: Some("/bin/true".to_string()),
+            url: None,
+            timeout_ms: 10_000,
+            source_dir: source_dir.to_string(),
+            disabled: false,
+            pinned: false,
+            removable: false,
+        }
+    }
+
+    /// The `HooksChanged` push is the channel late-arriving hooks come through.
+    /// Driven end-to-end through `handle_session_notification`: an empty first
+    /// push must not finish group-collapse seeding, the first non-empty push
+    /// applies the collapsed default, and later pushes preserve expand state.
+    #[test]
+    fn hooks_changed_push_seeds_group_collapse_on_first_non_empty_delivery() {
+        use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab, TabDataState};
+
+        let mut app = make_app_with_agent("sess-1");
+        app.agents.get_mut(&AgentId(0)).unwrap().extensions_modal =
+            Some(ExtensionsModalState::new(ExtensionsTab::Hooks));
+
+        // Empty first push: loads data but must leave seeding open.
+        assert!(handle_session_notification(
+            &hooks_changed_ext("sess-1", Vec::new()),
+            &mut app,
+        ));
+        {
+            let modal = app.agents[&AgentId(0)].extensions_modal.as_ref().unwrap();
+            assert!(matches!(modal.hooks_data, TabDataState::Loaded(_)));
+            assert!(
+                modal.hooks_collapsed_groups.is_empty(),
+                "empty first push must not seed any collapsed groups"
+            );
+        }
+
+        // First non-empty push: every source group gets the collapsed default.
+        let hooks = vec![push_hook("a", "/src1"), push_hook("b", "/src2")];
+        assert!(handle_session_notification(
+            &hooks_changed_ext("sess-1", hooks.clone()),
+            &mut app,
+        ));
+        {
+            let modal = app.agents[&AgentId(0)].extensions_modal.as_ref().unwrap();
+            assert!(modal.hooks_collapsed_groups.contains("/src1"));
+            assert!(modal.hooks_collapsed_groups.contains("/src2"));
+        }
+
+        // User expands /src1; a later push must not re-collapse it.
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .extensions_modal
+            .as_mut()
+            .unwrap()
+            .hooks_collapsed_groups
+            .remove("/src1");
+        assert!(handle_session_notification(
+            &hooks_changed_ext("sess-1", hooks),
+            &mut app,
+        ));
+        let modal = app.agents[&AgentId(0)].extensions_modal.as_ref().unwrap();
+        assert!(!modal.hooks_collapsed_groups.contains("/src1"));
+        assert!(modal.hooks_collapsed_groups.contains("/src2"));
     }
 

@@ -1,5 +1,3 @@
-//! `pty-scenario` — scripted TUI regression runner for xai-grok-pager.
-
 use std::path::PathBuf;
 use std::process::ExitCode;
 

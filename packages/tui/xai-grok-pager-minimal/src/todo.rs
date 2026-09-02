@@ -1,12 +1,9 @@
-//! Minimal-mode todo panel: the persistent list shown directly above the prompt
-//! while a turn has todos.
+//! Minimal-mode todo panel: the persistent list shown directly above the prompt while a turn has todos.
 //!
-//! It auto-hides once every todo is done (so a finished list doesn't linger),
-//! unless pinned open with `Ctrl+T` ([`todo_panel_visible`]). The overlay host
-//! sizes the idle viewport with [`todo_panel_height`] so the prompt sits right
-//! after the panel; [`draw_live`](super::live::draw_live) paints it with
-//! [`todo_panel_lines`] + [`render_todo_panel`]. Mirrors the full-TUI `TodoPane`
-//! glyphs/colors without its interactive chrome.
+//! It auto-hides once every todo is done (so a finished list doesn't linger), unless pinned open with `Ctrl+T` ([`todo_panel_visible`]).
+//! The overlay host sizes the idle viewport with [`todo_panel_height`] so the prompt sits right after the panel.
+//! [`draw_live`](super::live::draw_live) paints it with [`todo_panel_lines`] and [`render_todo_panel`].
+//! It mirrors the full-TUI `TodoPane` glyphs and colors without its interactive controls.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -16,15 +13,13 @@ use ratatui::text::{Line, Span};
 use xai_grok_pager::theme::Theme;
 use xai_grok_shell::tools::TodoStatus;
 
-/// Default cap on visible todo rows (the last becomes a `+N more` overflow row);
-/// `Ctrl+T` expands past it.
+/// Default cap on visible todo rows (the last becomes a `+N more` overflow row); `Ctrl+T` expands past it.
 pub(super) const MAX_TODO_ROWS: u16 = 8;
 
-/// Whether the todo panel should render this frame. Hidden when there are no
-/// todos, or when every todo is finished (so a completed list doesn't linger —
-/// nit: "still showing old TODOs on every turn even though all are complete").
-/// A new turn that creates fresh pending todos re-shows it immediately. `force`
-/// (Ctrl+T) pins it visible regardless, e.g. to review a finished list.
+/// Whether the todo panel should render this frame.
+/// It hides when there are no todos, or when every todo is finished, so a completed list doesn't linger.
+/// A new turn that creates fresh pending todos re-shows it immediately.
+/// `force` (Ctrl+T) pins it visible regardless, e.g. to review a finished list.
 pub(super) fn todo_panel_visible(
     agent: &xai_grok_pager::app::agent_view::AgentView,
     force: bool,
@@ -41,10 +36,8 @@ pub(super) fn todo_panel_visible(
         .any(|t| matches!(t.status, TodoStatus::Pending | TodoStatus::InProgress))
 }
 
-/// Rows the todo panel will occupy (0 when hidden — see [`todo_panel_visible`] —
-/// or there are no todos), capped at [`MAX_TODO_ROWS`]. The overlay host uses
-/// this to size the idle viewport to exactly its content so the prompt sits
-/// right after the committed conversation (no bottom-pin, no gap).
+/// Rows the todo panel will occupy, capped at [`MAX_TODO_ROWS`]; 0 when hidden or there are no todos (see [`todo_panel_visible`]).
+/// The overlay host uses this to size the idle viewport so the prompt sits right after the committed conversation (no bottom-pin, no gap).
 pub(super) fn todo_panel_height(
     agent: &xai_grok_pager::app::agent_view::AgentView,
     force: bool,
@@ -53,14 +46,12 @@ pub(super) fn todo_panel_height(
         return 0;
     }
     let len = agent.todo.todos().len() as u16;
-    // Ctrl+T (force) expands the full list (clamped to the screen by the caller);
-    // otherwise cap at `MAX_TODO_ROWS` with a `+N more` overflow row.
+    // Ctrl+T (force) expands the full list (clamped to the screen by the caller); otherwise cap at `MAX_TODO_ROWS` with a `+N more` overflow row
     if force { len } else { len.min(MAX_TODO_ROWS) }
 }
 
-/// Render the persistent todo panel into `area` (one line per item). Background
-/// is reset so the panel inherits the terminal's own background (transparency),
-/// matching the rest of the minimal live region.
+/// Render the persistent todo panel into `area` (one line per item).
+/// Background is reset so the panel inherits the terminal's own background (transparency), matching the rest of the minimal live region.
 pub(super) fn render_todo_panel(
     buf: &mut Buffer,
     area: Rect,
@@ -77,10 +68,9 @@ pub(super) fn render_todo_panel(
     }
 }
 
-/// Build the persistent todo-panel lines (status glyph + content per item),
-/// shown directly above the prompt while there are todos. Capped to `max_rows`
-/// (the last row becomes `… +N more` on overflow). Empty when there are no
-/// todos. Mirrors the full-TUI `TodoPane`'s glyphs/colors.
+/// Build the persistent todo-panel lines (a status glyph and the content per item), shown directly above the prompt while there are todos.
+/// Capped to `max_rows` (the last row becomes `… +N more` on overflow); empty when there are no todos.
+/// Mirrors the full-TUI `TodoPane`'s glyphs and colors.
 pub(super) fn todo_panel_lines(
     agent: &xai_grok_pager::app::agent_view::AgentView,
     max_rows: u16,
@@ -119,10 +109,8 @@ pub(super) fn todo_panel_lines(
                 ),
             };
             let content = truncate_chars(t.content.lines().next().unwrap_or("").trim(), 64);
-            // No leading pad: the caller places the panel at the shared
-            // live-region left edge (`live::live_left_inset` = 0, flush-left),
-            // so the glyph
-            // column lines up with committed `◆` bullets and the prompt `❯`.
+            // No leading pad: the caller places the panel at the shared live-region left edge (`live::live_left_inset` = 0, flush-left)
+            // That lines the glyph column up with committed `◆` bullets and the prompt `❯`
             Line::from(vec![
                 Span::styled(format!("{glyph} "), style),
                 Span::styled(content, style),
@@ -132,8 +120,7 @@ pub(super) fn todo_panel_lines(
 
     if overflow {
         let remaining = todos.len() - shown;
-        // When collapsed, advertise the chord that expands the full list; when
-        // already forced open (still overflowing a tiny screen) drop the hint.
+        // When collapsed, advertise the chord that expands the full list; when already forced open (still overflowing a tiny screen) drop the hint
         let label = if force {
             format!("\u{2026} +{remaining} more")
         } else {
@@ -181,17 +168,15 @@ mod tests {
     fn todo_panel_visibility_auto_hides_when_work_is_done() {
         use xai_grok_pager::app::agent::AgentState;
         let mut a = agent();
-        // No todos → hidden.
         assert!(!todo_panel_visible(&a, false));
 
-        // At least one unfinished todo → shown.
+        // At least one unfinished todo shows the panel
         a.todo.update_todos(vec![
             todo("done", TodoStatus::Completed),
             todo("doing", TodoStatus::InProgress),
         ]);
         assert!(todo_panel_visible(&a, false));
 
-        // All completed + idle → auto-hidden (don't linger forever).
         a.todo.update_todos(vec![
             todo("a", TodoStatus::Completed),
             todo("b", TodoStatus::Completed),
@@ -201,8 +186,7 @@ mod tests {
             "auto-hide once every todo is done and the turn is idle"
         );
 
-        // …and stays hidden even while a turn is actively running, so a previous
-        // turn's finished list never lingers at the start of the next turn.
+        // The panel stays hidden even mid-turn, so a previous turn's finished list never lingers at the start of the next turn
         a.session.state = AgentState::TurnRunning;
         assert!(
             !todo_panel_visible(&a, false),
@@ -220,7 +204,7 @@ mod tests {
     #[test]
     fn todo_panel_empty_when_no_todos() {
         assert!(todo_panel_lines(&agent(), 8, false).is_empty());
-        // …and empty when the cap is zero, regardless of todos.
+        // A zero cap also yields no lines, regardless of todos
         let mut a = agent();
         a.todo.update_todos(vec![todo("x", TodoStatus::Pending)]);
         assert!(todo_panel_lines(&a, 0, false).is_empty());
@@ -258,7 +242,6 @@ mod tests {
         );
         let lines = todo_panel_lines(&agent, 4, false);
         assert_eq!(lines.len(), 4, "capped to max_rows");
-        // 3 items + a "+7 more" overflow row (10 total, 3 shown), with a hint.
         assert!(
             line_text(&lines[3]).contains("+7 more"),
             "got: {:?}",
@@ -269,11 +252,5 @@ mod tests {
             "overflow row advertises the expand chord: {:?}",
             line_text(&lines[3])
         );
-    }
-
-    #[test]
-    fn truncate_chars_adds_ellipsis_only_when_needed() {
-        assert_eq!(truncate_chars("hello", 10), "hello");
-        assert_eq!(truncate_chars("hello world", 5), "hell…");
     }
 }

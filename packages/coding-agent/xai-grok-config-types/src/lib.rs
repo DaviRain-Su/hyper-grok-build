@@ -17,8 +17,8 @@ mod permission;
 pub use permission::*;
 use serde::{Deserialize, Serialize};
 use xai_grok_announcements::RemoteAnnouncement;
-/// A remote `campaigns[]` entry: an `id` gate plus a full-power
-/// flattened config patch (the JSON sibling of a `[[campaigns]]` TOML override).
+/// A remote `campaigns[]` entry: an `id` gate plus a flattened patch that can set any config key.
+/// It is the JSON sibling of a `[[campaigns]]` TOML override.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct CampaignOverride {
     #[serde(default, alias = "campaign_id")]
@@ -26,33 +26,26 @@ pub struct CampaignOverride {
     #[serde(flatten, default)]
     pub patch: serde_json::Map<String, serde_json::Value>,
 }
-/// Doom-loop recovery settings: ONE struct serves both the local
-/// `[doom_loop_recovery]` TOML table and the remote settings
-/// `doom_loop_recovery` JSON object, so the two stay 1:1. All fields are
-/// `Option` with per-field defaults (a partial object never fails the parse,
-/// and unknown future keys are ignored); unset fields fall through per-field
-/// in `resolve_doom_loop_recovery` (env > TOML > remote > default). Distinct
-/// namespace from the removed legacy `doom_loop_*` keys.
+/// Doom-loop recovery settings: one struct serves both the local `[doom_loop_recovery]` TOML table and the remote `doom_loop_recovery` JSON object.
+/// Every field is `Option` with a per-field default, so a partial object parses and unknown future keys are ignored.
+/// Unset fields fall through per-field in `resolve_doom_loop_recovery`: env, then TOML, then remote, then default.
+/// The namespace is distinct from the removed legacy `doom_loop_*` keys.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct DoomLoopRecoverySettings {
-    /// Send the `x-grok-doom-loop-check` header, parse the reported
-    /// triggers, and resample confident loops. `Some(false)` is a
-    /// kill-switch; absent ⇒ client default (ON).
+    /// Send the `x-grok-doom-loop-check` header, parse the reported triggers, and resample confident loops.
+    /// `Some(false)` is a kill-switch; absent uses the client default (on).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
-    /// Highest `tail_repetition` threshold considered confident (clamped to
-    /// 2..=64). Absent ⇒ client default (64). CLIENT-side filter over the
-    /// trigger labels the server returns — the server emits every fired
-    /// threshold; this is never sent as a request parameter.
+    /// Highest `tail_repetition` threshold considered confident (clamped to 2..=64); absent uses the client default (64).
+    /// The server emits every fired threshold, and the client filters the returned trigger labels with this.
+    /// It is never sent as a request parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_threshold: Option<u32>,
-    /// Resample budget per turn (clamped to 0..=5). Absent ⇒ client
-    /// default (2).
+    /// Resample budget per turn (clamped to 0..=5); absent uses the client default (2).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_retries: Option<u32>,
-    /// Detector window sent as the value of `x-grok-doom-loop-check`
-    /// (honored in 512..=4096, otherwise 4096; absent ⇒ client default 1024).
+    /// Detector window sent as the value of `x-grok-doom-loop-check` (honored in 512..=4096, otherwise 4096; absent uses the client default, 1024).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window_tokens: Option<u32>,
 }
@@ -105,64 +98,64 @@ impl<'de> Deserialize<'de> for WorktreeKindMaxAge {
         deserializer.deserialize_any(V)
     }
 }
-/// Local `[worktree.auto_gc]` / remote `worktree_auto_gc` policy.
-/// Field-wise tolerant deserialize so one bad key cannot drop a sibling kill-switch.
+/// Policy from the local `[worktree.auto_gc]` table or the remote `worktree_auto_gc` object.
+/// Each field deserializes tolerantly, so one bad key cannot drop a sibling kill-switch.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct WorktreeAutoGcSettings {
-    /// `Some(false)` kill-switch; absent ⇒ default on (env kill still applies).
+    /// `Some(false)` is a kill-switch; absent defaults to on (an env kill still applies).
     #[serde(
         default,
         deserialize_with = "de_opt_bool_tolerant",
         skip_serializing_if = "Option::is_none"
     )]
     pub enabled: Option<bool>,
-    /// Age cutoff seconds when platform age-expiry is allowed; clamped by resolver.
+    /// Age cutoff in seconds, on platforms where expiring by age is allowed; the resolver clamps it.
     #[serde(
         default,
         deserialize_with = "de_opt_u64_tolerant",
         skip_serializing_if = "Option::is_none"
     )]
     pub max_age_secs: Option<u64>,
-    /// Min seconds between successful auto-GC stamps; clamped by resolver.
+    /// Minimum seconds between successful auto-GC runs; the resolver clamps it.
     #[serde(
         default,
         deserialize_with = "de_opt_u64_tolerant",
         skip_serializing_if = "Option::is_none"
     )]
     pub min_interval_secs: Option<u64>,
-    /// Count age candidates without deleting.
+    /// When set, counts worktrees old enough to delete without deleting them.
     #[serde(
         default,
         deserialize_with = "de_opt_bool_tolerant",
         skip_serializing_if = "Option::is_none"
     )]
     pub dry_run: Option<bool>,
-    /// Linux only.
+    /// Only has an effect on Linux.
     #[serde(
         default,
         deserialize_with = "de_opt_bool_tolerant",
         skip_serializing_if = "Option::is_none"
     )]
     pub include_orphan_snapshots: Option<bool>,
-    /// Per-kind max ages (`session`/`ab`/`pool`/`fork`/`manual`/`subagent`).
-    /// Seconds or `"never"`. Absent keys use defaults (client default: `manual`=never).
-    /// Remote may set `manual` to a finite TTL — not client-pinned; local TOML can restore `"never"`.
-    /// Unknown kind keys ignored at resolve.
+    /// Per-kind max ages (`session`, `ab`, `pool`, `fork`, `manual`, `subagent`), each seconds or `"never"`.
+    /// Absent keys use the defaults; the client default keeps `manual` at never.
+    /// Remote may set `manual` to a finite TTL, and local TOML can restore `"never"`.
+    /// Unknown kind keys are ignored at resolve time.
     #[serde(
         default,
         deserialize_with = "de_opt_max_age_by_kind_tolerant",
         skip_serializing_if = "Option::is_none"
     )]
     pub max_age_by_kind: Option<std::collections::BTreeMap<String, WorktreeKindMaxAge>>,
-    /// Optional discovery rebuild + grok-scoped stale `.git/worktrees/` scrub (default off).
+    /// Also rebuild discovery and scrub grok's stale `.git/worktrees/` entries (default off).
     #[serde(
         default,
         deserialize_with = "de_opt_bool_tolerant",
         skip_serializing_if = "Option::is_none"
     )]
     pub include_rebuild: Option<bool>,
-    /// Independent rebuild throttle seconds; absent ⇒ 24h. Clamped like `min_interval_secs`.
+    /// Seconds between rebuilds, throttled independently of GC; absent means 24h. It is clamped like `min_interval_secs`.
     #[serde(
         default,
         deserialize_with = "de_opt_u64_tolerant",
@@ -170,16 +163,14 @@ pub struct WorktreeAutoGcSettings {
     )]
     pub rebuild_min_interval_secs: Option<u64>,
 }
-/// Display-refresh probe + auto-cadence settings: ONE struct for local
-/// `[ui.display_refresh]`, remote settings `display_refresh`, and `UiConfig`.
-/// Field-wise tolerant deserialize (wrong types → `None`); unknown keys kept in
-/// [`Self::extra`] so settings save cannot drop future knobs. Resolved by
-/// `resolve_display_refresh`. Client defaults: probe on, auto on, floor 8 ms,
-/// ceiling 16 ms, Hz band 55–240.
+/// Display-refresh probe and auto-cadence settings: one struct for local `[ui.display_refresh]`, remote `display_refresh`, and `UiConfig`.
+/// Each field deserializes tolerantly (wrong types become `None`); unknown keys land in [`Self::extra`] so a settings save cannot drop future knobs.
+/// `resolve_display_refresh` resolves it.
+/// Client defaults: probe on, auto on, floor 8 ms, ceiling 16 ms, Hz band 55 to 240.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct DisplayRefreshSettings {
-    /// Once-per-process primary-display Hz probe. `Some(false)` is a kill-switch.
+    /// Probe the primary display's Hz once per process. `Some(false)` is a kill-switch.
     #[serde(
         default,
         deserialize_with = "de_opt_bool_tolerant",
@@ -221,7 +212,7 @@ pub struct DisplayRefreshSettings {
         skip_serializing_if = "Option::is_none"
     )]
     pub max_hz: Option<u32>,
-    /// Unknown / future object members (preserved across config rewrite).
+    /// Unknown or future object members, preserved across a config rewrite.
     #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -392,7 +383,7 @@ fn de_opt_u64_tolerant<'de, D: serde::Deserializer<'de>>(
     }
     deserializer.deserialize_any(V)
 }
-/// Tolerant map: bad whole value → None; per-entry bad values skipped.
+/// A bad whole value becomes `None`; a bad per-entry value is skipped and its siblings kept.
 fn de_opt_max_age_by_kind_tolerant<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<std::collections::BTreeMap<String, WorktreeKindMaxAge>>, D::Error> {
@@ -411,8 +402,7 @@ fn de_opt_max_age_by_kind_tolerant<'de, D: serde::Deserializer<'de>>(
         _ => Ok(None),
     }
 }
-/// Present-but-malformed nested value: `None` plus a warning, so one bad
-/// setting cannot fail the whole [`RemoteSettings`] parse.
+/// A nested value that is present but malformed becomes `None` with a warning, so one bad setting cannot fail the whole [`RemoteSettings`] parse.
 pub fn deserialize_tolerant<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -435,13 +425,13 @@ where
         }
     }
 }
-/// Consent notice from `grok_build_settings.consent_gate`. Which accounts see it is a targeting
-/// decision, not a property of the payload.
+/// Consent notice from `grok_build_settings.consent_gate`.
+/// The server decides which accounts see it; the payload carries no targeting.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ConsentGate {
-    /// Keys the stored answer and the upstream record. A payload without one is dropped whole.
+    /// The id keys the stored answer and the upstream record. A payload without one is dropped whole.
     pub id: String,
-    /// Acceptance version for this notice. Only comparable against an answer to the same `id`.
+    /// Acceptance version for this notice. It only compares against an answer to the same `id`.
     #[serde(default)]
     pub version: Option<i32>,
     #[serde(default)]
@@ -449,20 +439,20 @@ pub struct ConsentGate {
     /// `[label](https://…)` links are painted inline; there is no scrolling, so keep it short.
     #[serde(default)]
     pub body: Option<String>,
-    /// The only way past the notice.
+    /// This button is the only way past the notice.
     #[serde(default)]
     pub accept_label: Option<String>,
 }
 /// Remote settings fetched from cli-chat-proxy `GET /v1/settings`.
 ///
 /// All fields are `Option` with `#[serde(default)]` so that:
-/// - Missing fields from old servers are gracefully ignored
+/// - Missing fields from old servers are ignored
 /// - New fields added in the future don't break existing clients
 /// - Callers can distinguish "server said false" from "server didn't say"
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RemoteSettings {
     /// When `Some(true)`, the server recommends enabling leader mode.
-    /// Used as a fallback when the user hasn't set `[cli] use_leader` locally.
+    /// It is the fallback when the user hasn't set `[cli] use_leader` locally.
     #[serde(default)]
     pub leader_mode: Option<bool>,
     #[serde(default)]
@@ -474,22 +464,21 @@ pub struct RemoteSettings {
     pub non_git_workspace_capture: Option<bool>,
     #[serde(default)]
     pub login_shell_capture: Option<bool>,
-    /// When `Some(false)`, scheduled task fires run as main-conversation
-    /// turns instead of background subagents.
+    /// When `Some(false)`, scheduled task fires run as main-conversation turns instead of background subagents.
     #[serde(default)]
     pub scheduler_background_loops: Option<bool>,
-    /// Fleet kill switch for turn-level transient retries; applies at next
-    /// spawn, local config/env win. Malformed values must not fail the parse.
+    /// Fleet-wide kill switch for turn-level transient retries; it applies at the next spawn, and local config or env wins.
+    /// Malformed values must not fail the parse.
     #[serde(default, deserialize_with = "de_opt_bool_tolerant")]
     pub turn_transient_retry: Option<bool>,
     /// Release channel: `"stable"` or `"alpha"`.
-    /// Fallback when no local `[cli] channel` or `--alpha`/`--stable` flag is set.
+    /// It is the fallback when no local `[cli] channel` or `--alpha`/`--stable` flag is set.
     #[serde(default)]
     pub release_channel: Option<String>,
     /// When `Some(true)`, enable LOC attribution tracking for this session.
     #[serde(default)]
     pub loc_tracking: Option<bool>,
-    /// Enable the experimental memory system remotely.
+    /// Remote toggle for the experimental memory system.
     #[serde(default)]
     pub memory_enabled: Option<bool>,
     #[serde(default)]
@@ -536,36 +525,33 @@ pub struct RemoteSettings {
     pub dream_min_sessions: Option<u64>,
     #[serde(default)]
     pub dream_check_interval_secs: Option<u64>,
-    /// Cadence (seconds) of the pager's free→paid subscription watch.
-    /// `0` disables it; the pager clamps and defaults (see its
-    /// `app::subscription` module). Forwarded from the `grok_build_settings`
-    /// remote settings flag via the CCP `/settings` flatten catch-all.
+    /// Cadence (seconds) of the pager's watch for a free account becoming paid.
+    /// `0` disables it; the pager clamps and defaults (see its `app::subscription` module).
+    /// It arrives from the `grok_build_settings` remote settings flag via the cli-chat-proxy `/settings` flatten catch-all.
     #[serde(default)]
     pub subscription_watch_interval_secs: Option<u64>,
     #[serde(default)]
     pub writeback_enabled: Option<bool>,
-    /// OAuth2 provider issuer URL (e.g., "https://auth.x.ai"). When present
-    /// together with `oauth2_client_id`, the client uses OAuth2 authorization code
-    /// flow. Controlled via remote settings for gradual rollout.
+    /// OAuth2 provider issuer URL (e.g., "https://auth.x.ai").
+    /// When present together with `oauth2_client_id`, the client uses the OAuth2 authorization code flow.
+    /// Remote settings control it so the rollout can be gradual.
     #[serde(default)]
     pub oauth2_issuer: Option<String>,
-    /// OAuth2 client_id for the CLI. Paired with `oauth2_issuer`.
+    /// OAuth2 client_id for the CLI. It pairs with `oauth2_issuer`.
     #[serde(default)]
     pub oauth2_client_id: Option<String>,
-    /// When `Some(true)`, enable grok's default OAuth2 (xAI auth.x.ai).
+    /// When `Some(true)`, enables grok's default OAuth2 (xAI auth.x.ai).
     /// Enterprise OIDC (user's own IdP via `oidc` config) always wins.
-    /// Controlled via remote settings; `--oauth` CLI flag overrides.
+    /// The `--oauth` CLI flag overrides it.
     #[serde(default)]
     pub grok_oauth_enabled: Option<bool>,
     #[serde(default)]
     pub lsp_tools_enabled: Option<bool>,
-    /// Folder-trust gate kill-switch / remote default. Gates whether repo-local
-    /// MCP/LSP servers (commands sourced from working-tree config files) require
-    /// a per-folder trust decision before they are spawned. `Some(true)`
-    /// enables, `Some(false)` is a kill-switch, `None` falls back to the client
-    /// default (on). Sits below env `GROK_FOLDER_TRUST`, user
-    /// `[folder_trust] enabled`, and managed config in the resolver chain. See
-    /// `agent::folder_trust::feature_enabled`.
+    /// Remote kill-switch and default for the folder-trust gate.
+    /// The gate decides whether repo-local MCP/LSP servers (commands from working-tree config files) need a per-folder trust decision before they spawn.
+    /// `Some(true)` enables, `Some(false)` is a kill-switch, `None` falls back to the client default (on).
+    /// It sits below env `GROK_FOLDER_TRUST`, user `[folder_trust] enabled`, and managed config in the resolver chain.
+    /// See `agent::folder_trust::feature_enabled`.
     #[serde(default)]
     pub folder_trust_enabled: Option<bool>,
     #[serde(default)]
@@ -573,53 +559,57 @@ pub struct RemoteSettings {
     #[serde(default)]
     pub active_agent_messages_enabled: Option<bool>,
     /// File toolset: `"standard"` or `"hashline"`.
-    /// Server-side default; local `[toolset] file_toolset` in config.toml
-    /// takes precedence when set.
+    /// This is the server-side default; local `[toolset] file_toolset` in config.toml takes precedence when set.
     #[serde(default)]
     pub file_toolset: Option<String>,
     /// Per-chunk idle timeout in seconds for inference streaming.
-    /// Fallback when no per-model `inference_idle_timeout_secs` is set in config.toml.
+    /// It is the fallback when no per-model `inference_idle_timeout_secs` is set in config.toml.
     #[serde(default)]
     pub inference_idle_timeout_secs: Option<u64>,
     #[serde(default)]
     pub subagent_rate_limit_max_attempts: Option<u32>,
-    /// Global default MCP startup-handshake timeout (seconds); lowest-precedence
-    /// fallback (per-server config, env, and requirements/managed override it).
+    #[serde(default)]
+    pub repo_status_in_system_prompt: Option<bool>,
+    /// Global default MCP startup-handshake timeout (seconds).
+    /// It is the lowest-precedence fallback; per-server config, env, and requirements/managed override it.
     #[serde(default)]
     pub mcp_startup_timeout_secs: Option<u64>,
-    /// remote settings `grok_build_settings.max_mcp_output_bytes` — global default
-    /// MCP tool-result inline cap (bytes). Overridden by requirements, env,
-    /// and `config.toml [mcp] max_output_bytes`. Built-in default 20_000.
+    /// Global default MCP tool-result inline cap (bytes), from remote settings `grok_build_settings.max_mcp_output_bytes`.
+    /// Requirements, env, and `config.toml [mcp] max_output_bytes` override it. The built-in default is 20_000.
     #[serde(default)]
     pub max_mcp_output_bytes: Option<u64>,
     /// When `Some(true)`, enable session registry hooks (register, update, finalize, memory upload).
-    /// When absent or `Some(false)`, all hooks are disabled (default: disabled).
+    /// When absent or `Some(false)`, all hooks are disabled.
     #[serde(default)]
     pub session_registry_enabled: Option<bool>,
-    /// The remote settings `doom_loop_recovery` JSON object; see
-    /// [`DoomLoopRecoverySettings`]. Absent ⇒ every knob falls through to
-    /// TOML/defaults; a partial object falls through per-field.
+    /// The remote settings `doom_loop_recovery` JSON object; see [`DoomLoopRecoverySettings`].
+    /// Absent means every knob falls through to TOML/defaults; a partial object falls through per-field.
     #[serde(default)]
     pub doom_loop_recovery: Option<DoomLoopRecoverySettings>,
     /// Automatic worktree GC policy; see [`WorktreeAutoGcSettings`].
-    /// Absent ⇒ every knob falls through to TOML/defaults; a partial object
-    /// falls through per-field. Present-but-malformed nested value is dropped
-    /// to `None` (does not fail the whole `RemoteSettings` parse). Platform
-    /// age-expiry policy is client-hardcoded and not remote-overridable.
+    /// Absent means every knob falls through to TOML/defaults; a partial object falls through per-field.
+    /// A value that is present but malformed drops to `None` instead of failing the whole `RemoteSettings` parse.
+    /// Which platforms may expire worktrees by age is hardcoded in the client; remote cannot override it.
     #[serde(default, deserialize_with = "deserialize_tolerant")]
     pub worktree_auto_gc: Option<WorktreeAutoGcSettings>,
     /// Enable/disable the runtime turn-end TodoGate remotely.
-    /// Precedence: CLI `--todo-gate` > this field > built-in default (`false`).
-    /// The gate ships disabled; set this to `Some(true)` (via the
-    /// `grok_build_settings` remote settings key) to enable it. See
-    /// `session::acp_session::resolve_reminder_policy`.
+    /// Precedence: CLI `--todo-gate`, then this field, then the built-in default (`false`).
+    /// The gate ships disabled; set this to `Some(true)` (via the `grok_build_settings` remote settings key) to enable it.
+    /// See `session::acp_session::resolve_reminder_policy`.
     #[serde(default)]
     pub todo_gate_enabled: Option<bool>,
     /// Hard cap on TodoGate fires per user prompt.
-    /// Precedence: this field > built-in default (`DEFAULT_TODO_GATE_MAX_FIRES`).
-    /// No CLI override. See `session::acp_session::resolve_reminder_policy`.
+    /// Precedence: this field, then the built-in default (`DEFAULT_TODO_GATE_MAX_FIRES`).
+    /// There is no CLI override. See `session::acp_session::resolve_reminder_policy`.
     #[serde(default)]
     pub todo_gate_max_fires_per_prompt: Option<u32>,
+    /// Length-salvage continue budget for `max_tokens`-truncated turns.
+    /// `Some(0)` is explicit off and kills every tier, including the
+    /// always-on cursor one and the `GROK_LENGTH_SALVAGE` env opt-in.
+    /// Otherwise: cursor tier > env opt-in > this field > off. See
+    /// `session::acp_session_impl::length_salvage`.
+    #[serde(default)]
+    pub length_salvage_budget: Option<u32>,
     #[serde(default)]
     pub auto_wake_enabled: Option<bool>,
     #[serde(default)]
@@ -650,66 +640,55 @@ pub struct RemoteSettings {
     pub codex_sessions_enabled: Option<bool>,
     /// When `Some(true)`, enable goal mode remotely.
     /// When `Some(false)`, force-disable it (kill-switch).
-    /// Absent ⇒ client default (enabled).
+    /// Absent uses the client default (enabled).
     #[serde(default)]
     pub goal_enabled: Option<bool>,
     /// When `Some(true)`, enable the goal-completion classifier remotely.
     /// When `Some(false)`, force-disable it.
-    /// Absent ⇒ default tracks goal mode (enabled iff goal mode is on).
+    /// Absent tracks goal mode: enabled exactly when goal mode is on.
     #[serde(default)]
     pub goal_classifier_enabled: Option<bool>,
     /// When `Some(true)`, enable the goal planner remotely.
     /// When `Some(false)`, force-disable it.
-    /// Absent ⇒ default tracks goal mode (enabled iff goal mode is on).
+    /// Absent tracks goal mode: enabled exactly when goal mode is on.
     #[serde(default)]
     pub goal_planner_enabled: Option<bool>,
-    /// When `Some(true)`, enable the goal summarizer remotely (the one-shot
-    /// closing "what was accomplished" summary on a verified achievement).
+    /// When `Some(true)`, enable the goal summarizer remotely (the one-shot closing "what was accomplished" summary on a verified achievement).
     /// When `Some(false)`, force-disable it (kill-switch).
-    /// Absent ⇒ default tracks goal mode (enabled iff goal mode is on).
+    /// Absent tracks goal mode: enabled exactly when goal mode is on.
     #[serde(default)]
     pub goal_summary_enabled: Option<bool>,
-    /// Number of adversarial skeptics spawned per goal-verification
-    /// attempt (step ② of the staged gate). Clamped to `1..=5` at the
-    /// resolver. Absent ⇒ harness default of
-    /// `goal_classifier::GOAL_VERIFIER_SKEPTIC_COUNT` (3 today).
+    /// Number of adversarial skeptics spawned per goal-verification attempt (step 2 of the staged gate); clamped to `1..=5` at the resolver.
+    /// Absent uses the harness default, `goal_classifier::GOAL_VERIFIER_SKEPTIC_COUNT` (3 today).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal_verifier_count: Option<u32>,
-    /// Maximum per-goal classifier runs before the goal auto-pauses
-    /// (BackOff). Clamped to `1..=10` at the resolver. Absent ⇒ harness
-    /// default of `goal_classifier::GOAL_CLASSIFIER_MAX_RUNS_DEFAULT`
-    /// (3 today).
+    /// Maximum per-goal classifier runs before the goal auto-pauses (BackOff); clamped to `1..=10` at the resolver.
+    /// Absent uses the harness default, `goal_classifier::GOAL_CLASSIFIER_MAX_RUNS_DEFAULT` (3 today).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal_classifier_max_runs: Option<u32>,
-    /// Fire the stall-triggered strategist every N consecutive
-    /// `NotAchieved` verifications. Clamped to `>= 1` at the resolver.
-    /// Absent ⇒ default of `max(1, goal_classifier_max_runs / 2)`.
+    /// Fire the stall-triggered strategist every N consecutive `NotAchieved` verifications; clamped to `>= 1` at the resolver.
+    /// Absent defaults to `max(1, goal_classifier_max_runs / 2)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal_strategist_every: Option<u32>,
-    /// Planner role model+toolset. Absent ⇒ inherit current model. A
-    /// present-but-malformed value is tolerantly dropped to `None` (not a
-    /// hard parse error) so it cannot nuke the whole `RemoteSettings`
-    /// payload (see [`deserialize_tolerant_goal_role_model`]).
+    /// Planner role model and toolset. Absent inherits the current model.
+    /// A malformed value drops to `None` rather than failing the whole `RemoteSettings` payload (see [`deserialize_tolerant_goal_role_model`]).
     #[serde(
         default,
         deserialize_with = "deserialize_tolerant_goal_role_model",
         skip_serializing_if = "Option::is_none"
     )]
     pub goal_planner_model: Option<GoalRoleModel>,
-    /// Strategist role model+toolset. Absent ⇒ inherit current model. A
-    /// present-but-malformed value is tolerantly dropped to `None`
-    /// (see [`deserialize_tolerant_goal_role_model`]).
+    /// Strategist role model and toolset. Absent inherits the current model.
+    /// A malformed value drops to `None` (see [`deserialize_tolerant_goal_role_model`]).
     #[serde(
         default,
         deserialize_with = "deserialize_tolerant_goal_role_model",
         skip_serializing_if = "Option::is_none"
     )]
     pub goal_strategist_model: Option<GoalRoleModel>,
-    /// Ordered skeptic pool. `pool[0]` = skeptic-0's model; skeptics
-    /// `1..N` are assigned round-robin over the pool. Empty/absent ⇒
-    /// inherit the current model. A single malformed pool entry is
-    /// dropped rather than discarding the whole pool (see
-    /// [`deserialize_tolerant_goal_skeptic_models`]).
+    /// Ordered skeptic pool: `pool[0]` is skeptic-0's model, and skeptics `1..N` are assigned round-robin over the pool.
+    /// Empty or absent inherits the current model.
+    /// A single malformed pool entry is dropped rather than discarding the whole pool (see [`deserialize_tolerant_goal_skeptic_models`]).
     #[serde(
         default,
         deserialize_with = "deserialize_tolerant_goal_skeptic_models",
@@ -723,77 +702,64 @@ pub struct RemoteSettings {
     pub managed_mcps_enabled: Option<bool>,
     #[serde(default)]
     pub managed_mcp_gateway_tools_enabled: Option<bool>,
-    /// Remote-policy disable lever for the **external OTEL** stream (customer
-    /// collectors); feeds `ExternalOtelRemotePolicy.force_disable`.
-    /// Restrictive-only by construction: there is deliberately
-    /// no `external_otel_enabled` remote field — remote settings are fetched
-    /// per-run and never persisted, so a remote "enable" could never reach
-    /// init; org-wide enable ships via managed config instead. Applied
-    /// in-process (tighten-only) via
-    /// `xai_grok_telemetry::external::apply_remote_policy`.
+    /// Remote-policy disable lever for the external OTEL stream (customer collectors); feeds `ExternalOtelRemotePolicy.force_disable`.
+    /// Tighten-only: there is no `external_otel_enabled` remote field and `apply_remote_policy` never enables, so even a stale disk cache can only restrict.
+    /// Org-wide enable ships via managed config instead.
     #[serde(default)]
     pub external_otel_disabled: Option<bool>,
-    /// Force the external stream's content gates (`OTEL_LOG_USER_PROMPTS`,
-    /// `OTEL_LOG_TOOL_DETAILS`) off regardless of local env/config.
-    /// Tighten-only, like `external_otel_disabled`.
+    /// Force the external stream's content gates (`OTEL_LOG_USER_PROMPTS`, `OTEL_LOG_TOOL_DETAILS`) off regardless of local env/config.
+    /// It is tighten-only, like `external_otel_disabled`.
     #[serde(default)]
     pub external_otel_content_gates_locked: Option<bool>,
-    /// `Some(false)` disarms managed-config signature verification (remote kill-switch).
+    /// `Some(false)` disables managed-config signature verification (remote kill-switch).
     #[serde(default)]
     pub managed_config_signature_verification: Option<bool>,
     #[serde(default)]
     pub telemetry_enabled: Option<bool>,
     /// Telemetry mode override (string): `"session-metrics"`, `"full"`, `"off"`.
-    /// Takes precedence over `telemetry_enabled` (bool) when present.
+    /// It takes precedence over `telemetry_enabled` (bool) when present.
     #[serde(default)]
     pub telemetry_mode: Option<String>,
     #[serde(default)]
     pub trace_upload_enabled: Option<bool>,
     /// Enable user-facing feedback (heuristic popups, `/feedback` command).
-    /// Session analytics (signal sync, turn deltas) are gated separately
-    /// by `telemetry_enabled`.
+    /// Session analytics (signal sync, turn deltas) are gated separately by `telemetry_enabled`.
     #[serde(default)]
     pub feedback_enabled: Option<bool>,
     /// Gradual rollout of the `/feedback` trace-consent card.
     #[serde(default)]
     pub feedback_trace_card_enabled: Option<bool>,
-    /// Two-pass (prefire) compaction. When approaching the auto-compact
-    /// threshold the shell speculatively summarizes the history prefix in the
-    /// background (pass 1 → NOTE₁); at compaction it summarizes NOTE₁ + the
-    /// recent tail (pass 2 → final summary), keeping summarizer latency off the
-    /// critical path. `Some(false)` forces off, `None` falls through env /
-    /// `[features]` / default (on).
+    /// Two-pass (prefire) compaction.
+    /// Near the auto-compact threshold the shell speculatively summarizes the history prefix in the background (pass 1 produces an interim note).
+    /// At compaction it summarizes that note plus the recent tail (pass 2), keeping summarizer latency off the critical path.
+    /// `Some(false)` forces off; `None` falls through env, `[features]`, then the default (on).
     #[serde(default)]
     pub two_pass_compaction_enabled: Option<bool>,
-    /// Dynamic tip list from remote settings. When present with non-empty entries,
-    /// one tip is shown at startup (rotated daily by UTC day).
-    /// `None` or `[]` = no tips shown.
+    /// Dynamic tip list from remote settings. When present with non-empty entries, one tip is shown at startup (rotated daily by UTC day).
+    /// `None` or `[]` shows no tips.
     #[serde(default)]
     pub tips: Option<Vec<String>>,
-    /// Free-form per-command tags (e.g. `new`, `beta`) rendered as a bracketed
-    /// label in the slash dropdown, keyed by canonical command name. Present-but-
-    /// malformed → `None` (does not fail the whole parse); local
-    /// `[slash_command_tags]` overrides per key. See `resolve_slash_command_tags`.
+    /// Free-form per-command tags (e.g. `new`, `beta`) rendered as a bracketed label in the slash dropdown, keyed by canonical command name.
+    /// A malformed value drops to `None` without failing the whole parse; local `[slash_command_tags]` overrides per key.
+    /// See `resolve_slash_command_tags`.
     #[serde(default, deserialize_with = "deserialize_tolerant")]
     pub slash_command_tags: Option<std::collections::BTreeMap<String, String>>,
     /// When present, controls the non-Git-repo warning at session start.
-    /// Controlled via remote settings (`non_git_warning` in `grok_build_settings`).
-    /// Takes precedence over `[features] non_git_warning` in config.toml:
+    /// It arrives as `non_git_warning` in `grok_build_settings`.
+    /// It takes precedence over `[features] non_git_warning` in config.toml.
     /// `Some(true)` enables, `Some(false)` acts as a kill-switch, `None` falls back to local config.
     #[serde(default)]
     pub non_git_warning: Option<bool>,
-    /// remote settings gate for first-run auto-registration of the official xAI
-    /// marketplace source. `Some(true)` enables, `Some(false)` is a kill-switch,
-    /// `None` falls back to env/default (off).
+    /// Remote settings gate for first-run auto-registration of the official xAI marketplace source.
+    /// `Some(true)` enables, `Some(false)` is a kill-switch, `None` falls back to env/default (off).
     #[serde(default)]
     pub official_marketplace_auto_register: Option<bool>,
-    /// remote settings gate for the inline plugin-install CTA (keyword-matched
-    /// marketplace upsell above the prompt). `Some(true)` enables, `Some(false)`
-    /// is a kill-switch, `None` falls back to env/default (off).
+    /// Remote settings gate for the inline plugin-install CTA (the keyword-matched marketplace upsell above the prompt).
+    /// `Some(true)` enables, `Some(false)` is a kill-switch, `None` falls back to env/default (off).
     #[serde(default)]
     pub plugin_cta: Option<bool>,
     /// Remote announcements list from proxy. Malformed items are skipped entirely.
-    /// `None` or `[]` = no announcements to display.
+    /// `None` or `[]` displays no announcements.
     #[serde(default, deserialize_with = "deserialize_tolerant_announcements")]
     pub announcements: Option<Vec<RemoteAnnouncement>>,
     #[serde(default)]
@@ -802,14 +768,11 @@ pub struct RemoteSettings {
     pub session_summary_model: Option<String>,
     #[serde(default)]
     pub image_description_model: Option<String>,
-    /// Server-side pin for the next-prompt suggestion model (tab-autocomplete
-    /// ghost text), from the `grok_build_settings` remote settings flag. Sits below
-    /// env (`GROK_PROMPT_SUGGESTIONS_MODEL`) and `[models] prompt_suggestion`
-    /// in config.toml, above the client hint and the built-in
-    /// `grok-4.6` default. The effective model is catalog-guarded: when
-    /// it is not in the shell's model catalog the suggestion request is
-    /// skipped entirely (never the session model). See
-    /// `ModelOverrideConfig::resolve` and `handle_suggest_prompt`.
+    /// Server-side pin for the next-prompt suggestion model (tab-autocomplete ghost text), from the `grok_build_settings` remote settings flag.
+    /// It sits below env (`GROK_PROMPT_SUGGESTIONS_MODEL`) and `[models] prompt_suggestion` in config.toml.
+    /// It sits above the client hint and the built-in `grok-4.6` default.
+    /// When the effective model is not in the shell's model catalog the suggestion request is skipped entirely; the session model is never used instead.
+    /// See `ModelOverrideConfig::resolve` and `handle_suggest_prompt`.
     #[serde(default)]
     pub prompt_suggestion_model: Option<String>,
     /// Server-recommended default model ID for new sessions.
@@ -817,112 +780,100 @@ pub struct RemoteSettings {
     pub default_model: Option<String>,
     #[serde(default)]
     pub campaigns: Vec<CampaignOverride>,
-    /// When `Some(true)`, foreground commands that hit the default timeout are
-    /// auto-backgrounded instead of killed. Fallback when no local
-    /// `[toolset.bash] auto_background_on_timeout` is set in config.toml.
+    /// When `Some(true)`, foreground commands that hit the default timeout are auto-backgrounded instead of killed.
+    /// It is the fallback when no local `[toolset.bash] auto_background_on_timeout` is set in config.toml.
     #[serde(default)]
     pub auto_background_on_timeout: Option<bool>,
-    /// When `Some(false)`, foreground commands containing a background `&`
-    /// operator are rejected. Fallback when no local `[toolset.bash]
-    /// allow_background_operator` is set; absent → client default (allow).
+    /// When `Some(false)`, foreground commands containing a background `&` operator are rejected.
+    /// It is the fallback when no local `[toolset.bash] allow_background_operator` is set; absent uses the client default (allow).
     #[serde(default)]
     pub allow_background_operator: Option<bool>,
-    /// remote settings fallback for `[toolset.ask_user_question] timeout_enabled`.
-    /// When `Some(false)`, questionnaires wait forever unless a higher tier
-    /// (requirements / env / user / managed config) sets otherwise.
+    /// Remote settings fallback for `[toolset.ask_user_question] timeout_enabled`.
+    /// When `Some(false)`, questionnaires wait forever unless a higher tier (requirements, env, user, or managed config) sets otherwise.
     #[serde(default)]
     pub ask_user_question_timeout_enabled: Option<bool>,
-    /// remote settings fallback for `[toolset.ask_user_question] timeout_secs`
-    /// (positive seconds). Absent → client default (1800 / 30 minutes).
+    /// Remote settings fallback for `[toolset.ask_user_question] timeout_secs` (positive seconds).
+    /// Absent uses the client default (1800 seconds, 30 minutes).
     #[serde(default)]
     pub ask_user_question_timeout_secs: Option<u64>,
-    /// When `Some(true)`, a completed subagent's isolated worktree is snapshotted
-    /// into a durable git ref and its directory deleted (resume rehydrates from
-    /// the ref). Fallback when no local `[features] subagent_worktree_snapshot`
-    /// is set in config.toml. Absent → default (**disabled** — ships dark).
+    /// When `Some(true)`, a completed subagent's isolated worktree is snapshotted into a durable git ref and its directory deleted.
+    /// Resume restores the worktree from the ref.
+    /// It is the fallback when no local `[features] subagent_worktree_snapshot` is set in config.toml; absent defaults to disabled.
     #[serde(default)]
     pub subagent_worktree_snapshot_enabled: Option<bool>,
-    /// `image_gen` / `/imagine`. `None` → env / `[features]` / default on.
+    /// Gates `image_gen` and `/imagine`. `None` falls through env, `[features]`, then the default (on).
     #[serde(default)]
     pub image_gen_enabled: Option<bool>,
-    /// remote settings flag: optional Imagine model override for `image_gen`.
-    /// When present and non-empty, `image_gen` uses this model slug
-    /// (e.g. `grok-imagine-image`) instead of the default quality model
-    /// (`grok-imagine-image-quality`). Absent/empty → default model.
+    /// Remote settings flag: optional Imagine model override for `image_gen`.
+    /// When present and non-empty, `image_gen` uses this model slug (e.g. `grok-imagine-image`) instead of the default `grok-imagine-image-quality`.
+    /// Absent or empty uses the default model.
     #[serde(default)]
     pub image_gen_model_override: Option<String>,
-    /// Optional Imagine model override for `image_edit`. Absent/empty → default.
+    /// Optional Imagine model override for `image_edit`. Absent or empty uses the default.
     #[serde(default)]
     pub image_edit_model_override: Option<String>,
-    /// Video tools / `/imagine-video`. `None` → env / `[features]` / default on.
+    /// Gates the video tools and `/imagine-video`. `None` falls through env, `[features]`, then the default (on).
     #[serde(default)]
     pub video_gen_enabled: Option<bool>,
-    /// When `Some(true)`, enable the process-wide image normalize cache that
-    /// amortises decode + integrity-check + re-encode work across SessionActors.
+    /// When `Some(true)`, enable the process-wide image normalize cache, which shares decode, integrity-check, and re-encode work across SessionActors.
     /// Default: disabled. See `session::normalize_cache`.
     #[serde(default)]
     pub image_normalize_cache_enabled: Option<bool>,
-    /// When `Some(true)`, enrich path-not-found errors with CWD reminders,
-    /// "did you mean?" corrections, and similar-name suggestions.
+    /// When `Some(true)`, enrich path-not-found errors with CWD reminders, "did you mean?" corrections, and similar-name suggestions.
     /// When `Some(false)` or absent, error messages are unchanged.
     #[serde(default)]
     pub path_not_found_hints: Option<bool>,
-    /// Remote enable tier for the per-tip contextual hints. Each field is a
-    /// soft default for one tip: `Some(false)` disables, `Some(true)` enables,
-    /// absent/null ⇒ client default (on). User config beats this tier.
+    /// Remote enable tier for the per-tip contextual hints.
+    /// Each field is a soft default for one tip: `Some(false)` disables, `Some(true)` enables, absent or null uses the client default (on).
+    /// User config beats this tier.
     #[serde(default)]
     pub contextual_hints: Option<ContextualHintsRemote>,
-    /// Server-recommended worktree creation type. Fallback when no local
-    /// `[cli] worktree_type` is set in config.toml.
+    /// Server-recommended worktree creation type.
+    /// It is the fallback when no local `[cli] worktree_type` is set in config.toml.
     #[serde(default)]
     pub worktree_type: Option<String>,
-    /// Grove-projected worktree strategy (`true` = grove-fuse/grove-nfs, `false` = copy).
+    /// Grove-projected worktree strategy (`true` means grove-fuse or grove-nfs, `false` means copy).
     /// `Some(false)` is the remote kill switch. `nfs_worktree` is a deserialize alias.
     #[serde(default, alias = "nfs_worktree")]
     pub grove_worktree: Option<bool>,
     /// Server-recommended default for `restore_code` in worktree resume.
-    /// Applied only when the client omits `restoreCode`.
+    /// It applies only when the client omits `restoreCode`.
     #[serde(default)]
     pub restore_code: Option<bool>,
-    /// When `Some(true)`, Ctrl+C before the first server activity rewinds
-    /// the prompt back into the input box instead of cancelling the turn.
+    /// When `Some(true)`, Ctrl+C before the first server activity rewinds the prompt back into the input box instead of cancelling the turn.
     #[serde(default)]
     pub cancel_rewind_enabled: Option<bool>,
-    /// Enables the session recap feature (`/recap` + automatic return-from-away).
-    /// Optional remote kill-switch; shell defaults ON when unset (set `false` to disable).
+    /// Enables the session recap feature (`/recap` and the automatic recap on returning from away).
+    /// Optional remote kill-switch; the shell defaults to on when unset (set `false` to disable).
     #[serde(default)]
     pub session_recap: Option<bool>,
     /// Enables the session search index (`/load` deep search).
-    /// Optional remote kill-switch; shell defaults ON when unset (set `false` to disable).
+    /// Optional remote kill-switch; the shell defaults to on when unset (set `false` to disable).
     #[serde(default)]
     pub session_search: Option<bool>,
-    /// Enables the per-turn dashboard summary (one-line "what happened last
-    /// turn" generated at turn end). Optional remote kill-switch; shell
-    /// defaults ON when unset (set `false` to disable).
+    /// Enables the per-turn dashboard summary (the one-line "what happened last turn" generated at turn end).
+    /// Optional remote kill-switch; the shell defaults to on when unset (set `false` to disable).
     #[serde(default)]
     pub turn_summary: Option<bool>,
-    /// Enables the early-session auto-title refresh (regenerate the title from
-    /// the whole conversation at a couple of early turns, then freeze). Optional
-    /// remote kill-switch; when unset the shell defers to `turn_summary` so the
-    /// two sibling post-turn side-calls default together without being coupled.
+    /// Enables the early-session auto-title refresh (regenerate the title from the whole conversation at a couple of early turns, then freeze).
+    /// Optional remote kill-switch; when unset the shell defers to `turn_summary`, so both post-turn calls default together without being coupled.
     #[serde(default)]
     pub title_refresh: Option<bool>,
-    /// Enables the `ask_user_question` tool. Optional remote kill-switch:
-    /// `Some(false)` strips the tool; `Some(true)` or absent → the shell
-    /// default (ON). Feature-flagged via remote settings.
+    /// Enables the `ask_user_question` tool.
+    /// Optional remote kill-switch: `Some(false)` strips the tool; `Some(true)` or absent uses the shell default (on).
     #[serde(default)]
     pub ask_user_question_enabled: Option<bool>,
     /// When `Some(true)`, enable the `web_fetch` tool.
     /// When `Some(false)` or absent, the tool is not registered.
-    /// Feature-flagged via remote settings for gradual rollout.
+    /// Remote settings control it so the rollout can be gradual.
     #[serde(default)]
     pub web_fetch_enabled: Option<bool>,
     /// Egress proxy endpoint for the web_fetch tool.
-    /// Fallback when no local `[toolset.web_fetch] proxy_endpoint` is set.
+    /// It is the fallback when no local `[toolset.web_fetch] proxy_endpoint` is set.
     #[serde(default)]
     pub web_fetch_proxy: Option<String>,
     /// Domain allowlist for the web_fetch tool.
-    /// Fallback when no local `[toolset.web_fetch] allowed_domains` is set.
+    /// It is the fallback when no local `[toolset.web_fetch] allowed_domains` is set.
     #[serde(default)]
     pub web_fetch_allowed_domains: Option<Vec<String>>,
     /// When `Some(false)`, hide the resolved model ID in /session-info.
@@ -932,77 +883,72 @@ pub struct RemoteSettings {
     /// When `Some(false)` or absent, sharing is disabled.
     #[serde(default)]
     pub sharing_enabled: Option<bool>,
-    /// Voice mode (STT dictation). Client default is **on** when absent.
+    /// Voice mode (STT dictation). The client default is on when absent.
     /// `Some(false)` is a remote kill switch; `Some(true)` forces on.
-    /// Overridable locally via `GROK_VOICE_MODE`. Free-tier SuperGrok upsell
-    /// is a separate client tier gate.
+    /// `GROK_VOICE_MODE` overrides it locally. The free-tier SuperGrok upsell is a separate client tier gate.
     #[serde(default)]
     pub voice_mode_enabled: Option<bool>,
+    /// Consolidated panel dock above the prompt. Off when absent.
+    /// `Some(true)` from `grok_build_settings.dock_enabled` turns it on for the targeted cohort.
+    /// `GROK_DOCK` (or the older `GROK_DOCK_V2`) overrides it locally.
+    #[serde(default)]
+    pub dock_enabled: Option<bool>,
     /// Whether ZDR (Zero Data Retention) users are allowed to use the product.
-    /// Controlled via remote settings. Default `false` (blocked) during beta.
+    /// The default is `false` (blocked) during beta.
     #[serde(default)]
     pub zdr_access_enabled: Option<bool>,
-    /// When `Some(true)`, the client may show the coding-data sharing upsell
-    /// banner. Controlled via remote settings (`privacy_notice_rollout`).
-    /// Absent/`None` means off so older servers and missing flags keep the
-    /// banner hidden.
+    /// When `Some(true)`, the client may show the coding-data sharing upsell banner.
+    /// Absent or `None` means off, so older servers and missing flags keep the banner hidden.
     #[serde(default)]
     pub privacy_notice_rollout: Option<bool>,
-    /// Days after a privacy-banner dismiss before it may re-show for users who
-    /// remain coding-data opted-out. From `grok_build_settings`.
-    /// `None` / `0` = never re-show after dismiss.
+    /// Days after a privacy-banner dismiss before it may re-show for users who remain opted out of coding-data sharing.
+    /// It comes from `grok_build_settings`; `None` or `0` means it never re-shows after dismiss.
     #[serde(default)]
     pub privacy_banner_reshow_days: Option<u64>,
-    /// remote settings tier of the `remember_tool_approvals` gate (whether per-tool
-    /// "Always allow …" prompt options are shown). Lowest precedence; typically
-    /// targeted per-org. Default `true`; `Some(false)` is a kill-switch.
+    /// Remote settings tier of the `remember_tool_approvals` gate (whether per-tool "Always allow …" prompt options are shown).
+    /// It has the lowest precedence and is typically targeted per-org. The default is `true`; `Some(false)` is a kill-switch.
     #[serde(default)]
     pub remember_tool_approvals: Option<bool>,
-    /// remote settings tier of the crash-handler install gate. Lowest precedence in
-    /// `resolve_crash_handler_enabled`; default off. `Some(false)` is a kill-switch.
+    /// Remote settings tier of the crash-handler install gate.
+    /// It has the lowest precedence in `resolve_crash_handler_enabled`; default off. `Some(false)` is a kill-switch.
     #[serde(default)]
     pub crash_handler_enabled: Option<bool>,
     /// Whether the TUI shows agent thinking/reasoning blocks in scrollback.
-    /// `None` defers to local config / env / default (`true`).
-    /// `Some(false)` is a remote kill-switch. Resolved via
-    /// `resolve_show_thinking_blocks` (requirements > env > user > managed >
-    /// remote > default true).
+    /// `None` defers to local config, env, then the default (`true`); `Some(false)` is a remote kill-switch.
+    /// `resolve_show_thinking_blocks` resolves it: requirements, env, user, managed, remote, then the default (true).
     #[serde(default)]
     pub show_thinking_blocks: Option<bool>,
-    /// Whether the TUI folds runs of consecutive non-destructive tool calls
-    /// (reads/searches/lists) into one transcript row. `None` defers to local
-    /// config / env / default (`true`). `Some(false)` is a remote
-    /// kill-switch. Resolved via `resolve_group_tool_verbs` (requirements >
-    /// env > user > managed > remote > default true).
+    /// Whether the TUI folds runs of consecutive non-destructive tool calls (reads, searches, lists) into one transcript row.
+    /// `None` defers to local config, env, then the default (`true`); `Some(false)` is a remote kill-switch.
+    /// `resolve_group_tool_verbs` resolves it: requirements, env, user, managed, remote, then the default (true).
     #[serde(default)]
     pub group_tool_verbs: Option<bool>,
-    /// Whether the TUI shows Edit tool calls as a collapsed one-line `+N/-M`
-    /// diffstat summary by default and merges back-to-back edits to the same
-    /// file into one row (expand for the diffs). `None` defers to local
-    /// config / env / default (`false`); `Some(false)` is a remote kill
-    /// switch. Resolved via `resolve_collapsed_edit_blocks` (requirements >
-    /// env > user > managed > remote > default false). Explicit pager.toml
-    /// `[scrollback.blocks.edit]` shape keys override the flag's fold shape
-    /// client-side; merging always follows the flag.
+    /// Whether the TUI shows Edit tool calls as a collapsed one-line `+N/-M` diffstat summary by default.
+    /// It also merges back-to-back edits to the same file into one row (expand for the diffs).
+    /// `None` defers to local config, env, then the default (`false`); `Some(false)` is a remote kill switch.
+    /// `resolve_collapsed_edit_blocks` resolves it: requirements, env, user, managed, remote, then the default (false).
+    /// Explicit pager.toml `[scrollback.blocks.edit]` shape keys override the flag's fold shape client-side; merging always follows the flag.
     #[serde(default)]
     pub collapsed_edit_blocks: Option<bool>,
-    /// Display-refresh probe + auto-cadence. See [`DisplayRefreshSettings`].
-    /// Partial object falls through per-field; resolved via `resolve_display_refresh`.
+    /// Display-refresh probe and auto-cadence. See [`DisplayRefreshSettings`].
+    /// A partial object falls through per-field; `resolve_display_refresh` resolves it.
     #[serde(default)]
     pub display_refresh: Option<DisplayRefreshSettings>,
-    /// Raw remote settings JSON for the `[auto_mode]` table (gate `enabled`,
-    /// `prompt_type`, `classifier_model`). Coerced into the shell's typed
-    /// `AutoModeConfig` (config-types stays dependency-light). Lowest-precedence
-    /// layer in `resolve_auto_permission_mode_enabled` (client default ON).
+    /// Raw remote settings JSON for the `[auto_mode]` table (gate `enabled`, `prompt_type`, `classifier_model`).
+    /// The shell coerces it into its typed `AutoModeConfig`, keeping this crate free of that dependency.
+    /// It is the lowest-precedence layer in `resolve_auto_permission_mode_enabled` (client default on).
     #[serde(default)]
     pub auto_mode: Option<serde_json::Value>,
-    /// Soft default permission mode (`"ask"` / `"auto"` / `"always-approve"` /
-    /// `"default"`). Used only when no effective TOML permission key is set.
+    /// Remote next-prompt suggestion settings, parsed by the shell.
+    #[serde(default)]
+    pub prompt_suggestions: Option<serde_json::Value>,
+    /// Soft default permission mode (`"ask"`, `"auto"`, `"always-approve"`, or `"default"`).
+    /// It is used only when no effective TOML permission key is set.
     #[serde(default)]
     pub permission_mode: Option<String>,
     /// User's subscription tier from remote settings `grok_build_access_gate`.
     /// E.g. "free", "premium", "supergrok", "supergrok_heavy".
-    /// Stamped on analytics events + user profile for filtering.
+    /// It is stamped on analytics events and the user profile for filtering.
     #[serde(default)]
     pub subscription_tier: Option<String>,
     #[serde(default)]
@@ -1011,16 +957,15 @@ pub struct RemoteSettings {
     pub gate_url: Option<String>,
     #[serde(default)]
     pub gate_label: Option<String>,
-    /// A usable `id`, non-empty `body` and positive `version` arm it; anything else fails open.
+    /// A usable `id`, non-empty `body` and positive `version` turn it on; anything else fails open.
     #[serde(default, deserialize_with = "deserialize_tolerant")]
     pub consent_gate: Option<ConsentGate>,
     /// Whether the session picker groups entries by repo name.
     /// When `None` or `Some(false)`, sessions are shown in a flat list.
     #[serde(default)]
     pub session_picker_grouped: Option<bool>,
-    /// Whether the user is allowed to use Grok Build. Set by remote settings
-    /// `grok_build_access_gate` targeting rules. `None` = no server response
-    /// yet (client uses own fallback check). `Some(false)` = blocked.
+    /// Whether the user is allowed to use Grok Build. Remote settings `grok_build_access_gate` targeting rules set it.
+    /// `None` means no server response yet (the client uses its own fallback check); `Some(false)` means blocked.
     #[serde(default)]
     pub allow_access: Option<bool>,
     /// User-friendly display name for the current subscription tier
@@ -1030,15 +975,12 @@ pub struct RemoteSettings {
     /// `api_key`, never free).
     #[serde(default)]
     pub subscription_tier_display: Option<String>,
-    /// Whether on-demand credit usage is enabled. When `Some(false)`, the
-    /// billing extension blocks on-demand cap changes.
+    /// Whether on-demand credit usage is enabled. When `Some(false)`, the billing extension blocks on-demand cap changes.
     #[serde(default)]
     pub on_demand_enabled: Option<bool>,
-    /// When set to a non-empty URL, the pager's `/usage` command shows a link
-    /// to that URL instead of fetching billing data from the backend.
-    /// Server-controlled via the remote settings `grok_build_usage_redirect_url`
-    /// feature flag (target it at personal-team users). `None`/empty keeps the
-    /// default behaviour of fetching usage from the backend.
+    /// When set to a non-empty URL, the pager's `/usage` command shows a link to that URL instead of fetching billing data from the backend.
+    /// The remote settings `grok_build_usage_redirect_url` feature flag controls it (target it at personal-team users).
+    /// `None` or empty keeps the default of fetching usage from the backend.
     #[serde(default)]
     pub usage_billing_redirect_url: Option<String>,
     /// Enable the shell command suggestion pipeline remotely.
@@ -1047,10 +989,8 @@ pub struct RemoteSettings {
     /// Enable AI-powered shell command suggestions remotely.
     #[serde(default)]
     pub suggestions_ai_enabled: Option<bool>,
-    /// Global auto-compact threshold percent (0-100) from remote settings
-    /// `grok_build_settings`. Per-model override on `ModelInfo`
-    /// (`grok_build_models`) takes precedence; user config and env var
-    /// further override per the resolver chain.
+    /// Global auto-compact threshold percent (0-100) from remote settings `grok_build_settings`.
+    /// A per-model override on `ModelInfo` (`grok_build_models`) takes precedence; user config and env var further override per the resolver chain.
     #[serde(default)]
     pub auto_compact_threshold_percent: Option<u8>,
     /// Max subagent nesting depth (`grok_build_settings.subagents_max_depth`).
@@ -1065,29 +1005,25 @@ pub struct RemoteSettings {
     pub subagents_limit_behavior: Option<String>,
     #[serde(default)]
     pub workflow_max_concurrent_agents: Option<u32>,
-    /// Max parallel `image_gen` / `image_edit` tool calls in one model step
-    /// (`grok_build_settings.max_parallel_image_gen_calls`).
+    /// Max parallel `image_gen` and `image_edit` tool calls in one model step (`grok_build_settings.max_parallel_image_gen_calls`).
     #[serde(default)]
     pub max_parallel_image_gen_calls: Option<u32>,
-    /// Max parallel video-gen tool calls in one model step
-    /// (`grok_build_settings.max_parallel_video_gen_calls`).
+    /// Max parallel video-gen tool calls in one model step (`grok_build_settings.max_parallel_video_gen_calls`).
     #[serde(default)]
     pub max_parallel_video_gen_calls: Option<u32>,
-    /// Global system-prompt identity label. Per-model override wins; see
-    /// `resolve_system_prompt_label`.
+    /// Global system-prompt identity label. A per-model override wins; see `resolve_system_prompt_label`.
     #[serde(default)]
     pub system_prompt_label: Option<String>,
-    /// Global per-compaction wall-clock budget (seconds) from remote settings;
-    /// `0` disables. Env (`GROK_COMPACTION_WALL_CLOCK_SECS`) overrides it.
-    /// Resolved via `resolve_compaction_wall_clock_budget_secs`.
+    /// Global per-compaction wall-clock budget (seconds) from remote settings; `0` disables.
+    /// Env (`GROK_COMPACTION_WALL_CLOCK_SECS`) overrides it. `resolve_compaction_wall_clock_budget_secs` resolves it.
     #[serde(default)]
     pub compaction_wall_clock_budget_secs: Option<u64>,
-    /// Compaction mode (`summary` | `transcript` | `segments`) from remote settings.
+    /// Compaction mode (`summary`, `transcript`, or `segments`) from remote settings.
     /// Env (`GROK_COMPACTION_MODE`) and user config override it.
     #[serde(default)]
     pub compaction_mode: Option<String>,
-    /// Segments verbatim detail (`none` | `minimal` | `balanced` | `verbose`)
-    /// from remote settings. Env (`GROK_COMPACTION_DETAIL`) and config override it.
+    /// Segments verbatim detail (`none`, `minimal`, `balanced`, or `verbose`) from remote settings.
+    /// Env (`GROK_COMPACTION_DETAIL`) and config override it.
     #[serde(default)]
     pub compaction_detail: Option<String>,
     /// remote settings verbatim-input flag; env (`GROK_COMPACTION_VERBATIM_INPUT`) and config override it. `None` = default (true).
@@ -1095,29 +1031,27 @@ pub struct RemoteSettings {
     pub compaction_verbatim_input: Option<bool>,
     #[serde(default)]
     pub compaction_tool_choice: Option<String>,
-    /// remote settings denylist of optional imagine tools to disable
-    /// (e.g. `["image_edit"]`). When a tool is listed it is authoritatively
-    /// removed from the toolset and local env/config can't re-enable it.
-    /// Absent or not listed → each tool keeps its own default.
+    /// Remote settings denylist of optional imagine tools to disable (e.g. `["image_edit"]`).
+    /// When a tool is listed it is removed from the toolset and local env/config can't re-enable it.
+    /// Absent or not listed means each tool keeps its own default.
     /// See `Config::resolve_image_edit`.
     #[serde(default)]
     pub imagine_tools_disabled: Option<Vec<String>>,
-    /// remote settings gate for the `grok workspace` CLI command (Computer Hub
-    /// workspace exposure), from `grok_build_settings.workspace_command_enabled`.
-    /// `Some(true)` enables it; `None`/`Some(false)` (the default) keep it off.
+    /// Remote settings gate for the `grok workspace` CLI command (Computer Hub workspace exposure).
+    /// It comes from `grok_build_settings.workspace_command_enabled`.
+    /// `Some(true)` enables it; `None` or `Some(false)` (the default) keep it off.
     #[serde(default)]
     pub workspace_command_enabled: Option<bool>,
     #[serde(default)]
     pub workspace_dashboard_enabled: Option<bool>,
-    /// Soft default for `keep_text_selection` (`"flash"` / `"hold"` / `"word_select"`), from
-    /// `grok_build_settings.keep_text_selection_default`. Applied only when the user has set no
-    /// local text-selection preference; an explicit local `keep_text_selection` always wins. An
-    /// absent or unrecognized value keeps the client default (`flash`). Set remotely to stage a
-    /// new default to a segment, cut everyone over, or revert it for a customer.
+    /// Soft default for `keep_text_selection` (`"flash"`, `"hold"`, or `"word_select"`), from `grok_build_settings.keep_text_selection_default`.
+    /// It applies only when the user has set no local text-selection preference; an explicit local `keep_text_selection` always wins.
+    /// An absent or unrecognized value keeps the client default (`flash`).
+    /// Set it remotely to stage a new default to a segment, cut everyone over, or revert it for a customer.
     #[serde(default)]
     pub keep_text_selection_default: Option<String>,
-    /// Master switch for jemalloc heap sampling + threshold dumps.
-    /// `Some(true)` enables, `Some(false)` kill-switch, `None` = client default off.
+    /// Master switch for jemalloc heap sampling and threshold dumps.
+    /// `Some(true)` enables, `Some(false)` is a kill-switch, `None` uses the client default (off).
     #[serde(default)]
     pub jemalloc_heap_profile_enabled: Option<bool>,
     /// Resident-byte thresholds (e.g. 2G/5G/10G as byte counts).
@@ -1129,19 +1063,18 @@ pub struct RemoteSettings {
     pub jemalloc_heap_profile_poll_interval_secs: Option<u64>,
 }
 impl RemoteSettings {
-    /// Denylist check for an optional imagine tool. Returns `true` when the
-    /// server sent `imagine_tools_disabled` and it contains `tool` (force-off);
-    /// otherwise `false` (defer to the tool's own default).
+    /// Denylist check for an optional imagine tool.
+    /// Returns `true` when the server sent `imagine_tools_disabled` and it contains `tool` (force-off).
+    /// Otherwise `false`, deferring to the tool's own default.
     pub fn imagine_tool_disabled(&self, tool: &str) -> bool {
         self.imagine_tools_disabled
             .as_ref()
             .is_some_and(|list| list.iter().any(|t| t == tool))
     }
 }
-/// Remote enable tier for the per-tip contextual hints (mirrors the client's
-/// `[ui.contextual_hints]` shape). Each field is a soft default for one tip;
-/// `None` defers to the client default (on). All fields `#[serde(default)]` so
-/// a partial object from remote settings never fails the whole `RemoteSettings` parse.
+/// Remote enable tier for the per-tip contextual hints (mirrors the client's `[ui.contextual_hints]` shape).
+/// Each field is a soft default for one tip; `None` defers to the client default (on).
+/// Every field is `#[serde(default)]` so a partial object from remote settings never fails the whole `RemoteSettings` parse.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ContextualHintsRemote {
     /// Undo tip (Ctrl+Z after a substantial draft wipe).
@@ -1159,17 +1092,19 @@ pub struct ContextualHintsRemote {
     /// Small-screen tip (`/compact-mode` hint on smallish terminals).
     #[serde(default)]
     pub small_screen: Option<bool>,
-    /// Word-select tip after double-click fold/nav (settings discoverability).
+    /// Word-select tip after a double-click fold or nav (helps users find the setting).
     #[serde(default)]
     pub word_select: Option<bool>,
+    /// Export/copy tip after three nearby drag-copies.
+    #[serde(default)]
+    pub export_copy: Option<bool>,
     /// SSH wrap session-load tip (recommend `grok wrap ssh` for remote sessions).
     #[serde(default)]
     pub ssh_wrap: Option<bool>,
 }
 /// Tolerant deserializer for `Option<Vec<RemoteAnnouncement>>`.
-/// Parses as Vec<Value>, tries each as RemoteAnnouncement, drops failures.
-/// This ensures one bad item does not poison the whole RemoteSettings.
-/// Logs a warning when malformed items are dropped.
+/// Parses as Vec<Value>, tries each as RemoteAnnouncement, and drops failures with a warning.
+/// One bad item cannot poison the whole RemoteSettings.
 fn deserialize_tolerant_announcements<'de, D>(
     deserializer: D,
 ) -> Result<Option<Vec<RemoteAnnouncement>>, D::Error>
@@ -1198,11 +1133,9 @@ where
         Some(_) => Ok(None),
     }
 }
-/// Parse one JSON value as a [`GoalRoleModel`], returning `None` (with a
-/// `tracing::warn!`) instead of erroring when the value is malformed.
-/// Shared by the tolerant deserializers for the single-pair role fields
-/// and the skeptic pool so all three goal-role-model fields drop bad
-/// remote payloads rather than failing the whole `RemoteSettings` parse.
+/// Parse one JSON value as a [`GoalRoleModel`], returning `None` (with a `tracing::warn!`) instead of erroring when the value is malformed.
+/// The tolerant deserializers for the single-pair role fields and the skeptic pool share it.
+/// All three goal-role-model fields drop bad remote payloads rather than failing the whole `RemoteSettings` parse.
 fn parse_goal_role_model_tolerant(value: serde_json::Value) -> Option<GoalRoleModel> {
     match serde_json::from_value::<GoalRoleModel>(value) {
         Ok(model) => Some(model),
@@ -1215,11 +1148,9 @@ fn parse_goal_role_model_tolerant(value: serde_json::Value) -> Option<GoalRoleMo
         }
     }
 }
-/// Tolerant deserializer for `Option<GoalRoleModel>` (the single-pair
-/// role fields). Parses as `Option<Value>`; a present-but-malformed value
-/// (or an explicit `null`) maps to `None` via
-/// [`parse_goal_role_model_tolerant`] rather than erroring, so one bad
-/// remote payload cannot nuke the whole `RemoteSettings` parse.
+/// Tolerant deserializer for `Option<GoalRoleModel>` (the single-pair role fields).
+/// Parses as `Option<Value>`; a malformed value or an explicit `null` maps to `None` via [`parse_goal_role_model_tolerant`] rather than erroring.
+/// One bad remote payload cannot fail the whole `RemoteSettings` parse.
 fn deserialize_tolerant_goal_role_model<'de, D>(
     deserializer: D,
 ) -> Result<Option<GoalRoleModel>, D::Error>
@@ -1233,11 +1164,9 @@ where
     })
 }
 /// Tolerant deserializer for `Vec<GoalRoleModel>` (the skeptic pool).
-/// Parses as `Option<Value>`; a non-array value (or null/absent) yields
-/// an empty pool, and within an array each malformed entry is dropped
-/// (via [`parse_goal_role_model_tolerant`]) instead of nuking the whole
-/// pool. Survivor order is preserved — the skeptic round-robin assignment
-/// (`expand_skeptic_assignment`) depends on pool order.
+/// Parses as `Option<Value>`; a non-array, null, or absent value yields an empty pool.
+/// Within an array each malformed entry is dropped (via [`parse_goal_role_model_tolerant`]) instead of discarding the whole pool.
+/// Survivor order is preserved: the skeptic round-robin assignment (`expand_skeptic_assignment`) depends on pool order.
 fn deserialize_tolerant_goal_skeptic_models<'de, D>(
     deserializer: D,
 ) -> Result<Vec<GoalRoleModel>, D::Error>
@@ -1253,30 +1182,21 @@ where
         _ => Ok(Vec::new()),
     }
 }
-/// A model + the harness whose system prompt / toolset flavor that model must
-/// run against. The pair is the atomic configurable unit because a model is
-/// only guaranteed to work with a compatible harness (cursor vs grok-build).
+/// A model and the harness whose system prompt and toolset flavor that model must run against.
+/// The pair is the atomic configurable unit because a model is only guaranteed to work with a compatible harness (cursor vs grok-build).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoalRoleModel {
-    /// Model id, e.g. "grok-4". Resolved against available models at
-    /// spawn time; unknown/unauthorized ⇒ fail-open to current model.
+    /// Model id, e.g. "grok-4". It resolves against available models at spawn time; unknown or unauthorized fails open to the current model.
     pub model: String,
-    /// Harness `agent_type` (e.g. "cursor", "grok-build-plan") whose
-    /// `AgentDefinition` decides the role subagent's harness flavor (system
-    /// prompt + cursor-vs-grok-build toolset), applied REGARDLESS of the
-    /// session/parent agent. Resolved by NAME (project/plugin/builtin lookup,
-    /// then re-flavored by the subagent toolset resolver) — NOT via the main
-    /// session's env/ACP/strict-harness precedence chain. NOT a subagent type:
-    /// the role always spawns `general-purpose`, so the harness only re-flavors
-    /// that toolset. An `agent_type` that doesn't resolve, that resolves to a
-    /// strict harness whose flavor the subagent system can't represent (e.g.
-    /// `codex`), or whose role toolset can't satisfy the role, fails open to the
-    /// session model + harness before commit.
+    /// Harness `agent_type` (e.g. "cursor", "grok-build-plan") whose `AgentDefinition` decides the role subagent's harness flavor.
+    /// The flavor (system prompt and cursor-vs-grok-build toolset) applies regardless of the session or parent agent.
+    /// It is resolved by name (project/plugin/builtin lookup, then re-flavored by the subagent toolset resolver).
+    /// The main session's env/ACP/strict-harness precedence chain plays no part.
+    /// It is not a subagent type: the role always spawns `general-purpose`, so the harness only re-flavors that toolset.
+    /// An `agent_type` that doesn't resolve, or whose role toolset can't satisfy the role, fails open to the session model and harness before commit.
+    /// One that resolves to a strict harness whose flavor the subagent system can't represent (e.g. `codex`) fails open the same way.
     pub agent_type: String,
 }
-#[cfg(test)]
-#[path = "remote_settings_tests.rs"]
-mod remote_settings_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1534,19 +1454,6 @@ mod tests {
         }
     }
     #[test]
-    fn remote_settings_consent_gate_absent_is_none() {
-        let settings: RemoteSettings = serde_json::from_str("{}").unwrap();
-        assert!(settings.consent_gate.is_none());
-    }
-    #[test]
-    fn remote_settings_goal_role_models_absent_default_clean() {
-        let json = r#"{}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.goal_planner_model, None);
-        assert_eq!(s.goal_strategist_model, None);
-        assert!(s.goal_skeptic_models.is_empty());
-    }
-    #[test]
     fn remote_settings_goal_planner_model_round_trip() {
         let json =
             r#"{"goal_planner_model": {"model": "grok-4", "agent_type": "general-purpose"}}"#;
@@ -1561,21 +1468,6 @@ mod tests {
         let out = serde_json::to_string(&s).unwrap();
         let s2: RemoteSettings = serde_json::from_str(&out).unwrap();
         assert_eq!(s2.goal_planner_model, s.goal_planner_model);
-    }
-    #[test]
-    fn remote_settings_goal_strategist_model_round_trip() {
-        let json = r#"{"goal_strategist_model": {"model": "grok-4.5", "agent_type": "cursor"}}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            s.goal_strategist_model,
-            Some(GoalRoleModel {
-                model: "grok-4.5".to_string(),
-                agent_type: "cursor".to_string(),
-            })
-        );
-        let out = serde_json::to_string(&s).unwrap();
-        let s2: RemoteSettings = serde_json::from_str(&out).unwrap();
-        assert_eq!(s2.goal_strategist_model, s.goal_strategist_model);
     }
     #[test]
     fn remote_settings_goal_skeptic_models_fully_valid_pool_round_trips() {
@@ -1622,18 +1514,6 @@ mod tests {
                 },
             ]
         );
-    }
-    #[test]
-    fn remote_settings_goal_skeptic_models_null_yields_empty() {
-        let json = r#"{"goal_skeptic_models": null}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert!(s.goal_skeptic_models.is_empty());
-    }
-    #[test]
-    fn remote_settings_goal_skeptic_models_empty_array_yields_empty() {
-        let json = r#"{"goal_skeptic_models": []}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert!(s.goal_skeptic_models.is_empty());
     }
     #[test]
     fn remote_settings_goal_skeptic_models_all_entries_bad_yields_empty() {
@@ -1737,18 +1617,6 @@ mod tests {
         }
     }
     #[test]
-    fn remote_settings_goal_strategist_model_malformed_yields_none() {
-        for json in [
-            r#"{"goal_strategist_model": {"model": "only-model"}}"#,
-            r#"{"goal_strategist_model": {"agent_type": ["x"]}}"#,
-            r#"{"goal_strategist_model": 42}"#,
-        ] {
-            let s: RemoteSettings = serde_json::from_str(json)
-                .unwrap_or_else(|e| panic!("must not hard-error for {json}: {e}"));
-            assert_eq!(s.goal_strategist_model, None, "for {json}");
-        }
-    }
-    #[test]
     fn remote_settings_goal_role_models_malformed_pair_does_not_drop_other_fields() {
         let json = r#"{
             "goal_planner_model": {"model": "broken"},
@@ -1815,66 +1683,6 @@ mod tests {
         assert_eq!(settings.inference_idle_timeout_secs, Some(120));
     }
     #[test]
-    fn remote_settings_web_fetch_fields_absent() {
-        let json = r#"{}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.web_fetch_enabled, None);
-        assert_eq!(s.web_fetch_proxy, None);
-        assert_eq!(s.web_fetch_allowed_domains, None);
-    }
-    #[test]
-    fn remote_settings_web_fetch_all_populated() {
-        let json = r#"{
-            "web_fetch_enabled": true,
-            "web_fetch_proxy": "https://proxy.corp.example.com",
-            "web_fetch_allowed_domains": ["docs.rs", "example.com"]
-        }"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.web_fetch_enabled, Some(true));
-        assert_eq!(
-            s.web_fetch_proxy.as_deref(),
-            Some("https://proxy.corp.example.com")
-        );
-        assert_eq!(
-            s.web_fetch_allowed_domains,
-            Some(vec!["docs.rs".to_owned(), "example.com".to_owned()])
-        );
-    }
-    #[test]
-    fn remote_settings_web_fetch_enabled_false() {
-        let json = r#"{"web_fetch_enabled": false}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.web_fetch_enabled, Some(false));
-        assert_eq!(s.web_fetch_proxy, None);
-    }
-    #[test]
-    fn remote_settings_ask_user_question_absent() {
-        let json = r#"{}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.ask_user_question_enabled, None);
-    }
-    #[test]
-    fn remote_settings_ask_user_question_enabled_round_trip() {
-        let json = r#"{"ask_user_question_enabled": true}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.ask_user_question_enabled, Some(true));
-        let out = serde_json::to_string(&s).unwrap();
-        let s2: RemoteSettings = serde_json::from_str(&out).unwrap();
-        assert_eq!(s2.ask_user_question_enabled, Some(true));
-    }
-    #[test]
-    fn remote_settings_ask_user_question_enabled_false() {
-        let json = r#"{"ask_user_question_enabled": false}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.ask_user_question_enabled, Some(false));
-    }
-    #[test]
-    fn remote_settings_web_fetch_empty_domains() {
-        let json = r#"{"web_fetch_allowed_domains": []}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.web_fetch_allowed_domains, Some(vec![]));
-    }
-    #[test]
     fn remote_settings_display_refresh_present_partial() {
         let json = r#"{"display_refresh": {"auto_cadence_enabled": true, "floor_ms": 7}}"#;
         let s: RemoteSettings = serde_json::from_str(json).unwrap();
@@ -1885,11 +1693,6 @@ mod tests {
         assert_eq!(dr.ceiling_ms, None);
         assert_eq!(dr.min_hz, None);
         assert_eq!(dr.max_hz, None);
-    }
-    #[test]
-    fn remote_settings_display_refresh_absent() {
-        let s: RemoteSettings = serde_json::from_str("{}").unwrap();
-        assert_eq!(s.display_refresh, None);
     }
     #[test]
     fn remote_settings_display_refresh_unknown_keys_preserved() {
@@ -1903,159 +1706,6 @@ mod tests {
         let out = serde_json::to_value(&dr).unwrap();
         assert_eq!(out.get("future_knob"), Some(&serde_json::json!(42)));
         assert_eq!(out.get("probe_enabled"), Some(&serde_json::json!(true)));
-    }
-    #[test]
-    fn remote_settings_contextual_hints_present() {
-        let json = r#"{"contextual_hints": {"undo": false, "plan_mode": true}}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        let hints = s.contextual_hints.expect("contextual_hints present");
-        assert_eq!(hints.undo, Some(false));
-        assert_eq!(hints.plan_mode, Some(true));
-        assert_eq!(hints.image_input, None);
-    }
-    #[test]
-    fn remote_settings_contextual_hints_absent() {
-        let json = r#"{}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.contextual_hints, None);
-    }
-    #[test]
-    fn remote_settings_workflows_flag_round_trips() {
-        let settings: RemoteSettings =
-            serde_json::from_str(r#"{"workflows_enabled": true}"#).unwrap();
-        assert_eq!(settings.workflows_enabled, Some(true));
-        let round: RemoteSettings =
-            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
-        assert_eq!(round.workflows_enabled, Some(true));
-    }
-    #[test]
-    fn remote_settings_goal_planner_enabled_present() {
-        let json = r#"{"goal_planner_enabled": true}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.goal_planner_enabled, Some(true));
-    }
-    #[test]
-    fn remote_settings_goal_planner_enabled_false() {
-        let json = r#"{"goal_planner_enabled": false}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.goal_planner_enabled, Some(false));
-    }
-    #[test]
-    fn remote_settings_goal_planner_enabled_absent() {
-        let json = r#"{}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.goal_planner_enabled, None);
-    }
-    #[test]
-    fn remote_settings_goal_summary_enabled_present() {
-        let json = r#"{"goal_summary_enabled": true}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.goal_summary_enabled, Some(true));
-    }
-    #[test]
-    fn remote_settings_goal_summary_enabled_false() {
-        let json = r#"{"goal_summary_enabled": false}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.goal_summary_enabled, Some(false));
-    }
-    #[test]
-    fn remote_settings_goal_summary_enabled_absent() {
-        let json = r#"{}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.goal_summary_enabled, None);
-    }
-    #[test]
-    fn remote_settings_folder_trust_enabled_present() {
-        let json = r#"{"folder_trust_enabled": true}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.folder_trust_enabled, Some(true));
-    }
-    #[test]
-    fn remote_settings_folder_trust_enabled_false() {
-        let json = r#"{"folder_trust_enabled": false}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.folder_trust_enabled, Some(false));
-    }
-    #[test]
-    fn remote_settings_folder_trust_enabled_absent() {
-        let json = r#"{}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.folder_trust_enabled, None);
-    }
-    #[test]
-    fn remote_settings_workspace_command_enabled_present() {
-        let json = r#"{"workspace_command_enabled": true}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.workspace_command_enabled, Some(true));
-    }
-    #[test]
-    fn remote_settings_workspace_command_enabled_false() {
-        let json = r#"{"workspace_command_enabled": false}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.workspace_command_enabled, Some(false));
-    }
-    #[test]
-    fn remote_settings_workspace_command_enabled_absent() {
-        let json = r#"{}"#;
-        let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.workspace_command_enabled, None);
-    }
-    #[test]
-    fn remote_settings_workspace_dashboard_enabled_parses_all_states() {
-        let on: RemoteSettings =
-            serde_json::from_str(r#"{"workspace_dashboard_enabled": true}"#).unwrap();
-        assert_eq!(on.workspace_dashboard_enabled, Some(true));
-        let off: RemoteSettings =
-            serde_json::from_str(r#"{"workspace_dashboard_enabled": false}"#).unwrap();
-        assert_eq!(off.workspace_dashboard_enabled, Some(false));
-        let absent: RemoteSettings = serde_json::from_str("{}").unwrap();
-        assert_eq!(absent.workspace_dashboard_enabled, None);
-    }
-    #[test]
-    fn remote_settings_keep_text_selection_default_round_trips() {
-        let ws: RemoteSettings =
-            serde_json::from_str(r#"{"keep_text_selection_default": "word_select"}"#).unwrap();
-        assert_eq!(
-            ws.keep_text_selection_default.as_deref(),
-            Some("word_select")
-        );
-        let flash: RemoteSettings =
-            serde_json::from_str(r#"{"keep_text_selection_default": "flash"}"#).unwrap();
-        assert_eq!(flash.keep_text_selection_default.as_deref(), Some("flash"));
-        let absent: RemoteSettings = serde_json::from_str("{}").unwrap();
-        assert_eq!(absent.keep_text_selection_default, None);
-    }
-    #[test]
-    fn remote_settings_permission_mode_deserializes() {
-        let s: RemoteSettings = serde_json::from_str(r#"{"permission_mode": "auto"}"#).unwrap();
-        assert_eq!(s.permission_mode.as_deref(), Some("auto"));
-        let s2: RemoteSettings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
-        assert_eq!(s2.permission_mode.as_deref(), Some("auto"));
-        let s: RemoteSettings =
-            serde_json::from_str(r#"{"permission_mode": "always-approve"}"#).unwrap();
-        assert_eq!(s.permission_mode.as_deref(), Some("always-approve"));
-        let s: RemoteSettings = serde_json::from_str("{}").unwrap();
-        assert_eq!(s.permission_mode, None);
-        let s: RemoteSettings = serde_json::from_str(r#"{"permission_mode": null}"#).unwrap();
-        assert_eq!(s.permission_mode, None);
-    }
-    #[test]
-    fn remote_settings_crash_handler_enabled_present() {
-        let s: RemoteSettings = serde_json::from_str(r#"{"crash_handler_enabled": true}"#).unwrap();
-        assert_eq!(s.crash_handler_enabled, Some(true));
-        let s2: RemoteSettings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
-        assert_eq!(s2.crash_handler_enabled, Some(true));
-    }
-    #[test]
-    fn remote_settings_crash_handler_enabled_false() {
-        let s: RemoteSettings =
-            serde_json::from_str(r#"{"crash_handler_enabled": false}"#).unwrap();
-        assert_eq!(s.crash_handler_enabled, Some(false));
-    }
-    #[test]
-    fn remote_settings_crash_handler_enabled_absent() {
-        let s: RemoteSettings = serde_json::from_str("{}").unwrap();
-        assert_eq!(s.crash_handler_enabled, None);
     }
     type JemallocFields<'a> = (Option<bool>, Option<&'a [u64]>, Option<u64>);
     fn jemalloc_fields(s: &RemoteSettings) -> JemallocFields<'_> {
@@ -2084,66 +1734,6 @@ mod tests {
         );
     }
     #[test]
-    fn remote_settings_privacy_notice_rollout_absent_null_true_false() {
-        assert_eq!(parse_remote("{}").privacy_notice_rollout, None);
-        assert_eq!(
-            parse_remote(r#"{"privacy_notice_rollout": null}"#).privacy_notice_rollout,
-            None
-        );
-        let on = parse_remote(r#"{"privacy_notice_rollout": true}"#);
-        assert_eq!(on.privacy_notice_rollout, Some(true));
-        assert_eq!(round_trip_remote(&on).privacy_notice_rollout, Some(true));
-        let off = parse_remote(r#"{"privacy_notice_rollout": false}"#);
-        assert_eq!(off.privacy_notice_rollout, Some(false));
-        assert_eq!(round_trip_remote(&off).privacy_notice_rollout, Some(false));
-    }
-    #[test]
-    fn remote_settings_privacy_banner_reshow_days() {
-        assert_eq!(parse_remote("{}").privacy_banner_reshow_days, None);
-        assert_eq!(
-            parse_remote(r#"{"privacy_banner_reshow_days": 30}"#).privacy_banner_reshow_days,
-            Some(30)
-        );
-        let s = parse_remote(r#"{"privacy_banner_reshow_days": 7}"#);
-        assert_eq!(round_trip_remote(&s).privacy_banner_reshow_days, Some(7));
-    }
-    #[test]
-    fn remote_settings_jemalloc_heap_profile_fields_absent_and_null() {
-        assert_eq!(jemalloc_fields(&parse_remote("{}")), (None, None, None));
-        assert_eq!(
-            jemalloc_fields(&parse_remote(
-                r#"{
-                    "jemalloc_heap_profile_enabled": null,
-                    "jemalloc_heap_profile_thresholds_bytes": null,
-                    "jemalloc_heap_profile_poll_interval_secs": null
-                }"#
-            )),
-            (None, None, None)
-        );
-    }
-    #[test]
-    fn remote_settings_jemalloc_heap_profile_enabled_true_false_round_trip() {
-        assert_jemalloc_round_trip(
-            r#"{"jemalloc_heap_profile_enabled": true}"#,
-            (Some(true), None, None),
-        );
-        assert_jemalloc_round_trip(
-            r#"{"jemalloc_heap_profile_enabled": false}"#,
-            (Some(false), None, None),
-        );
-    }
-    #[test]
-    fn remote_settings_jemalloc_heap_profile_kill_switch_with_non_empty_thresholds() {
-        assert_jemalloc_round_trip(
-            r#"{
-                "jemalloc_heap_profile_enabled": false,
-                "jemalloc_heap_profile_thresholds_bytes": [2147483648, 5368709120],
-                "jemalloc_heap_profile_poll_interval_secs": 30
-            }"#,
-            (Some(false), Some(&[2_147_483_648, 5_368_709_120]), Some(30)),
-        );
-    }
-    #[test]
     fn remote_settings_jemalloc_heap_profile_thresholds_populated_and_empty_round_trip() {
         assert_jemalloc_round_trip(
             r#"{
@@ -2165,52 +1755,6 @@ mod tests {
                 "jemalloc_heap_profile_thresholds_bytes": []
             }"#,
             (Some(true), Some(&[]), None),
-        );
-    }
-    #[test]
-    fn remote_settings_jemalloc_heap_profile_poll_interval_round_trip() {
-        assert_jemalloc_round_trip(
-            r#"{"jemalloc_heap_profile_poll_interval_secs": 60}"#,
-            (None, None, Some(60)),
-        );
-    }
-    #[test]
-    fn remote_settings_jemalloc_heap_profile_all_fields_populated_round_trip() {
-        assert_jemalloc_round_trip(
-            r#"{
-                "jemalloc_heap_profile_enabled": true,
-                "jemalloc_heap_profile_thresholds_bytes": [2147483648, 5368709120],
-                "jemalloc_heap_profile_poll_interval_secs": 15
-            }"#,
-            (Some(true), Some(&[2_147_483_648, 5_368_709_120]), Some(15)),
-        );
-    }
-    #[test]
-    fn remote_settings_jemalloc_heap_profile_boundary_u64_values() {
-        let json = format!(
-            r#"{{
-                "jemalloc_heap_profile_thresholds_bytes": [0, 1, {}],
-                "jemalloc_heap_profile_poll_interval_secs": {}
-            }}"#,
-            u64::MAX,
-            u64::MAX
-        );
-        assert_jemalloc_round_trip(&json, (None, Some(&[0, 1, u64::MAX]), Some(u64::MAX)));
-    }
-    #[test]
-    fn remote_settings_jemalloc_heap_profile_coexists_with_unknown_keys() {
-        let s = parse_remote(
-            r#"{
-                "jemalloc_heap_profile_enabled": true,
-                "jemalloc_heap_profile_thresholds_bytes": [1073741824],
-                "jemalloc_heap_profile_poll_interval_secs": 30,
-                "future_jemalloc_knob": 42,
-                "unrelated_remote_field": "ok"
-            }"#,
-        );
-        assert_eq!(
-            jemalloc_fields(&s),
-            (Some(true), Some([1_073_741_824].as_slice()), Some(30))
         );
     }
     #[test]

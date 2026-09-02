@@ -18,7 +18,6 @@ impl AsyncTerminalRunner for DummyTerminal {
         Err(TerminalError::Other("dummy terminal".into()))
     }
 }
-/// Create a minimal SessionActor for testing auto-compact logic.
 async fn create_test_actor(
     total_tokens: u64,
     context_window: u64,
@@ -40,6 +39,8 @@ async fn create_test_actor(
     let tool_context = ToolContext::new(cwd.clone(), None, None, fs, terminal, hunk_tracker_handle);
     let state = TokioMutex::new(State {
         running_task: None,
+        finalization_gate: Default::default(),
+        message_delivery: Default::default(),
         pending_inputs: VecDeque::new(),
         edit_holds: HashMap::new(),
         pending_notifications: Vec::new(),
@@ -78,6 +79,8 @@ async fn create_test_actor(
     );
     chat_state_handle.record_token_usage(total_tokens);
     SessionActor {
+        repo_status_prefetch: crate::session::repo_status_prefix::RepoStatusPrefetchState::default(
+        ),
         transient_retry_enabled: true,
         transient_retries_prompt_total: std::cell::Cell::new(0),
         transient_episode_start: std::cell::Cell::new(None),
@@ -108,6 +111,7 @@ async fn create_test_actor(
         attach_non_interactive: std::rc::Rc::new(std::cell::Cell::new(false)),
         chat_state_handle,
         current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        active_work: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
@@ -154,6 +158,7 @@ async fn create_test_actor(
             injection_count: std::sync::atomic::AtomicU64::new(0),
             compaction_recovery_count: std::sync::atomic::AtomicU64::new(0),
             chunks_added: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            init_reindex_handle: std::cell::RefCell::new(None),
             dream_config: Default::default(),
             dream_count: std::sync::atomic::AtomicU64::new(0),
             dream_success_count: std::sync::atomic::AtomicU64::new(0),
@@ -212,6 +217,7 @@ async fn create_test_actor(
         goal_classifier_enabled: false,
         goal_planner_enabled: false,
         goal_summary_enabled: false,
+        length_salvage_remote_budget: None,
         goal_verifier_skeptic_count: 1,
         goal_role_models: Default::default(),
         goal_use_current_model_only: false,
@@ -286,9 +292,8 @@ async fn create_test_actor(
         trace_config_template: std::cell::RefCell::new(None),
     }
 }
-/// Suppression gates both AUTO paths; the reset scope depends on the reason:
-/// `other` clears next turn, `credit_block` holds until a successful model call,
-/// `size` is sticky until a full reset (success / rewind / model switch).
+/// Suppression gates both AUTO paths; the reset scope depends on the reason.
+/// `other` clears next turn, `credit_block` holds until a successful model call, `size` is sticky until a full reset (success/rewind/model switch).
 #[tokio::test(flavor = "current_thread")]
 async fn suppression_gates_and_reset_is_reason_scoped() {
     use crate::session::compaction_config::{SUPPRESS_NONE, SUPPRESS_TURN, SUPPRESS_UNTIL_SUCCESS};
@@ -358,6 +363,45 @@ async fn suppression_gates_and_reset_is_reason_scoped() {
                 .auto_compact_suppressed
                 .store(SUPPRESS_NONE, Relaxed);
             assert!(actor.check_auto_compact_needed().await.is_some());
+        })
+        .await;
+}
+/// The background two-pass prefire is an AUTO trigger: suppression must gate
+/// it (else it silently re-sends the doomed request) and resets re-enable it.
+#[tokio::test(flavor = "current_thread")]
+async fn suppression_gates_prefire_two_pass() {
+    use crate::session::compaction_config::{SUPPRESS_NONE, SUPPRESS_TURN};
+    use std::sync::atomic::Ordering::Relaxed;
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+            let actor = create_test_actor(214_000, 200_000, 85, gateway_tx, persistence_tx).await;
+            assert!(actor.should_prefire_two_pass().await);
+            actor
+                .suppress_auto_compaction(SuppressReason::Size, "", 1_000, 200_000)
+                .await;
+            assert!(
+                !actor.should_prefire_two_pass().await,
+                "suppressed prefire must not fire"
+            );
+            actor
+                .compaction
+                .auto_compact_suppressed
+                .store(SUPPRESS_NONE, Relaxed);
+            assert!(actor.should_prefire_two_pass().await);
+            actor
+                .suppress_auto_compaction(SuppressReason::Other, "", 1_000, 200_000)
+                .await;
+            assert!(!actor.should_prefire_two_pass().await);
+            let _ = actor.compaction.auto_compact_suppressed.compare_exchange(
+                SUPPRESS_TURN,
+                SUPPRESS_NONE,
+                Relaxed,
+                Relaxed,
+            );
+            assert!(actor.should_prefire_two_pass().await);
         })
         .await;
 }
@@ -496,8 +540,8 @@ async fn clear_auth_suppress_leaves_credit_suppress() {
         })
         .await;
 }
-/// After /login, clearing auth suppress must re-arm pre-sampling compact
-/// before the next sample (ordering that prepare_sampler-after-gate broke).
+/// After /login, clearing auth suppress must re-enable pre-sampling compact before the next sample.
+/// This ordering broke when prepare_sampler ran after the gate.
 #[tokio::test(flavor = "current_thread")]
 async fn clear_auth_suppress_rearms_pre_sampling_compact_gate() {
     use crate::session::compaction_config::SUPPRESS_AUTH;
@@ -576,8 +620,7 @@ async fn surface_compact_auth_failure_emits_reauthable_retry_state() {
         })
         .await;
 }
-/// The suppression notification text is tailored to the failure reason; the
-/// unclassified `Other` bucket carries the normalized real error.
+/// The suppression notification text is tailored to the failure reason; the unclassified `Other` bucket carries the normalized real error.
 #[test]
 fn suppression_notification_message_is_reason_specific() {
     let msg = SessionActor::suppress_notification_message;
@@ -632,8 +675,7 @@ fn suppression_notification_message_is_reason_specific() {
         "truncation marker: {detail_line}"
     );
 }
-/// The suppress transition emits one `AutoCompactFailed` carrying exactly the
-/// composed, scrubbed message.
+/// The suppress transition emits one `AutoCompactFailed` carrying exactly the composed, scrubbed message.
 #[tokio::test(flavor = "current_thread")]
 async fn suppression_emits_composed_notification() {
     let local = tokio::task::LocalSet::new();
@@ -674,7 +716,6 @@ async fn suppression_emits_composed_notification() {
         })
         .await;
 }
-/// Mock LLM endpoint answering every request with a deterministic 400.
 async fn spawn_deterministic_400_server() -> String {
     spawn_status_body_server(
         400,
@@ -682,7 +723,6 @@ async fn spawn_deterministic_400_server() -> String {
     )
     .await
 }
-/// Mock LLM that answers every request with 401.
 async fn spawn_deterministic_401_server() -> String {
     spawn_status_body_server(
         401,
@@ -690,7 +730,6 @@ async fn spawn_deterministic_401_server() -> String {
     )
     .await
 }
-/// Mock LLM that answers every request with 500 (transient).
 async fn spawn_transient_500_server() -> String {
     spawn_status_body_server(
         500,
@@ -699,23 +738,59 @@ async fn spawn_transient_500_server() -> String {
     .await
 }
 async fn spawn_status_body_server(status: u16, body: &'static str) -> String {
+    spawn_capturing_status_body_server(status, body).await.0
+}
+/// Like [`spawn_status_body_server`] but also captures each request body (in
+/// arrival order), for tests that assert how many attempts a flow made and
+/// what each attempt sent.
+async fn spawn_capturing_status_body_server(
+    status: u16,
+    body: &'static str,
+) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let status_line = match status {
         400 => "400 Bad Request",
         401 => "401 Unauthorized",
+        413 => "413 Payload Too Large",
         500 => "500 Internal Server Error",
         other => panic!("add status line for {other}"),
     };
+    let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = Arc::clone(&captured);
     tokio::spawn(async move {
         loop {
             let Ok((mut stream, _)) = listener.accept().await else {
                 break;
             };
+            let sink = Arc::clone(&sink);
             tokio::spawn(async move {
                 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                let mut buf = [0u8; 4096];
-                let _ = stream.read(&mut buf).await;
+                let mut raw = Vec::new();
+                let mut buf = [0u8; 8192];
+                let request_body = loop {
+                    match stream.read(&mut buf).await {
+                        Ok(0) | Err(_) => break String::new(),
+                        Ok(n) => raw.extend_from_slice(&buf[..n]),
+                    }
+                    if let Some(header_end) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers =
+                            String::from_utf8_lossy(&raw[..header_end]).to_ascii_lowercase();
+                        let content_length: usize = headers
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse().ok())
+                            .unwrap_or(0);
+                        let body_start = header_end + 4;
+                        if raw.len() >= body_start + content_length {
+                            break String::from_utf8_lossy(
+                                &raw[body_start..body_start + content_length],
+                            )
+                            .into_owned();
+                        }
+                    }
+                };
+                sink.lock().unwrap().push(request_body);
                 let resp = format!(
                     "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len(),
@@ -724,7 +799,7 @@ async fn spawn_status_body_server(status: u16, body: &'static str) -> String {
             });
         }
     });
-    format!("http://{addr}")
+    (format!("http://{addr}"), captured)
 }
 fn switch_target_config(model: &str, base_url: String) -> xai_grok_sampler::SamplerConfig {
     xai_grok_sampler::SamplerConfig {
@@ -736,8 +811,7 @@ fn switch_target_config(model: &str, base_url: String) -> xai_grok_sampler::Samp
         ..Default::default()
     }
 }
-/// Family switch → compact with the new model over the lossy view: the
-/// request must contain nothing but plain `{role, content}` text messages.
+/// A family switch compacts with the new model over the lossy view: the request must contain nothing but plain `{role, content}` text messages.
 #[tokio::test(flavor = "current_thread")]
 async fn family_switch_compacts_lossy_with_new_model() {
     let local = tokio::task::LocalSet::new();
@@ -810,7 +884,7 @@ async fn family_switch_compacts_lossy_with_new_model() {
         })
         .await;
 }
-/// 401 auto-compact: SUPPRESS_AUTH + reauthable RetryState (abort for /login).
+/// 401 auto-compact: SUPPRESS_AUTH and a reauthable RetryState (abort for /login).
 #[tokio::test(flavor = "current_thread")]
 async fn e2e_auto_compact_401_suppresses_auth_and_surfaces_reauth() {
     use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
@@ -893,6 +967,94 @@ async fn e2e_auto_compact_401_suppresses_auth_and_surfaces_reauth() {
             assert_eq!(
                 actor.compaction.auto_compact_suppressed.load(Relaxed),
                 crate::session::compaction_config::SUPPRESS_NONE
+            );
+        })
+        .await;
+}
+/// A 413 with a GENERIC body must walk the whole input ladder — verbatim →
+/// verbatim_fitted → lossy, one request per stage — and only then suppress
+/// as sticky `size`, with the "too large to compact" notification.
+#[tokio::test(flavor = "current_thread")]
+async fn e2e_auto_compact_413_steps_ladder_then_sticky_size_suppress() {
+    use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
+    use crate::session::compaction_config::SUPPRESS_STICKY;
+    use crate::session::storage::SessionUpdate;
+    use std::sync::atomic::Ordering::Relaxed;
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel();
+            let actor =
+                Arc::new(create_test_actor(180_000, 200_000, 85, gateway_tx, persistence_tx).await);
+            let (base_url, requests) = spawn_capturing_status_body_server(
+                413,
+                r#"{"error":{"type":"request_error","message":"Request failed."}}"#,
+            )
+            .await;
+            let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            cfg.base_url = base_url;
+            actor.chat_state_handle.update_sampling_config(cfg);
+            actor.chat_state_handle.replace_conversation(vec![
+                ConversationItem::system("sys"),
+                ConversationItem::user("hello"),
+                ConversationItem::assistant_tool_calls(vec![xai_grok_sampling_types::ToolCall {
+                    id: std::sync::Arc::<str>::from("call_1"),
+                    name: "run_terminal_command".to_string(),
+                    arguments: std::sync::Arc::<str>::from(r#"{"command":"ls"}"#),
+                }]),
+                ConversationItem::ToolResult(xai_grok_sampling_types::ToolResultItem {
+                    tool_call_id: "call_1".to_string(),
+                    content: std::sync::Arc::<str>::from("file listing"),
+                    images: Vec::new(),
+                    is_error: false,
+                }),
+                ConversationItem::assistant("hi"),
+                ConversationItem::user("compact me"),
+            ]);
+            actor.chat_state_handle.record_token_usage(180_000);
+            actor
+                .run_compact_only(
+                    AutoCompactTriggerInfo {
+                        tokens_used: 180_000,
+                        context_window: 200_000,
+                        percentage: 90,
+                    },
+                    false,
+                )
+                .await
+                .expect_err("413 mock must fail auto-compact");
+            let bodies = requests.lock().unwrap().clone();
+            assert_eq!(
+                bodies.len(),
+                3,
+                "413 must step the input ladder exactly once per stage"
+            );
+            assert!(!bodies[0].is_empty(), "server must capture request bodies");
+            assert_ne!(
+                bodies[2], bodies[0],
+                "lossy stage must send a degraded input, not the verbatim payload"
+            );
+            assert_eq!(
+                actor.compaction.auto_compact_suppressed.load(Relaxed),
+                SUPPRESS_STICKY,
+                "ladder exhaustion on 413 must suppress as sticky size, not per-turn other"
+            );
+            let mut saw_size_notification = false;
+            while let Ok(msg) = persistence_rx.try_recv() {
+                if let PersistenceMsg::Update(SessionUpdate::Xai(notif)) = msg
+                    && let XaiSessionUpdate::AutoCompactFailed { error } = &notif.update
+                {
+                    assert!(
+                        error.contains("too large to compact"),
+                        "413 exhaustion must surface the size notification, got: {error}"
+                    );
+                    saw_size_notification = true;
+                }
+            }
+            assert!(
+                saw_size_notification,
+                "expected the size AutoCompactFailed notification"
             );
         })
         .await;
@@ -1002,7 +1164,7 @@ async fn e2e_model_switch_compact_non_auth_failure_does_not_abort() {
         })
         .await;
 }
-/// After clearing auth suppress, a shrink switch can re-evaluate and compact.
+/// After clearing auth suppress, a switch to a smaller window can re-evaluate and compact.
 #[tokio::test(flavor = "current_thread")]
 async fn clear_auth_suppress_allows_model_switch_compact_reeval() {
     use crate::session::compaction_config::{PreviousModelInfo, SUPPRESS_AUTH, SUPPRESS_NONE};
@@ -1062,8 +1224,7 @@ async fn clear_auth_suppress_allows_model_switch_compact_reeval() {
         })
         .await;
 }
-/// A deterministic failure suppresses auto-compaction only on the AUTO
-/// path — never for a bare manual `/compact`.
+/// A deterministic failure suppresses auto-compaction only on the AUTO path, never for a bare manual `/compact`.
 #[tokio::test(flavor = "current_thread")]
 async fn bare_manual_compact_failure_does_not_suppress_auto() {
     use crate::session::compaction_config::SUPPRESS_NONE;
@@ -1113,8 +1274,8 @@ async fn bare_manual_compact_failure_does_not_suppress_auto() {
         })
         .await;
 }
-/// A transient failure (500, retries exhausted) on the AUTO path notifies
-/// with guidance + the normalized error (~6s: real retry delays).
+/// A transient failure (500, retries exhausted) on the AUTO path notifies with guidance and the normalized error.
+/// The test takes ~6s: real retry delays run.
 #[tokio::test(flavor = "current_thread")]
 async fn transient_auto_compact_failure_notifies_with_real_error() {
     use crate::session::compaction_config::SUPPRESS_NONE;
@@ -1182,10 +1343,9 @@ async fn transient_auto_compact_failure_notifies_with_real_error() {
         })
         .await;
 }
-/// A successful compaction re-arms failed-server announcements: the failure
-/// reminder was dropped with the compacted context (unlike connected servers,
-/// which the compaction context carries), so the announced episodes clear and
-/// the MCP reminder goes dirty for a re-announcement at the next injection.
+/// A successful compaction lets failed-server announcements fire again.
+/// The failure reminder was dropped with the compacted context (unlike connected servers, which the compaction context carries).
+/// So the announced episodes clear and the MCP reminder goes dirty for a re-announcement at the next injection.
 #[tokio::test(flavor = "current_thread")]
 async fn compaction_rearms_failed_server_announcements() {
     use xai_grok_test_support::MockInferenceServer;
@@ -1231,10 +1391,9 @@ async fn compaction_rearms_failed_server_announcements() {
         })
         .await;
 }
-/// A forked session whose whole-transcript inherited prefix alone exceeds
-/// the auto-compact threshold releases the prefix on compaction (so the
-/// conversation can actually shrink below the threshold) and keeps the
-/// release sticky across further compactions (no unbounded compaction loop).
+/// A forked session whose whole-transcript inherited prefix alone exceeds the auto-compact threshold releases the prefix on compaction.
+/// That lets the conversation actually shrink below the threshold.
+/// The release stays sticky across further compactions (no unbounded compaction loop).
 #[tokio::test(flavor = "current_thread")]
 async fn forked_prefix_released_under_pressure_and_stays_released() {
     use crate::session::compaction_config::SUPPRESS_NONE;
@@ -1304,11 +1463,9 @@ async fn forked_prefix_released_under_pressure_and_stays_released() {
         })
         .await;
 }
-/// When even the released (summarized) history still exceeds the threshold
-/// -- the pathological case where the system prompt alone is over budget --
-/// a forked session sets sticky suppression (WITHOUT a user-facing failure
-/// event) instead of clearing it, so AUTO is not immediately re-armed while the
-/// compaction itself still reports success.
+/// The pathological case: even the released (summarized) history exceeds the threshold because the system prompt alone is over budget.
+/// A forked session then sets sticky suppression instead of clearing it, WITHOUT a user-facing failure event.
+/// So AUTO is not immediately re-enabled while the compaction itself still reports success.
 #[tokio::test(flavor = "current_thread")]
 async fn forked_release_still_over_threshold_suppresses_auto() {
     use crate::session::compaction_config::SUPPRESS_STICKY;
@@ -1371,8 +1528,7 @@ async fn forked_release_still_over_threshold_suppresses_auto() {
         })
         .await;
 }
-/// The cancel error carries the typed kind AND still extracts to the plain
-/// cancel text for text-only consumers (old pagers, log sinks).
+/// The cancel error carries the typed kind AND still extracts to the plain cancel text for text-only consumers (old pagers, log sinks).
 #[test]
 fn cancelled_error_is_typed_and_extracts_to_cancel_text() {
     use crate::session::helpers::session_compact::{COMPACT_CANCELLED_MSG, CompactFailure};
@@ -1388,8 +1544,7 @@ fn cancelled_error_is_typed_and_extracts_to_cancel_text() {
         COMPACT_CANCELLED_MSG
     );
 }
-/// Raw producer input is scrubbed, single-lined, and capped at the
-/// chokepoint; already-normalized input passes through byte-identical.
+/// Raw producer input is scrubbed, single-lined, and capped at the chokepoint; already-normalized input passes through byte-identical.
 #[test]
 fn compact_error_data_scrubs_and_caps_raw_producer_input() {
     use crate::session::helpers::session_compact::{CompactErrorKind, compact_error_data};
@@ -1468,8 +1623,7 @@ fn user_facing_compact_error_strips_prefix_single_lines_and_caps() {
     assert!(capped.len() <= 300, "capped to {} bytes", capped.len());
     assert!(capped.ends_with('…'), "truncation marker: {capped}");
 }
-/// `classify_suppress_reason` maps each deterministic-failure shape to its
-/// fixed [`SuppressReason`].
+/// `classify_suppress_reason` maps each deterministic-failure shape to its fixed [`SuppressReason`].
 #[test]
 fn classify_suppress_reason_maps_error_text() {
     let classify = SessionActor::classify_suppress_reason;
@@ -1514,8 +1668,8 @@ fn classify_suppress_reason_maps_error_text() {
         SuppressReason::Other
     );
 }
-/// `SuppressReason::as_str` is the stable telemetry wire value — BQ/OTLP and
-/// dashboards key off these exact strings. Lock them so a rename can't break monitoring.
+/// `SuppressReason::as_str` is the stable telemetry wire value: BQ/OTLP and dashboards key off these exact strings.
+/// Lock them so a rename can't break monitoring.
 #[test]
 fn suppress_reason_as_str_is_stable() {
     assert_eq!(SuppressReason::CreditBlock.as_str(), "credit_block");
@@ -1544,8 +1698,8 @@ mod preserve_prefix {
         assert_eq!(items.len(), 4);
         assert!(matches!(items[0], ConversationItem::System(_)));
     }
-    /// Invariant: a head-only prefix lets compaction shrink the conversation;
-    /// a whole-transcript prefix does not (that pinned floor is the loop).
+    /// Invariant: a head-only prefix lets compaction shrink the conversation; a whole-transcript prefix does not.
+    /// That pinned floor is what causes the compaction loop.
     #[test]
     fn head_only_shrinks_full_transcript_does_not() {
         let mut conversation = vec![ConversationItem::system("sys")];
@@ -1566,9 +1720,8 @@ mod preserve_prefix {
             "full prefix never shrinks"
         );
     }
-    /// The reseed projection calibrates the bytes/4 estimate to real tokens
-    /// (ratio != 1) and caps at the pre-compaction total, so the release
-    /// decision reflects what the trigger applies next turn.
+    /// The reseed projection calibrates the bytes/4 estimate to real tokens (ratio != 1) and caps at the pre-compaction total.
+    /// The release decision then reflects what the trigger applies next turn.
     #[test]
     fn project_preserved_reseed_tokens_calibrates_and_caps() {
         assert_eq!(
@@ -1585,8 +1738,7 @@ mod preserve_prefix {
         );
         assert_eq!(project_preserved_reseed_tokens(10, 5, 0), 5);
     }
-    /// Both prefix and re-injected suffix may carry AGENTS.md; the splice must
-    /// leave exactly one (else the model sees project instructions twice).
+    /// Both prefix and re-injected suffix may carry AGENTS.md; the splice must leave exactly one (else the model sees project instructions twice).
     #[test]
     fn does_not_duplicate_agents_md() {
         let conversation = vec![

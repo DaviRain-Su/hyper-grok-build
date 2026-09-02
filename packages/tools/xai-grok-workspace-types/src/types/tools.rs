@@ -11,61 +11,38 @@ use crate::identity::ToolCallId;
 /// One incremental tool output frame (e.g. bash stdout).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolOutputChunk {
-    /// Tool call this output belongs to.
     pub call_id: ToolCallId,
-    /// Output stream identifier (`"stdout"` or `"stderr"` are the
-    /// most common values).
+    /// Output stream identifier (`"stdout"` or `"stderr"` are the most common values).
     #[serde(default)]
     pub stream: String,
-    /// Raw bytes from the tool. Encoded as a standard (RFC 4648)
-    /// base64 string in JSON via the `bytes_as_base64` module --
-    /// serde's default JSON representation of `Vec<u8>` would be a
-    /// JSON array of integers, which is wasteful for byte streams.
-    /// In binary serializers (postcard, bincode) the underlying bytes
-    /// go over as length-prefixed bytes.
+    /// Raw bytes from the tool, serialized as a standard (RFC 4648) base64 string in JSON via `bytes_as_base64`.
+    /// Binary serializers (postcard, bincode) send them as length-prefixed bytes.
     #[serde(default, with = "bytes_as_base64")]
     pub bytes: Vec<u8>,
     /// Wall-clock timestamp the chunk was emitted (UTC).
-    ///
-    /// Default on missing field is the Unix epoch (`DateTime::default()`)
-    /// rather than `Utc::now()`: we deliberately want a deterministic,
-    /// distinguishable sentinel rather than the receiver's wall clock
-    /// pretending to be the originator's.
+    /// A missing field defaults to the Unix epoch (`DateTime::default()`), not `Utc::now()`.
+    /// The receiver's wall clock must never pose as the originator's.
     #[serde(default)]
     pub at: DateTime<Utc>,
 }
 
 /// Lifecycle / progress event emitted by a tool.
 ///
-/// Holds an `f32` `fraction` field on the `Percent` variant, so the
-/// enum cannot derive `Eq` (only `PartialEq`).
-///
-/// Tagged with `tag = "type", content = "data"` (adjacent tagging) to
-/// match every other wire enum in the crate. See `crate::lib`
-/// doc-comment "# Wire format" for the rationale -- adjacent tagging is
-/// the only form that works uniformly across struct, newtype, and unit
-/// variants. Important: `ToolProgress` is itself nested inside
-/// `ToolChunk::Progress(ToolProgress)`, so using a uniform adjacent
-/// shape keeps the rendered JSON consistent across the whole tree (no
-/// mix of adjacent + internal tagging in a single document).
+/// Holds an `f32` `fraction` field on the `Percent` variant, so the enum cannot derive `Eq` (only `PartialEq`).
+/// Adjacent tagging (`tag = "type", content = "data"`) matches every other wire enum; see "# Wire format" in the crate doc for why.
+/// `ToolProgress` nests inside `ToolChunk::Progress`, so the uniform shape avoids mixing tagging styles in one document.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ToolProgress {
     /// Tool started (after permission was granted, before execution).
-    Started {
-        /// Tool call this progress is for.
-        call_id: ToolCallId,
-    },
+    Started { call_id: ToolCallId },
     /// Free-form status string (e.g. `"installing dependencies"`).
     Status {
-        /// Tool call this progress is for.
         call_id: ToolCallId,
-        /// Status message.
         message: String,
     },
     /// Quantitative progress (used for downloads / installs).
     Percent {
-        /// Tool call this progress is for.
         call_id: ToolCallId,
         /// Completed fraction in `[0.0, 1.0]`.
         fraction: f32,
@@ -75,9 +52,8 @@ pub enum ToolProgress {
 /// Terminal result emitted as exactly one `ToolChunk::Final` per call.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCallResult {
-    /// Tool call this result belongs to.
     pub call_id: ToolCallId,
-    /// Process / tool exit code (0 = success).
+    /// Process / tool exit code (0 means success).
     #[serde(default)]
     pub exit_code: i32,
     /// Optional human-readable summary.
@@ -86,12 +62,11 @@ pub struct ToolCallResult {
     /// Optional JSON-encoded structured result (tool-defined).
     #[serde(default)]
     pub output_json: String,
-    /// Whether the call was cancelled (rather than finishing naturally).
     #[serde(default)]
     pub cancelled: bool,
 }
 
-/// Tool definition surfaced via `ToolChunk::Definitions`.
+/// Tool definition sent in `ToolChunk::Definitions`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolDef {
     /// Stable tool name (e.g. `"read_file"`).
@@ -102,16 +77,12 @@ pub struct ToolDef {
     /// JSON Schema for the tool's input arguments.
     #[serde(default)]
     pub input_schema_json: String,
-    /// Whether invocations require explicit user permission.
     #[serde(default)]
     pub requires_permission: bool,
 }
 
-/// Module-private base64 codec for `ToolOutputChunk::bytes`.
-///
-/// Uses the `base64` crate's standard (RFC 4648) engine. The raw
-/// `Vec<u8>` field would otherwise serialize as a JSON array of
-/// integers, which is wasteful for byte streams.
+/// Base64 codec for `ToolOutputChunk::bytes`, using the `base64` crate's standard (RFC 4648) engine.
+/// The raw `Vec<u8>` field would otherwise serialize as a JSON array of integers, which is wasteful for byte streams.
 mod bytes_as_base64 {
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD;
@@ -169,8 +140,7 @@ mod tests {
 
     #[test]
     fn tool_output_chunk_at_defaults_to_epoch() {
-        // Omitted `at` field should deserialize to `DateTime::default()`,
-        // not `Utc::now()`.
+        // An omitted `at` must fall back to the epoch, not the receiver's `Utc::now()`
         let json = r#"{"call_id":"c1","stream":"stdout","bytes":""}"#;
         let chunk: ToolOutputChunk = serde_json::from_str(json).unwrap();
         assert_eq!(chunk.at, DateTime::<Utc>::default());

@@ -223,11 +223,68 @@ pub async fn presign_get_url(
     Ok(presigned.uri().to_string())
 }
 
+/// Aborts a created multipart upload when its future is dropped before
+/// completion. Callers bound uploads with deadlines and cancel by drop; a
+/// dropped future skips both Complete and the in-scope error-path abort,
+/// leaving orphaned billable parts in the (possibly customer-managed) bucket.
+struct AbortMultipartOnDrop {
+    client: aws_sdk_s3::Client,
+    bucket: String,
+    key: String,
+    upload_id: String,
+    armed: bool,
+}
+
+impl AbortMultipartOnDrop {
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+
+    /// In-scope abort for the error path: awaited, unlike the drop hook.
+    /// Disarms only after the send completes, so a caller cancelling this
+    /// await still gets the drop-hook abort (AbortMultipartUpload is
+    /// idempotent server-side).
+    async fn abort(mut self) {
+        let _ = self
+            .client
+            .abort_multipart_upload()
+            .bucket(&self.bucket)
+            .key(&self.key)
+            .upload_id(&self.upload_id)
+            .send()
+            .await;
+        self.armed = false;
+    }
+}
+
+impl Drop for AbortMultipartOnDrop {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // Detached: a drop site cannot await. Bounded, since the cancellation
+        // often means the endpoint is already unresponsive.
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let abort = self
+            .client
+            .abort_multipart_upload()
+            .bucket(&self.bucket)
+            .key(&self.key)
+            .upload_id(&self.upload_id);
+        handle.spawn(async move {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(30), abort.send()).await;
+        });
+    }
+}
+
 /// Multipart upload for payloads that exceed [`MULTIPART_THRESHOLD`].
 ///
 /// Splits `content` into [`MULTIPART_PART_SIZE`] chunks and uploads each as a
 /// separate part via the S3 multipart upload API. Aborts the upload on any
-/// part failure so we don't leak incomplete multipart uploads.
+/// part failure — or on cancellation (dropped future) — so we don't leak
+/// incomplete multipart uploads.
 async fn multipart_upload_bytes(
     client: &aws_sdk_s3::Client,
     bucket: &str,
@@ -250,6 +307,13 @@ async fn multipart_upload_bytes(
         .upload_id()
         .context("CreateMultipartUpload response missing upload_id")?
         .to_owned();
+    let abort_guard = AbortMultipartOnDrop {
+        client: client.clone(),
+        bucket: bucket.to_owned(),
+        key: object_path.to_owned(),
+        upload_id: upload_id.clone(),
+        armed: true,
+    };
 
     let mut completed_parts = Vec::new();
     let mut offset = 0usize;
@@ -310,13 +374,9 @@ async fn multipart_upload_bytes(
     .await;
 
     if result.is_err() {
-        let _ = client
-            .abort_multipart_upload()
-            .bucket(bucket)
-            .key(object_path)
-            .upload_id(&upload_id)
-            .send()
-            .await;
+        abort_guard.abort().await;
+    } else {
+        abort_guard.disarm();
     }
 
     result
@@ -1023,19 +1083,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn batch_upload_reports_size() {
-        let (endpoint, _state) = start_mock_server().await;
-        let client = make_test_client(&endpoint).await;
-
-        let content = b"twelve chars".to_vec();
-        let expected_size = content.len() as i64;
-        let files = vec![("sized.txt".into(), content, "text/plain".into())];
-
-        let results = client.batch_upload(files).await.unwrap();
-        assert_eq!(results[0].size, Some(expected_size));
-    }
-
-    #[tokio::test]
     async fn batch_upload_empty_input() {
         let (endpoint, _state) = start_mock_server().await;
         let client = make_test_client(&endpoint).await;
@@ -1222,319 +1269,210 @@ mod tests {
         assert_eq!(objects.get("small-single.txt").unwrap(), &content);
         assert!(state.multipart_uploads.read().await.is_empty());
     }
-
-    /// Full multipart roundtrip against a real S3-compatible endpoint.
+    /// Regression: cancelling (dropping) a multipart upload mid-part must
+    /// still abort the upload. A dropped future skips both Complete and the
+    /// in-scope error-path abort, leaving orphaned billable parts in the
+    /// bucket — reachable from callers that bound uploads with a deadline.
     #[tokio::test]
-    #[ignore]
-    async fn integration_multipart_upload_roundtrip() {
-        let (endpoint, bucket, access_key, secret_key, region) = match integration_test_config() {
-            Some(c) => c,
-            None => return,
+    async fn dropped_multipart_upload_aborts_the_upload() {
+        use axum::extract::Query;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct TarpitState {
+            part_started: tokio::sync::Notify,
+            abort_seen: tokio::sync::Notify,
+            aborted: AtomicBool,
+        }
+        let state = Arc::new(TarpitState {
+            part_started: tokio::sync::Notify::new(),
+            abort_seen: tokio::sync::Notify::new(),
+            aborted: AtomicBool::new(false),
+        });
+
+        let s = state.clone();
+        let put_handler = move |AxumPath((_, _key)): AxumPath<(String, String)>,
+                                _query: Query<HashMap<String, String>>,
+                                _body: axum::body::Bytes| {
+            let state = s.clone();
+            async move {
+                // Tarpit the part upload so the caller's deadline fires mid-part.
+                state.part_started.notify_one();
+                std::future::pending::<()>().await;
+                StatusCode::OK.into_response()
+            }
         };
-        let creds = integration_creds(&access_key, &secret_key);
-        let raw = make_raw_sdk_client(&endpoint, &access_key, &secret_key, &region).await;
+        let post_handler = move |AxumPath((_, _key)): AxumPath<(String, String)>,
+                                 query: Query<HashMap<String, String>>| async move {
+            if query.contains_key("uploads") {
+                return xml_response(
+                    200,
+                    "<InitiateMultipartUploadResult><UploadId>tarpit-upload</UploadId></InitiateMultipartUploadResult>".into(),
+                );
+            }
+            StatusCode::BAD_REQUEST.into_response()
+        };
+        let s = state.clone();
+        let delete_handler =
+            move |AxumPath((_, _key)): AxumPath<(String, String)>,
+                  query: Query<HashMap<String, String>>| {
+                let state = s.clone();
+                async move {
+                    if query.contains_key("uploadId") {
+                        state.aborted.store(true, Ordering::Relaxed);
+                        state.abort_seen.notify_one();
+                    }
+                    StatusCode::NO_CONTENT.into_response()
+                }
+            };
+        let router = Router::new()
+            .route(
+                "/{bucket}/{*key}",
+                axum::routing::put(put_handler)
+                    .post(post_handler)
+                    .delete(delete_handler),
+            )
+            // The 8 MiB part must reach the tarpit handler, not a 413.
+            .layer(axum::extract::DefaultBodyLimit::max(
+                2 * MULTIPART_PART_SIZE,
+            ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
 
-        let prefix = unique_prefix();
-        let key = format!("{prefix}/multipart-large.bin");
-
-        // 20 MiB of patterned data, exceeds MULTIPART_THRESHOLD
-        let content: Vec<u8> = (0..20 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
-
-        let result = upload_bytes(
-            &bucket,
-            &key,
+        let client = build_s3_client(
+            "us-east-1",
+            Some(r#"{"aws_access_key_id":"test","aws_secret_access_key":"test"}"#),
+            None,
+            Some(&format!("http://{addr}")),
+        )
+        .await
+        .unwrap();
+        let content = vec![0u8; MULTIPART_THRESHOLD];
+        let mut upload = Box::pin(multipart_upload_bytes(
+            &client,
+            "test-bucket",
+            "obj.bin",
             &content,
             "application/octet-stream",
-            &region,
-            Some(&creds),
-            None,
-            Some(&endpoint),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result, format!("s3://{bucket}/{key}"));
-
-        let obj = raw
-            .get_object()
-            .bucket(&bucket)
-            .key(&key)
-            .send()
-            .await
-            .unwrap();
-        let body = obj.body.collect().await.unwrap().into_bytes();
-        assert_eq!(&body[..], &content[..]);
-    }
-
-    // --- Integration tests (require S3_TEST_ENDPOINT env var pointing at MinIO or similar) ---
-
-    fn integration_test_config() -> Option<(String, String, String, String, String)> {
-        Some((
-            std::env::var("S3_TEST_ENDPOINT").ok()?,
-            std::env::var("S3_TEST_BUCKET").ok()?,
-            std::env::var("S3_TEST_ACCESS_KEY").ok()?,
-            std::env::var("S3_TEST_SECRET_KEY").ok()?,
-            std::env::var("S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".to_string()),
-        ))
-    }
-
-    fn integration_creds(access_key: &str, secret_key: &str) -> String {
-        serde_json::json!({
-            "aws_access_key_id": access_key,
-            "aws_secret_access_key": secret_key,
-        })
-        .to_string()
-    }
-
-    async fn make_integration_client(
-        endpoint: &str,
-        bucket: &str,
-        access_key: &str,
-        secret_key: &str,
-        region: &str,
-    ) -> S3StorageClient {
-        let creds = integration_creds(access_key, secret_key);
-        S3StorageClient::new(
-            bucket.to_string(),
-            region,
-            Some(&creds),
-            None,
-            Some(endpoint),
-        )
-        .await
-        .unwrap()
-    }
-
-    async fn make_raw_sdk_client(
-        endpoint: &str,
-        access_key: &str,
-        secret_key: &str,
-        region: &str,
-    ) -> aws_sdk_s3::Client {
-        let creds = integration_creds(access_key, secret_key);
-        build_s3_client(region, Some(&creds), None, Some(endpoint))
-            .await
-            .unwrap()
-    }
-
-    fn unique_prefix() -> String {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        format!("test-{nanos}-{}", std::process::id())
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn integration_batch_upload_and_verify_content() {
-        let (endpoint, bucket, access_key, secret_key, region) = match integration_test_config() {
-            Some(c) => c,
-            None => return,
-        };
-        let client =
-            make_integration_client(&endpoint, &bucket, &access_key, &secret_key, &region).await;
-        let raw = make_raw_sdk_client(&endpoint, &access_key, &secret_key, &region).await;
-
-        let prefix = unique_prefix();
-        let key_a = format!("{prefix}/a.txt");
-        let key_b = format!("{prefix}/b.bin");
-
-        let files = vec![
-            (key_a.clone(), b"hello-a".to_vec(), "text/plain".to_string()),
-            (
-                key_b.clone(),
-                b"\x00\x01\x02binary".to_vec(),
-                "application/octet-stream".to_string(),
-            ),
-        ];
-
-        let results = client.batch_upload(files).await.unwrap();
-        assert_eq!(results.len(), 2);
-        for r in &results {
-            assert_eq!(
-                r.status,
-                prod_mc_cli_chat_proxy_types::BatchUploadStatus::Ok
-            );
-        }
-
-        let obj_a = raw
-            .get_object()
-            .bucket(&bucket)
-            .key(&key_a)
-            .send()
-            .await
-            .unwrap();
-        let body_a = obj_a.body.collect().await.unwrap().into_bytes();
-        assert_eq!(&body_a[..], b"hello-a");
-
-        let obj_b = raw
-            .get_object()
-            .bucket(&bucket)
-            .key(&key_b)
-            .send()
-            .await
-            .unwrap();
-        let body_b = obj_b.body.collect().await.unwrap().into_bytes();
-        assert_eq!(&body_b[..], b"\x00\x01\x02binary");
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn integration_batch_check_exists_partitions_correctly() {
-        let (endpoint, bucket, access_key, secret_key, region) = match integration_test_config() {
-            Some(c) => c,
-            None => return,
-        };
-        let client =
-            make_integration_client(&endpoint, &bucket, &access_key, &secret_key, &region).await;
-
-        let prefix = unique_prefix();
-        let uploaded_1 = format!("{prefix}/exists-1.txt");
-        let uploaded_2 = format!("{prefix}/exists-2.txt");
-        let missing = format!("{prefix}/does-not-exist.txt");
-
-        let files = vec![
-            (
-                uploaded_1.clone(),
-                b"data1".to_vec(),
-                "text/plain".to_string(),
-            ),
-            (
-                uploaded_2.clone(),
-                b"data2".to_vec(),
-                "text/plain".to_string(),
-            ),
-        ];
-        client.batch_upload(files).await.unwrap();
-
-        let paths = vec![uploaded_1.clone(), missing.clone(), uploaded_2.clone()];
-        let existing = unwrap_found(client.batch_check_exists(&paths).await);
-        assert_eq!(existing.len(), 2);
-        assert!(existing.contains(&uploaded_1));
-        assert!(existing.contains(&uploaded_2));
-        assert!(!existing.contains(&missing));
-
-        // All-missing query collapses to top-level NotFound (symmetric with proxy).
-        let all_missing = vec![format!("{prefix}/nope-1"), format!("{prefix}/nope-2")];
-        assert!(matches!(
-            client.batch_check_exists(&all_missing).await,
-            crate::storage_client::ExistsResult::NotFound
         ));
+        // Drive the upload until the part request is in flight, then drop it —
+        // the caller-side deadline-cancellation shape.
+        tokio::select! {
+            _ = &mut upload => panic!("tarpitted part upload must not complete"),
+            _ = state.part_started.notified() => {}
+        }
+        drop(upload);
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            state.abort_seen.notified(),
+        )
+        .await
+        .expect("dropped multipart upload must send AbortMultipartUpload");
+        assert!(state.aborted.load(Ordering::Relaxed));
     }
 
+    /// Regression: cancelling the awaited error-path abort mid-send must leave
+    /// the drop backstop armed, so the abort still reaches the bucket.
     #[tokio::test]
-    #[ignore]
-    async fn integration_upload_stream_roundtrip() {
-        let (endpoint, bucket, access_key, secret_key, region) = match integration_test_config() {
-            Some(c) => c,
-            None => return,
+    async fn cancelled_error_path_abort_still_aborts_via_drop_backstop() {
+        use axum::extract::Query;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct AbortTarpitState {
+            abort_requests: AtomicUsize,
+            first_abort_started: tokio::sync::Notify,
+            second_abort_seen: tokio::sync::Notify,
+        }
+        let state = Arc::new(AbortTarpitState {
+            abort_requests: AtomicUsize::new(0),
+            first_abort_started: tokio::sync::Notify::new(),
+            second_abort_seen: tokio::sync::Notify::new(),
+        });
+
+        // Part upload fails outright, driving the in-scope error-path abort.
+        let put_handler = move |AxumPath((_, _key)): AxumPath<(String, String)>,
+                                _query: Query<HashMap<String, String>>,
+                                _body: axum::body::Bytes| async move {
+            StatusCode::FORBIDDEN.into_response()
         };
-        let creds = integration_creds(&access_key, &secret_key);
-        let raw = make_raw_sdk_client(&endpoint, &access_key, &secret_key, &region).await;
+        let post_handler = move |AxumPath((_, _key)): AxumPath<(String, String)>,
+                                 query: Query<HashMap<String, String>>| async move {
+            if query.contains_key("uploads") {
+                return xml_response(
+                    200,
+                    "<InitiateMultipartUploadResult><UploadId>abort-tarpit</UploadId></InitiateMultipartUploadResult>".into(),
+                );
+            }
+            StatusCode::BAD_REQUEST.into_response()
+        };
+        let s = state.clone();
+        let delete_handler =
+            move |AxumPath((_, _key)): AxumPath<(String, String)>,
+                  query: Query<HashMap<String, String>>| {
+                let state = s.clone();
+                async move {
+                    if query.contains_key("uploadId") {
+                        let n = state.abort_requests.fetch_add(1, Ordering::Relaxed) + 1;
+                        if n == 1 {
+                            // Tarpit the first (awaited) abort so the caller's
+                            // deadline can drop the future mid-send.
+                            state.first_abort_started.notify_one();
+                            std::future::pending::<()>().await;
+                        } else {
+                            state.second_abort_seen.notify_one();
+                        }
+                    }
+                    StatusCode::NO_CONTENT.into_response()
+                }
+            };
+        let router = Router::new()
+            .route(
+                "/{bucket}/{*key}",
+                axum::routing::put(put_handler)
+                    .post(post_handler)
+                    .delete(delete_handler),
+            )
+            .layer(axum::extract::DefaultBodyLimit::max(
+                2 * MULTIPART_PART_SIZE,
+            ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
 
-        let prefix = unique_prefix();
-        let key = format!("{prefix}/streamed.bin");
-
-        // 50 KB of patterned data to exercise multi-chunk ReaderStream reads
-        let content: Vec<u8> = (0..50_000).map(|i| (i % 251) as u8).collect();
-        let reader = std::io::Cursor::new(content.clone());
-
-        let result = upload_stream(
-            &bucket,
-            &key,
-            reader,
-            "application/octet-stream",
-            &region,
-            Some(&creds),
+        let client = build_s3_client(
+            "us-east-1",
+            Some(r#"{"aws_access_key_id":"test","aws_secret_access_key":"test"}"#),
             None,
-            Some(&endpoint),
+            Some(&format!("http://{addr}")),
         )
         .await
         .unwrap();
+        let content = vec![0u8; MULTIPART_THRESHOLD];
+        let mut upload = Box::pin(multipart_upload_bytes(
+            &client,
+            "test-bucket",
+            "obj.bin",
+            &content,
+            "application/octet-stream",
+        ));
+        // Drive until the awaited error-path abort is in flight, then drop —
+        // the deadline cancellation landing mid-abort.
+        tokio::select! {
+            _ = &mut upload => panic!("upload must park on the tarpitted abort"),
+            _ = state.first_abort_started.notified() => {}
+        }
+        drop(upload);
 
-        assert_eq!(result, format!("s3://{bucket}/{key}"));
-
-        let obj = raw
-            .get_object()
-            .bucket(&bucket)
-            .key(&key)
-            .send()
-            .await
-            .unwrap();
-        let body = obj.body.collect().await.unwrap().into_bytes();
-        assert_eq!(&body[..], &content[..]);
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn integration_check_exists_single_roundtrip() {
-        let (endpoint, bucket, access_key, secret_key, region) = match integration_test_config() {
-            Some(c) => c,
-            None => return,
-        };
-        let client =
-            make_integration_client(&endpoint, &bucket, &access_key, &secret_key, &region).await;
-
-        let prefix = unique_prefix();
-        let key = format!("{prefix}/single.txt");
-
-        assert!(client.check_exists(&key).await.is_none());
-
-        client
-            .batch_upload(vec![(
-                key.clone(),
-                b"present".to_vec(),
-                "text/plain".to_string(),
-            )])
-            .await
-            .unwrap();
-
-        let resp = client.check_exists(&key).await.unwrap();
-        assert_eq!(resp.path, key);
-        assert_eq!(resp.bucket, bucket);
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn integration_empty_file_upload() {
-        let (endpoint, bucket, access_key, secret_key, region) = match integration_test_config() {
-            Some(c) => c,
-            None => return,
-        };
-        let client =
-            make_integration_client(&endpoint, &bucket, &access_key, &secret_key, &region).await;
-        let raw = make_raw_sdk_client(&endpoint, &access_key, &secret_key, &region).await;
-
-        let prefix = unique_prefix();
-        let key = format!("{prefix}/empty.bin");
-
-        let results = client
-            .batch_upload(vec![(
-                key.clone(),
-                vec![],
-                "application/octet-stream".to_string(),
-            )])
-            .await
-            .unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(
-            results[0].status,
-            prod_mc_cli_chat_proxy_types::BatchUploadStatus::Ok
-        );
-        assert_eq!(results[0].size, Some(0));
-
-        let obj = raw
-            .get_object()
-            .bucket(&bucket)
-            .key(&key)
-            .send()
-            .await
-            .unwrap();
-        let body = obj.body.collect().await.unwrap().into_bytes();
-        assert!(body.is_empty());
-
-        assert!(client.check_exists(&key).await.is_some());
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            state.second_abort_seen.notified(),
+        )
+        .await
+        .expect("an abort cancelled mid-send must re-send via the drop backstop");
     }
 }

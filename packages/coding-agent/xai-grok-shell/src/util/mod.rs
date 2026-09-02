@@ -7,10 +7,8 @@ pub(crate) mod subprocess;
 pub(crate) mod text_sanitize;
 pub(crate) mod user_identity;
 
-// The foundation utilities live in `xai-grok-shell-base` (upstream of this
-// crate so they build in parallel). Re-exported at the original paths so
-// existing `crate::util::…` / `xai_grok_shell::util::…` users compile
-// unchanged.
+// The foundation utilities live in `xai-grok-shell-base` (upstream of this crate so they build in parallel)
+// Re-exported at the original paths so existing `crate::util::…` and `xai_grok_shell::util::…` users compile unchanged
 pub use xai_grok_shell_base::util::*;
 
 pub(crate) fn is_user_instruction_path(
@@ -41,13 +39,9 @@ pub(crate) fn is_user_instruction_path(
             .any(|(vendor_home, _)| path.starts_with(vendor_home))
 }
 
-/// Aborts the wrapped tokio task when dropped.
-///
-/// Use to tie a spawned helper task's lifetime to an async scope so that
-/// cancelling the parent future (e.g. a turn abort dropping the tool loop)
-/// also tears down the helper instead of leaving it running detached.
-/// Aborting an already-finished task is a no-op, so this is safe to hold
-/// across normal scope exit too.
+/// Ties a spawned helper task's lifetime to an async scope by aborting it on drop.
+/// Cancelling the parent future (e.g. a turn abort dropping the tool loop) tears down the helper instead of leaving it running detached.
+/// Aborting an already-finished task is a no-op, so this is safe to hold across normal scope exit too.
 pub(crate) struct AbortOnDrop(pub tokio::task::JoinHandle<()>);
 
 impl Drop for AbortOnDrop {
@@ -104,7 +98,6 @@ mod expand_home_tests {
 
     #[test]
     fn does_not_handle_user_tilde() {
-        // `~bob/path` is treated as a literal relative path.
         assert_eq!(
             expand_home("~bob/path"),
             std::path::PathBuf::from("~bob/path")

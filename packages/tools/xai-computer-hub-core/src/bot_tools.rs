@@ -148,6 +148,177 @@ pub fn grok_bot_tool_description(name: &str) -> Option<&'static str> {
         .map(|(_, desc)| *desc)
 }
 
+/// Flattened JSON Schema for a Grok Bot tool's arguments.
+///
+/// Same shape the hub advertises via `schema_for_kind`. Pre-bind synthesis
+/// uses this so constrained decoding can emit required fields (`agent_id`,
+/// `prompt`, …) instead of locking the call to `{}`.
+pub fn grok_bot_tool_arguments_schema(name: &str) -> Option<serde_json::Value> {
+    Some(match name {
+        "bot_create_agent" => serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name"],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Short human-readable name for the new agent. Required. Empty is rejected."
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional persona / instructions for the new agent. Shapes how it behaves. Omitted becomes an empty string on the box."
+                }
+            }
+        }),
+        "bot_list_agents" => serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {}
+        }),
+        "bot_send_prompt" => serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["agent_id", "prompt"],
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": "Target agent id from bot_list_agents or bot_create_agent. Required. Empty is rejected."
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "User text to send to the agent. Required. Empty is rejected. Do not put file bytes here; attach workspace files with paths."
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["fire_and_forget", "blocking", "async"],
+                    "description": "fire_and_forget (default) returns {accepted} immediately. blocking waits and returns assistant text. async returns {accepted, handle} and wakes the model when the turn ends. On timeout call bot_await_turn with the handle. Do not re-send. Waiting modes are not supported for live streaming agents or agents that cannot stream live turns."
+                },
+                "timeout_ms": {
+                    "type": "integer",
+                    "description": "Caller timeout in milliseconds for blocking/async. Server clamps to 5000..=600000. Default 300000. Timeout is finished:false plus a handle, not an error. Ignored for fire_and_forget."
+                },
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Workspace files to attach. Each path is client-fs-base-relative (the bound session cwd when that cwd is under the workspace root, otherwise the workspace root). Same contract as grok.com client-fs and grok-build model paths. Empty or omitted means no files. At most 8 paths; each file is capped at 25 MiB. Requires a bound workspace that serves workspace.client_fs_read_file. Attachments are refused for live streaming agents. Hub reads raw bytes, uploads to the box, then sends. First attach failure fails the whole send."
+                }
+            }
+        }),
+        "bot_get_agent_transcript" => serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["agent_id"],
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": "Agent id whose full transcript to read. From bot_list_agents or bot_create_agent."
+                }
+            }
+        }),
+        "bot_get_agent_transcript_page" => serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["agent_id", "limit", "until_ms"],
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": "Agent id whose retained transcript page to read. From bot_list_agents or bot_create_agent."
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of entries to return. Required. Must be greater than 0."
+                },
+                "until_ms": {
+                    "type": "integer",
+                    "description": "Inclusive upper bound as unix epoch milliseconds. Required."
+                },
+                "before_seq": {
+                    "type": "integer",
+                    "description": "Optional exclusive sequence cursor from a previous page. Return entries before this seq."
+                },
+                "since_ms": {
+                    "type": "integer",
+                    "description": "Optional inclusive lower bound as unix epoch milliseconds."
+                }
+            }
+        }),
+        "bot_get_agent_transcript_tail" => serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["agent_id", "limit"],
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": "Agent id whose transcript tail to read. From bot_list_agents or bot_create_agent."
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of entries to return. Required. Must be greater than 0."
+                },
+                "before_seq": {
+                    "type": "integer",
+                    "description": "Optional exclusive sequence cursor from a previous page. Return entries before this seq. Omit on the first (latest) page."
+                }
+            }
+        }),
+        "bot_get_agent_transcript_window" => serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["agent_id", "limit"],
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": "Agent id whose transcript window to read. From bot_list_agents or bot_create_agent."
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of entries to return. Required. Must be greater than 0."
+                },
+                "before_seq": {
+                    "type": "integer",
+                    "description": "Optional exclusive sequence cursor from a previous page. Return entries before this seq. Omit on the first page."
+                }
+            }
+        }),
+        "bot_transcript_offbox" => serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["agent_id"],
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": "Agent id. Read off-box; never wakes the box. From bot_list_agents or bot_create_agent."
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Opaque pagination cursor from a previous off-box page. Omit on the first page. Not an agent id."
+                }
+            }
+        }),
+        "bot_await_turn" => serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["agent_id"],
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": "Agent id to wait on. Must match handle.agentId when a handle is passed. From bot_list_agents or bot_create_agent."
+                },
+                "handle": {
+                    "type": "object",
+                    "default": null,
+                    "description": "Opaque handle returned by bot_send_prompt or a prior bot_await_turn. Pass it back unchanged. Omit to wait until the agent is idle and return the last send-message. Do not construct a handle yourself."
+                },
+                "timeout_ms": {
+                    "type": "integer",
+                    "description": "Caller timeout in milliseconds. Server clamps to 5000..=600000. Default 300000. Timeout is finished:false, not an error. Use the returned handle to call this tool again."
+                }
+            }
+        }),
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,5 +335,15 @@ mod tests {
                 .iter()
                 .all(|(_, desc)| !desc.trim().is_empty())
         );
+    }
+
+    #[test]
+    fn arguments_schema_covers_every_id() {
+        for id in GROK_BOT_TOOL_IDS {
+            let schema = grok_bot_tool_arguments_schema(id)
+                .unwrap_or_else(|| panic!("{id} must have an arguments schema"));
+            assert_eq!(schema["type"], "object", "{id}");
+        }
+        assert!(grok_bot_tool_arguments_schema("bot_typo").is_none());
     }
 }

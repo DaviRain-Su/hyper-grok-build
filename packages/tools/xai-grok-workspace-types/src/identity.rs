@@ -1,31 +1,21 @@
-//! Identifier types for sessions, tool calls, and hunks.
+//! Each identifier is a newtype wrapper around `String`.
+//! A string rather than `Uuid` lets callers pick any id scheme (UUIDs, ULIDs, slugs) and keeps the wire format human-readable.
 //!
-//! Each identifier is a newtype wrapper around `String`. Strings are used
-//! (rather than `Uuid` directly) so callers can pick whatever id scheme
-//! they like (UUIDs, ULIDs, slugs, ...) and so the wire format stays
-//! human-readable.
-//!
-//! The inner field is **not** public: callers must construct ids via
-//! `new()`, `From<String>`, or `From<&str>`, and read them back via
-//! `as_str()` or `Display`. Keeping the inner field private prevents
-//! callers from poking arbitrary strings into the newtype and bypassing
-//! whatever invariants we add later (e.g. non-empty, ASCII-only, ...).
+//! The inner field is **not** public: construct ids via `new()`, `From<String>`, or `From<&str>`, and read them back via `as_str()` or `Display`.
+//! That keeps callers from poking arbitrary strings into the newtype and bypassing invariants we add later (e.g. non-empty, ASCII-only).
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Unique session identifier. Used to scope per-session operations.
 #[derive(Debug, Clone, Default, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SessionId(pub(crate) String);
 
 impl SessionId {
-    /// Construct a new session id from any string-like value.
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 
-    /// Borrow the wrapped string.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -55,12 +45,10 @@ impl From<&str> for SessionId {
 pub struct ToolCallId(pub(crate) String);
 
 impl ToolCallId {
-    /// Construct a new tool call id from any string-like value.
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 
-    /// Borrow the wrapped string.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -94,12 +82,10 @@ impl From<&str> for ToolCallId {
 pub struct HunkId(pub(crate) String);
 
 impl HunkId {
-    /// Construct a new hunk id from any string-like value.
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 
-    /// Borrow the wrapped string.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -152,12 +138,5 @@ mod tests {
         assert_eq!(json, "\"hunk-xyz\"");
         let back: HunkId = serde_json::from_str(&json).unwrap();
         assert_eq!(back, id);
-    }
-
-    #[test]
-    fn ids_implement_display() {
-        assert_eq!(SessionId::new("a").to_string(), "a");
-        assert_eq!(ToolCallId::new("b").to_string(), "b");
-        assert_eq!(HunkId::new("c").to_string(), "c");
     }
 }

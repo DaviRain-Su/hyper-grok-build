@@ -110,7 +110,7 @@ impl Theme {
             md_muted: MUTED,
             md_code_bg: SURFACE,
             md_text: TEXT,
-            link_fg: FOAM, // #9ccfd8 -- teal/cyan for dark bg
+            link_fg: FOAM, // #9ccfd8, teal/cyan for dark bg
         }
     }
 }

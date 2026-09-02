@@ -60,8 +60,7 @@ impl WorkflowRunStatus {
     }
 
     pub(crate) fn is_resumable(self) -> bool {
-        // Cancelled (`/workflow stop`) keeps the journal; resume continues
-        // it the same way a pause does. Complete/interrupted stay terminal.
+        // Cancelled (`/workflow stop`) keeps the journal; resume continues it the same way a pause does
         self.is_paused() || self == Self::Failed || self == Self::Cancelled
     }
 
@@ -422,9 +421,8 @@ impl WorkflowTracker {
         label
     }
 
-    /// Point a roster row at a fresh child session id. Contract retries
-    /// spawn a new child session per attempt; the row must follow so live
-    /// progress lookups and transcript clicks resolve to the current child.
+    /// Contract retries spawn a new child session per attempt.
+    /// The row must follow so live progress lookups and transcript clicks resolve to the current child.
     pub(crate) fn rebind_agent_id(&mut self, run_id: &str, agent_id: &str, new_agent_id: &str) {
         let Some(run) = self.run_mut(run_id) else {
             return;

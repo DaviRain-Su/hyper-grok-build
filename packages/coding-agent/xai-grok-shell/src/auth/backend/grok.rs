@@ -1,4 +1,4 @@
-//! The Grok Build backend: xAI OAuth2 / enterprise OIDC, the operator's auth binary, devbox.
+//! The Grok Build backend: xAI OAuth2, enterprise OIDC, the operator's auth binary, or a devbox.
 
 use std::sync::Arc;
 
@@ -18,7 +18,7 @@ impl AuthBackend for GrokAuthBackend {
         config.auth_scope()
     }
 
-    /// Pre-OIDC devbox auth files wrote this key, and only this backend ever minted into it.
+    /// Devbox auth files from before the OIDC flow wrote this key, and only this backend ever minted credentials into it.
     fn inherited_scopes(&self) -> &'static [&'static str] {
         &[crate::auth::model::LEGACY_SCOPE]
     }

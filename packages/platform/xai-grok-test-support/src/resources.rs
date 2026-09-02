@@ -1,13 +1,12 @@
-//! OS resource snapshots for soak tests, read through `xai_tty_utils` so the
-//! soaks and production measure the same way.
+//! OS resource snapshots for soak tests, read through `xai_tty_utils` so the soaks and production measure the same way.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-/// RSS in bytes, live threads, and open files, sampled together. `None` marks a
-/// metric the platform can't report.
+/// RSS in bytes, live threads, and open files, sampled together.
+/// `None` marks a metric the platform can't report.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ResourceSnapshot {
     pub rss: Option<usize>,
@@ -15,9 +14,9 @@ pub struct ResourceSnapshot {
     pub open_files: Option<usize>,
 }
 
-/// Saturating per-field growth of one [`ResourceSnapshot`] over an earlier
-/// baseline. A distinct type from a snapshot so a delta can't be mistaken for
-/// an absolute sample. `None` marks a field either side couldn't report.
+/// Saturating per-field growth of one [`ResourceSnapshot`] over an earlier baseline.
+/// A distinct type from a snapshot so a delta can't be mistaken for an absolute sample.
+/// `None` marks a field either side couldn't report.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ResourceGrowth {
     pub rss: Option<usize>,
@@ -36,9 +35,8 @@ impl ResourceSnapshot {
         }
     }
 
-    /// RSS from the cheap sampler, skipping the Linux descriptor scan (the
-    /// thread gauge rides that sample either way and is dropped here). For
-    /// sampling loops that read just `rss`.
+    /// RSS from the cheap sampler, skipping the Linux descriptor scan (the thread gauge comes with that sample either way and is dropped here).
+    /// Use this in sampling loops that read just `rss`.
     pub fn capture_rss() -> Option<usize> {
         xai_tty_utils::sample_process_memory()
             .rss_bytes
@@ -102,8 +100,8 @@ impl RssSampler {
         }
     }
 
-    /// Stop sampling and return the measurement. A final synchronous read
-    /// backstops a peak that rose and fell between sampler ticks.
+    /// Stop sampling and return the measurement.
+    /// A final synchronous read backstops a peak that rose and fell between sampler ticks.
     pub fn finish(mut self) -> RssMeasurement {
         let final_rss = ResourceSnapshot::capture_rss().unwrap_or(0);
         self.stop.store(true, Ordering::Relaxed);
@@ -116,8 +114,7 @@ impl RssSampler {
     }
 }
 
-/// Baseline and peak captured by one sampler run, separate from any budget so
-/// one measurement can be judged against several.
+/// Baseline and peak captured by one sampler run, separate from any budget so one measurement can be judged against several.
 pub struct RssMeasurement {
     pub baseline: Option<usize>,
     pub peak_rss: usize,
@@ -133,8 +130,8 @@ impl RssMeasurement {
     }
 }
 
-/// Peak-RSS growth over a baseline, judged against a budget. Unmeasurable RSS
-/// fails the verdict rather than passing vacuously.
+/// Peak-RSS growth over a baseline, judged against a budget.
+/// Unmeasurable RSS fails the verdict rather than passing vacuously.
 pub struct RssOutcome {
     pub baseline: Option<usize>,
     pub peak_rss: usize,

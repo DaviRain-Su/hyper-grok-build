@@ -1,8 +1,7 @@
-//! Real-turn-loop tests against a mock server that 401s unauthenticated
-//! requests and 200s a fresh bearer: a fail-closed (credential-less) 401
-//! must not consume `AuthRetrySchedule` budget — the field failure mode
-//! where each sleep cycle burned one slot — while credentialed 401s must
-//! still exhaust after `MAX_RETRIES`.
+//! These tests run the real turn loop against a mock server that 401s unauthenticated requests and 200s a fresh bearer.
+//! A fail-closed (credential-less) 401 must not consume `AuthRetrySchedule` budget.
+//! That was the failure seen in the field: each sleep cycle burned one slot.
+//! Credentialed 401s must still exhaust after `MAX_RETRIES`.
 
 use super::support::*;
 use super::*;
@@ -15,10 +14,9 @@ use xai_grok_test_support::{MockInferenceServer, MockModelEntry};
 /// The token the mock server accepts and the refresher mints on success.
 const FRESH_TOKEN: &str = "refreshed-test-token";
 
-/// With `fail_pre_request`, mimics the post-wake sequence: pre-send
-/// (`PreRequest`) refreshes fail transiently so the send goes out
-/// fail-closed, while the 401-triggered recovery (`ServerRejected`)
-/// succeeds and mints [`FRESH_TOKEN`]. Otherwise always succeeds.
+/// With `fail_pre_request`, mimics the post-wake sequence: pre-send (`PreRequest`) refreshes fail transiently, so the send goes out fail-closed.
+/// The 401-triggered recovery (`ServerRejected`) succeeds and mints [`FRESH_TOKEN`].
+/// Otherwise always succeeds.
 struct WakeGapRefresher {
     calls: Arc<AtomicU32>,
     fail_pre_request: bool,
@@ -46,9 +44,8 @@ impl crate::auth::refresh::TokenRefresher for WakeGapRefresher {
     }
 }
 
-/// `(tempdir, manager)` with a hard-expired OIDC token, so the wire-valid
-/// resolver has nothing to stamp until the refresher succeeds. The tempdir
-/// must outlive the manager (auth.json path).
+/// `(tempdir, manager)` with a hard-expired OIDC token, so the wire-valid resolver has nothing to stamp until the refresher succeeds.
+/// The tempdir must outlive the manager (auth.json path).
 fn expired_auth_manager(
     refresher: Arc<dyn crate::auth::refresh::TokenRefresher>,
 ) -> (tempfile::TempDir, Arc<AuthManager>) {
@@ -94,8 +91,7 @@ fn drain_gateway(
     captured
 }
 
-/// `(error_type, message)` of the turn's terminal `retryState`, if the client
-/// was told about one at all.
+/// `(error_type, message)` of the turn's terminal `retryState`, if the client was told about one.
 fn terminal_failure(updates: &XaiUpdates) -> Option<(String, String)> {
     updates.lock().iter().find_map(|value| {
         let update = value.get("update")?;
@@ -109,19 +105,8 @@ fn terminal_failure(updates: &XaiUpdates) -> Option<(String, String)> {
     })
 }
 
-fn drain_persistence(mut rx: tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>) {
-    tokio::task::spawn_local(async move {
-        while let Some(msg) = rx.recv().await {
-            if let PersistenceMsg::FlushAndAck { respond_to } = msg {
-                let _ = respond_to.send(Ok(()));
-            }
-        }
-    });
-}
-
-/// Actor wired for session-token auth against the mock server: real sampler,
-/// `cached_token` method, `NotByok` model facts (so the session-token gate is
-/// active against the loopback URL), and the supplied auth manager.
+/// Actor wired for session-token auth against the mock server: a real sampler, the `cached_token` method, and the supplied auth manager.
+/// `NotByok` model facts keep the session-token gate active against the loopback URL.
 async fn session_token_actor(
     server: &MockInferenceServer,
     auth_manager: Arc<AuthManager>,
@@ -171,8 +156,7 @@ async fn session_token_actor(
     creds.auth_type = xai_chat_state::AuthType::SessionToken;
     actor.chat_state_handle.update_credentials(creds);
 
-    // Definite NotByok: the session-token gate must stay active against the
-    // loopback mock URL (an `Unknown` would demand a first-party host).
+    // Definite NotByok: the session-token gate must stay active against the loopback mock URL (an `Unknown` would demand a first-party host)
     actor
         .model_auth_memo
         .replace(Some(crate::session::acp_session::ModelAuthMemo {
@@ -241,14 +225,35 @@ async fn run_prompt(
         .expect("turn must finish within timeout")
 }
 
-/// The wake sequence: the resolver has nothing wire-valid, the send goes
-/// out with no `Authorization` header, the server 401s it, recovery lands a
-/// fresh token. The turn must survive and resubmit with the fresh bearer.
-#[tokio::test(flavor = "current_thread")]
-async fn fail_closed_401_is_uncharged_and_turn_survives() {
+/// The turn future needs a session-sized stack (spawn.rs: 8 MiB); default test stacks overflow.
+fn on_session_stack(test: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(test)
+        .expect("spawn test thread")
+        .join()
+        .expect("test thread panicked");
+}
+
+fn run_current_thread<F: std::future::Future>(paused: bool, fut: impl FnOnce() -> F) {
+    let mut builder = tokio::runtime::Builder::new_current_thread();
+    builder.enable_all();
+    if paused {
+        builder.start_paused(true);
+    }
+    let rt = builder.build().expect("test runtime");
     let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
+    rt.block_on(local.run_until(async move {
+        fut().await;
+    }));
+}
+
+/// The wake sequence: the resolver has nothing wire-valid, so the send goes out with no `Authorization` header and the server 401s it.
+/// Recovery lands a fresh token; the turn must survive and resubmit with the fresh bearer.
+#[test]
+fn fail_closed_401_is_uncharged_and_turn_survives() {
+    on_session_stack(|| {
+        run_current_thread(false, || async {
             let server = MockInferenceServer::start_with_required_auth(
                 vec![MockModelEntry::new("test")],
                 FRESH_TOKEN,
@@ -257,9 +262,7 @@ async fn fail_closed_401_is_uncharged_and_turn_survives() {
             .expect("mock inference server");
 
             let calls = Arc::new(AtomicU32::new(0));
-            // Pre-send refreshes fail like a post-wake network gap, so the
-            // first send goes out fail-closed; the 401-recovery refresh
-            // succeeds.
+            // Pre-send refreshes fail like a post-wake network gap, so the first send goes out fail-closed; the 401-recovery refresh succeeds
             let refresher = Arc::new(WakeGapRefresher {
                 calls: calls.clone(),
                 fail_pre_request: true,
@@ -296,21 +299,18 @@ async fn fail_closed_401_is_uncharged_and_turn_survives() {
                 calls.load(Ordering::SeqCst) >= 2,
                 "both the failing pre-flight and the recovery refresh must run"
             );
-        })
-        .await;
+        });
+    });
 }
 
-/// Real credential rejections must still terminate: when every request
-/// carries a bearer the server rejects, the escalating budget exhausts after
-/// `MAX_RETRIES` and the failure names authenticated rejections — not a
-/// generic budget message. `start_paused` auto-advances the backoff ladder.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn authenticated_401s_still_exhaust_after_three_retries() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            // The server only accepts a token the refresher never mints, so
-            // every authenticated send is rejected.
+/// Real credential rejections must still terminate: the escalating budget exhausts after `MAX_RETRIES` when every request carries a rejected bearer.
+/// The failure names authenticated rejections, not a generic budget message.
+/// Real time (not `start_paused`): recovery runs on a nested LocalSet task whose join does not auto-advance paused timers.
+#[test]
+fn authenticated_401s_still_exhaust_after_three_retries() {
+    on_session_stack(|| {
+        run_current_thread(false, || async {
+            // The server only accepts a token the refresher never mints, so every authenticated send is rejected
             let server = MockInferenceServer::start_with_required_auth(
                 vec![MockModelEntry::new("test")],
                 "never-issued-token",
@@ -344,10 +344,8 @@ async fn authenticated_401s_still_exhaust_after_three_retries() {
                 "initial send plus MAX_RETRIES resubmits, all authenticated"
             );
 
-            // The budget is the one terminal path that lives outside
-            // `handle_sampling_failure`, and it used to return its error with
-            // no notification at all — leaving the pager with no re-auth
-            // prompt and no turn-failed block for a turn that died on 401s.
+            // The budget is the one terminal path outside `handle_sampling_failure`, and it used to return its error with no notification
+            // That left the pager with no re-auth prompt and no turn-failed block for a turn that died on 401s
             let (error_type, message) = terminal_failure(&updates)
                 .expect("an exhausted turn must report a terminal retryState");
             assert_eq!(
@@ -358,8 +356,8 @@ async fn authenticated_401s_still_exhaust_after_three_retries() {
                 message.contains("authenticated inference requests were still rejected"),
                 "the notification must carry the same story as the error: {message}"
             );
-        })
-        .await;
+        });
+    });
 }
 
 /// Explicit 2 MiB named-thread + current-thread runtime + LocalSet.
@@ -431,8 +429,6 @@ fn auth_retry_budget_constructs_turn_on_explicit_2mib_stack() {
                     });
                     let (_dir, am) = expired_auth_manager(refresher);
                     let (actor, _xai_updates) = session_token_actor(&server, am).await;
-                    // Construct + start the large future; timeout quickly if
-                    // the budget path would sleep forever without paused time.
                     let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
                         "hello".to_string(),
                     ))];

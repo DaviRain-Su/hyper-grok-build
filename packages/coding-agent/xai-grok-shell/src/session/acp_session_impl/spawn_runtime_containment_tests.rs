@@ -1,13 +1,12 @@
 //! Containment tests for [`super::build_session_runtime`].
 //!
-//! Cases run in a re-exec'd child (the `xai-gix-status` pattern) so
-//! parallel tests are unaffected. Stdout markers distinguish skip
-//! (unenforceable environment) from pass/fail.
+//! Cases run in a re-exec'd child (the `xai-gix-status` pattern) so parallel tests are unaffected.
+//! Stdout markers distinguish skip (unenforceable environment) from pass/fail.
 
 use super::build_session_runtime;
 use xai_tty_utils::runtime::MAX_BLOCKING_THREADS;
 
-/// Env marker dispatching the re-exec'd test binary into child logic.
+/// This env var routes the re-exec'd test binary into the child logic.
 const CHILD_ENV: &str = "XAI_GROK_SHELL_RUNTIME_CONTAINMENT_CHILD";
 const BLOCKING_POOL_CHILD_ENV: &str = "XAI_GROK_SHELL_BLOCKING_POOL_CONTAINMENT_CHILD";
 const PASS_MARK: &str = "runtime-build-contained:";
@@ -69,8 +68,7 @@ fn run_child() -> ! {
         println!("{SKIP_MARK} setrlimit failed");
         std::process::exit(0);
     }
-    // Fill remaining headroom empirically; immune to fds the test
-    // harness already holds.
+    // Fill the remaining headroom empirically; this is immune to fds the test harness already holds
     let mut held = Vec::new();
     loop {
         // SAFETY: dup(0) yields a held fd or fails with EMFILE when full.
@@ -90,8 +88,7 @@ fn run_child() -> ! {
             println!("{PASS_MARK} {e}");
             std::process::exit(0);
         }
-        // The contract under test ("failure is an Err") was not
-        // exercised; skip rather than fail.
+        // The contract under test ("failure is an Err") was not exercised; skip rather than fail
         Ok(_) => {
             println!("{SKIP_MARK} runtime built despite full fd table");
             std::process::exit(0);
@@ -103,8 +100,8 @@ fn thread_count() -> Option<u64> {
     xai_tty_utils::sample_process_resources().threads
 }
 
-/// Child: session runtime must not 16-wide pre-warm (cap proof lives in
-/// `xai-tty-utils`). `spawn_blocking` must still run.
+/// Child: the session runtime must not pre-warm a 16-wide blocking pool (the cap proof lives in `xai-tty-utils`).
+/// `spawn_blocking` must still run.
 fn run_blocking_pool_child() -> ! {
     let Some(before) = thread_count() else {
         println!("{SKIP_MARK} thread count unavailable");

@@ -1,4 +1,4 @@
-//! Shared reasoning-effort gate for the session lifecycle.
+//! Applies a reasoning-effort hint only when the model supports it; shared by session creation, model switch, and the summary client.
 
 use agent_client_protocol as acp;
 use xai_grok_sampler::SamplerConfig;
@@ -6,7 +6,6 @@ use xai_grok_sampling_types::ReasoningEffort;
 
 use crate::agent::models::ModelsManager;
 
-/// Where a resolved effort applies in the session lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EffortTarget {
     NewSession,
@@ -25,7 +24,6 @@ impl EffortTarget {
 }
 
 impl ModelsManager {
-    /// Gate `effort` against `sampling`'s model and, when supported, assign it.
     pub(crate) fn apply_supported_effort(
         &self,
         sampling: &mut SamplerConfig,
@@ -37,7 +35,7 @@ impl ModelsManager {
             return;
         };
         if !self.model_supports_reasoning_effort(&sampling.model) {
-            // SummaryClient stays silent on unsupported; the spawn/switch path already warns the same hint.
+            // SummaryClient stays quiet; the spawn or switch that carried this effort already warned that the model does not support it
             if matches!(target, EffortTarget::NewSession | EffortTarget::ModelSwitch) {
                 tracing::warn!(
                     session_id = %session_id.0,
@@ -48,8 +46,13 @@ impl ModelsManager {
             }
             return;
         }
-        // Same fields at every target; only the level differs. tracing bakes the
-        // level into a static callsite, so match a const level per arm.
+        // Some models are a different model id at each effort, so swap in the id this effort asks for.
+        // Do this before the log, or the log records an id we are not sending.
+        if let Some(routed) = self.model_for_effort(&sampling.model, effort) {
+            sampling.model = routed;
+        }
+        // Same fields at every target; only the level differs
+        // tracing bakes the level into a static callsite, so match a const level per arm
         macro_rules! log_applied {
             ($level:expr) => {
                 tracing::event!(
@@ -72,8 +75,7 @@ impl ModelsManager {
     }
 }
 
-/// Where a `session/new` reasoning-effort hint is routed. At most one variant
-/// carries the hint, so the spawn and switch consumers can never both fire.
+/// At most one variant carries the hint, so the spawn and switch consumers can never both fire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NewSessionEffort {
     /// Seed the spawned session's sampling config (default-model path).
@@ -83,12 +85,8 @@ pub(crate) enum NewSessionEffort {
     None,
 }
 
-/// Resolve the effort hint for `session/new`.
-///
-/// Precedence: an explicit `_meta.reasoningEffort` wins over the process-wide
-/// last-used / `[models].default_reasoning_effort` value
-/// ([`ModelsManager::current_reasoning_effort`]). The catalog default is the
-/// last resort and is left on the sampling config when this returns `None`.
+/// Precedence: an explicit `_meta.reasoningEffort` wins over the process-wide last-used or `[models].default_reasoning_effort` value.
+/// The catalog default is the last resort and is left on the sampling config when this returns `None`.
 pub(crate) fn resolve_new_session_effort_hint(
     meta_hint: Option<ReasoningEffort>,
     current: Option<ReasoningEffort>,
@@ -96,12 +94,6 @@ pub(crate) fn resolve_new_session_effort_hint(
     meta_hint.or(current)
 }
 
-/// Route a `session/new` reasoning-effort hint to exactly one consumer.
-///
-/// New-session precedence: `_meta.reasoningEffort` wins over last-used /
-/// config default, which wins over the model's catalog default. An explicit
-/// `modelId` routes the hint to the post-spawn model switch; the default-model
-/// path seeds it at spawn.
 pub(crate) fn split_new_session_effort(
     resolved_custom_model: Option<&str>,
     hint: Option<ReasoningEffort>,

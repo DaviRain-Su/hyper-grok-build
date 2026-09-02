@@ -173,8 +173,7 @@ fn title_is_manual_round_trips_through_json() {
 
 #[test]
 fn title_is_manual_defaults_false_and_skips_when_unset() {
-    // Old summary.json without the field: default false, so pre-existing
-    // renames show no border title until renamed again.
+    // Old summary.json without the field: default false, so pre-existing renames show no border title until renamed again
     let json = r#"{
             "info": { "id": "old-session", "cwd": "/tmp" },
             "session_summary": "first prompt text",
@@ -211,9 +210,8 @@ fn manual_title_opt_none_for_auto_generated_title() {
     assert_eq!(summary.display_title_opt().as_deref(), Some("Auto Title"));
 }
 
-/// A stale `title_is_manual` over a blank `generated_title` (e.g. written
-/// by an old client before the ext boundary rejected blank renames) must
-/// not relabel the `session_summary` display fallback as manual.
+/// A stale `title_is_manual` over a blank `generated_title` must not relabel the `session_summary` display fallback as manual.
+/// An old client could write that combination before the ext boundary rejected blank renames.
 #[test]
 fn manual_title_opt_ignores_stale_flag_over_blank_generated_title() {
     let mut summary = Summary::new(

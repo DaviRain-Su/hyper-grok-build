@@ -3470,25 +3470,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "flaky: combined_output is sometimes empty in CI"]
-    async fn test_simple_command() {
-        let backend = LocalTerminalBackend::new();
-        let request = make_request("echo hello");
-        let output_file = request.output_file.clone();
-
-        let result = backend.run(request).await.unwrap();
-
-        assert_eq!(result.combined_output.trim(), "hello");
-        assert_eq!(result.exit_code, Some(0));
-        assert!(!result.timed_out);
-
-        let file_content = tokio::fs::read_to_string(&output_file).await.unwrap();
-        assert_eq!(file_content.trim(), "hello");
-
-        let _ = tokio::fs::remove_file(&output_file).await;
-    }
-
-    #[tokio::test]
     async fn test_command_with_exit_code() {
         let backend = LocalTerminalBackend::new();
         let result = backend.run(make_request("exit 42")).await.unwrap();
@@ -3900,54 +3881,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "flaky: combined_output is sometimes empty in CI"]
-    async fn test_multiple_commands() {
-        let backend = LocalTerminalBackend::new();
-
-        let result1 = backend.run(make_request("echo first")).await.unwrap();
-        let result2 = backend.run(make_request("echo second")).await.unwrap();
-
-        assert_eq!(result1.combined_output.trim(), "first");
-        assert_eq!(result2.combined_output.trim(), "second");
-    }
-
-    #[tokio::test]
-    #[ignore = "flaky: output file content sometimes not flushed in CI"]
-    async fn test_output_file_written() {
-        let backend = LocalTerminalBackend::new();
-
-        let output_file =
-            std::env::temp_dir().join(format!("terminal-test-file-{}.out", std::process::id()));
-
-        let request = TerminalRunRequest {
-            command: "echo 'line1'; echo 'line2'; echo 'line3'".to_string(),
-            working_directory: PathBuf::from("/tmp"),
-            env: HashMap::new(),
-            timeout: Duration::from_secs(30),
-            output_byte_limit: 10000,
-            output_file: output_file.clone(),
-            notification_handle: ToolNotificationHandle::noop(),
-            tool_call_id: "test-output-file".to_string(),
-            display_command: None,
-            auto_background_on_timeout: false,
-            foreground_block_budget: None,
-            kind: TaskKind::Bash,
-            owner_session_id: None,
-            description: None,
-        };
-
-        let result = backend.run(request).await.unwrap();
-        assert_eq!(result.exit_code, Some(0));
-
-        let file_content = tokio::fs::read_to_string(&output_file).await.unwrap();
-        assert!(file_content.contains("line1"));
-        assert!(file_content.contains("line2"));
-        assert!(file_content.contains("line3"));
-
-        let _ = tokio::fs::remove_file(&output_file).await;
-    }
-
-    #[tokio::test]
     async fn test_run_background_and_get_task() {
         let backend = LocalTerminalBackend::new();
 
@@ -4350,46 +4283,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "flaky: output buffer sometimes not flushed before kill completes"]
-    async fn test_output_preserved_on_kill() {
-        let backend = LocalTerminalBackend::new();
-        let tmp = tempfile::TempDir::new().unwrap();
-
-        let request = TerminalRunRequest {
-            command: "echo before_kill; sleep 60".to_string(),
-            working_directory: PathBuf::from("/tmp"),
-            env: HashMap::new(),
-            timeout: Duration::from_secs(30),
-            output_byte_limit: 10000,
-            output_file: tmp.path().join("kill-output.out"),
-            notification_handle: ToolNotificationHandle::noop(),
-            tool_call_id: "test-kill-output".to_string(),
-            display_command: None,
-            auto_background_on_timeout: false,
-            foreground_block_budget: None,
-            kind: TaskKind::Bash,
-            owner_session_id: None,
-            description: None,
-        };
-
-        let handle = backend.run_background(request).await.unwrap();
-
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        let outcome = backend.kill_task(&handle.task_id).await;
-        assert_eq!(outcome, KillOutcome::Killed);
-
-        let snapshot = backend.get_task(&handle.task_id).await;
-        if let Some(snapshot) = snapshot {
-            assert!(
-                snapshot.output.contains("before_kill"),
-                "Output should contain 'before_kill', got: {:?}",
-                snapshot.output
-            );
-        }
-    }
-
-    #[tokio::test]
     async fn test_output_preserved_on_timeout() {
         // 2s timeout so the poll loop gets enough ticks to read the echo
         // before the timeout handler snapshots the buffer.
@@ -4461,37 +4354,6 @@ mod tests {
             "Output should contain 'done', got: {:?}",
             result.combined_output
         );
-    }
-
-    #[tokio::test]
-    #[ignore = "flaky: pgrep sees sleep processes from other sandbox co-tenants"]
-    async fn test_kill_kills_child_processes() {
-        let backend = LocalTerminalBackend::new();
-        let request = make_request("bash -c 'sleep 60 & sleep 60 & wait'");
-
-        let handle = backend.run_background(request).await.unwrap();
-
-        tokio::time::sleep(Duration::from_millis(200)).await;
-
-        let _ = backend.kill_task(&handle.task_id).await;
-
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        #[cfg(unix)]
-        {
-            let pgrep = std::process::Command::new("pgrep")
-                .arg("-P")
-                .arg(std::process::id().to_string())
-                .arg("sleep")
-                .output()
-                .expect("pgrep should run");
-
-            assert!(
-                pgrep.stdout.is_empty(),
-                "Expected no sleep processes to remain, but pgrep found: {:?}",
-                String::from_utf8_lossy(&pgrep.stdout)
-            );
-        }
     }
 
     #[test]

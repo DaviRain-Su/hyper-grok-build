@@ -3,11 +3,11 @@ license = "Apache-2.0"
 name = "xai-grok-mcp"
 version = "0.1.0"
 edition.workspace = true
-description = "MCP integration crate. Quarantines rmcp + reqwest 0.13 (rmcp 2.1 requires reqwest >= 0.13.2 while the rest of the workspace uses reqwest 0.12) and owns the MCP credential store and OAuth flow orchestrator."
+description = "MCP integration crate. Quarantines rmcp + reqwest 0.13 (rmcp 3.x requires reqwest >= 0.13.2 while the rest of the workspace uses reqwest 0.12) and owns the MCP credential store and OAuth flow orchestrator."
 authors = ["xAI"]
 
 [dependencies]
-rmcp = { version = "2.1", features = [
+rmcp = { version = "3.2", features = [
     "auth",
     "client",
     "transport-async-rw",
@@ -42,7 +42,7 @@ url = { workspace = true }
 webbrowser = { workspace = true }
 xai-grok-config = { workspace = true }
 
-# For mcp_http_client.rs (rmcp trait signatures). Must match rmcp 2.1's own
+# For mcp_http_client.rs (rmcp trait signatures). Must match rmcp 3.x's own
 # versions or the trait types won't unify.
 http = { workspace = true }
 sse-stream = "0.2"

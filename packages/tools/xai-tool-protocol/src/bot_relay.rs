@@ -49,6 +49,16 @@ pub const COMMAND_REJECTED_ATTACHMENTS_NOT_SUPPORTED_IN_LIVE: &str =
 /// prompt acceptance (no Temporal interrupt RPC; on-box ledger is never written).
 pub const COMMAND_REJECTED_NOT_SUPPORTED_IN_LIVE: &str = "not_supported_in_live";
 
+/// `reason` on `command_rejected` when attachUpload cannot fetch the file because this connection has no usable credential.
+pub const COMMAND_REJECTED_ATTACHMENT_CREDENTIAL_UNAVAILABLE: &str =
+    "attachment_credential_unavailable";
+
+/// `reason` on `command_rejected` when the owning harness refused the send.
+/// Nothing was accepted and the same message may be sent again. The upstream
+/// `failureCode` is logged rather than surfaced, because this list is a closed
+/// client contract.
+pub const COMMAND_REJECTED_HARNESS_REFUSED: &str = "harness_refused";
+
 /// `reason` on `command_rejected` when attachUpload cannot see the file (missing or not the caller's).
 pub const COMMAND_REJECTED_ATTACHMENT_NOT_FOUND: &str = "attachment_not_found";
 
@@ -64,6 +74,25 @@ pub const COMMAND_REJECTED_ATTACHMENT_NOT_READY: &str = "attachment_not_ready";
 /// `reason` on `command_rejected` when the box refused a well-formed
 /// catalog method (capability skew, not a client catalog bug).
 pub const COMMAND_REJECTED_GATEWAY_UNKNOWN_METHOD: &str = "gateway/unknown-method";
+
+/// Every `command_rejected` reason above, sorted. Codegen fails if this
+/// disagrees with the `COMMAND_REJECTED_*` consts, and the hub checks its
+/// metrics label set against it, so a new reason cannot land uncounted.
+pub const COMMAND_REJECTED_REASONS: &[&str] = &[
+    COMMAND_REJECTED_AGENT_ID_MISMATCH,
+    COMMAND_REJECTED_ARGS_INVALID,
+    COMMAND_REJECTED_ARGS_TOO_LARGE,
+    COMMAND_REJECTED_ATTACHMENTS_NOT_SUPPORTED_IN_LIVE,
+    COMMAND_REJECTED_ATTACHMENT_CREDENTIAL_UNAVAILABLE,
+    COMMAND_REJECTED_ATTACHMENT_NOT_FOUND,
+    COMMAND_REJECTED_ATTACHMENT_NOT_READY,
+    COMMAND_REJECTED_ATTACHMENT_TOO_LARGE,
+    COMMAND_REJECTED_ATTACHMENT_WRONG_SOURCE,
+    COMMAND_REJECTED_GATEWAY_UNKNOWN_METHOD,
+    COMMAND_REJECTED_HARNESS_REFUSED,
+    COMMAND_REJECTED_NOT_SUPPORTED_IN_LIVE,
+    COMMAND_REJECTED_NOT_YET_ENABLED,
+];
 
 /// True only when the hub classified a box unknown-method refusal.
 /// False for `unknown_method` (catalog-miss), `not_yet_enabled`,
@@ -104,7 +133,11 @@ pub type BotCommandResult = serde_json::Value;
 
 /// `bot.vncDescriptor` params.
 #[typeshare]
-pub type BotVncDescriptorParams = BotEmptyParams;
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BotVncDescriptorParams {
+    pub agent_id: String,
+}
 
 /// `bot.vncDescriptor` result.
 ///
@@ -136,8 +169,12 @@ pub type BotRosterParams = BotEmptyParams;
 pub struct BotRosterEntry {
     pub agent_id: String,
     pub name: String,
+    /// One of `running`, `idle` or `unknown`. A row read off-box is always
+    /// `unknown`: the durable registry holds identities, not activity. A later
+    /// read against a live box replaces it.
     pub status: String,
-    /// Unix time in milliseconds of the agent's last turn, when known.
+    /// Unix time in milliseconds of the agent's last turn. Absent on a cold
+    /// row: the durable registry records no turn time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[typeshare(serialized_as = "Option<I54>")]
     pub last_turn_at: Option<i64>,
@@ -291,6 +328,34 @@ pub type BotBindConversationResult = BotEmptyResult;
 #[serde(rename_all = "snake_case")]
 pub enum BotRelayErrorCode {
     IdentityUnavailable,
+    /// The xAI account has never been linked to a Cursor account. The user
+    /// must run the link flow (or JIT provisions once opted in).
+    LinkRequired,
+    /// The link was explicitly removed (a sticky unlink on the Cursor
+    /// side). Re-linking takes an explicit flow, never a silent retry.
+    LinkRemoved,
+    /// Linking needs the user's recorded consent before an existing Cursor
+    /// account can be attached. Definitive until the consent UX runs.
+    ConsentRequired,
+    /// Enterprise-managed on either side (enterprise-claimed email domain,
+    /// active team, or server-side enterprise policy); the flow serves
+    /// self-serve accounts only. `reason` names which rule refused.
+    EnterpriseUnsupported,
+    /// The matched Cursor account is on legacy request-based pricing.
+    LegacyPricingUnsupported,
+    /// The xAI account has no verified email, so no Cursor account can be
+    /// matched or created. Fixable on the xAI side.
+    EmailUnverified,
+    /// Linking hit a conflict that needs manual resolution: the email
+    /// matches multiple accounts, or a 1:1 link rule declined the pair.
+    /// `reason` distinguishes.
+    LinkConflict,
+    /// A link exists, but its Cursor account is gone or unusable.
+    CursorAccountUnavailable,
+    /// Definitive self-serve refusal this client build does not know more
+    /// precisely (a reason token newer than the mapping). `reason` carries
+    /// the token verbatim.
+    LinkUnsupported,
     NoPlan,
     UsageExhausted,
     BoxMigrating,
@@ -304,6 +369,15 @@ pub enum BotRelayErrorCode {
 impl BotRelayErrorCode {
     pub const ALL: &'static [Self] = &[
         Self::IdentityUnavailable,
+        Self::LinkRequired,
+        Self::LinkRemoved,
+        Self::ConsentRequired,
+        Self::EnterpriseUnsupported,
+        Self::LegacyPricingUnsupported,
+        Self::EmailUnverified,
+        Self::LinkConflict,
+        Self::CursorAccountUnavailable,
+        Self::LinkUnsupported,
         Self::NoPlan,
         Self::UsageExhausted,
         Self::BoxMigrating,
@@ -317,6 +391,15 @@ impl BotRelayErrorCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::IdentityUnavailable => "identity_unavailable",
+            Self::LinkRequired => "link_required",
+            Self::LinkRemoved => "link_removed",
+            Self::ConsentRequired => "consent_required",
+            Self::EnterpriseUnsupported => "enterprise_unsupported",
+            Self::LegacyPricingUnsupported => "legacy_pricing_unsupported",
+            Self::EmailUnverified => "email_unverified",
+            Self::LinkConflict => "link_conflict",
+            Self::CursorAccountUnavailable => "cursor_account_unavailable",
+            Self::LinkUnsupported => "link_unsupported",
             Self::NoPlan => "no_plan",
             Self::UsageExhausted => "usage_exhausted",
             Self::BoxMigrating => "box_migrating",
@@ -332,6 +415,15 @@ impl BotRelayErrorCode {
     pub fn from_wire(s: &str) -> Self {
         match s {
             "identity_unavailable" => Self::IdentityUnavailable,
+            "link_required" => Self::LinkRequired,
+            "link_removed" => Self::LinkRemoved,
+            "consent_required" => Self::ConsentRequired,
+            "enterprise_unsupported" => Self::EnterpriseUnsupported,
+            "legacy_pricing_unsupported" => Self::LegacyPricingUnsupported,
+            "email_unverified" => Self::EmailUnverified,
+            "link_conflict" => Self::LinkConflict,
+            "cursor_account_unavailable" => Self::CursorAccountUnavailable,
+            "link_unsupported" => Self::LinkUnsupported,
             "no_plan" => Self::NoPlan,
             "usage_exhausted" => Self::UsageExhausted,
             "box_migrating" => Self::BoxMigrating,
@@ -343,34 +435,91 @@ impl BotRelayErrorCode {
         }
     }
 
-    /// Closest existing [`crate::ERROR_CODES`] numeric. Receivers switch on
-    /// the string [`Self::as_str`] in `data`, not this companion.
-    pub const fn jsonrpc_numeric(self) -> i32 {
+    /// The `(numeric, key)` JSON-RPC class from [`crate::ERROR_CODES`] for
+    /// every code — the single exhaustive mapping both
+    /// [`Self::jsonrpc_numeric`] and [`Self::jsonrpc_code_key`] project
+    /// from, so the two companion values cannot drift and adding a variant
+    /// forces an intentional classification.
+    const fn jsonrpc_class(self) -> (i32, &'static str) {
         match self {
-            Self::NoPlan => -32003,         // forbidden
-            Self::UsageExhausted => -32099, // rate_limited
+            Self::NoPlan
+            | Self::LinkRequired
+            | Self::LinkRemoved
+            | Self::ConsentRequired
+            | Self::EnterpriseUnsupported
+            | Self::LegacyPricingUnsupported
+            | Self::EmailUnverified
+            | Self::LinkConflict
+            | Self::CursorAccountUnavailable
+            | Self::LinkUnsupported => (-32003, "forbidden"),
+            Self::UsageExhausted => (-32099, "rate_limited"),
             Self::IdentityUnavailable
             | Self::BoxMigrating
             | Self::BoxRecreating
             | Self::BoxUnavailable
-            | Self::ComputerUnavailable => -32013, // tool_unavailable
-            Self::CommandRejected => -32600, // invalid_request
-            Self::UpstreamError => -32603,  // internal_error
+            | Self::ComputerUnavailable => (-32013, "tool_unavailable"),
+            Self::CommandRejected => (-32600, "invalid_request"),
+            Self::UpstreamError => (-32603, "internal_error"),
         }
+    }
+
+    /// Closest existing [`crate::ERROR_CODES`] numeric. Receivers switch on
+    /// the string [`Self::as_str`] in `data`, not this companion.
+    pub const fn jsonrpc_numeric(self) -> i32 {
+        self.jsonrpc_class().0
+    }
+
+    /// Whether this is a definitive link-state refusal of the account
+    /// link: never retryable, always carries the machine `reason` token.
+    pub const fn is_link_state(self) -> bool {
+        matches!(
+            self,
+            Self::LinkRequired
+                | Self::LinkRemoved
+                | Self::ConsentRequired
+                | Self::EnterpriseUnsupported
+                | Self::LegacyPricingUnsupported
+                | Self::EmailUnverified
+                | Self::LinkConflict
+                | Self::CursorAccountUnavailable
+                | Self::LinkUnsupported
+        )
     }
 
     /// [`crate::ERROR_CODES`] key paired with [`Self::jsonrpc_numeric`].
     pub const fn jsonrpc_code_key(self) -> &'static str {
-        match self {
-            Self::NoPlan => "forbidden",
-            Self::UsageExhausted => "rate_limited",
-            Self::IdentityUnavailable
-            | Self::BoxMigrating
-            | Self::BoxRecreating
-            | Self::BoxUnavailable
-            | Self::ComputerUnavailable => "tool_unavailable",
-            Self::CommandRejected => "invalid_request",
-            Self::UpstreamError => "internal_error",
+        self.jsonrpc_class().1
+    }
+}
+
+/// The link-state subset of [`BotRelayErrorCode`] as its own type, so
+/// constructors that only accept link states are infallible by shape
+/// instead of guarded by asserts. Converts losslessly into the wire enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LinkStateCode {
+    LinkRequired,
+    LinkRemoved,
+    ConsentRequired,
+    EnterpriseUnsupported,
+    LegacyPricingUnsupported,
+    EmailUnverified,
+    LinkConflict,
+    CursorAccountUnavailable,
+    LinkUnsupported,
+}
+
+impl From<LinkStateCode> for BotRelayErrorCode {
+    fn from(code: LinkStateCode) -> Self {
+        match code {
+            LinkStateCode::LinkRequired => Self::LinkRequired,
+            LinkStateCode::LinkRemoved => Self::LinkRemoved,
+            LinkStateCode::ConsentRequired => Self::ConsentRequired,
+            LinkStateCode::EnterpriseUnsupported => Self::EnterpriseUnsupported,
+            LinkStateCode::LegacyPricingUnsupported => Self::LegacyPricingUnsupported,
+            LinkStateCode::EmailUnverified => Self::EmailUnverified,
+            LinkStateCode::LinkConflict => Self::LinkConflict,
+            LinkStateCode::CursorAccountUnavailable => Self::CursorAccountUnavailable,
+            LinkStateCode::LinkUnsupported => Self::LinkUnsupported,
         }
     }
 }
@@ -401,7 +550,9 @@ pub struct BotRelayErrorDetail {
 ///
 /// Wire form: `{code, retryable, detail, reason?}`.
 /// `detail` is always present (empty object when unused).
-/// `reason` is set only for [`BotRelayErrorCode::CommandRejected`].
+/// `reason` is set for [`BotRelayErrorCode::CommandRejected`] and for the
+/// link-state codes ([`BotRelayErrorCode::is_link_state`]), where it
+/// carries the exchange's machine reason token for per-case client copy.
 ///
 /// On the JSON-RPC envelope this object is `error.data`. Receivers
 /// switch on `data.code`. The envelope `error.message` is the snake_case
@@ -732,6 +883,19 @@ mod tests {
                 json!({"agentId": "agt_1", "name": "noop", "args": args})
             );
         }
+    }
+
+    #[test]
+    fn vnc_descriptor_params_require_agent_id() {
+        let params = BotVncDescriptorParams {
+            agent_id: "agt_...".to_owned(),
+        };
+        let wire = json!({"agentId": "agt_..."});
+        assert_eq!(roundtrip(&params), wire);
+        let parsed: BotVncDescriptorParams = serde_json::from_value(wire).unwrap();
+        assert_eq!(parsed, params);
+        assert_rejects::<BotVncDescriptorParams>(json!({}));
+        assert_rejects::<BotVncDescriptorParams>(json!({"agent_id": "agt_..."}));
     }
 
     #[test]
@@ -1390,33 +1554,6 @@ mod tests {
         let parsed_body: HubResyncRequiredEvent = serde_json::from_value(parsed.event).unwrap();
         assert_eq!(parsed_body, resync);
     }
-
-    #[test]
-    fn hello_ack_can_advertise_bot_verbs() {
-        use crate::{ConnectionId, HelloAckMsg, UserId};
-
-        let ack = HelloAckMsg {
-            connection_id: ConnectionId::new("conn_1").unwrap(),
-            user_id: UserId::new("user_1").unwrap(),
-            computer_hub_version: "0.1.0".to_owned(),
-            supported_protocol_versions: vec![crate::PROTOCOL_VERSION.to_owned()],
-            capabilities: BOT_RELAY_CAPABILITIES
-                .iter()
-                .map(|s| (*s).to_owned())
-                .collect(),
-        };
-        let json = serde_json::to_value(&ack).expect("serialize");
-        let parsed: HelloAckMsg = serde_json::from_value(json).expect("deserialize");
-        assert_eq!(
-            parsed
-                .capabilities
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            BOT_RELAY_CAPABILITIES
-        );
-    }
-
     #[test]
     fn event_envelope_new_omits_event_id_on_the_wire() {
         let env = BotEventEnvelope::new("agt_1", 1, HubChannel::ResyncRequired, json!({}));

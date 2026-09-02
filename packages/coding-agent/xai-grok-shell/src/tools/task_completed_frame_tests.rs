@@ -66,8 +66,7 @@ fn a_multi_megabyte_log_fits_and_points_at_the_file() {
     assert!(snapshot.output.contains("/tmp/bg-1.log"));
 }
 
-/// Limiting the output field alone misses this: JSON encoding makes each of
-/// these bytes six times larger.
+/// Limiting the output field alone misses this: JSON encoding makes each of these bytes six times larger.
 #[test]
 fn escaped_output_fits_too() {
     let mut notification = notification(&"\u{7}".repeat(30 * 1024));
@@ -77,8 +76,7 @@ fn escaped_output_fits_too() {
     assert!(!task_snapshot(&mut notification).unwrap().output.is_empty());
 }
 
-/// The output is not the only field a task can grow: with no output at all,
-/// the frame must still fit once the other variable fields are capped.
+/// The output is not the only field a task can grow: with no output at all, the frame must still fit once the other variable fields are capped.
 #[test]
 fn oversized_non_output_fields_are_capped_too() {
     let mut notification = notification("");
@@ -103,8 +101,7 @@ fn a_long_log_path_still_fits() {
     let params = encode(&mut notification).unwrap();
 
     assert!(frame_len(&params) <= FRAME_MAX_BYTES);
-    // A long path costs output, but the pointer stays whole: a truncated one
-    // would send the reader nowhere.
+    // A long path costs output, but the pointer stays whole: a truncated one would send the reader nowhere
     let snapshot = task_snapshot(&mut notification).unwrap();
     assert!(
         snapshot
@@ -126,9 +123,8 @@ fn the_encoded_message_matches_the_one_left_on_the_notification() {
     );
 }
 
-/// A cut output can still be longer than the original once the footer is
-/// added, so the mark cannot come from comparing lengths. The squeeze uses the
-/// session id because compaction does not give that room back.
+/// A cut output can still be longer than the original once the footer is added, so the mark cannot come from comparing lengths.
+/// The test pads the session id because compaction does not give that room back.
 #[test]
 fn output_cut_to_fit_is_always_marked_incomplete() {
     const ROOM_FOR_OUTPUT: usize = 716;
@@ -152,8 +148,8 @@ fn output_cut_to_fit_is_always_marked_incomplete() {
     assert!(snapshot.truncated, "a cut output must be marked incomplete");
 }
 
-/// Nothing is returned unmeasured. When even the ids do not fit, there is no
-/// message to send, and sending one anyway is what closes the connection.
+/// Nothing is returned unmeasured.
+/// When even the ids do not fit, there is no message to send, and sending one anyway is what closes the connection.
 #[test]
 fn a_message_that_cannot_fit_at_all_is_not_returned() {
     let mut notification = notification("hello");
@@ -162,9 +158,8 @@ fn a_message_that_cannot_fit_at_all_is_not_returned() {
     assert!(encode(&mut notification).is_none());
 }
 
-/// A recorded completion that fits no other way loses its output and gets a
-/// capped path, the same last resort the live path takes, instead of being
-/// dropped.
+/// A recorded completion that fits no other way loses its output and gets a capped path instead of being dropped.
+/// That is the same last resort the live path takes.
 #[test]
 fn a_recorded_completion_with_an_oversized_path_is_refit_not_dropped() {
     let mut record = serde_json::to_value(notification(&"Z".repeat(64 * 1024))).unwrap();
@@ -180,8 +175,7 @@ fn a_recorded_completion_with_an_oversized_path_is_refit_not_dropped() {
     }
 }
 
-/// A recorded completion whose command alone is oversized is refit, not
-/// dropped: the replay path caps the same fields the live path does.
+/// The replay path caps the same fields the live path does.
 #[test]
 fn a_recorded_completion_with_an_oversized_command_is_refit() {
     let mut record = serde_json::to_value(notification("small\n")).unwrap();
@@ -196,9 +190,8 @@ fn a_recorded_completion_with_an_oversized_command_is_refit() {
     }
 }
 
-/// The wrapper reservation, re-derived here from the JSON-RPC line shape
-/// the bridge sends. A transport change shows up as this test going stale,
-/// not as proof against it.
+/// The wrapper reservation, re-derived here from the JSON-RPC line shape the bridge sends.
+/// A transport change shows up as this test going stale, not as proof against it.
 #[test]
 fn the_reservation_matches_the_line_the_transport_writes() {
     let body = "{}";

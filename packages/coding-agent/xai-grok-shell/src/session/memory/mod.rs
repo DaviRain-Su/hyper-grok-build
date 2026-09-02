@@ -1,13 +1,9 @@
 //! Memory system shim.
 //!
-//! The memory "core engine" now lives in the standalone `xai-grok-memory`
-//! crate. This module re-exports that crate's public surface under the
-//! historical `crate::session::memory::*` paths so the ~30 reverse-dependency
-//! call sites in this crate keep compiling unchanged.
+//! The memory "core engine" now lives in the standalone `xai-grok-memory` crate.
+//! This module re-exports that crate's public API under the historical `crate::session::memory::*` paths.
 //!
-//! Only `hooks` stays here: it is session glue (depends on
-//! `crate::sampling` and `crate::session::helpers::session_compact`) and is
-//! not part of the relocatable core engine.
+//! Only `hooks` stays here: it is session glue (depends on `crate::sampling` and `crate::session::helpers::session_compact`).
 
 pub mod hooks;
 

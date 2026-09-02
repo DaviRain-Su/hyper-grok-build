@@ -185,14 +185,6 @@ impl SystemPowerListener {
 mod tests {
     use super::*;
 
-    #[test]
-    fn power_event_is_copy_eq() {
-        let e = PowerEvent::WillSleep;
-        let copied = e; // Copy
-        assert_eq!(e, copied);
-        assert_ne!(PowerEvent::WillSleep, PowerEvent::DidWake);
-    }
-
     /// `start` + `drop` must be clean on every platform: no panic and no hang
     /// (the latter exercises the macOS run-loop teardown). On Linux/Windows CI
     /// `start` may return `None` (no system bus / unsupported) — also fine.

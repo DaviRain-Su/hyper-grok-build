@@ -1,10 +1,12 @@
-//! Session-close timing: a closed table of `session_end.*` spans plus a
-//! per-session [`SessionEndTimer`] that feeds the `SessionEndTimings` event.
+//! Session-close timing: a closed table of `session_end.*` spans plus a per-session [`SessionEndTimer`] that feeds the `SessionEndTimings` event.
 //!
-//! Leaf phases carry a duration field; wrapper phases (`Memory`, `Hooks`,
-//! `Workflows`, `Feedback`, `SessionFlush`) are span-only aggregates of their
-//! leaves, so summing every `*_ms` double-counts. Adding a leaf [`Phase`] wires
-//! it to a field in [`phase_event_slot`] (exhaustive) or it stays span-only.
+//! Leaf phases carry a duration field.
+//! Wrapper phases (`Memory`, `Hooks`, `Workflows`, `Feedback`, `SessionFlush`) are span-only aggregates of their leaves.
+//! Summing every `*_ms` therefore double-counts.
+//! Adding a leaf [`Phase`] wires it to a field in [`phase_event_slot`] (exhaustive) or it stays span-only.
+//!
+//! The timer also records `total_ms`, the wall-clock from its creation (session end starts) to emit.
+//! So `total_ms - sum(leaves)` is time spent between the measured steps.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -22,6 +24,7 @@ pub enum Phase {
     HooksStop,
     Memory,
     MemorySave,
+    /// Intentionally unpopulated; retained because downstream metrics consumers still read this field.
     MemoryConsolidate,
     Feedback,
     FeedbackDrain,
@@ -69,9 +72,19 @@ pub fn record_join(span: &Region, outcome: &str, elapsed_ms: u64, notice_shown: 
     s.record("notice_shown", notice_shown);
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SessionEndTimer {
+    start: Instant,
     phases: Mutex<Vec<(Phase, u64)>>,
+}
+
+impl Default for SessionEndTimer {
+    fn default() -> Self {
+        Self {
+            start: Instant::now(),
+            phases: Mutex::default(),
+        }
+    }
 }
 
 pub type SharedSessionEndTimer = Arc<SessionEndTimer>;
@@ -79,6 +92,11 @@ pub type SharedSessionEndTimer = Arc<SessionEndTimer>;
 impl SessionEndTimer {
     pub fn new_shared() -> SharedSessionEndTimer {
         Arc::new(Self::default())
+    }
+
+    /// Wall-clock since the timer was created (session-end teardown start).
+    pub fn elapsed_ms(&self) -> u64 {
+        u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 
     pub fn record(&self, phase: Phase, elapsed: Duration) {
@@ -180,7 +198,7 @@ mod tests {
     #[test]
     fn write_event_phases_maps_every_leaf_and_skips_wrappers() {
         let timer = SessionEndTimer::default();
-        // Distinct value per leaf so a mis-wired slot (HooksStop -> hooks_dispatch_ms) fails.
+        // Distinct value per leaf so a mis-wired slot (HooksStop writing hooks_dispatch_ms) fails
         timer.record(Phase::MemorySave, Duration::from_millis(1));
         timer.record(Phase::MemoryConsolidate, Duration::from_millis(2));
         timer.record(Phase::HooksDispatch, Duration::from_millis(3));

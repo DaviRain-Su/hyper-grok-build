@@ -1,83 +1,52 @@
 //! Heuristic stop-detector for premature "give up" turn endings.
 //!
-//! The model is judged to be bailing out when the LAST non-empty
-//! paragraph of its turn-final text starts with one of the patterns
-//! commonly used as a bail / hand-off / verdict signal.
-//! On a hit, `maybe_queue_goal_continuation` (reached on the success /
-//! continuation path) renders the bail-specific continuation nudge
-//! instead of the generic one and the harness emits
-//! `Event::GoalPrematureStopDetected { pattern }` tagged with the
-//! matched pattern label so dashboards can audit precision / recall of
-//! the regex panel.
+//! The model is judged to be bailing out when the LAST non-empty paragraph of its turn-final text starts with one of the patterns below.
+//! The patterns are phrasings commonly used as a bail / hand-off / verdict signal.
+//! On a hit, `maybe_queue_goal_continuation` (reached on the success / continuation path) renders the bail-specific nudge instead of the generic one.
+//! The harness emits `Event::GoalPrematureStopDetected { pattern }` tagged with the matched pattern label.
+//! Dashboards use the pattern label to audit precision / recall of the regex panel.
 //!
-//! Each regex is locked to a source-string constant in
-//! [`STOP_REGEX_SOURCES`] by a regression test (asserting each
-//! `Regex::as_str()` matches) so a later refactor cannot silently
-//! swap a pattern out. Two patterns are expressed in two stages
-//! rather than as a single regex:
+//! Two patterns are expressed in two stages rather than as a single regex:
 //!
-//! 1. [`CHECK_BACK_LATER`] — a single-regex form would need a negative
-//!    lookahead `(?!your?\b)` that the `regex` crate does not
-//!    support; we implement the same semantics in two stages
-//!    (broad first-stage regex + `your`/`you` post-filter in
-//!    `check_back_later_matches`).
-//! 2. `STOPPING_HERE` — the base trailer set
-//!    `(?:\.|$| \u2014| -| until| pending| since| because)` is
-//!    widened to include `,`, `;`, and ` for ` so naturally-occurring
-//!    sign-offs like "Stopping here for now.", "Stopping here, will
-//!    come back later.", and "Paused here; review needed." still
-//!    fire. The widening is bounded by a non-letter boundary in the
-//!    tests so in-word matches like "Stopping hereafter" stay
-//!    rejected.
+//! 1. [`CHECK_BACK_LATER`]: a single-regex form would need a negative lookahead `(?!your?\b)` that the `regex` crate does not support.
+//!    The same check runs in two stages instead: a broad first-stage regex, then a `your`/`you` post-filter in `check_back_later_matches`.
+//! 2. `STOPPING_HERE`: the base trailer set `(?:\.|$| \u2014| -| until| pending| since| because)` is widened to include `,`, `;`, and ` for `.
+//!    Natural sign-offs like "Stopping here for now.", "Stopping here, will come back later.", and "Paused here; review needed." still fire.
+//!    The widening is bounded by a non-letter boundary in the tests so in-word matches like "Stopping hereafter" stay rejected.
 //!
-//! Intentionally omitted from this panel: a broad catch-all
-//! "continuation deferral" pattern (`\b(?:once|when|after|until|
-//! as soon as)\b…`). Stand-alone it fires on routine work narration
-//! ("Once the test settles I'll iterate") and the resulting false-
-//! positive rate dwarfs the bail signal we care about; the more
-//! specific patterns below already cover the bail surface.
-//!
-//! Regexes are anchored with `^` so the marker must start a line; in-
-//! prose mentions like "I can't continue without your input" mid-
-//! sentence are intentionally ignored.
+//! Intentionally omitted from this panel: a broad catch-all "continuation deferral" pattern (`\b(?:once|when|after|until|as soon as)\b…`).
+//! Stand-alone it fires on routine work narration ("Once the test settles I'll iterate"), and that false-positive rate dwarfs the bail signal.
+//! The more specific patterns below already cover the bail phrasings.
 
 use regex::Regex;
 use std::sync::LazyLock;
 
-/// Stable label for `Event::GoalPrematureStopDetected.pattern` when
-/// the surrender-phrasing regex fires.
+/// Stable label for `Event::GoalPrematureStopDetected.pattern` when the surrender-phrasing regex fires.
 pub(crate) const PATTERN_UNABLE_TO_PROCEED: &str = "unable_to_proceed";
 /// Stable label for "giving up" / "task not actionable".
 pub(crate) const PATTERN_GIVING_UP: &str = "giving_up";
-/// Stable label for "Stopping here" / "Parked the branch" /
-/// "Paused here" family.
+/// Stable label for "Stopping here" / "Parked the branch" / "Paused here" family.
 pub(crate) const PATTERN_STOPPING_HERE: &str = "stopping_here";
-/// Stable label for the "N agents in flight" / loop-active /
-/// "Waiting for the cron" hand-off family.
+/// Stable label for the "N agents in flight" / loop-active / "Waiting for the cron" hand-off family.
 pub(crate) const PATTERN_AGENTS_IN_FLIGHT: &str = "agents_in_flight";
-/// Stable label for the "I'll check back / retry later" deferral
-/// pattern (`CHECK_BACK_LATER`).
+/// Stable label for the "I'll check back / retry later" deferral pattern (`CHECK_BACK_LATER`).
 pub(crate) const PATTERN_CHECK_BACK_LATER: &str = "check_back_later";
 /// Stable label for the `VERDICT: PASS|FAIL` self-sign-off.
 pub(crate) const PATTERN_VERDICT_LINE: &str = "verdict_line";
 /// Stable label for the commit / push / PR-opened hand-off family.
 pub(crate) const PATTERN_COMMIT_PUSH_PR: &str = "commit_push_pr";
-/// Stable label for the "Ready for review / to merge / to ship"
-/// hand-off.
+/// Stable label for the "Ready for review / to merge / to ship" hand-off.
 pub(crate) const PATTERN_READY_FOR_REVIEW: &str = "ready_for_review";
-/// Stable label for the "Please <verb> X for me" user-deflection
-/// pattern.
+/// Stable label for the "Please <verb> X for me" user-deflection pattern.
 pub(crate) const PATTERN_PLEASE_DEFLECTION: &str = "please_deflection";
 
 const UNABLE_TO_PROCEED_SRC: &str = r"^I (?:can(?:'?t|not)|am unable to) (?:proceed|continue|make (?:any )?progress|complete|fix this)\b";
 const GIVING_UP_SRC: &str = r"^(?:Giving up|I(?:'m| am) giving up|The task is not actionable)\b";
 const STOPPING_HERE_SRC: &str = r"^(?:Stopping here|I've stopped here|Parked (?:the|this) branch|Paused here)(?:\.|,|;|$| for | \u{2014}| -| until| pending| since| because)";
 const AGENTS_IN_FLIGHT_SRC: &str = r"^(?:(?:\*\*)?[1-9]\d* (?:agent|cron|task|fork|job|worker|PR|check)s? (?:in flight|remaining|active|still (?:running|working)|pending|running|launched)\b|(?:Continuous )?(?:[Ll]oop|[Cc]rons?|[Bb]abysit) (?:active|healthy|continuing|running|will keep|continues)\b|Waiting for (?:the )?(?:agent|cron|task|fork|worker|job|remaining|them)s?\b|Agents? will report back\b|Waiting\.?$)";
-/// First-stage regex for `CHECK_BACK_LATER`. Captures the trailing
-/// token after `when|once|after|until` so the post-filter can decide
-/// whether the deferral target is the user (`you`/`your`) or the
-/// system (anything else). `in`/`again` branches are unconditional —
-/// they are never a deferral back to the user.
+/// First-stage regex for `CHECK_BACK_LATER`. Captures the trailing token after `when|once|after|until`.
+/// The post-filter uses it to decide whether the deferral target is the user (`you`/`your`) or the system (anything else).
+/// `in`/`again` branches are unconditional: they are never a deferral back to the user.
 const CHECK_BACK_LATER_BROAD_SRC: &str = r"^(?:I will|I'll|Will) (?:check back|re-?check|poll|look again|retry|re-?run|try again) (?:in\b|again\b|(?:when|once|after|until)\s+(\S+))";
 const VERDICT_LINE_SRC: &str = r"^VERDICT: (?:PASS|FAIL)\b";
 const COMMIT_PUSH_PR_SRC: &str = r"^(?:Pushed (?:to `|`[0-9a-f]{7,})|Committed as `?[0-9a-f]{7,}\b|Commit: `?[0-9a-f]{7,}\b|(?:Opened|Created) PR #?\d)";
@@ -104,28 +73,22 @@ static READY_FOR_REVIEW: LazyLock<Regex> =
 static PLEASE_DEFLECTION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(PLEASE_DEFLECTION_SRC).expect("PLEASE_DEFLECTION must compile"));
 
-/// `CHECK_BACK_LATER` post-filter: the broad regex captures the
-/// trailing token after `when|once|after|until`; the equivalent
-/// negative-lookahead `(?!your?\b)` means "the trailing
-/// token does not start a `your?` word". `you`/`your` followed by a
-/// word-boundary character (anything outside `[A-Za-z0-9_]`) is a
-/// deferral to the user, which should NOT be flagged as a self-bail.
+/// `CHECK_BACK_LATER` post-filter: the broad regex captures the trailing token after `when|once|after|until`.
+/// A deferral to the user should NOT be flagged as a self-bail.
 fn check_back_later_matches(line: &str) -> bool {
     let Some(caps) = CHECK_BACK_LATER_BROAD.captures(line) else {
         return false;
     };
     let Some(target) = caps.get(1) else {
-        // `in` / `again` branches have no capture — always a bail.
+        // `in` / `again` branches have no capture: always a bail
         return true;
     };
     let token = target.as_str();
     !is_user_pronoun(token)
 }
 
-/// True iff `token` is a `\byour?\b`-matching word — i.e. `you` or
-/// `your` immediately followed by a non-word character (or
-/// end-of-string). Anything longer (`yours`, `youthful`, …) is not
-/// the negative branch.
+/// True iff `token` is a `\byour?\b`-matching word: `you` or `your` immediately followed by a non-word character (or end-of-string).
+/// Anything longer (`yours`, `youthful`, …) is not the negative branch.
 fn is_user_pronoun(token: &str) -> bool {
     let lower = token.to_ascii_lowercase();
     for stem in ["your", "you"] {
@@ -141,8 +104,7 @@ fn is_user_pronoun(token: &str) -> bool {
     false
 }
 
-/// Source string for each regex. Locked against the live
-/// `Regex::as_str()` value in `regex_sources_match_compiled_regex`.
+/// Source string for each regex. Locked against the live `Regex::as_str()` value in `regex_sources_match_compiled_regex`.
 /// Each tuple is `(label, source)`.
 #[cfg(test)]
 const STOP_REGEX_SOURCES: &[(&str, &str)] = &[
@@ -157,10 +119,7 @@ const STOP_REGEX_SOURCES: &[(&str, &str)] = &[
     (PATTERN_PLEASE_DEFLECTION, PLEASE_DEFLECTION_SRC),
 ];
 
-/// Per-line matcher: returns `true` iff `line` matches a given
-/// labelled pattern. Lets us share the same dispatch table between
-/// `matched_stop_pattern` and `looks_like_premature_stop` without
-/// re-implementing the `CHECK_BACK_LATER` post-filter.
+/// Shared by `matched_stop_pattern` and `looks_like_premature_stop`, so the `CHECK_BACK_LATER` post-filter is implemented once.
 fn line_matches(label: &'static str, line: &str) -> bool {
     match label {
         PATTERN_UNABLE_TO_PROCEED => UNABLE_TO_PROCEED.is_match(line),
@@ -176,8 +135,8 @@ fn line_matches(label: &'static str, line: &str) -> bool {
     }
 }
 
-/// Stable list of pattern labels in declaration order. Iterated by
-/// the dispatch in [`matched_stop_pattern`].
+/// Stable list of pattern labels in declaration order.
+/// Iterated by the dispatch in [`matched_stop_pattern`].
 const PATTERN_LABELS: &[&str] = &[
     PATTERN_UNABLE_TO_PROCEED,
     PATTERN_GIVING_UP,
@@ -190,23 +149,16 @@ const PATTERN_LABELS: &[&str] = &[
     PATTERN_PLEASE_DEFLECTION,
 ];
 
-/// Returns the first matched pattern label when the LAST non-empty
-/// paragraph of `text` contains a line that triggers any of the
-/// reference stop patterns. Order is declaration order:
-/// `unable_to_proceed → giving_up → stopping_here → agents_in_flight
-/// → check_back_later → verdict_line → commit_push_pr →
-/// ready_for_review → please_deflection`.
+/// Returns the first matched pattern label when the LAST non-empty paragraph of `text` contains a line that triggers a stop pattern.
+/// Patterns are tried in [`PATTERN_LABELS`] declaration order.
 ///
 /// Matching contract:
-/// * `\r\n` line endings are normalised to `\n` on entry so CRLF
-///   paragraphs split the same way LF paragraphs do.
+/// * `\r\n` line endings are normalised to `\n` on entry so CRLF paragraphs split the same way LF paragraphs do.
 /// * Whitespace at the start/end of `text` is ignored.
-/// * "Paragraph" = consecutive non-blank lines; the *last* such block
-///   is the only one considered. Earlier-paragraph hits do not fire.
-/// * Inside the last paragraph, every line is trimmed and matched
-///   against each pattern individually. The patterns are `^`-anchored,
-///   so the marker must start a line: "I can't continue without your
-///   input" inside a sentence does NOT match.
+/// * A "paragraph" is a run of consecutive non-blank lines; only the *last* such block is considered.
+///   A hit in an earlier paragraph does not fire.
+/// * Inside the last paragraph, every line is trimmed and matched against each pattern individually.
+///   The patterns are `^`-anchored, so the marker must start a line: "I can't continue without your input" inside a sentence does NOT match.
 pub(crate) fn matched_stop_pattern(text: &str) -> Option<&'static str> {
     let normalised = normalise_line_endings(text);
     let last_paragraph = last_non_empty_paragraph(&normalised)?;
@@ -223,17 +175,15 @@ pub(crate) fn matched_stop_pattern(text: &str) -> Option<&'static str> {
     Some(label)
 }
 
-/// Convenience wrapper around [`matched_stop_pattern`]; returns
-/// `true` iff a pattern matched. Used by the boolean-only test
-/// assertions; production callers use `matched_stop_pattern` so the
-/// pattern label can be threaded into `Event::GoalPrematureStopDetected`.
+/// Used by the boolean-only test assertions.
+/// Production callers use `matched_stop_pattern` so the pattern label can be threaded into `Event::GoalPrematureStopDetected`.
 #[cfg(test)]
 fn looks_like_premature_stop(text: &str) -> bool {
     matched_stop_pattern(text).is_some()
 }
 
-/// Normalise `\r\n` (and bare `\r`) to `\n`. Allocates only when the
-/// input contains a `\r`; LF-only text is returned borrowed.
+/// Normalise `\r\n` (and bare `\r`) to `\n`.
+/// Allocates only when the input contains a `\r`; LF-only text is returned borrowed.
 fn normalise_line_endings(text: &str) -> std::borrow::Cow<'_, str> {
     if text.contains('\r') {
         std::borrow::Cow::Owned(text.replace("\r\n", "\n").replace('\r', "\n"))
@@ -242,9 +192,8 @@ fn normalise_line_endings(text: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// Return the last non-empty paragraph of `text`, where paragraphs are
-/// separated by one or more blank lines. `None` when `text` has no
-/// non-whitespace content.
+/// Return the last non-empty paragraph of `text`, where paragraphs are separated by one or more blank lines.
+/// `None` when `text` has no non-whitespace content.
 fn last_non_empty_paragraph(text: &str) -> Option<&str> {
     text.split("\n\n")
         .map(str::trim)
@@ -306,8 +255,7 @@ mod tests {
                 "should flag stopping-here phrase: {phrase}",
             );
         }
-        // In-word boundaries must still reject: `hereafter`, `forever`
-        // (no space after `for`) are not the widened trailer set.
+        // In-word boundaries must still reject: `hereafter`, `forever` (no space after `for`) are not the widened trailer set
         assert!(matched_stop_pattern("Stopping hereafter we ship").is_none());
         assert!(
             matched_stop_pattern("Stopping here forever, I quit.").is_none(),
@@ -363,10 +311,8 @@ mod tests {
         }
     }
 
-    /// Every non-user trailing token crossed with every deferral
-    /// conjunction (`when|once|after|until`) must trigger — guards
-    /// against silently re-narrowing the post-filter to a small
-    /// allow-list and dropping legitimate bail subjects.
+    /// Every non-user trailing token crossed with every deferral conjunction (`when|once|after|until`) must trigger.
+    /// Guards against silently re-narrowing the post-filter to a small allow-list and dropping legitimate bail subjects.
     #[test]
     fn check_back_later_walks_all_non_user_targets() {
         for conjunction in ["when", "once", "after", "until"] {
@@ -393,10 +339,9 @@ mod tests {
         }
     }
 
-    /// Deferrals back to the user (`you` / `your` with either case)
-    /// must NOT trigger. Trailing word characters (`yours`,
-    /// `your_team`) keep the `\byour?\b` boundary unmet and are
-    /// covered by `check_back_later_user_pronoun_requires_word_boundary`.
+    /// Deferrals back to the user (`you` / `your` with either case) must NOT trigger.
+    /// Trailing word characters (`yours`, `your_team`) keep the `\byour?\b` boundary unmet.
+    /// `check_back_later_user_pronoun_requires_word_boundary` covers those.
     #[test]
     fn check_back_later_does_not_flag_user_deferrals() {
         for line in [
@@ -412,10 +357,9 @@ mod tests {
         }
     }
 
-    /// `yours` / `your_team` / `youthful` are NOT the negative branch:
-    /// `your?` requires a `\b` boundary, and word characters (`s`,
-    /// `_`, `t`) keep the regex from matching. The post-filter
-    /// treats them like any other non-pronoun target.
+    /// `yours` / `your_team` / `youthful` are NOT the negative branch.
+    /// `your?` requires a `\b` boundary, and word characters (`s`, `_`, `t`) keep the regex from matching.
+    /// The post-filter treats them like any other non-pronoun target.
     #[test]
     fn check_back_later_user_pronoun_requires_word_boundary() {
         for line in [
@@ -447,10 +391,8 @@ mod tests {
                 "should flag commit/push/PR hand-off: {phrase}",
             );
         }
-        // Short hex (<7) must not fire on the hex-bearing branches —
-        // that's the `[0-9a-f]{7,}` length guard. The `Pushed`
-        // alternation has two arms: `Pushed to \`` (literal — any
-        // branch name) and `Pushed \`[0-9a-f]{7,}` (backtick + hex).
+        // Hex shorter than 7 digits must not fire on the hex-bearing branches: that's the `[0-9a-f]{7,}` length guard
+        // The `Pushed` alternation has two arms: `Pushed to \`` (literal, any branch name) and `Pushed \`[0-9a-f]{7,}` (a backtick then hex)
         // The negatives below target only the hex-bearing arms.
         assert!(matched_stop_pattern("Commit: abc").is_none());
         assert!(
@@ -545,8 +487,7 @@ mod tests {
         assert!(!looks_like_premature_stop(text));
     }
 
-    /// CRLF (`\r\n\r\n`) line endings must split paragraphs
-    /// identically to LF; mixed and bare-CR inputs are also tolerated.
+    /// CRLF (`\r\n\r\n`) line endings must split paragraphs identically to LF; mixed and bare-CR inputs are also tolerated.
     #[test]
     fn crlf_line_endings_do_not_break_paragraph_split() {
         let crlf = "Wrote the fix.\r\n\r\nGiving up.\r\n";
@@ -598,10 +539,7 @@ mod tests {
         assert_eq!(matched_stop_pattern(text), Some(PATTERN_GIVING_UP));
     }
 
-    /// Each compiled regex's `as_str()` must equal its source
-    /// string in `STOP_REGEX_SOURCES` — locks the pattern set so a
-    /// future refactor that swaps a regex cannot silently drift the
-    /// panel.
+    /// Locks the pattern set so a future refactor that swaps a regex cannot silently drift the panel.
     #[test]
     fn regex_sources_match_compiled_regex() {
         for (label, src) in STOP_REGEX_SOURCES {
@@ -624,10 +562,7 @@ mod tests {
         }
     }
 
-    /// The `PATTERN_LABELS` dispatch table must enumerate every
-    /// entry in `STOP_REGEX_SOURCES` in declaration order — guards
-    /// against forgetting to add a new pattern to one of the two
-    /// lists.
+    /// Guards against forgetting to add a new pattern to one of the two lists.
     #[test]
     fn pattern_labels_match_source_table_order() {
         let from_sources: Vec<&'static str> =

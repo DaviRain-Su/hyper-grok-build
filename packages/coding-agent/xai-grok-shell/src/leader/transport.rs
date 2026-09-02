@@ -1,10 +1,8 @@
-//! Cross-platform IPC transport for leader<->client communication.
+//! Cross-platform IPC transport between the leader and its clients.
 //!
-//! - **Unix:** [`LeaderStream`] / [`LeaderListener`] are type aliases for
-//!   `tokio::net::UnixStream` / `UnixListener`. Zero wrapper, no unsafe.
-//! - **Windows:** wraps `tokio::net::windows::named_pipe::*` (tokio doesn't
-//!   expose AF_UNIX on Windows). The leader's filesystem path is hashed
-//!   into `\\.\pipe\grok-leader-<hash>` so callers keep their path-based API.
+//! - **Unix:** [`LeaderStream`] and [`LeaderListener`] are type aliases for `tokio::net::UnixStream` and `UnixListener`; no wrapper, no unsafe.
+//! - **Windows:** wraps `tokio::net::windows::named_pipe::*` (tokio doesn't expose AF_UNIX on Windows).
+//!   The leader's filesystem path is hashed into `\\.\pipe\grok-leader-<hash>` so callers keep their path-based API.
 //!
 #[cfg(unix)]
 pub(super) use tokio::net::UnixListener as LeaderListener;
@@ -14,8 +12,7 @@ pub(super) use tokio::net::UnixStream as LeaderStream;
 /// Has a leader bound a listener at `path`?
 ///
 /// - Unix: stats the socket file.
-/// - Windows: probes the named pipe (Named Pipes don't appear in the
-///   filesystem, so `path.exists()` doesn't work).
+/// - Windows: probes the named pipe (Named Pipes don't appear in the filesystem, so `path.exists()` doesn't work).
 pub fn listener_is_ready(path: &std::path::Path) -> bool {
     #[cfg(unix)]
     {
@@ -41,8 +38,7 @@ mod windows_impl {
     use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
     use tracing::debug;
 
-    /// Bidirectional IPC stream wrapping a connected named pipe (server-
-    /// or client-side, depending on how it was created).
+    /// Bidirectional IPC stream wrapping a connected named pipe (server- or client-side, depending on how it was created).
     pub(crate) struct LeaderStream {
         inner: StreamInner,
     }
@@ -53,14 +49,13 @@ mod windows_impl {
     }
 
     impl LeaderStream {
-        /// Connect to a listener at `path`. The path is translated to a
-        /// named-pipe name and `ClientOptions::open` is used.
+        /// Connect to a listener at `path`.
+        /// The path is translated to a named-pipe name and `ClientOptions::open` is used.
         pub(crate) async fn connect<P: AsRef<Path>>(path: P) -> io::Result<Self> {
             use tokio::net::windows::named_pipe::ClientOptions;
 
-            // ClientOptions::open returns ERROR_PIPE_BUSY if all pipe
-            // instances are in use; the caller's CONNECT_TIMEOUT loop
-            // already retries, so we surface the error and let it handle.
+            // ClientOptions::open returns ERROR_PIPE_BUSY if all pipe instances are in use
+            // The caller's CONNECT_TIMEOUT loop already retries, so return the error and let it handle the retry
             let pipe_name = path_to_pipe_name(path.as_ref());
             let inner = ClientOptions::new().open(pipe_name)?;
             Ok(Self {
@@ -69,11 +64,9 @@ mod windows_impl {
         }
     }
 
-    // tokio's NamedPipeServer / NamedPipeClient are auto-Unpin (they wrap
-    // PollEvented<mio::windows::NamedPipe>, which is Unpin), so our
-    // wrapping enum and struct are auto-Unpin as well. That means
-    // Pin<&mut Self>::get_mut() is safe — no unsafe needed for the
-    // structural projection into `inner`.
+    // tokio's NamedPipeServer and NamedPipeClient are automatically Unpin (they wrap PollEvented<mio::windows::NamedPipe>, which is Unpin)
+    // The wrapping enum and struct are therefore Unpin as well
+    // That makes Pin<&mut Self>::get_mut() safe; no unsafe is needed for the structural projection into `inner`
     impl AsyncRead for LeaderStream {
         fn poll_read(
             self: Pin<&mut Self>,
@@ -114,19 +107,13 @@ mod windows_impl {
         }
     }
 
-    /// Listener for incoming leader IPC connections. Holds the pipe name
-    /// plus the next pre-created server instance (Windows named pipes
-    /// require pre-creating an instance per pending connection).
+    /// Listener for incoming leader IPC connections.
+    /// Holds the pipe name plus the next pre-created server instance (Windows named pipes require pre-creating an instance per pending connection).
     pub(crate) struct LeaderListener {
         pipe_name: std::ffi::OsString,
-        /// Next pre-created server instance, ready for `connect().await`.
-        /// We rotate: take this one, await its connect, immediately create
-        /// the next one for the following accept(). The first instance is
-        /// created in `bind()` with `first_pipe_instance(true)` to lock
-        /// out other processes from squatting the pipe name.
-        ///
-        /// tokio::sync::Mutex (not parking_lot) because accept() holds the
-        /// lock across `server.connect().await`.
+        /// Next pre-created server instance, ready for `connect().await`; accept() rotates it.
+        /// The first instance is created in `bind()` with `first_pipe_instance(true)` to lock out other processes from squatting the pipe name.
+        /// tokio::sync::Mutex (not parking_lot) because accept() holds the lock across `server.connect().await`.
         next_server: tokio::sync::Mutex<Option<tokio::net::windows::named_pipe::NamedPipeServer>>,
     }
 
@@ -145,18 +132,14 @@ mod windows_impl {
             })
         }
 
-        /// Wait for the next incoming connection. Mirrors
-        /// `UnixListener::accept`, returning a connected stream and a unit
-        /// placeholder where Unix would return the peer address (named
-        /// pipes don't carry one).
+        /// Wait for the next incoming connection.
+        /// Mirrors `UnixListener::accept`, returning a connected stream and a unit placeholder for the peer address (named pipes don't carry one).
         pub(crate) async fn accept(&self) -> io::Result<(LeaderStream, ())> {
             use tokio::net::windows::named_pipe::ServerOptions;
 
-            // Take the pending instance (or create one), await a client, then
-            // pre-create the next. On connect() error, drop the instance and
-            // retry with a fresh one — returning early would leave the slot
-            // empty and brick the listener. Bounded with a backoff so a
-            // persistently failing connect() can't busy-spin.
+            // Take the pending instance (or create one), await a client, then pre-create the next
+            // On connect() error, drop the instance and retry with a fresh one; returning early would leave the slot empty and the listener unusable
+            // Bounded with a backoff so a persistently failing connect() can't busy-spin
             const MAX_ACCEPT_ATTEMPTS: usize = 10;
             const RETRY_BACKOFF: Duration = Duration::from_millis(20);
 
@@ -186,7 +169,7 @@ mod windows_impl {
                 }
             }
 
-            // Best-effort re-arm; take-or-create above still recovers if this fails.
+            // Best-effort refill of the slot; take-or-create above still recovers if this fails
             if let Ok(fresh) = ServerOptions::new().create(&self.pipe_name) {
                 *slot = Some(fresh);
             }
@@ -197,10 +180,9 @@ mod windows_impl {
 
     /// Whether a leader has a pipe bound at `path`.
     ///
-    /// Probes with `WaitNamedPipeW` (non-connecting), not `ClientOptions::open`,
-    /// which would open a real client the leader's `accept()` consumes as a
-    /// phantom session. `ERROR_FILE_NOT_FOUND` means absent; `TRUE` or any other
-    /// error (e.g. `ERROR_SEM_TIMEOUT`: exists but busy) means ready.
+    /// Probes with `WaitNamedPipeW` (non-connecting), not `ClientOptions::open`.
+    /// The latter would open a real client that `accept()` consumes as a phantom session.
+    /// `ERROR_FILE_NOT_FOUND` means absent; `TRUE` or any other error (e.g. `ERROR_SEM_TIMEOUT`: exists but busy) means ready.
     pub(super) fn listener_is_ready(path: &Path) -> bool {
         use std::os::windows::ffi::OsStrExt;
 
@@ -208,7 +190,7 @@ mod windows_impl {
         use windows::Win32::System::Pipes::WaitNamedPipeW;
         use windows::core::PCWSTR;
 
-        // 1 ms (a real timeout, not 0 = "server default").
+        // 1 ms is a real timeout; 0 would mean "use the server default"
         const PROBE_TIMEOUT_MS: u32 = 1;
 
         let pipe_name = path_to_pipe_name(path);
@@ -235,13 +217,12 @@ mod windows_impl {
 
     /// Deterministic leaf name (`grok-leader-<hash>`) for a filesystem path.
     ///
-    /// Uses SipHash-1-3 with fixed keys so the hash is stable across Rust
-    /// versions (unlike `DefaultHasher`, whose algorithm is unspecified).
+    /// Uses SipHash-1-3 with fixed keys so the hash is stable across Rust versions (unlike `DefaultHasher`, whose algorithm is unspecified).
     fn pipe_leaf_name(path: &Path) -> std::ffi::OsString {
         use siphasher::sip::SipHasher13;
         use std::hash::{Hash, Hasher};
 
-        // Fixed keys — must never change once shipped.
+        // Fixed keys: they must never change once shipped
         let mut hasher = SipHasher13::new_with_keys(0x67726f6b_6c656164, 0x65725f70_69706521);
         path.hash(&mut hasher);
         let hash = hasher.finish();
@@ -284,12 +265,11 @@ mod windows_impl {
 
         #[tokio::test]
         async fn listener_is_ready_tracks_pipe_lifecycle() {
-            // Unique path per process so parallel test binaries don't collide on
-            // the derived pipe name.
+            // Unique path per process so parallel test binaries don't collide on the derived pipe name
             let path =
                 std::env::temp_dir().join(format!("grok-ready-probe-{}.sock", std::process::id()));
 
-            // Nothing bound yet -> ERROR_FILE_NOT_FOUND -> not ready.
+            // Nothing is bound yet, so the probe hits ERROR_FILE_NOT_FOUND and reports not ready
             assert!(!listener_is_ready(&path));
 
             let listener = LeaderListener::bind(&path).unwrap();

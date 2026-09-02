@@ -685,6 +685,11 @@ async fn pre_tool_use_additional_context_reaches_the_model_after_the_tool_result
                 conversation[second].text_content().contains("<\\/system-reminder>"),
                 "hook text must not be able to close the reminder envelope: {conversation:?}"
             );
+            let note = conversation[first].text_content();
+            assert!(
+                note.contains("from PreToolUse hook") && !note.contains("pre_tool_use"),
+                "the model-facing note must spell the event in CamelCase: {note}"
+            );
         })
         .await;
 }

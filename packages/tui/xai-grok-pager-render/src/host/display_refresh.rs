@@ -1,12 +1,12 @@
 //! One-shot primary-display refresh probe (OnceLock-cached).
-//! Fail-closed: never panics into callers; no TTY IO; no display mode mutation.
+//! Fail-closed: it never panics into callers, does no TTY IO, and never mutates the display mode.
 
 use std::sync::OnceLock;
 use std::time::Instant;
 
 use super::{DisplayServer, HostOs, is_wsl};
 
-/// Sane bounds; outside → fail closed.
+/// Sane bounds; a reading outside them fails closed.
 const MIN_HZ: u32 = 30;
 const MAX_HZ: u32 = 500;
 
@@ -41,7 +41,7 @@ impl DisplayRefreshProbeResult {
     }
 }
 
-/// Once per process. Infallible; never panics.
+/// Probes once per process; never panics.
 pub fn probe_display_refresh() -> DisplayRefreshProbeResult {
     static CACHE: OnceLock<DisplayRefreshProbeResult> = OnceLock::new();
     *CACHE.get_or_init(probe_uncached)
@@ -178,7 +178,7 @@ unsafe fn macos_main_display_refresh_hz() -> Result<u32, &'static str> {
     }
     let rate = unsafe { CGDisplayModeGetRefreshRate(mode) };
     unsafe { CGDisplayModeRelease(mode) };
-    // 0.0 is documented indeterminate for some LCD/VRR panels — skip, not error.
+    // 0.0 is documented indeterminate for some LCD/VRR panels, so it maps to a skip, not an error
     // Future primary-display fallback must be thread-safe; no AppKit/NSScreen here.
     if !rate.is_finite() || rate < 0.0 {
         return Err("error");
@@ -205,9 +205,8 @@ fn probe_windows() -> Result<u32, &'static str> {
     Err("unsupported")
 }
 
-/// Primary monitor Hz (matches macOS `CGMainDisplayID`). Null device name to
-/// `EnumDisplaySettingsW` is the *current* adapter, which can differ from the
-/// primary on multi-monitor machines.
+/// Primary monitor Hz (matches macOS `CGMainDisplayID`).
+/// A null device name to `EnumDisplaySettingsW` selects the *current* adapter, which can differ from the primary on multi-monitor machines.
 #[cfg(target_os = "windows")]
 unsafe fn windows_primary_display_refresh_hz() -> Result<u32, &'static str> {
     use windows_sys::Win32::Graphics::Gdi::{
@@ -243,7 +242,7 @@ unsafe fn windows_primary_display_refresh_hz() -> Result<u32, &'static str> {
             return Err("error");
         }
         let hz = devmode.dmDisplayFrequency;
-        // 0/1 often mean "default hardware rate" — fail closed.
+        // 0/1 often mean "default hardware rate", so fail closed
         if hz < 2 {
             return Err("error");
         }
@@ -256,9 +255,8 @@ unsafe fn windows_primary_display_refresh_hz() -> Result<u32, &'static str> {
 mod tests {
     use super::*;
 
-    /// Real OS path smoke: must not panic (FFI wrapped + fail-closed).
-    /// Outcome may be ok/skipped/error depending on host; we only require
-    /// process survival and a valid outcome token.
+    /// Runs the real OS probe end to end; it must not panic (the FFI is wrapped and fails closed).
+    /// The outcome may be ok/skipped/error depending on host; we only require process survival and a valid outcome token.
     #[test]
     fn probe_display_refresh_never_panics() {
         let r = probe_display_refresh();
@@ -274,7 +272,7 @@ mod tests {
         } else {
             assert!(!r.skip_reason.is_empty() || r.outcome() == "error");
         }
-        // Second call hits OnceLock — still must not panic.
+        // Second call hits the OnceLock cache and still must not panic
         let r2 = probe_display_refresh();
         assert_eq!(r.hz, r2.hz);
         assert_eq!(r.outcome(), r2.outcome());

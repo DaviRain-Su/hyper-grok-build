@@ -1,25 +1,28 @@
-//! Redaction helpers shared by the **internal** OTLP span pipeline
-//! ([`crate::otel_layer`]) and the **external** customer-collector pipeline
-//! ([`crate::external`]).
+//! Redaction helpers shared by the **internal** OTLP span pipeline and the **external** customer-collector pipeline.
+//! Those are [`crate::otel_layer`] and [`crate::external`].
 //!
-//! Both pipelines are authoritative privacy chokepoints (see the crate
-//! `AGENTS.md`); these helpers are the string-level scrubbing primitives they
-//! share. Changes here affect every byte that leaves the process on either
-//! pipeline.
+//! Both pipelines are authoritative privacy chokepoints (see the crate `AGENTS.md`).
+//! These helpers are the string-level scrubbing primitives they share.
+//! Changes here affect every byte that leaves the process on either pipeline.
 
 use std::borrow::Cow;
 
-/// Secret-shape then user-path scrub. Returns `Some` only when the input
-/// changed (owned, so callers can overwrite in place).
+/// Secret-shape then user-path scrub.
+/// Returns `Some` only when the input changed (owned, so callers can overwrite in place).
 pub(crate) fn redact_owned(input: &str) -> Option<String> {
     let secrets = xai_grok_secrets::redact_secrets(input);
-    match xai_grok_secrets::redact_user_paths(secrets.as_ref()) {
-        Cow::Owned(paths) => Some(paths),
+    let after = match xai_grok_secrets::redact_user_paths(secrets.as_ref()) {
+        Cow::Owned(paths) => paths,
         Cow::Borrowed(_) => match secrets {
-            Cow::Owned(s) => Some(s),
-            Cow::Borrowed(_) => None,
+            Cow::Owned(s) => s,
+            Cow::Borrowed(_) => return None,
         },
-    }
+    };
+    // `redact_secrets` returns `Cow::Owned` whenever its matcher hits, even
+    // when replacements are no-ops — a URL origin still matches `https://…`.
+    // The export validator treats `Some` as "still dirty" and drops the
+    // record, so a second pass on already-scrubbed text must be `None`.
+    if after == input { None } else { Some(after) }
 }
 
 /// Scrub a string, returning the (possibly unchanged) owned value.
@@ -27,9 +30,8 @@ pub(crate) fn redact_to_owned(input: &str) -> String {
     redact_owned(input).unwrap_or_else(|| input.to_owned())
 }
 
-/// Reduce a URL to `scheme://host[:port]` — its path/query can carry user
-/// content. Unparseable values are returned unchanged (callers pass the result
-/// through the secret scrubber).
+/// Reduce a URL to `scheme://host[:port]`; its path/query can carry user content.
+/// Unparseable values are returned unchanged (callers pass the result through the secret scrubber).
 pub(crate) fn url_origin(value: &str) -> Cow<'_, str> {
     if let Ok(url) = url::Url::parse(value)
         && let Some(host) = url.host_str()
@@ -43,9 +45,8 @@ pub(crate) fn url_origin(value: &str) -> Cow<'_, str> {
     Cow::Borrowed(value)
 }
 
-/// Reduce any embedded `http(s)://…` URLs in free-form text (e.g. transport
-/// error strings) to their origins, then secret-scrub. Path/query can carry
-/// tokens or user content and must not reach logs.
+/// Reduce any embedded `http(s)://…` URLs in free-form text (e.g. transport error strings) to their origins, then secret-scrub.
+/// Path/query can carry tokens or user content and must not reach logs.
 pub(crate) fn redact_urls_in_text(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut rest = input;
@@ -92,6 +93,18 @@ mod tests {
     #[test]
     fn redact_owned_returns_none_when_clean() {
         assert_eq!(redact_owned("no secrets here"), None);
+    }
+
+    #[test]
+    fn redact_owned_is_idempotent_after_url_scrub() {
+        let once = redact_to_owned("see https://example.com/docs?token=CANARY");
+        assert!(once.contains("https://example.com"), "origin lost: {once}");
+        assert!(!once.contains("CANARY"), "query token survived: {once}");
+        assert_eq!(
+            redact_owned(&once),
+            None,
+            "already-scrubbed URL text must not look dirty to the export validator"
+        );
     }
 
     #[test]

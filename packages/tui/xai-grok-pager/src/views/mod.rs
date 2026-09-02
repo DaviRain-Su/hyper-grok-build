@@ -10,6 +10,7 @@ pub mod context_bar;
 pub mod credit_bar;
 pub mod dashboard;
 pub mod debug_style;
+pub mod dock;
 pub mod elicitation_view;
 pub mod extensions_modal;
 pub mod file_search;

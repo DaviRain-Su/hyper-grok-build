@@ -11,8 +11,8 @@ use super::{
     approved_root_for_recent, finish_tool_scan, normalize_title,
 };
 
-// Codex is currently on single-digit state generations. Probe a generous,
-// deterministic supported range without enumerating unrelated CODEX_HOME files.
+// Codex is currently on single-digit state generations
+// Probe a generous, deterministic supported range without enumerating unrelated CODEX_HOME files
 const MAX_STATE_DB_GENERATION: u32 = 128;
 
 pub(super) fn scan(cwd: &Path, now: SystemTime) -> Vec<ForeignSessionSummary> {

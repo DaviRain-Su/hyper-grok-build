@@ -46,7 +46,7 @@ pub struct InputRewrite {
     pub input: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AdditionalContext {
     pub hook_name: String,
     pub text: String,
@@ -228,7 +228,9 @@ async fn dispatch_sequential_gate(
                     system_message,
                 });
             }
-            HookRunnerResult::Success | HookRunnerResult::Stop(_) => {
+            HookRunnerResult::Success
+            | HookRunnerResult::Stop(_)
+            | HookRunnerResult::PostToolUse { .. } => {
                 tracing::info!(
                     hook_name = %spec.name,
                     elapsed_ms = elapsed.as_millis() as u64,
@@ -529,7 +531,301 @@ pub async fn dispatch_stop(
             | HookRunnerResult::Ask { .. }
             | HookRunnerResult::Defer
             | HookRunnerResult::Deny { .. }
-            | HookRunnerResult::Block { .. } => {
+            | HookRunnerResult::Block { .. }
+            | HookRunnerResult::PostToolUse { .. } => {
+                out.results.push(HookRunResult::Success {
+                    hook_name: spec.name.clone(),
+                    elapsed,
+                    http_info,
+                    system_message,
+                });
+            }
+        }
+    }
+
+    record_dispatch_counts(&span, &out.results);
+    out
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostToolUseBlock {
+    pub hook_name: String,
+    pub reason: String,
+}
+
+pub use crate::result::{OutputReplacement, ReplacementKind};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectedReplacement {
+    pub replacement: OutputReplacement,
+    pub run_index: usize,
+}
+
+#[derive(Debug, Default)]
+pub struct PostToolUseResult {
+    pub blocks: Vec<PostToolUseBlock>,
+    pub additional_context: Vec<AdditionalContext>,
+    pub builtin_replacement: Option<SelectedReplacement>,
+    pub mcp_replacement: Option<SelectedReplacement>,
+    pub results: Vec<HookRunResult>,
+}
+
+impl PostToolUseResult {
+    fn absorb(
+        &mut self,
+        hook_name: &str,
+        run_index: usize,
+        outcome: crate::result::PostToolUseHookOutcome,
+    ) {
+        let crate::result::PostToolUseHookOutcome {
+            block_reason,
+            additional_context,
+            output_replacement,
+        } = outcome;
+        if let Some(reason) = block_reason {
+            self.blocks.push(PostToolUseBlock {
+                hook_name: hook_name.to_string(),
+                reason,
+            });
+        }
+        if let Some(text) = additional_context {
+            self.additional_context.push(AdditionalContext {
+                hook_name: hook_name.to_string(),
+                text,
+            });
+        }
+        if let Some(replacement) = output_replacement {
+            self.set_replacement(replacement, run_index);
+        }
+    }
+
+    pub fn merge(&mut self, other: PostToolUseResult) {
+        let PostToolUseResult {
+            blocks,
+            additional_context,
+            builtin_replacement,
+            mcp_replacement,
+            results,
+        } = other;
+        debug_assert!(
+            builtin_replacement.is_none() && mcp_replacement.is_none(),
+            "client results carry no output replacement"
+        );
+        self.results.extend(results);
+        self.blocks.extend(blocks);
+        self.additional_context.extend(additional_context);
+    }
+
+    fn set_replacement(&mut self, replacement: OutputReplacement, run_index: usize) {
+        let slot = match replacement.kind {
+            ReplacementKind::Builtin => &mut self.builtin_replacement,
+            ReplacementKind::Mcp => &mut self.mcp_replacement,
+        };
+        if let Some(replaced) = slot.as_ref() {
+            tracing::warn!(
+                hook_name = replacement.hook_name.as_str(),
+                wire_field = replacement.wire_field(),
+                replaced_hook = replaced.replacement.hook_name.as_str(),
+                "a later output replacement replaced an earlier one of the same kind"
+            );
+        }
+        *slot = Some(SelectedReplacement {
+            replacement,
+            run_index,
+        });
+    }
+}
+
+pub async fn dispatch_post_tool_use(
+    registry: &HookRegistry,
+    envelope: &HookEventEnvelope,
+    ctx: &RunContext<'_>,
+) -> PostToolUseResult {
+    let event = HookEventName::PostToolUse;
+    let gate = event.traits().gate;
+    debug_assert!(
+        gate == GateKind::PostTool,
+        "dispatch_post_tool_use gate regressed to {gate:?}"
+    );
+    let hooks = registry.hooks_for_canonical(event);
+    if hooks.is_empty() {
+        return PostToolUseResult::default();
+    }
+
+    let span = dispatch_span(event, hooks.len());
+    let _enter = span.enter();
+
+    let mut out = PostToolUseResult::default();
+    let match_value = envelope.payload.match_value().map(str::to_string);
+    let disabled = crate::trust::DisabledHooks::load();
+
+    for spec in hooks {
+        if !eligible_or_record_skip(spec, match_value.as_deref(), &mut out.results, &disabled) {
+            continue;
+        }
+
+        let _hook_span = tracing::info_span!(
+            "hook.run",
+            hook_name = %spec.name,
+            hook_event = %event,
+        )
+        .entered();
+
+        let (result, elapsed, http_info, system_message) =
+            runner::run_hook(spec, envelope, ctx, gate).await;
+
+        match result {
+            HookRunnerResult::PostToolUse { outcome, failure } => {
+                tracing::info!(
+                    hook_name = %spec.name,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    block = outcome.block_reason.is_some(),
+                    additional_context = outcome.additional_context.is_some(),
+                    output_replacement = outcome.output_replacement.is_some(),
+                    "post_tool_use hook completed"
+                );
+                out.results.push(match failure {
+                    Some(error) => HookRunResult::Failed {
+                        hook_name: spec.name.clone(),
+                        error,
+                        elapsed,
+                        http_info,
+                        system_message,
+                    },
+                    None => HookRunResult::Success {
+                        hook_name: spec.name.clone(),
+                        elapsed,
+                        http_info,
+                        system_message,
+                    },
+                });
+                let run_index = out.results.len() - 1;
+                out.absorb(&spec.name, run_index, outcome);
+            }
+            HookRunnerResult::Failed(err) => {
+                tracing::warn!(
+                    hook_name = %spec.name,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    hook_failure = %err,
+                    "post_tool_use hook failed; ignoring (fail-open)"
+                );
+                out.results.push(HookRunResult::Failed {
+                    hook_name: spec.name.clone(),
+                    error: err,
+                    elapsed,
+                    http_info,
+                    system_message,
+                });
+            }
+            HookRunnerResult::Success
+            | HookRunnerResult::Allow { .. }
+            | HookRunnerResult::Ask { .. }
+            | HookRunnerResult::Defer
+            | HookRunnerResult::Deny { .. }
+            | HookRunnerResult::Block { .. }
+            | HookRunnerResult::Stop(_) => {
+                out.results.push(HookRunResult::Success {
+                    hook_name: spec.name.clone(),
+                    elapsed,
+                    http_info,
+                    system_message,
+                });
+            }
+        }
+    }
+
+    record_dispatch_counts(&span, &out.results);
+    out
+}
+
+#[derive(Debug, Default)]
+pub struct PostToolUseFailureResult {
+    pub additional_context: Vec<AdditionalContext>,
+    pub results: Vec<HookRunResult>,
+}
+
+// CC's PostToolUseFailure is context-only: it reuses the PostToolUse stdout
+// parse but honors only `additionalContext` — block and output replacement are
+// dropped.
+pub async fn dispatch_post_tool_use_failure(
+    registry: &HookRegistry,
+    envelope: &HookEventEnvelope,
+    ctx: &RunContext<'_>,
+) -> PostToolUseFailureResult {
+    let event = HookEventName::PostToolUseFailure;
+    let hooks = registry.hooks_for_canonical(event);
+    if hooks.is_empty() {
+        return PostToolUseFailureResult::default();
+    }
+
+    let span = dispatch_span(event, hooks.len());
+    let _enter = span.enter();
+
+    let mut out = PostToolUseFailureResult::default();
+    let match_value = envelope.payload.match_value().map(str::to_string);
+    let disabled = crate::trust::DisabledHooks::load();
+
+    for spec in hooks {
+        if !eligible_or_record_skip(spec, match_value.as_deref(), &mut out.results, &disabled) {
+            continue;
+        }
+
+        let _hook_span = tracing::info_span!(
+            "hook.run",
+            hook_name = %spec.name,
+            hook_event = %event,
+        )
+        .entered();
+
+        let (result, elapsed, http_info, system_message) =
+            runner::run_hook(spec, envelope, ctx, GateKind::PostTool).await;
+
+        match result {
+            HookRunnerResult::PostToolUse { outcome, failure } => {
+                if let Some(text) = outcome.additional_context {
+                    out.additional_context.push(AdditionalContext {
+                        hook_name: spec.name.clone(),
+                        text,
+                    });
+                }
+                out.results.push(match failure {
+                    Some(error) => HookRunResult::Failed {
+                        hook_name: spec.name.clone(),
+                        error,
+                        elapsed,
+                        http_info,
+                        system_message,
+                    },
+                    None => HookRunResult::Success {
+                        hook_name: spec.name.clone(),
+                        elapsed,
+                        http_info,
+                        system_message,
+                    },
+                });
+            }
+            HookRunnerResult::Failed(err) => {
+                tracing::warn!(
+                    hook_name = %spec.name,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    hook_failure = %err,
+                    "post_tool_use_failure hook failed; ignoring (fail-open)"
+                );
+                out.results.push(HookRunResult::Failed {
+                    hook_name: spec.name.clone(),
+                    error: err,
+                    elapsed,
+                    http_info,
+                    system_message,
+                });
+            }
+            HookRunnerResult::Success
+            | HookRunnerResult::Allow { .. }
+            | HookRunnerResult::Ask { .. }
+            | HookRunnerResult::Defer
+            | HookRunnerResult::Deny { .. }
+            | HookRunnerResult::Block { .. }
+            | HookRunnerResult::Stop(_) => {
                 out.results.push(HookRunResult::Success {
                     hook_name: spec.name.clone(),
                     elapsed,
@@ -614,8 +910,7 @@ pub async fn dispatch_non_blocking(
             | HookRunnerResult::Ask { .. }
             | HookRunnerResult::Defer
             | HookRunnerResult::Deny { .. }
-            | HookRunnerResult::Block { .. }
-            | HookRunnerResult::Stop(_) => {
+            | HookRunnerResult::Block { .. } => {
                 tracing::info!(
                     hook_name = %spec.name,
                     elapsed_ms = elapsed.as_millis() as u64,
@@ -623,6 +918,15 @@ pub async fn dispatch_non_blocking(
                 );
                 results.push(HookRunResult::Success {
                     hook_name: spec.name.clone(),
+                    elapsed,
+                    http_info,
+                    system_message,
+                });
+            }
+            HookRunnerResult::Stop(_) | HookRunnerResult::PostToolUse { .. } => {
+                results.push(HookRunResult::Failed {
+                    hook_name: spec.name.clone(),
+                    error: "a gate hook result routed to the observe dispatch".to_string(),
                     elapsed,
                     http_info,
                     system_message,
@@ -1707,6 +2011,144 @@ mod tests {
             );
         }
     }
+
+    fn post_tool_use_envelope(tool_name: &str) -> HookEventEnvelope {
+        HookEventEnvelope {
+            hook_event_name: HookEventName::PostToolUse,
+            session_id: "test-session".into(),
+            cwd: "/tmp".into(),
+            workspace_root: "/tmp".into(),
+            timestamp: "2025-01-01T00:00:00Z".into(),
+            transcript_path: None,
+            client_identifier: None,
+            prompt_id: None,
+            permission_mode: None,
+            payload: HookPayload::PostToolUse {
+                tool_name: tool_name.into(),
+                tool_use_id: "tu-1".into(),
+                tool_input: serde_json::json!({"command": "ls"}),
+                tool_result: serde_json::json!({"type": "Bash"}),
+                tool_input_truncated: false,
+                tool_result_truncated: false,
+                duration_ms: None,
+                is_backgrounded: false,
+                subagent_type: None,
+            },
+        }
+    }
+
+    fn post_tool_use_spec(name: &str, script: &str) -> HookSpec {
+        let mut spec = make_command_spec(name, None, true, script);
+        spec.event = HookEventName::PostToolUse;
+        spec
+    }
+
+    #[tokio::test]
+    async fn post_tool_use_wrong_kind_write_cannot_displace_correct_kind() {
+        let builtin = post_tool_use_spec(
+            "builtin",
+            r#"echo '{"hookSpecificOutput":{"updatedToolOutput":{"type":"Bash","output":[],"exit_code":0,"command":"correct","truncated":false}}}'"#,
+        );
+        let mcp = post_tool_use_spec(
+            "mcp",
+            r#"echo '{"hookSpecificOutput":{"updatedMCPToolOutput":"wrong-kind"}}'"#,
+        );
+        let registry = registry_from_specs(vec![builtin, mcp]);
+        let result = dispatch_post_tool_use(
+            &registry,
+            &post_tool_use_envelope("run_terminal_command"),
+            &run_ctx(),
+        )
+        .await;
+
+        let builtin = result
+            .builtin_replacement
+            .as_ref()
+            .expect("the built-in replacement survives the later wrong-kind write");
+        assert_eq!(builtin.replacement.hook_name, "builtin");
+        assert_eq!(builtin.run_index, 0);
+        let mcp = result.mcp_replacement.as_ref().expect("the MCP slot");
+        assert_eq!(mcp.replacement.hook_name, "mcp");
+        assert_eq!(mcp.run_index, 1);
+    }
+
+    #[tokio::test]
+    async fn post_tool_use_same_kind_write_takes_the_last_writer() {
+        let first = post_tool_use_spec(
+            "first",
+            r#"echo '{"hookSpecificOutput":{"updatedToolOutput":{"type":"Bash","output":[],"exit_code":0,"command":"first","truncated":false}}}'"#,
+        );
+        let second = post_tool_use_spec(
+            "second",
+            r#"echo '{"hookSpecificOutput":{"updatedToolOutput":{"type":"Bash","output":[],"exit_code":0,"command":"second","truncated":false}}}'"#,
+        );
+        let registry = registry_from_specs(vec![first, second]);
+        let result = dispatch_post_tool_use(
+            &registry,
+            &post_tool_use_envelope("run_terminal_command"),
+            &run_ctx(),
+        )
+        .await;
+
+        let selected = result
+            .builtin_replacement
+            .as_ref()
+            .expect("the later same-kind write wins the built-in slot");
+        assert_eq!(selected.replacement.value["command"], "second");
+        assert_eq!(selected.run_index, 1);
+        assert!(result.mcp_replacement.is_none());
+    }
+
+    #[test]
+    fn merge_appends_results_blocks_and_context() {
+        let success = |name: &str| HookRunResult::Success {
+            hook_name: name.to_string(),
+            elapsed: std::time::Duration::ZERO,
+            http_info: None,
+            system_message: None,
+        };
+        let block = |name: &str| PostToolUseBlock {
+            hook_name: name.to_string(),
+            reason: format!("{name}-reason"),
+        };
+        let context = |name: &str| AdditionalContext {
+            hook_name: name.to_string(),
+            text: format!("{name}-text"),
+        };
+        let mut base = PostToolUseResult {
+            results: vec![success("a")],
+            blocks: vec![block("a")],
+            additional_context: vec![context("a")],
+            ..Default::default()
+        };
+        base.merge(PostToolUseResult {
+            results: vec![success("b"), success("c")],
+            blocks: vec![block("b")],
+            additional_context: vec![context("b"), context("c")],
+            ..Default::default()
+        });
+
+        let result_names: Vec<&str> = base
+            .results
+            .iter()
+            .map(|r| match r {
+                HookRunResult::Success { hook_name, .. } => hook_name.as_str(),
+                other => panic!("unexpected result variant: {other:?}"),
+            })
+            .collect();
+        assert_eq!(result_names, ["a", "b", "c"]);
+        let block_names: Vec<&str> = base.blocks.iter().map(|b| b.hook_name.as_str()).collect();
+        assert_eq!(block_names, ["a", "b"]);
+        let context_names: Vec<&str> = base
+            .additional_context
+            .iter()
+            .map(|c| c.hook_name.as_str())
+            .collect();
+        assert_eq!(context_names, ["a", "b", "c"]);
+        assert!(base.builtin_replacement.is_none());
+        assert!(base.mcp_replacement.is_none());
+    }
+
     #[test]
     fn disabled_hooks_file_cannot_skip_managed_policy_hook() {
         let disabled = crate::trust::DisabledHooks::from_names([

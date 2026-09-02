@@ -1,13 +1,10 @@
-//! Controllable raw HTTP/1.1 artifact server shared by the blitz
-//! download/install tests and the concurrent-update convergence tests.
+//! Controllable raw HTTP/1.1 artifact server shared by the blitz download/install tests and the concurrent-update convergence tests.
 //!
-//! Serves a real executable artifact and can truncate the body, close the
-//! connection early, serve a right-length-but-garbage body, or hang
-//! mid-transfer — for both the parallel byte-range path and the
-//! single-connection path. It also counts body-serving GETs (HEAD probes are
-//! excluded) so tests can assert how many downloads actually happened, and
-//! supports a "slow" mode that widens the race window so concurrent
-//! installers genuinely overlap in flight.
+//! Serves a real executable artifact.
+//! It can truncate the body, close the connection early, serve a right-length-but-garbage body, or hang mid-transfer.
+//! Each failure mode applies to both the parallel byte-range path and the single-connection path.
+//! It also counts body-serving GETs (HEAD probes are excluded) so tests can assert how many downloads actually happened.
+//! A "slow" mode widens the race window so concurrent installers genuinely overlap in flight.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -22,8 +19,7 @@ pub enum Mode {
     Full,
     /// Serve a right-length body that exits non-zero (fails the smoke-test).
     Garbage,
-    /// Advertise the full length but send only `k` bytes then close the socket
-    /// (silent truncation: premature EOF / short range chunk).
+    /// Advertise the full length but send only `k` bytes then close the socket (silent truncation: premature EOF / short range chunk).
     Truncate(usize),
     /// Send `k` bytes then hang, so a client-side timeout cancels mid-transfer.
     Hang(usize),
@@ -94,22 +90,18 @@ impl ArtifactServer {
         self.state.lock().unwrap().mode = mode;
     }
 
-    /// Number of body-serving GET requests handled so far (HEAD probes from
-    /// the parallel-download path are excluded). Tests use this to assert
-    /// how many downloads actually happened — e.g. that a sequential updater
-    /// converged onto an already-installed binary without re-downloading.
-    /// One download may span multiple GETs when the parallel byte-range path
-    /// splits it, so tests asserting exact counts use a small artifact
-    /// (single-connection path, 1 GET per download).
+    /// Number of body-serving GET requests handled so far (HEAD probes from the parallel-download path are excluded).
+    /// Tests use this to assert how many downloads actually happened.
+    /// For example: a sequential updater converged onto an already-installed binary without re-downloading.
+    /// One download may span multiple GETs when the parallel byte-range path splits it.
+    /// Tests asserting exact counts therefore use a small artifact (single-connection path, 1 GET per download).
     pub fn request_count(&self) -> usize {
         self.gets.load(Ordering::Relaxed)
     }
 
-    /// When enabled, hold each Full/Garbage response open ~500ms before
-    /// sending the body. This keeps an installer in flight long enough for
-    /// concurrent installers to genuinely overlap even on a heavily loaded
-    /// CI host — a too-short hold would let race tests run the installers
-    /// back-to-back and never exercise the concurrent window.
+    /// When enabled, hold each Full/Garbage response open ~500ms before sending the body.
+    /// This keeps an installer in flight long enough for concurrent installers to genuinely overlap even on a heavily loaded CI host.
+    /// A too-short hold would let race tests run the installers back-to-back and never exercise the concurrent window.
     pub fn set_slow(&self, slow: bool) {
         self.slow.store(slow, Ordering::Relaxed);
     }
@@ -141,14 +133,14 @@ fn handle_connection(
     gets: Arc<AtomicUsize>,
     slow: Arc<AtomicBool>,
 ) {
-    // A stream accepted from a non-blocking listener can inherit non-blocking
-    // mode; force blocking so large `write_all`s don't short-write on WouldBlock.
+    // A stream accepted from a non-blocking listener can inherit non-blocking mode
+    // Force blocking so large `write_all`s don't short-write on WouldBlock
     let _ = stream.set_nonblocking(false);
     // Avoid Nagle/delayed-ACK stalls on the header-then-body writes.
     let _ = stream.set_nodelay(true);
 
-    // Read the request header block (until CRLFCRLF). Bodies are never sent by
-    // the client, so headers are all we need.
+    // Read the request header block (until CRLFCRLF)
+    // Bodies are never sent by the client, so headers are all we need
     let mut buf = Vec::new();
     let mut tmp = [0u8; 1024];
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
@@ -182,23 +174,20 @@ fn handle_connection(
     let total = body.len();
     let body: &[u8] = &body;
 
-    // Determine the byte slice this request is for, plus the length we will
-    // claim in Content-Length.
+    // Determine the byte slice this request is for, plus the length we will claim in Content-Length
     let (slice_start, slice_end_excl) = match range {
         Some((a, b)) => (a.min(total), (b + 1).min(total)),
         None => (0, total),
     };
     let claimed_len = slice_end_excl - slice_start;
 
-    // For truncation/hang, `k` is a GLOBAL cutoff across the whole artifact:
-    // a slice that reaches past byte `k` is sent short, so the parallel path's
-    // later chunk (or the single-connection body) is the one truncated.
+    // For truncation/hang, `k` is a GLOBAL cutoff across the whole artifact
+    // A slice that reaches past byte `k` is sent short, so the parallel path's later chunk (or the single-connection body) is the one truncated
     let send_end = match mode {
         Mode::Truncate(k) | Mode::Hang(k) => slice_end_excl.min(k).max(slice_start),
         _ => slice_end_excl,
     };
-    // `payload` is what we actually transmit before any early close; for the
-    // truncated modes it may be shorter than the advertised `claimed_len`.
+    // `payload` is what we actually transmit before any early close; for the truncated modes it may be shorter than the advertised `claimed_len`
     let payload: Vec<u8> = match mode {
         Mode::Garbage => {
             let mut bad = b"#!/bin/sh\nexit 1\n".to_vec();
@@ -208,7 +197,7 @@ fn handle_connection(
         _ => body[slice_start..send_end].to_vec(),
     };
 
-    // Status line + headers. For range requests we answer 206; HEAD is 200.
+    // Status line and headers. For range requests we answer 206; HEAD is 200.
     let mut head = String::new();
     if range.is_some() && !is_head {
         head.push_str("HTTP/1.1 206 Partial Content\r\n");
@@ -222,8 +211,7 @@ fn handle_connection(
         head.push_str("HTTP/1.1 200 OK\r\n");
         head.push_str("Accept-Ranges: bytes\r\n");
     }
-    // Always advertise the (claimed) full length so a truncated transfer is a
-    // genuine premature EOF rather than a short-but-consistent body.
+    // Always advertise the (claimed) full length so a truncated transfer is a genuine premature EOF rather than a short-but-consistent body
     head.push_str(&format!("Content-Length: {}\r\n", claimed_len));
     head.push_str("Connection: close\r\n\r\n");
 
@@ -237,24 +225,21 @@ fn handle_connection(
 
     match mode {
         Mode::Full | Mode::Garbage => {
-            // Hold the connection open longer so concurrent installers
-            // genuinely overlap mid-download (see `set_slow`).
+            // Hold the connection open longer so concurrent installers genuinely overlap mid-download (see `set_slow`)
             if slow.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(500));
             }
             let _ = stream.write_all(&payload);
         }
         Mode::Truncate(_) => {
-            // Send the (possibly short) payload then drop the connection without
-            // meeting Content-Length — the client sees a premature EOF.
+            // Send the (possibly short) payload then drop the connection without meeting Content-Length; the client sees a premature EOF
             let _ = stream.write_all(&payload);
         }
         Mode::Hang(_) => {
             let _ = stream.write_all(&payload);
             let _ = stream.flush();
-            // Hold the connection open longer than any client-side cancel
-            // timeout so the client times out and cancels (a genuine mid-flight
-            // cancel rather than a server-side close).
+            // Hold the connection open longer than any client-side cancel timeout so the client times out and cancels
+            // This is a genuine mid-flight cancel rather than a server-side close
             for _ in 0..30 {
                 if shutdown.load(Ordering::Relaxed) {
                     break;

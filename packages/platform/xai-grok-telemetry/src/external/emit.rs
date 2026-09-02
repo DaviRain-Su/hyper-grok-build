@@ -1,10 +1,7 @@
-//! The *how* of external emission: content-gate application, secret scrub +
-//! truncation, ctx (`session.id`/`turn_number`/`prompt.id`/`event.sequence`)
-//! injection, metric-increment conversion, and provider hand-off.
+//! The *how* of external emission: content gates, secret scrubbing and truncation, ctx injection, and metric-increment conversion.
 //!
-//! The per-event *what* (field → attribute mapping) lives in
-//! [`super::schema`], wired via the `telemetry_event!` macro's
-//! `external = …` arm.
+//! The per-event *what*, which field becomes which attribute, lives in [`super::schema`].
+//! The `telemetry_event!` macro's `external = …` arm wires it in.
 
 use opentelemetry::KeyValue;
 use opentelemetry::logs::{AnyValue, LogRecord as _, Logger as _, Severity};
@@ -13,22 +10,22 @@ use opentelemetry::metrics::{Counter, Histogram, Meter};
 use super::ExternalTelemetry;
 use super::config::ContentGates;
 use super::schema::{
-    AttrValue, ExternalKey, ExternalRecord, Gate, METRIC_ERROR_COUNT, METRIC_SESSION_COUNT,
-    METRIC_STARTUP_PHASE_DURATION, METRIC_STARTUP_TIMEOUT, METRIC_STARTUP_TOTAL,
-    METRIC_TOKEN_USAGE, METRIC_TOOL_DECISION, METRIC_TOOL_USAGE, METRIC_TURN_COUNT,
-    MetricIncrement,
+    AttrValue, ExternalKey, ExternalRecord, Gate, METRIC_COST_USAGE, METRIC_ERROR_COUNT,
+    METRIC_SESSION_COUNT, METRIC_STARTUP_PHASE_DURATION, METRIC_STARTUP_TIMEOUT,
+    METRIC_STARTUP_TOTAL, METRIC_TOKEN_USAGE, METRIC_TOOL_DECISION, METRIC_TOOL_USAGE,
+    METRIC_TURN_COUNT, MetricIncrement,
 };
 
-/// Default OTel buckets end at 10s; startup's failure regime is 10-30s, so
-/// those samples need real buckets, not +Inf.
+/// Default OTel buckets end at 10s; startup failures land in the 10-30s range, so those samples need real buckets, not +Inf.
 const STARTUP_MS_BOUNDARIES: &[f64] = &[
     50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0, 15000.0, 30000.0, 60000.0, 120000.0,
 ];
 
-/// Pre-created counters/histograms (schema pinned by test: names, units, attr keys).
+/// Pre-created counters/histograms (a test pins the names, units, and attr keys).
 pub(crate) struct Instruments {
     session_count: Counter<u64>,
     token_usage: Counter<u64>,
+    cost_usage: Counter<f64>,
     turn_count: Counter<u64>,
     tool_decision: Counter<u64>,
     tool_usage: Counter<u64>,
@@ -48,6 +45,10 @@ impl Instruments {
             token_usage: meter
                 .u64_counter(METRIC_TOKEN_USAGE)
                 .with_unit("{token}")
+                .build(),
+            cost_usage: meter
+                .f64_counter(METRIC_COST_USAGE)
+                .with_unit("USD")
                 .build(),
             turn_count: meter
                 .u64_counter(METRIC_TURN_COUNT)
@@ -87,17 +88,27 @@ fn gate_open(gates: ContentGates, gate: Gate) -> bool {
     match gate {
         Gate::UserPrompts => gates.log_user_prompts,
         Gate::ToolDetails => gates.log_tool_details,
+        Gate::AssistantResponses => gates.log_assistant_responses,
+        Gate::ToolContent => gates.log_tool_content,
     }
 }
 
-/// Scrub + truncate one string attribute value. Every string passes the
-/// secret/path scrub; the prompt key gets the 60 KB content cap, everything
-/// else the standard 512→128 value truncation. Defense-in-depth only — the
-/// export-time validators in [`super::redact`] enforce the result.
+/// Scrub and truncate one string attribute value.
+/// Every string passes the secret/path scrub; prompt, response, tool_input, tool_output, and full_command get the 60 KB content cap; tool_parameters preview and error_message get the 4 KB preview cap; everything else the standard 512-to-128 value truncation.
+/// This is defense in depth only: the export-time validators in [`super::redact`] enforce the result.
 fn scrub_string(key: ExternalKey, s: String) -> String {
     let scrubbed = crate::redact_common::redact_to_owned(&s);
     match key {
-        ExternalKey::Prompt => super::truncate::truncate_content(&scrubbed).unwrap_or(scrubbed),
+        ExternalKey::Prompt
+        | ExternalKey::Response
+        | ExternalKey::FullCommand
+        | ExternalKey::ToolInput
+        | ExternalKey::ToolOutput => {
+            super::truncate::truncate_content(&scrubbed).unwrap_or(scrubbed)
+        }
+        ExternalKey::ToolParameters | ExternalKey::ErrorMessage => {
+            super::truncate::truncate_preview(&scrubbed).unwrap_or(scrubbed)
+        }
         _ => super::truncate::truncate_value_owned(scrubbed),
     }
 }
@@ -107,32 +118,34 @@ fn to_any_value(v: AttrValue) -> AnyValue {
         AttrValue::Str(s) => AnyValue::String(s.into()),
         AttrValue::I64(i) => AnyValue::Int(i),
         AttrValue::Bool(b) => AnyValue::Boolean(b),
+        AttrValue::DeferredJson(v) => AnyValue::String(v.to_string().into()),
     }
 }
 
-/// Convert one mapped [`ExternalRecord`] into a log record and metric
-/// increments. Synchronous and cheap: the `BatchLogProcessor` queues the
-/// record; no `tokio::spawn` (contrast with the product-events path).
+/// Convert one mapped [`ExternalRecord`] into a log record and metric increments.
+/// Synchronous and cheap: the `BatchLogProcessor` queues the record; unlike the product-events path there is no `tokio::spawn`.
 pub(crate) fn emit_record(ext: &ExternalTelemetry, mut record: ExternalRecord) {
     let gates = *ext.gates.read();
 
-    // Gated attributes: emitted only when the matching gate is on. A gated
-    // value sharing a key with a default attr (verbatim vs. sanitized
-    // `tool_name`) replaces the default.
+    // Gated attributes: emitted only when the matching gate is on
+    // A gated value sharing a key with a default attr (verbatim vs. sanitized `tool_name`) replaces the default.
     for gated in std::mem::take(&mut record.gated) {
         if !gate_open(gates, gated.gate) {
             continue;
         }
+        let value = match gated.value {
+            AttrValue::DeferredJson(v) => AttrValue::Str(v.to_string()),
+            other => other,
+        };
         if let Some(existing) = record.attrs.iter_mut().find(|(k, _)| *k == gated.key) {
-            existing.1 = gated.value;
+            existing.1 = value;
         } else {
-            record.attrs.push((gated.key, gated.value));
+            record.attrs.push((gated.key, value));
         }
     }
 
-    // Ambient ctx: a mapping-supplied `session.id` wins; the ctx is a
-    // fallback for in-session events (the session-start sites are spawned
-    // outside the ctx scope and carry their own ids).
+    // Ambient ctx: a mapping-supplied `session.id` wins
+    // The ctx is a fallback for in-session events (the session-start sites are spawned outside the ctx scope and carry their own ids)
     let ctx = crate::session_ctx::external_ctx_snapshot();
     let mapped_session_id = record
         .attrs
@@ -185,6 +198,7 @@ pub(crate) fn emit_record(ext: &ExternalTelemetry, mut record: ExternalRecord) {
         }
         for (key, value) in [
             (ExternalKey::UserId, identity.user_id.as_deref()),
+            (ExternalKey::UserEmail, identity.email.as_deref()),
             (
                 ExternalKey::OrganizationId,
                 identity.organization_id.as_deref(),
@@ -219,8 +233,8 @@ fn add_increment(
     session_id: Option<&str>,
     identity: &super::IdentityAttrs,
 ) {
-    // Identity/cardinality attrs shared by every instrument. `prompt.id` is
-    // deliberately never attached to metrics.
+    // Identity/cardinality attrs shared by every instrument
+    // `prompt.id` is deliberately never attached to metrics
     let mut attrs: Vec<KeyValue> = Vec::with_capacity(8);
     if ext.include_session_id_on_metrics
         && let Some(sid) = session_id.filter(|s| !s.is_empty())
@@ -232,6 +246,7 @@ fn add_increment(
     }
     for (key, value) in [
         ("user.id", identity.user_id.as_deref()),
+        ("user.email", identity.email.as_deref()),
         ("organization.id", identity.organization_id.as_deref()),
         ("team.id", identity.team_id.as_deref()),
         ("deployment.id", identity.deployment_id.as_deref()),
@@ -241,9 +256,8 @@ fn add_increment(
         }
     }
 
-    // `model` is the one non-enum metric attribute value: scrub it at
-    // increment time (call-site discipline is never the guarantee on its own
-    // — the PR 6 collector fixture pins this with a wire-payload canary).
+    // `model` is the one non-enum metric attribute value: scrub it at increment time rather than trusting every call site
+    // A collector fixture pins this by asserting on the wire payload
     let scrub = |s: &str| crate::redact_common::redact_to_owned(s);
 
     match increment {
@@ -258,6 +272,10 @@ fn add_increment(
             attrs.push(KeyValue::new("type", token_type));
             attrs.push(KeyValue::new("model", scrub(&model)));
             instruments.token_usage.add(count, &attrs);
+        }
+        MetricIncrement::CostUsage { model, cost_usd } => {
+            attrs.push(KeyValue::new("model", scrub(&model)));
+            instruments.cost_usage.add(cost_usd, &attrs);
         }
         MetricIncrement::TurnCount { outcome, model } => {
             attrs.push(KeyValue::new("outcome", outcome));

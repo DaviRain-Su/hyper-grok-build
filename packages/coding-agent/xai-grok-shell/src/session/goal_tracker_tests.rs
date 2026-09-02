@@ -44,8 +44,6 @@ fn create_goal_activates_and_starts_timer() {
 
 #[test]
 fn lifecycle_transitions_record_history_events() {
-    // Created/paused/resumed/completed each append a history entry that
-    // reaches `GoalUpdated.last_event`.
     use crate::session::goal_orchestrator::build_goal_updated;
 
     let mut t = make_tracker();
@@ -81,7 +79,7 @@ fn lifecycle_transitions_record_history_events() {
         o.history.last().map(|e| &e.event),
         Some(GoalEvent::GoalCompleted)
     ));
-    // The latest event must surface on the wire as `last_event`.
+    // The latest event must reach the wire as `last_event`
     match build_goal_updated(o, 0, 0) {
         crate::extensions::notification::SessionUpdate::GoalUpdated { last_event, .. } => {
             assert_eq!(last_event.as_deref(), Some("goal_completed"));
@@ -92,8 +90,7 @@ fn lifecycle_transitions_record_history_events() {
 
 #[test]
 fn premature_stop_event_maps_to_wire_string() {
-    // PrematureStopDetected serializes to its wire label and carries the
-    // pattern via `last_event_detail`.
+    // PrematureStopDetected serializes to its wire label and carries the pattern via `last_event_detail`
     use crate::session::goal_orchestrator::build_goal_updated;
 
     let mut t = make_tracker();
@@ -121,7 +118,6 @@ fn premature_stop_event_maps_to_wire_string() {
 
 #[test]
 fn append_history_caps_oldest_entries() {
-    // The persisted timeline is bounded; the newest entry is retained.
     let mut t = make_tracker();
     activate_tracker(&mut t); // seeds 1 GoalCreated entry
     for i in 0..(GOAL_HISTORY_MAX + 10) {
@@ -145,8 +141,7 @@ fn append_history_caps_oldest_entries() {
 
 #[test]
 fn goal_event_unknown_string_deserializes_to_unknown() {
-    // #[serde(other)] forward-compat: an unknown event from a newer shell
-    // deserializes to `Unknown` instead of failing the field.
+    // #[serde(other)] forward-compat: an unknown event from a newer shell deserializes to `Unknown` instead of failing the field
     let unknown: GoalEvent = serde_json::from_str("\"some_future_event\"").unwrap();
     assert!(matches!(unknown, GoalEvent::Unknown));
     let known: GoalEvent = serde_json::from_str("\"goal_paused\"").unwrap();
@@ -155,8 +150,7 @@ fn goal_event_unknown_string_deserializes_to_unknown() {
 
 #[test]
 fn pause_records_cause_specific_history_detail() {
-    // All six pause reasons record a distinct history `detail` (the
-    // `history_detail` mapping, exercised via the real pause path).
+    // All six pause reasons record a distinct history `detail` (the `history_detail` mapping, exercised via the real pause path)
     for (reason, expected) in [
         (GoalPauseReason::User, "user"),
         (GoalPauseReason::User, "user"),
@@ -176,8 +170,6 @@ fn pause_records_cause_specific_history_detail() {
 
 #[test]
 fn budget_limit_records_history_via_chokepoint() {
-    // budget_limit records its own BudgetExceeded entry via the chokepoint,
-    // like the other lifecycle transitions.
     let mut t = make_tracker();
     activate_tracker(&mut t);
     assert!(t.budget_limit());
@@ -234,8 +226,7 @@ fn plan_file_omitted_from_json_when_none() {
     assert!(restored.plan_file.is_none());
 }
 
-/// A legacy snapshot written before this PR has no `plan_file`
-/// key; `#[serde(default)]` must backfill `None`.
+/// A legacy snapshot predates the `plan_file` key; `#[serde(default)]` must backfill `None`.
 #[test]
 fn plan_file_backfills_none_on_legacy_snapshot() {
     const LEGACY: &str = r#"{
@@ -259,12 +250,8 @@ fn plan_file_backfills_none_on_legacy_snapshot() {
     assert!(loaded.plan_file.is_none());
 }
 
-/// `generate_verifier_id` must produce 12-char hex strings and
-/// fresh values on every call. The fixed length is part of the
-/// public contract — verifier file paths embed it verbatim, and
-/// drift here would silently invalidate the documented
-/// `grok-goal-<12 hex chars>` scratch-root format (and the
-/// 12-hex restore validation in `from_snapshot`).
+/// The fixed length is part of the public contract: verifier file paths embed it verbatim.
+/// Drift here would silently invalidate the `grok-goal-<12 hex chars>` scratch-root format and the 12-hex restore validation in `from_snapshot`.
 #[test]
 fn generate_verifier_id_is_short_hex_and_unique() {
     let a = generate_verifier_id();
@@ -278,11 +265,7 @@ fn generate_verifier_id_is_short_hex_and_unique() {
     assert_ne!(a, b, "two successive ids must differ");
 }
 
-/// `create_goal` populates `verifier_id` and that id survives every
-/// pause/resume/complete transition unchanged. The id is the
-/// stable handle the model uses to read verdict files, so any
-/// mid-lifecycle reassignment would orphan the previously written
-/// verdicts.
+/// The id is the stable handle the model uses to read verdict files, so any mid-lifecycle reassignment would orphan the previously written verdicts.
 #[test]
 fn verifier_id_is_stable_across_pause_resume() {
     let mut t = make_tracker();
@@ -306,12 +289,8 @@ fn verifier_id_is_stable_across_pause_resume() {
     assert_eq!(t.snapshot().unwrap().verifier_id, original);
 }
 
-/// Serde round-trip must preserve `verifier_id`, and a legacy
-/// snapshot without the field must round-trip to a freshly
-/// generated id (not panic, not empty). This guards both the
-/// stability contract (existing goals keep their id after a
-/// shell restart) and the backwards-compat contract (pre-field
-/// snapshots load cleanly with a backfilled id).
+/// Serde round-trip must preserve `verifier_id` so existing goals keep their id after a shell restart.
+/// A legacy snapshot without the field must round-trip to a freshly generated id (not panic, not empty).
 #[test]
 fn verifier_id_serde_roundtrip_and_backfill() {
     let mut t = make_tracker();
@@ -326,8 +305,7 @@ fn verifier_id_serde_roundtrip_and_backfill() {
     let restored: GoalOrchestration = serde_json::from_str(&json).unwrap();
     assert_eq!(restored.verifier_id, original_id);
 
-    // Legacy snapshot — drop the verifier_id key entirely and
-    // confirm serde backfills a fresh 12-char hex id.
+    // Legacy snapshot: drop the verifier_id key entirely and confirm serde backfills a fresh 12-char hex id
     let legacy: serde_json::Value = {
         let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
         v.as_object_mut().unwrap().remove("verifier_id");
@@ -429,21 +407,18 @@ fn reset_classifier_stall_clears_streak_so_next_occurrence_is_first() {
         assert_eq!(o.classifier_stall_count, 0);
         assert!(o.last_gap_fingerprint.is_none());
     }
-    // The same fingerprint is now a fresh first occurrence — it must
-    // NOT immediately trip the stall.
     assert!(
         !t.record_classifier_stall("fp-a"),
         "after reset, a repeat of the old fingerprint must not re-stall"
     );
 }
 
-/// Firing the strategist clears the gap-fingerprint stall streak so the
-/// restructure is measured from a clean slate.
+/// Firing the strategist clears the gap-fingerprint stall streak so the restructure is measured from a clean slate.
 #[test]
 fn strategist_fire_resets_classifier_stall_streak() {
     let mut t = make_tracker();
     activate_tracker(&mut t);
-    // Seed a partial stall streak (a pre-strategist gap repeat).
+    // Seed a partial stall streak (a gap repeated before the strategist fires)
     assert!(!t.record_classifier_stall("fp-pre"));
     {
         let o = t.snapshot().unwrap();
@@ -463,9 +438,7 @@ fn strategist_fire_resets_classifier_stall_streak() {
     );
 }
 
-/// While the strategist bonus is active, identical gap fingerprints get the
-/// relaxed stall window instead of tripping at the default threshold of 2,
-/// and the window stays bounded (still exits at its own threshold).
+/// While the strategist bonus is active, identical gap fingerprints get the relaxed stall window instead of tripping at the default threshold of 2.
 #[test]
 fn relaxed_stall_threshold_applies_while_strategist_bonus_active() {
     let mut t = make_tracker();
@@ -474,23 +447,19 @@ fn relaxed_stall_threshold_applies_while_strategist_bonus_active() {
     assert!(t.claim_strategist_fire(|_, _| true).is_some());
     assert!(t.snapshot().unwrap().strategist_cap_bonus > 0);
 
-    // Identical fingerprints below the relaxed threshold must NOT stall.
     for n in 1..GOAL_STRATEGIST_STALL_THRESHOLD {
         assert!(
             !t.record_classifier_stall("fp-loop"),
             "count {n} must not stall inside the relaxed window"
         );
     }
-    // Bounded: the relaxed window still exits at its own threshold.
     assert!(
         t.record_classifier_stall("fp-loop"),
         "relaxed window trips at GOAL_STRATEGIST_STALL_THRESHOLD"
     );
 }
 
-/// Once strategist state resets (clearing the cap bonus) the stall
-/// threshold reverts to the strict default — the relaxation is scoped to
-/// the post-strategist window only, never weakening the guard outside it.
+/// The relaxation applies only in the window after a strategist fire, never weakening the guard outside it.
 #[test]
 fn relaxed_stall_threshold_reverts_after_strategist_reset() {
     let mut t = make_tracker();
@@ -619,13 +588,12 @@ fn resume_resets_classifier_runs_attempted() {
 
     assert!(t.resume());
     assert_eq!(t.status(), Some(GoalStatus::Active));
-    // Counter reset for a fresh budget; cap untouched.
+    // The counter resets for a fresh budget; the cap stays untouched
     assert_eq!(t.snapshot().unwrap().classifier_runs_attempted, 0);
     assert_eq!(t.snapshot().unwrap().classifier_max_runs, Some(4));
 }
 
-/// Resume re-arms for a fresh attempt, so it clears the stall streak too —
-/// the first post-resume round must not inherit a count that insta-pauses.
+/// The first round after a resume must not inherit a count that pauses the goal immediately.
 #[test]
 fn resume_clears_classifier_stall_streak() {
     let mut t = make_tracker();
@@ -694,7 +662,6 @@ fn claim_strategist_fire_skips_and_preserves_state_when_predicate_false() {
     assert_eq!(o.strategist_cap_bonus, 0, "no fire => no cap bonus");
 }
 
-/// A strategist fire grants the cap bonus; reset clears it.
 #[test]
 fn strategist_fire_grants_cap_bonus_then_reset_clears_it() {
     let mut t = make_tracker();
@@ -711,9 +678,7 @@ fn strategist_fire_grants_cap_bonus_then_reset_clears_it() {
     assert_eq!(t.snapshot().unwrap().strategist_cap_bonus, 0);
 }
 
-/// `reset_strategist_state` clears the streak, the last-fired marker,
-/// AND the persisted recommendation together — the single reset used by
-/// every branch so they can't drift.
+/// Every branch uses this single reset so they can't drift.
 #[test]
 fn reset_strategist_state_clears_streak_marker_and_recommendation() {
     let mut t = make_tracker();
@@ -732,9 +697,7 @@ fn reset_strategist_state_clears_streak_marker_and_recommendation() {
     assert!(o.last_strategy_recommendation.is_none());
 }
 
-/// resume / complete / budget_limit must ALL clear the recommendation +
-/// streak + last-fired marker (symmetric with the reset, so a
-/// paused/terminal goal never replays a stale structural note).
+/// This mirrors the reset, so a paused or terminal goal never replays a stale structural note.
 #[test]
 fn lifecycle_transitions_clear_all_strategist_state() {
     let seed = |t: &mut GoalTracker| {
@@ -789,9 +752,8 @@ fn strategy_recommendation_record_round_trip() {
     );
 }
 
-/// Legacy snapshots predate `consecutive_not_achieved` /
-/// `last_strategy_*`; `#[serde(default)]` must backfill them so an
-/// upgrade doesn't fail to deserialize.
+/// Legacy snapshots predate `consecutive_not_achieved` and `last_strategy_*`.
+/// `#[serde(default)]` must backfill them so an upgrade doesn't fail to deserialize.
 #[test]
 fn strategist_fields_backfill_on_legacy_snapshot() {
     const LEGACY: &str = r#"{
@@ -922,9 +884,7 @@ fn is_paused_matches_all_paused_variants() {
     assert!(!GoalStatus::BudgetLimited.is_paused());
 }
 
-/// `NoProgressPaused` round-trips through both serde wire forms (snake_case
-/// `Serialize` + `from_wire_str`) and stays distinct from the cap pause's
-/// `back_off_paused`.
+/// `NoProgressPaused` round-trips through both wire forms, the snake_case `Serialize` and `from_wire_str`.
 #[test]
 fn no_progress_paused_round_trips_distinctly_from_back_off() {
     assert_eq!(
@@ -935,7 +895,7 @@ fn no_progress_paused_round_trips_distinctly_from_back_off() {
     assert_eq!(json, "\"no_progress_paused\"");
     let back: GoalStatus = serde_json::from_str(&json).unwrap();
     assert_eq!(back, GoalStatus::NoProgressPaused);
-    // The cap pause keeps its own wire form — the two must not collapse.
+    // The cap pause keeps its own wire form; the two must not collapse
     assert_eq!(
         GoalStatus::from_wire_str("back_off_paused"),
         GoalStatus::BackOffPaused
@@ -1235,8 +1195,7 @@ fn unknown_future_paused_status_deserializes_to_user_paused() {
     assert_eq!(parsed, GoalStatus::UserPaused);
 }
 
-/// Any unknown wire status — not just `*_paused` forms — must restore
-/// as a resumable paused goal, never an Active self-driving one.
+/// Any unknown wire status (not just `*_paused` forms) must restore as a resumable paused goal, never an Active self-driving one.
 #[test]
 fn unknown_non_paused_status_deserializes_to_user_paused_not_active() {
     for wire in [r#""quarantined""#, r#""v9_super_active""#, r#""""#] {
@@ -1306,7 +1265,6 @@ fn from_snapshot_preserves_infra_paused_on_restart() {
     );
 }
 
-/// Guards that `from_snapshot` preserves `plan_file` across reloads.
 #[test]
 fn from_snapshot_preserves_plan_file_some() {
     let mut orchestration = make_base_orchestration();
@@ -1317,8 +1275,7 @@ fn from_snapshot_preserves_plan_file_some() {
     assert_eq!(t.snapshot().unwrap().plan_file, Some(path));
 }
 
-/// The temp-dir scratch doesn't survive a restart; restore must
-/// recreate it so the next panel's skeptics can read claimed outputs.
+/// The temp-dir scratch doesn't survive a restart; restore must recreate it so the next panel's skeptics can read claimed outputs.
 #[test]
 fn from_snapshot_recreates_implementer_scratch_dir() {
     let orchestration = make_base_orchestration();
@@ -1338,8 +1295,7 @@ fn from_snapshot_recreates_implementer_scratch_dir() {
     let _ = std::fs::remove_dir_all(goal_scratch_root(&t.snapshot().unwrap().verifier_id));
 }
 
-/// A terminal snapshot's scratch root was deliberately removed by its
-/// transition; restore must not resurrect it.
+/// A terminal snapshot's scratch root was deliberately removed by its transition; restore must not resurrect it.
 #[test]
 fn from_snapshot_skips_scratch_recreation_for_terminal_status() {
     for status in [GoalStatus::Complete, GoalStatus::BudgetLimited] {
@@ -1360,8 +1316,7 @@ fn from_snapshot_skips_scratch_recreation_for_terminal_status() {
     }
 }
 
-/// Anything off the pinned 12-hex `verifier_id` form must be
-/// regenerated, never used as a path component.
+/// Anything off the pinned 12-hex `verifier_id` form must be regenerated, never used as a path component.
 #[test]
 fn from_snapshot_regenerates_non_canonical_verifier_id() {
     for bad in ["../../../escape", "abcd", "abcdef01234Z", ""] {
@@ -1383,8 +1338,7 @@ fn from_snapshot_regenerates_non_canonical_verifier_id() {
     let _ = std::fs::remove_dir_all(goal_scratch_root(&original));
 }
 
-/// Full raw-JSON snapshot path: an unknown wire status must come back
-/// from `from_snapshot` as a resumable `UserPaused` goal, never Active.
+/// Full raw-JSON snapshot path: an unknown wire status must come back from `from_snapshot` as a resumable `UserPaused` goal, never Active.
 #[test]
 fn from_snapshot_raw_json_unknown_status_restores_user_paused() {
     const FORWARD_VERSION: &str = r#"{
@@ -1415,8 +1369,7 @@ fn from_snapshot_raw_json_unknown_status_restores_user_paused() {
     let _ = std::fs::remove_dir_all(goal_scratch_root(&t.snapshot().unwrap().verifier_id));
 }
 
-/// Restoring the id would over-count a resumed skeptic-0's prior
-/// cumulative as fresh spend (token records are in-memory only).
+/// Restoring the id would over-count a resumed skeptic-0's prior cumulative spend as fresh spend (token records are in-memory only).
 #[test]
 fn from_snapshot_drops_skeptic0_session_id() {
     let mut orchestration = make_base_orchestration();
@@ -1430,8 +1383,7 @@ fn from_snapshot_drops_skeptic0_session_id() {
     let _ = std::fs::remove_dir_all(goal_scratch_root(&t.snapshot().unwrap().verifier_id));
 }
 
-/// A failed strategist run revokes the cap bonus while keeping the
-/// fire claimed, so the next fire still waits a full window.
+/// A failed strategist run revokes the cap bonus while keeping the fire claimed, so the next fire still waits a full window.
 #[test]
 fn revoke_strategist_cap_bonus_keeps_fire_claim() {
     let mut t = make_tracker();
@@ -1454,7 +1406,7 @@ fn revoke_strategist_cap_bonus_keeps_fire_claim() {
 
 #[test]
 fn from_snapshot_idle_active_restores_paused() {
-    let orchestration = make_base_orchestration(); // Idle + Active
+    let orchestration = make_base_orchestration(); // phase Idle, status Active
     let t = GoalTracker::from_snapshot(PathBuf::from("/tmp"), orchestration);
     assert_eq!(t.snapshot().unwrap().status, GoalStatus::UserPaused);
     assert!(t.active_since.is_none());
@@ -1489,16 +1441,9 @@ fn from_snapshot_restore_then_resume_tracks_elapsed() {
     assert!(t.snapshot().unwrap().elapsed_ms >= 5000);
 }
 
-/// A snapshot written by an older shell will omit all nine
-/// classifier fields (incl. the stall `last_gap_fingerprint` /
-/// `classifier_stall_count` and the persisted `last_classifier_gaps`
-/// summary added later). Deserialization must
-/// succeed and every new field must come back at its
-/// `#[serde(default)]` value. The
-/// JSON literal below doubles as a documented v0 schema contract
-/// — if a future PR breaks legacy load, this test fails *because*
-/// the documented shape no longer parses, not because the in-code
-/// serialization shape happened to drift in sync.
+/// A snapshot written by an older shell will omit all nine classifier fields.
+/// Deserialization must succeed and every new field must come back at its `#[serde(default)]` value.
+/// The JSON literal below doubles as the documented v0 schema contract: a raw literal cannot drift in sync with the in-code serialization shape.
 #[test]
 fn classifier_fields_backwards_compat_defaults_on_legacy_snapshot() {
     const LEGACY_SNAPSHOT_JSON: &str = r#"{
@@ -1533,18 +1478,14 @@ fn classifier_fields_backwards_compat_defaults_on_legacy_snapshot() {
     assert!(legacy.changes_baseline_commit.is_none());
     assert!(legacy.last_gap_fingerprint.is_none());
     assert_eq!(legacy.classifier_stall_count, 0);
-    // New transient `#[serde(skip)]` field defaults empty for a
-    // legacy snapshot that predates it.
+    // New transient `#[serde(skip)]` field defaults empty for a legacy snapshot that predates it
     assert!(legacy.live_tokens_by_model.is_empty());
-    // Spend-accumulator backfill: zero spent, `None` anchor so the
-    // first `goal_tokens` call seeds from `token_baseline`.
+    // The spend accumulator backfills to zero spent and a `None` anchor, so the first `goal_tokens` call seeds from `token_baseline`
     assert_eq!(legacy.parent_tokens_spent, 0);
     assert_eq!(legacy.last_session_tokens_seen, None);
 }
 
-/// Legacy on-disk snapshots carry the dropped `tokens_used` and
-/// `finished_subagent_tokens` fields. Verify they are silently
-/// ignored on load and the struct deserializes cleanly.
+/// Legacy on-disk snapshots carry the dropped `tokens_used` and `finished_subagent_tokens` fields.
 #[test]
 fn goal_orchestration_serde_drops_legacy_tokens_used_field() {
     const LEGACY: &str = r#"{
@@ -1569,10 +1510,8 @@ fn goal_orchestration_serde_drops_legacy_tokens_used_field() {
         serde_json::from_str(LEGACY).expect("legacy snapshot must deserialize");
     assert_eq!(loaded.goal_id, "g-old");
     assert_eq!(loaded.token_baseline, 0);
-    // Round-trip and verify the dropped keys do not reappear at
-    // the top level; `tokens_used` on history entries (Option<i64>)
-    // is a distinct field and `history` is empty here so the
-    // simple `contains` check is sound.
+    // Round-trip and verify the dropped keys do not reappear at the top level
+    // `tokens_used` on history entries (Option<i64>) is a distinct field and `history` is empty here so the simple `contains` check is sound
     let round = serde_json::to_string(&loaded).unwrap();
     assert!(
         !round.contains("\"tokens_used\""),
@@ -1584,10 +1523,7 @@ fn goal_orchestration_serde_drops_legacy_tokens_used_field() {
     );
 }
 
-/// Populating every new field and round-tripping through serde
-/// must return identical values. This guards both the on-disk
-/// schema shape and the `Eq`-by-field semantics the verification
-/// stage orchestrator relies on.
+/// This guards both the on-disk schema shape and the field-by-field `Eq` comparison the verification stage orchestrator relies on.
 #[test]
 fn classifier_fields_serde_round_trip_preserves_all_fields() {
     let mut o = make_base_orchestration();
@@ -1630,9 +1566,7 @@ fn classifier_fields_serde_round_trip_preserves_all_fields() {
         Some("abc123def456")
     );
 
-    // Contract: `Option::None` fields must NOT serialize as
-    // `"key": null`. Verify the round-trip JSON omits the keys when
-    // we reset them to None on a freshly-created orchestration.
+    // Contract: `Option::None` fields must NOT serialize as `"key": null`
     let mut base = make_base_orchestration();
     base.classifier_max_runs = None;
     base.last_classifier_verdict = None;
@@ -1658,10 +1592,7 @@ fn classifier_fields_serde_round_trip_preserves_all_fields() {
     }
 }
 
-/// `skeptic0_session_id` round-trips through serde when populated
-/// (it must persist across a snapshot save/restore within a session
-/// so the next attempt can resume skeptic 0). Mirrors the
-/// `last_classifier_gaps` round-trip contract.
+/// `skeptic0_session_id` must persist across a snapshot save/restore within a session so the next attempt can resume skeptic 0.
 #[test]
 fn skeptic0_session_id_round_trips_through_serde() {
     let mut o = make_base_orchestration();
@@ -1674,8 +1605,7 @@ fn skeptic0_session_id_round_trips_through_serde() {
     );
 }
 
-/// Round-trips through serde so a resumed goal keeps its breadth anchor,
-/// and is skipped on serialize when `None`.
+/// Round-trips through serde so a resumed goal keeps its breadth anchor, and is skipped on serialize when `None`.
 #[test]
 fn first_final_response_round_trips_through_serde() {
     let mut o = make_base_orchestration();
@@ -1695,9 +1625,7 @@ fn first_final_response_round_trips_through_serde() {
     );
 }
 
-/// Every terminal goal-ending transition (`complete`, `budget_limit`)
-/// clears the resumed skeptic-0 id so a later goal starts verification
-/// with a fresh, cold skeptic 0.
+/// A later goal then starts verification with a fresh, cold skeptic 0.
 #[test]
 fn terminal_transitions_clear_skeptic0_session_id() {
     for ending in ["complete", "budget_limit"] {
@@ -1716,9 +1644,7 @@ fn terminal_transitions_clear_skeptic0_session_id() {
     }
 }
 
-/// `skeptic_model_assignment` (the frozen per-index pool) round-trips
-/// through serde so the assignment survives a snapshot save/restore and
-/// stays stable across resumes.
+/// `skeptic_model_assignment` (the frozen per-index pool) round-trips through serde.
 #[test]
 fn skeptic_model_assignment_round_trips_through_serde() {
     let mut o = make_base_orchestration();
@@ -1740,8 +1666,7 @@ fn skeptic_model_assignment_round_trips_through_serde() {
     );
 }
 
-/// A legacy snapshot (no `skeptic_model_assignment` key) deserializes to
-/// an empty assignment (serde default) — all skeptics inherit.
+/// A legacy snapshot (no `skeptic_model_assignment` key) deserializes to an empty assignment (serde default); all skeptics inherit.
 #[test]
 fn legacy_snapshot_without_skeptic_model_assignment_deserializes_empty() {
     const LEGACY: &str = r#"{
@@ -1765,9 +1690,7 @@ fn legacy_snapshot_without_skeptic_model_assignment_deserializes_empty() {
     assert!(restored.skeptic_model_assignment.is_empty());
 }
 
-/// Sibling of `skeptic0_session_id`: every terminal goal-ending
-/// transition (`complete`, `budget_limit`) clears the frozen per-index
-/// model assignment so a later goal re-resolves its own panel.
+/// A later goal then re-resolves its own panel.
 #[test]
 fn terminal_transitions_clear_skeptic_model_assignment() {
     for ending in ["complete", "budget_limit"] {
@@ -1790,9 +1713,7 @@ fn terminal_transitions_clear_skeptic_model_assignment() {
     }
 }
 
-/// `plan_baseline_file` is a sibling of `skeptic0_session_id` and must
-/// be cleared by the SAME terminal transitions so a later goal
-/// re-snapshots its own planner's original plan.
+/// A later goal then re-snapshots its own planner's original plan.
 #[test]
 fn terminal_transitions_clear_plan_baseline_file() {
     for ending in ["complete", "budget_limit"] {
@@ -1812,9 +1733,6 @@ fn terminal_transitions_clear_plan_baseline_file() {
     }
 }
 
-/// The scratch path helpers derive the pinned layout from
-/// `temp_dir()` + `verifier_id`: a `grok-goal-<vid>` root with an
-/// `implementer/` subdir and per-index `skeptic-<idx>/` subdirs.
 #[test]
 fn scratch_path_helpers_derive_pinned_layout() {
     let root = goal_scratch_root("vid123");
@@ -1833,19 +1751,16 @@ fn scratch_path_helpers_derive_pinned_layout() {
     );
 }
 
-/// Two skeptics in the SAME goal get DISTINCT scratch dirs so their
-/// re-runs never overwrite each other (the intra-goal screenshot race).
+/// Two skeptics in the SAME goal get DISTINCT scratch dirs so their re-runs never overwrite each other's screenshots.
 #[test]
 fn distinct_skeptics_get_distinct_scratch_dirs() {
     assert_ne!(skeptic_scratch_dir("vid", 0), skeptic_scratch_dir("vid", 1),);
-    // ...and neither equals the implementer dir.
     assert_ne!(
         skeptic_scratch_dir("vid", 0),
         implementer_scratch_dir("vid")
     );
 }
 
-/// `create_goal` creates the scratch root + implementer dir up front.
 #[test]
 fn create_goal_creates_implementer_scratch_dir() {
     let mut t = make_tracker();
@@ -1857,12 +1772,10 @@ fn create_goal_creates_implementer_scratch_dir() {
         t.snapshot().unwrap().scratch_dir_ready,
         "create_goal must mark scratch_dir_ready true when the dir was created",
     );
-    // Clean up the real on-disk dir this test created.
     let _ = std::fs::remove_dir_all(goal_scratch_root(&vid));
 }
 
-/// The root is 0700 from the instant it exists (atomic-mode create,
-/// no chmod window) and a re-ensure re-pins the mode.
+/// The root is 0700 from the instant it exists (atomic-mode create, no chmod window) and a re-ensure re-applies the mode.
 #[cfg(unix)]
 #[test]
 fn ensure_goal_scratch_root_is_owner_only() {
@@ -1879,8 +1792,7 @@ fn ensure_goal_scratch_root_is_owner_only() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// A pre-planted symlink root is rejected: never followed, the
-/// victim dir never chmodded, nothing created behind it.
+/// A pre-planted symlink root is rejected: never followed, the victim dir never chmodded, nothing created behind it.
 #[cfg(unix)]
 #[test]
 fn ensure_goal_scratch_root_rejects_preplanted_symlink_root() {
@@ -1915,8 +1827,7 @@ fn ensure_goal_scratch_root_rejects_preplanted_symlink_root() {
     );
 }
 
-/// A non-directory squat (regular file at the root path) is also
-/// rejected rather than written around.
+/// A non-directory squat (regular file at the root path) is also rejected rather than written around.
 #[cfg(unix)]
 #[test]
 fn ensure_goal_scratch_root_rejects_file_squat() {
@@ -1928,8 +1839,7 @@ fn ensure_goal_scratch_root_rejects_file_squat() {
     assert!(result.is_err(), "a file squat must be rejected");
 }
 
-/// Starting a new goal over a still-active one removes the prior goal's
-/// scratch root (no orphan), while creating the new one.
+/// Starting a new goal over a still-active one removes the prior goal's scratch root (no orphan), while creating the new one.
 #[test]
 fn create_goal_over_active_removes_prior_scratch_root() {
     let mut t = make_tracker();
@@ -1938,8 +1848,7 @@ fn create_goal_over_active_removes_prior_scratch_root() {
     let old_root = goal_scratch_root(&old_vid);
     assert!(old_root.is_dir(), "prior scratch root must exist");
 
-    // Re-create over the active goal without an intervening terminal
-    // transition.
+    // Re-create over the active goal without an intervening terminal transition
     activate_tracker(&mut t);
     let new_vid = t.snapshot().unwrap().verifier_id.clone();
     assert_ne!(old_vid, new_vid, "a fresh goal gets a fresh verifier_id");
@@ -1954,10 +1863,7 @@ fn create_goal_over_active_removes_prior_scratch_root() {
     let _ = std::fs::remove_dir_all(goal_scratch_root(&new_vid));
 }
 
-/// All three terminal transitions rescue the details file (the
-/// achieved ack surfaces its path AFTER `complete()`): pins the
-/// rescued location, the updated stored path, and the inlined
-/// per-skeptic reports (numeric order; see `append_skeptic_reports`).
+/// All three terminal transitions rescue the details file; the achieved ack reports its path AFTER `complete()`.
 #[test]
 fn terminal_transitions_rescue_classifier_details_file() {
     for ending in ["complete", "budget_limit", "clear"] {
@@ -2023,8 +1929,7 @@ fn terminal_transitions_rescue_classifier_details_file() {
     }
 }
 
-/// Replacing a still-active goal (`create_goal` over-active) is the
-/// 4th root-removal site and must rescue like its terminal siblings.
+/// Replacing a still-active goal (`create_goal` over-active) is the 4th root-removal site and must rescue like its terminal siblings.
 #[test]
 fn create_goal_over_active_rescues_prior_details_file() {
     let session = tempfile::tempdir().unwrap();
@@ -2048,11 +1953,9 @@ fn create_goal_over_active_rescues_prior_details_file() {
     let _ = std::fs::remove_dir_all(goal_scratch_root(&t.snapshot().unwrap().verifier_id));
 }
 
-/// Source guards: a non-scratch stored path is a no-op, and a
-/// lexically-inside `..`-escaping path is rejected unread.
 #[test]
 fn rescue_classifier_details_guards_source_path() {
-    // Non-scratch path → no-op.
+    // A non-scratch path is a no-op
     let session = tempfile::tempdir().unwrap();
     let mut t = GoalTracker::new(session.path().to_path_buf());
     activate_tracker(&mut t);
@@ -2072,7 +1975,7 @@ fn rescue_classifier_details_guards_source_path() {
         "stored path must stay untouched on the no-op guard",
     );
 
-    // `..`-escaping path (lexically under the root) → rejected.
+    // A `..`-escaping path (lexically under the root) is rejected
     let session = tempfile::tempdir().unwrap();
     let mut t = GoalTracker::new(session.path().to_path_buf());
     activate_tracker(&mut t);
@@ -2100,8 +2003,7 @@ fn rescue_classifier_details_guards_source_path() {
     let _ = std::fs::remove_file(&victim);
 }
 
-/// A symlink-squatted root fails the rescue: the attacker-staged
-/// file is neither moved into the goal dir nor stamped.
+/// A symlink-squatted root fails the rescue: the attacker-staged file is neither moved into the goal dir nor stamped.
 #[cfg(unix)]
 #[test]
 fn rescue_classifier_details_rejects_symlink_squatted_root() {
@@ -2148,9 +2050,8 @@ fn rescue_classifier_details_rejects_symlink_squatted_root() {
     );
 }
 
-/// Numeric latest-attempt-first inlining: budget elision drops the
-/// stale attempt, never the final one (lexical order — `-1-` before
-/// `-10-` — would invert that).
+/// Attempts are inlined latest first by numeric order, so budget elision drops the stale attempt, never the final one.
+/// Lexical order (`-1-` before `-10-`) would invert that.
 #[test]
 fn append_skeptic_reports_prefers_latest_attempt_numerically() {
     let scratch = tempfile::tempdir().unwrap();
@@ -2194,8 +2095,7 @@ fn append_skeptic_reports_prefers_latest_attempt_numerically() {
     );
 }
 
-/// `copy_no_follow` must refuse a pre-planted destination symlink
-/// (O_EXCL) instead of writing the rescued content through it.
+/// `copy_no_follow` must refuse a pre-planted destination symlink (O_EXCL) instead of writing the rescued content through it.
 #[cfg(unix)]
 #[test]
 fn copy_no_follow_refuses_destination_symlink() {
@@ -2218,9 +2118,6 @@ fn copy_no_follow_refuses_destination_symlink() {
     );
 }
 
-/// Every terminal goal-ending transition (`complete`, `budget_limit`,
-/// `clear`) removes the private scratch root from disk — mirrors
-/// `terminal_transitions_clear_plan_baseline_file`.
 #[test]
 fn terminal_transitions_remove_scratch_root() {
     for ending in ["complete", "budget_limit", "clear"] {
@@ -2228,7 +2125,7 @@ fn terminal_transitions_remove_scratch_root() {
         activate_tracker(&mut t);
         let vid = t.snapshot().unwrap().verifier_id.clone();
         let root = goal_scratch_root(&vid);
-        // create_goal already made implementer/; assert the precondition.
+        // create_goal already made implementer/
         assert!(
             root.is_dir(),
             "{ending}: scratch root must exist pre-transition"
@@ -2265,9 +2162,7 @@ fn create_goal_initialises_plan_baseline_file_to_none() {
     assert!(t.snapshot().unwrap().plan_baseline_file.is_none());
 }
 
-/// `plan_baseline_file` round-trips through serde when populated (it
-/// must persist across a snapshot save/restore so the baseline survives
-/// a shell restart), and is omitted from the wire when `None`.
+/// `plan_baseline_file` must persist across a snapshot save/restore so the baseline survives a shell restart.
 #[test]
 fn plan_baseline_file_round_trips_through_serde() {
     let mut o = make_base_orchestration();
@@ -2293,9 +2188,7 @@ fn plan_baseline_file_round_trips_through_serde() {
     assert!(restored_none.plan_baseline_file.is_none());
 }
 
-/// The verdict enum must serialize in snake_case so it stays
-/// consistent with `GoalStatus` and the rest of the goal-tracker
-/// enums. Both variants are asserted explicitly — no wildcard.
+/// The verdict enum must serialize in snake_case so it stays consistent with `GoalStatus` and the rest of the goal-tracker enums.
 #[test]
 fn classifier_verdict_serializes_as_snake_case() {
     assert_eq!(
@@ -2313,9 +2206,6 @@ fn classifier_verdict_serializes_as_snake_case() {
     assert_eq!(n, GoalClassifierVerdict::NotAchieved);
 }
 
-/// `create_goal` must thread `baseline_commit` straight into
-/// `changes_baseline_commit` on the new orchestration record.
-/// Passing `None` must leave the field `None`.
 #[test]
 fn create_goal_plumbs_baseline_commit_into_orchestration() {
     let mut t = make_tracker();

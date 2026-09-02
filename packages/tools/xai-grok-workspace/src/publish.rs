@@ -1,13 +1,11 @@
-//! Publish (strict) — the merge-or-fail publish flow.
+//! Publish (strict): the merge-or-fail publish flow.
 //!
-//! `Publish(app)` = commit if dirty → `MergeToMain(conv → main)` → on success
-//! build/deploy from the merge SHA and record it; on merge failure return an
-//! error and **do not deploy**. No silent force-push, no deploy
-//! off an unmerged conv branch.
+//! `Publish(app)` commits if dirty, runs `MergeToMain` (conv into main), and on success builds/deploys from the merge SHA and records it.
+//! On merge failure it returns an error and **does not deploy**.
+//! No silent force-push, no deploy off an unmerged conv branch.
 //!
-//! The flow is expressed over the [`PublishBackend`] trait so it is unit-testable
-//! without a live workspace/deployer; the production adapter wires each method to
-//! the corresponding WorkspaceOp (`Commit`, `MergeToMain`) and the app deployer.
+//! The flow is expressed over the [`PublishBackend`] trait so it is unit-testable without a live workspace/deployer.
+//! The production adapter wires each method to the corresponding WorkspaceOp (`Commit`, `MergeToMain`) and the app deployer.
 
 use async_trait::async_trait;
 
@@ -16,8 +14,7 @@ pub use xai_grok_workspace_types::rpc::git::GitMergeToMainOutcome;
 /// The result of a `MergeToMain` step, decoupled from the wire type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MergeResult {
-    /// The conv branch merged (or fast-forwarded) into the target; `sha` is the
-    /// new target HEAD to build from.
+    /// The conv branch merged (or fast-forwarded) into the target; `sha` is the new target HEAD to build from.
     Merged { sha: String },
     /// The conv branch was already merged; `sha` is the current target HEAD.
     UpToDate { sha: String },
@@ -35,9 +32,7 @@ impl From<GitMergeToMainOutcome> for MergeResult {
     }
 }
 
-/// The successful result of a publish: the merge SHA that was built and the
-/// deployment that references it (every deploy records the SHA it was built
-/// from).
+/// The successful result of a publish: the merge SHA that was built and the deployment that references it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishOutcome {
     pub merge_sha: String,
@@ -50,8 +45,8 @@ pub enum PublishError {
     /// A pre-deploy git/commit step failed.
     #[error("commit before publish failed: {0}")]
     Commit(String),
-    /// The merge into the target branch hit conflicts. The conversation should
-    /// be parked in a "needs resolution" FE state; nothing is deployed.
+    /// The merge into the target branch hit conflicts.
+    /// The conversation should be parked in a "needs resolution" frontend state; nothing is deployed.
     #[error("merge into '{target}' has conflicts in {} file(s); not deployed", .files.len())]
     MergeConflict { target: String, files: Vec<String> },
     /// The merge failed for a non-conflict reason (e.g. remote unavailable).
@@ -60,24 +55,22 @@ pub enum PublishError {
     /// A backend/status probe failed before any deploy could happen.
     #[error("publish precondition failed: {0}")]
     Precondition(String),
-    /// Merge succeeded but the deploy step failed. The merge is durable on the
-    /// target branch (git = source of truth); a retry can re-deploy the SHA.
+    /// Merge succeeded but the deploy step failed.
+    /// The merge is durable on the target branch (git is the source of truth); a retry can re-deploy the SHA.
     #[error("deploy of merge sha {sha} failed: {message}")]
     Deploy { sha: String, message: String },
 }
 
-/// The operations `publish` drives. Each maps to an explicit platform op — the
-/// agent never performs these autonomously.
+/// The operations `publish` drives.
+/// Each maps to an explicit platform op; the agent never performs these autonomously.
 #[async_trait]
 pub trait PublishBackend {
     /// Is the conv-branch working tree dirty (uncommitted changes)?
     async fn is_dirty(&self) -> Result<bool, PublishError>;
     /// Commit the working tree onto the conv branch. Returns the new HEAD sha.
     async fn commit(&self, message: &str) -> Result<Option<String>, PublishError>;
-    /// Merge the conv branch into `target` (never rebase, never force). `push`
-    /// requires the merged target to be delivered to the durable remote before
-    /// returning success — so a deployed SHA is always on `origin`, never
-    /// local-only (invariants #1/#3).
+    /// Merge the conv branch into `target` (never rebase, never force).
+    /// `push` requires the merged target to be delivered to the durable remote before returning success, so a deployed SHA is always on `origin`.
     async fn merge_to_main(
         &self,
         conv_branch: &str,
@@ -88,14 +81,12 @@ pub trait PublishBackend {
     async fn deploy(&self, merge_sha: &str) -> Result<String, PublishError>;
 }
 
-/// Run the strict publish flow. Commits the dirty tree (if any), merges the conv
-/// branch into `target`, pushes the target to the durable remote, and only then
-/// builds/deploys from the merge SHA. A conflict or merge failure returns an
-/// error and never deploys.
+/// Run the strict publish flow.
+/// It commits a dirty tree, merges the conv branch into `target`, pushes to the durable remote, and only then builds/deploys from the merge SHA.
+/// A conflict or merge failure returns an error and never deploys.
 ///
-/// The caller must first ensure the workspace is on the conversation branch tip
-/// (via `EnsureBinding`, restoring the resume snapshot if needed) — this flow
-/// operates on the current working tree and does not resolve the branch itself.
+/// The caller must first ensure the workspace is on the conversation branch tip (via `EnsureBinding`, restoring the resume snapshot if needed).
+/// This flow operates on the current working tree and does not resolve the branch itself.
 pub async fn publish<B: PublishBackend + ?Sized>(
     backend: &B,
     conv_branch: &str,
@@ -107,7 +98,7 @@ pub async fn publish<B: PublishBackend + ?Sized>(
         backend.commit(commit_message).await?;
     }
 
-    // 2. MergeToMain (with push) — the only path that writes the target branch.
+    // 2. MergeToMain (with push): the only path that writes the target branch.
     // Push is required so the deployed SHA is on the durable remote, not local.
     let merge_sha = match backend.merge_to_main(conv_branch, target, true).await? {
         MergeResult::Merged { sha } | MergeResult::UpToDate { sha } => sha,
@@ -128,11 +119,11 @@ pub async fn publish<B: PublishBackend + ?Sized>(
     })
 }
 
-/// Multi-repo publish: commit + dry-run merge on **every** repo first, then
-/// serial merge+push+deploy. A dry-run conflict aborts before any remote push.
+/// Multi-repo publish: commit and dry-run merge on **every** repo first, then serial merge, push, and deploy.
+/// A dry-run conflict aborts before any remote push.
 ///
-/// `push = false` on the dry-run must not update the durable remote. Implementers
-/// that cannot preview without mutating local `main` should reset after the probe.
+/// `push = false` on the dry-run must not update the durable remote.
+/// Implementers that cannot preview without mutating local `main` should reset after the probe.
 pub async fn publish_serial_after_dry_run<B: PublishBackend + ?Sized>(
     backends: &[&B],
     conv_branch: &str,
@@ -327,7 +318,6 @@ mod tests {
             }
             other => panic!("expected MergeConflict, got {other:?}"),
         }
-        // The critical invariant: a conflicted merge never deploys.
         assert_eq!(None, backend.calls.lock().unwrap().deployed_sha);
     }
 
@@ -395,7 +385,6 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, PublishError::Deploy { .. }));
-        // The merge did happen and deploy was attempted (merge is durable in git).
         let calls = backend.calls.lock().unwrap();
         assert!(calls.merged);
         assert_eq!(Some("abc123".to_owned()), calls.deployed_sha);

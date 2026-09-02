@@ -1,7 +1,5 @@
-//! Smoke test for sandbox enforcement.
-//!
-//! This binary applies a sandbox profile and then attempts various operations
-//! to verify kernel enforcement. Run it directly to test:
+//! This binary applies a sandbox profile and then attempts various operations to verify kernel enforcement.
+//! Run it directly to test:
 //!
 //! ```bash
 //! # Test workspace profile (should allow writes to CWD, block ~/Desktop)
@@ -85,7 +83,6 @@ fn main() {
     // Test 4: Write to CWD (should work for workspace/strict, blocked for read-only)
     let test_file = workspace.join(".sandbox-test-write");
     test_write("Write to CWD", &test_file);
-    // Clean up
     let _ = std::fs::remove_file(&test_file);
 
     // Test 5: Write to /tmp (should work for workspace/strict, blocked for read-only)

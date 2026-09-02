@@ -1,5 +1,3 @@
-//! Debounced `idle_prompt` notification extension.
-
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -12,7 +10,6 @@ use xai_agent_lifecycle::{
 use super::super::*;
 use super::{NotificationEvent, NotificationEventSink};
 
-/// Default `idle_prompt` debounce (60s of user inactivity).
 const DEFAULT_IDLE_NOTIFICATION_DELAY: Duration = Duration::from_secs(60);
 
 /// Debounce between the session settling idle and the `idle_prompt` notification, so it fires only on sustained inactivity.
@@ -28,14 +25,14 @@ fn resolve_idle_notification_delay(raw: Option<String>) -> Duration {
         .unwrap_or(DEFAULT_IDLE_NOTIFICATION_DELAY)
 }
 
-/// Fires the `idle_prompt` notification hook once the session stays idle for the delay. Synthetic turns (auto-wake, drain, cron) only defer an
-/// earned ping: they cancel the timer like any turn start, and their own idle settle re-arms it.
-/// Covered by the headless E2E via `GROK_IDLE_NOTIFICATION_DELAY_MS`.
+/// Fires the `idle_prompt` notification hook once the session stays idle for the delay.
+/// Synthetic turns (auto-wake, drain, cron) only defer an earned ping: they cancel the timer like any turn start, and settling idle re-arms it.
+/// The headless E2E covers this via `GROK_IDLE_NOTIFICATION_DELAY_MS`.
 struct IdlePromptExtension {
     notification_event_sink: Rc<dyn NotificationEventSink>,
     timer: TaskSlot<()>,
-    /// Never cleared. A turn start cancels the armed timer; clearing this there too would let a
-    /// bash-mode turn, which starts but never ends, swallow the ping the previous turn earned.
+    /// Never cleared. A turn start cancels the armed timer.
+    /// Clearing the flag there too would let a bash-mode turn, which starts but never ends, swallow the ping the previous turn earned.
     has_ever_ended_a_turn: std::cell::Cell<bool>,
 }
 
@@ -97,7 +94,7 @@ mod idle_notification_delay_tests {
     use super::{DEFAULT_IDLE_NOTIFICATION_DELAY, resolve_idle_notification_delay};
     use std::time::Duration;
 
-    /// Missing env var → 60s default.
+    /// A missing env var falls back to the 60s default.
     #[test]
     fn defaults_to_claude_code_threshold() {
         assert_eq!(
@@ -110,7 +107,7 @@ mod idle_notification_delay_tests {
         );
     }
 
-    /// Pins the public `GROK_IDLE_NOTIFICATION_DELAY_MS` contract: a valid override is interpreted as milliseconds (the E2E seam depends on this).
+    /// Pins the public `GROK_IDLE_NOTIFICATION_DELAY_MS` contract: a valid override is interpreted as milliseconds (the E2E tests depend on this).
     #[test]
     fn env_override_parses_millis() {
         assert_eq!(
@@ -159,8 +156,8 @@ mod idle_after_interrupt_tests {
         tokio::task::yield_now().await;
     }
 
-    /// Regression: an interrupt used to leave a host stuck on "working". Every way a turn can end
-    /// arms the ping, so dropping any one of the three callbacks fails this.
+    /// Regression: an interrupt used to leave a host stuck on "working".
+    /// Every way a turn can end arms the ping, so dropping any one of the three callbacks fails this.
     #[tokio::test(start_paused = true)]
     async fn any_turn_ending_earns_a_ping() {
         let local = tokio::task::LocalSet::new();
@@ -185,8 +182,8 @@ mod idle_after_interrupt_tests {
             .await;
     }
 
-    /// A bash-mode turn cancels the armed timer without ever ending a turn. Clearing the flag on
-    /// turn start would swallow the ping the turn before it earned.
+    /// A bash-mode turn cancels the armed timer without ever ending a turn.
+    /// Clearing the flag on turn start would swallow the ping the turn before it earned.
     #[tokio::test(start_paused = true)]
     async fn a_turn_that_never_ends_keeps_the_earned_ping() {
         let local = tokio::task::LocalSet::new();

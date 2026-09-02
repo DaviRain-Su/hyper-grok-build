@@ -26,7 +26,7 @@ pub async fn pull_session_to_local(
         None => return Ok(PullResult::NotFound),
     };
 
-    // cwd required for local dir placement; null means pre-writeback session.
+    // cwd is required for local dir placement; null means the session predates cwd writeback
     let cwd = match remote.cwd.as_ref() {
         Some(cwd) => cwd,
         None => {
@@ -40,7 +40,7 @@ pub async fn pull_session_to_local(
         cwd: cwd.clone(),
     };
     let dir = crate::session::persistence::session_dir(&info);
-    // Ensure the `<encoded-cwd>` shield up front (best-effort).
+    // Create the owner-only `<encoded-cwd>` dir up front (best-effort)
     if let Err(e) = crate::util::grok_home::ensure_sessions_cwd_dir(cwd) {
         tracing::warn!(?e, "failed to ensure sessions cwd dir for pulled session");
     }
@@ -122,13 +122,10 @@ pub(crate) mod hydrate {
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        // Pull is not the rename ext boundary — strip and cap before this
-        // reaches `display_name`.
+        // Pull does not go through the rename extension, so strip and cap here before this reaches `display_name`
         //
-        // `save_session_data` writes the metadata blob, not the session-row
-        // title (`upsert` there passes title=None). Prefer an explicit blob
-        // title — including blank, which means cleared — so a stale row
-        // cannot resurrect a pin or clobber a metadata-only rename.
+        // `save_session_data` writes the metadata blob, not the session-row title (`upsert` there passes title=None)
+        // Prefer an explicit blob title, including blank (meaning cleared), so a stale row cannot resurrect a pin or clobber a metadata-only rename
         let remote_title = match meta.and_then(|m| m.get("title")) {
             Some(v) => v.as_str().and_then(sanitize_and_cap_title),
             None => remote.title.as_deref().and_then(sanitize_and_cap_title),
@@ -169,15 +166,14 @@ pub(crate) mod hydrate {
             head_commit: None,
             head_branch: None,
             request_id: None,
-            // Record the *local* grok_home (where this hydrated copy lives),
-            // not the original remote session's, since reconstruction runs locally.
+            // Record the *local* grok_home (where this hydrated copy lives), not the original remote session's, since reconstruction runs locally
             grok_home: crate::session::persistence::grok_home_string(),
             last_active_at: None,
             generated_title,
             title_is_manual,
             worktree_label: None,
             agent_name: None,
-            // Hydrated locally — record the profile this process runs under.
+            // Hydrated locally: record the profile this process runs under
             sandbox_profile: xai_grok_sandbox::configured_profile_name().map(String::from),
             reasoning_effort: None,
             last_turn_summary: None,

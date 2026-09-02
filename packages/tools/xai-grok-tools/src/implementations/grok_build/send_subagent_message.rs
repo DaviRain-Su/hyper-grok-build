@@ -2,7 +2,8 @@
 
 use crate::implementations::grok_build::task::backend::SubagentBackendResource;
 use crate::implementations::grok_build::task::types::{
-    ActiveAgentMessageOutcome, ActiveAgentMessageRequest, SubagentDepthCounter,
+    ActiveAgentMessageOperation, ActiveAgentMessageOutcome, ActiveAgentMessageRequest,
+    SubagentDepthCounter,
 };
 use crate::types::tool::{ToolKind, ToolNamespace};
 
@@ -14,6 +15,10 @@ pub struct SendSubagentMessageInput {
     pub subagent_id: String,
     /// Text to send to the subagent.
     pub text: String,
+    /// Queue for a later turn instead of steering the active turn.
+    #[serde(default)]
+    #[schemars(default)]
+    pub queue: bool,
 }
 
 #[derive(
@@ -144,7 +149,7 @@ impl crate::types::tool_metadata::ToolMetadata for SendSubagentMessageTool {
     }
 
     fn description_template(&self) -> &str {
-        "Send a follow-up message to an active subagent owned by this session. The subagent must still be active and accepting messages."
+        "Send a follow-up message to an active subagent owned by this session. By default it steers the current turn at its next safe point; set queue to true to wait for a later turn."
     }
 }
 
@@ -196,7 +201,16 @@ impl xai_tool_runtime::Tool for SendSubagentMessageTool {
         let (Some(0), Some(backend)) = (depth, backend) else {
             return Ok(SendSubagentMessageOutput::Unsupported);
         };
-        let request = match ActiveAgentMessageRequest::try_new(input.subagent_id, input.text) {
+        let operation = if input.queue {
+            ActiveAgentMessageOperation::Queue
+        } else {
+            ActiveAgentMessageOperation::Steer
+        };
+        let request = match ActiveAgentMessageRequest::try_new_with_operation(
+            input.subagent_id,
+            input.text,
+            operation,
+        ) {
             Ok(request) => request,
             Err(outcome) => return Ok(outcome.into()),
         };

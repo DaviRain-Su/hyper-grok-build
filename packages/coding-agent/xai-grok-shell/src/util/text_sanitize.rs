@@ -1,15 +1,12 @@
-//! Invisible/spoofing-character policy for remote-influenced text embedded
-//! in model-facing lines (reminders and similar) in this crate. Weaker,
-//! purpose-specific sanitizers exist for titles
-//! (`session::persistence::sanitize_rename_title`) and tool descriptions
-//! (`xai_grok_tools::implementations::search_tool::sanitize_description`);
-//! new consumers in this crate should prefer this policy.
+//! Invisible/spoofing-character policy for remote-influenced text embedded in model-facing lines (reminders and similar) in this crate.
+//! A weaker title sanitizer exists at `session::persistence::sanitize_rename_title`.
+//! A weaker tool-description sanitizer exists at `xai_grok_tools::implementations::search_tool::sanitize_description`.
+//! New consumers in this crate should prefer this policy.
 
-/// Characters flattened out of remote-influenced text: controls, Unicode
-/// line/paragraph separators, every format (Cf) character — including the
-/// tag block used for invisible-text smuggling — variation selectors, and
-/// invisible filler letters. Ranges are widened to whole blocks (fail
-/// closed on unassigned code points).
+/// Characters flattened out of remote-influenced text.
+/// Covered: controls, Unicode line/paragraph separators, every format (Cf) character, variation selectors, and invisible filler letters.
+/// The format class includes the tag block used for invisible-text smuggling.
+/// Ranges are widened to whole blocks (fail closed on unassigned code points).
 pub(crate) fn is_invisible_or_spoofing_char(c: char) -> bool {
     c.is_control()
         || matches!(
@@ -57,8 +54,7 @@ pub(crate) fn flatten_to_spaces(s: &str) -> String {
         .collect()
 }
 
-/// Flatten spoofable characters to spaces and trim; `None` when nothing
-/// legible remains.
+/// Flatten spoofable characters to spaces and trim; `None` when nothing legible remains.
 pub(crate) fn flatten_spoofable(s: &str) -> Option<String> {
     let flattened = flatten_to_spaces(s);
     let trimmed = flattened.trim();

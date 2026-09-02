@@ -1,14 +1,11 @@
 //! Mock inference server. Logs every request and shuts down on drop.
 //!
-//! Serves the three inference endpoints (`/v1/chat/completions`,
-//! `/v1/responses`, `/v1/messages`) plus `/v1/models`, `/v1/settings`,
-//! `/v1/user`, `/v1/storage`, `/v1/privacy/coding-data-retention`, and
-//! session writeback (`POST /sessions/{id}/data`, `PUT /sessions/{id}`).
+//! Serves the three inference endpoints (`/v1/chat/completions`, `/v1/responses`, `/v1/messages`).
+//! Also serves `/v1/models`, `/v1/settings`, `/v1/user`, `/v1/storage`, and `/v1/privacy/coding-data-retention`.
+//! Session writeback is served at `POST /sessions/{id}/data` and `PUT /sessions/{id}`.
 //!
-//! The inference endpoints answer from the first source that matches: a named
-//! expectation, then the path's [`ScriptedResponse`] queue, then the active
-//! mode, which echoes the last user message until
-//! [`MockInferenceServer::set_response`] replaces it with a fixed text.
+//! The inference endpoints answer from the first match: a named expectation, then the path's [`ScriptedResponse`] queue, then the active mode.
+//! The active mode echoes the last user message until [`MockInferenceServer::set_response`] replaces it with a fixed text.
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -44,7 +41,7 @@ pub struct LogEntry {
     pub authorization: Option<String>,
     /// Lowercase names in arrival order. Empty for the GET endpoints.
     pub headers: Vec<(String, String)>,
-    /// Wall-clock arrival time, for latency-harness request timelines.
+    /// Wall-clock arrival time, so the latency harness can build request timelines.
     pub at: std::time::SystemTime,
 }
 
@@ -104,9 +101,8 @@ impl RequestLog {
     }
 }
 
-/// A model served by `/v1/models`. Each field is emitted under its camelCase
-/// name when set, at the top level except for `agent_type`, which goes in
-/// `_meta`.
+/// A model served by `/v1/models`.
+/// Each field is emitted under its camelCase name when set, at the top level except for `agent_type`, which goes in `_meta`.
 #[derive(Debug, Clone)]
 pub struct MockModelEntry {
     pub id: String,
@@ -282,8 +278,7 @@ impl MockInferenceServer {
         Self::start_inner(models, None).await
     }
 
-    /// Start a mock that returns 401 on inference requests missing
-    /// `Authorization: Bearer <required_token>`.
+    /// Start a mock that returns 401 on inference requests missing `Authorization: Bearer <required_token>`.
     pub async fn start_with_required_auth(
         models: Vec<MockModelEntry>,
         required_token: impl Into<String>,
@@ -338,7 +333,7 @@ impl MockInferenceServer {
                 .unwrap();
         });
 
-        // Wait for server readiness — try connecting instead of a fixed sleep.
+        // Wait for server readiness: try connecting instead of a fixed sleep
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         while tokio::net::TcpStream::connect(addr).await.is_err() {
             if tokio::time::Instant::now() >= deadline {
@@ -375,14 +370,14 @@ impl MockInferenceServer {
         *self.response_mode.write().unwrap() = ResponseMode::Fixed(text.into());
     }
 
-    /// Consumed FIFO per `path`, e.g. `"/v1/chat/completions"`. An empty queue
-    /// falls back to the response mode.
+    /// Consumed FIFO per `path`, e.g. `"/v1/chat/completions"`.
+    /// An empty queue falls back to the response mode.
     pub fn enqueue_response(&self, path: impl Into<String>, response: ScriptedResponse) {
         self.overrides.enqueue_response(path, response);
     }
 
-    /// Default-responder concurrency cap: over `cap` in-flight (each held for
-    /// `hold`), extra requests get 429 + `Retry-After`. Scripts/expectations bypass.
+    /// Default-responder concurrency cap: over `cap` in-flight (each held for `hold`), extra requests get 429 with `Retry-After`.
+    /// Scripted responses and expectations bypass the cap.
     pub fn set_inference_concurrency_cap(&self, cap: usize, hold: Duration, retry_after_secs: u64) {
         self.overrides
             .set_concurrency_cap(cap, hold, retry_after_secs);
@@ -424,8 +419,8 @@ impl MockInferenceServer {
         *guard = Some(value);
     }
 
-    /// The smallest settings payload that opens the subscription gate. Without
-    /// it a client sits on the upsell screen.
+    /// The smallest settings payload that opens the subscription gate.
+    /// Without it a client sits on the upsell screen.
     pub fn preset_allow_access(&self) {
         self.set_settings(json!({ "allow_access": true }));
     }
@@ -452,8 +447,8 @@ impl MockInferenceServer {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// The `subscriptionTier` on `GET /v1/user`. `None`, the default, omits the
-    /// field, which the shell reads as the free tier.
+    /// The `subscriptionTier` on `GET /v1/user`.
+    /// `None`, the default, omits the field, which the shell reads as the free tier.
     pub fn set_user_subscription_tier(&self, tier: Option<&str>) {
         *self.user_tier.write().unwrap() = tier.map(str::to_owned);
     }
@@ -463,15 +458,15 @@ impl MockInferenceServer {
         *self.messages_stop_reason.write().unwrap() = stop_reason.into();
     }
 
-    /// Emit each SSE event after `delay`, so a test can hold a turn visibly
-    /// streaming. `None` restores instant streaming. Applies to requests
-    /// started after the call.
+    /// Emit each SSE event after `delay`, so a test can hold a turn visibly streaming.
+    /// `None` restores instant streaming.
+    /// Applies to requests started after the call.
     pub fn set_chunk_delay(&self, delay: Option<Duration>) {
         *self.chunk_delay.write().unwrap() = delay;
     }
 
-    /// Hold foreground terminal SSE events until
-    /// [`Self::release_agent_completions`]. Prefer per-expectation blocking.
+    /// Hold foreground terminal SSE events until [`Self::release_agent_completions`].
+    /// Prefer per-expectation blocking.
     pub fn hold_agent_completions(&self) {
         self.overrides.hold_completions();
     }
@@ -495,6 +490,16 @@ impl MockInferenceServer {
         self.log.count.load(Ordering::SeqCst)
     }
 
+    pub fn request_count_for(&self, path: &str) -> usize {
+        self.log
+            .entries
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e.path == path)
+            .count()
+    }
+
     /// Stop retaining entries. [`Self::request_count`] stays exact.
     pub fn set_keep_requests(&self, enabled: bool) {
         self.log.keep_entries.store(enabled, Ordering::SeqCst);
@@ -504,8 +509,7 @@ impl MockInferenceServer {
         self.log.entries.lock().unwrap().clone()
     }
 
-    /// Bodies of all received requests, in arrival order (body-less requests
-    /// such as `GET /v1/models` are skipped).
+    /// Bodies of all received requests, in arrival order (body-less requests such as `GET /v1/models` are skipped).
     pub fn request_bodies(&self) -> Vec<Value> {
         self.log
             .entries
@@ -601,8 +605,7 @@ impl MockInferenceServer {
         self.storage.uploads.lock().unwrap().clone()
     }
 
-    /// Counts the attempt, then either rejects it or records it and answers in
-    /// the proxy's `UploadResponse` shape.
+    /// Counts the attempt, then either rejects it or records it and answers in the proxy's `UploadResponse` shape.
     fn storage_upload_handler(
         storage: &StorageState,
         headers: &HeaderMap,
@@ -1001,8 +1004,7 @@ impl MockInferenceServer {
                             if !matches!(stall, StartupFetchStall::None) {
                                 served.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
-                            // Scripts take precedence, so a test can serve a
-                            // transient payload before the steady-state value.
+                            // Scripts take precedence, so a test can serve a transient payload before the steady-state value
                             if let Some(s) = overrides.pop_scripted("/v1/settings") {
                                 return s.into_response_paced(None, None).await;
                             }
@@ -1030,8 +1032,7 @@ impl MockInferenceServer {
                                 auth.as_deref(),
                                 Self::headers_vec(&headers),
                             );
-                            // Echo the received flag back like the real
-                            // cli-chat-proxy does on success.
+                            // Echo the received flag back like the real cli-chat-proxy does on success
                             let opt_out = body
                                 .get("codingDataRetentionOptOut")
                                 .cloned()
@@ -1048,8 +1049,7 @@ impl MockInferenceServer {
                         let log = log.clone();
                         let user_tier = user_tier.clone();
                         async move {
-                            // Log the query string so a test can count
-                            // `?include=subscription` on its own.
+                            // Log the query string so a test can count `?include=subscription` on its own
                             let path = match query {
                                 Some(q) if !q.is_empty() => format!("/v1/user?{q}"),
                                 _ => "/v1/user".to_owned(),
@@ -1132,8 +1132,7 @@ impl MockInferenceServer {
                     }
                 }),
             )
-            // 404 reads as an old proxy, so the shell falls back to a plain
-            // `POST /v1/storage`.
+            // 404 reads as an old proxy, so the shell falls back to a plain `POST /v1/storage`
             .route(
                 "/v1/storage/exists",
                 get(|| async { StatusCode::NOT_FOUND }),
@@ -1768,7 +1767,7 @@ mod tests {
         let body = post_chat(&server, "ping pong").await.text().await.unwrap();
         assert_eq!(chat_stream_text(&body), "Echo: ping pong");
 
-        // Echo mode keeps its historical whitespace-collapsing semantics.
+        // Echo mode keeps its old whitespace-collapsing behavior
         let body = post_chat(&server, "a  b\nc").await.text().await.unwrap();
         assert_eq!(chat_stream_text(&body), "Echo: a b c");
     }
@@ -1971,8 +1970,7 @@ mod tests {
         );
     }
 
-    /// Pins the documented precedence: a script bypasses the required-auth
-    /// gate; once the queue empties, the gate is back.
+    /// Pins the documented precedence: a script bypasses the required-auth gate; once the queue empties, the gate is back.
     #[tokio::test]
     async fn scripted_response_takes_precedence_over_required_auth() {
         let server = MockInferenceServer::start_with_required_auth(
@@ -1996,8 +1994,7 @@ mod tests {
         assert_eq!(resp.status(), 401);
     }
 
-    /// Scripted response headers reach the client (the phase-2 script format's
-    /// named consumer: 429 + Retry-After error injection).
+    /// Scripts inject 429 errors with `Retry-After`, so scripted headers must reach the client.
     #[tokio::test]
     async fn scripted_response_headers_reach_the_client() {
         let server = MockInferenceServer::start().await.unwrap();

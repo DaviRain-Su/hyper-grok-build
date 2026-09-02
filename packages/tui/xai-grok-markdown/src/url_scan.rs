@@ -36,56 +36,52 @@ pub(crate) fn detect_plain_urls_with_offset(
 
     for (i, line) in lines.iter().enumerate() {
         let line_index = line_index_offset + i;
-        let mut display_col: usize = 0;
+        // Scan the joined line so a URL split across style spans
+        // (pretty-mode link coloring) is one target, not a truncated prefix.
+        let line_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
 
-        for span in &line.spans {
-            let span_text: &str = span.content.as_ref();
-
-            for link in finder.links(span_text) {
-                let start = link.start();
-                let end = link.end();
-                if start > end
-                    || end > span_text.len()
-                    || !span_text.is_char_boundary(start)
-                    || !span_text.is_char_boundary(end)
-                {
-                    continue;
-                }
-                let before = &span_text[..start];
-                let matched = &span_text[start..end];
-
-                let col_start = display_col + unicode_display_width(before);
-                let col_end = col_start + unicode_display_width(matched);
-                let url = match link.kind() {
-                    LinkKind::Email => {
-                        // `git@github.com:org/repo` is an scp remote, not mail.
-                        if matches!(span_text.as_bytes().get(end), Some(b':' | b'/')) {
-                            continue;
-                        }
-                        format!("mailto:{}", link.as_str())
-                    }
-                    _ => link.as_str().to_string(),
-                };
-
-                // Dedup: skip if any existing or already-added target overlaps on the same line
-                let overlaps = existing.iter().chain(result.iter()).any(|h| {
-                    h.line_index == line_index
-                        && col_start < h.column_range.end
-                        && h.column_range.start < col_end
-                });
-
-                if !overlaps {
-                    result.push(HyperlinkTarget {
-                        line_index,
-                        column_range: col_start..col_end,
-                        url,
-                        id: current_id,
-                    });
-                    current_id += 1;
-                }
+        for link in finder.links(&line_text) {
+            let start = link.start();
+            let end = link.end();
+            if start > end
+                || end > line_text.len()
+                || !line_text.is_char_boundary(start)
+                || !line_text.is_char_boundary(end)
+            {
+                continue;
             }
+            let before = &line_text[..start];
+            let matched = &line_text[start..end];
 
-            display_col += unicode_display_width(span_text);
+            let col_start = unicode_display_width(before);
+            let col_end = col_start + unicode_display_width(matched);
+            let url = match link.kind() {
+                LinkKind::Email => {
+                    // `git@github.com:org/repo` is an scp remote, not mail.
+                    if matches!(line_text.as_bytes().get(end), Some(b':' | b'/')) {
+                        continue;
+                    }
+                    format!("mailto:{}", link.as_str())
+                }
+                _ => link.as_str().to_string(),
+            };
+
+            // Dedup: skip if any existing or already-added target overlaps on the same line
+            let overlaps = existing.iter().chain(result.iter()).any(|h| {
+                h.line_index == line_index
+                    && col_start < h.column_range.end
+                    && h.column_range.start < col_end
+            });
+
+            if !overlaps {
+                result.push(HyperlinkTarget {
+                    line_index,
+                    column_range: col_start..col_end,
+                    url,
+                    id: current_id,
+                });
+                current_id += 1;
+            }
         }
     }
 
@@ -258,6 +254,32 @@ mod tests {
 
         let url_width = unicode_display_width("https://example.com");
         assert_eq!(h.column_range.end, expected_start + url_width);
+    }
+
+    #[test]
+    fn url_split_across_style_spans_is_one_target() {
+        use crate::buffers::unicode_display_width;
+        use ratatui::style::{Color, Style};
+        use ratatui::text::Span;
+
+        let line = Line::from(vec![
+            Span::styled(
+                "https://tracker.example.com/",
+                Style::default().fg(Color::Blue),
+            ),
+            Span::styled("projects/issues/#12345", Style::default().fg(Color::Blue)),
+        ]);
+        let (found, _) = detect_plain_urls(&[line], &[], 0);
+        assert_eq!(found.len(), 1, "style boundary must not split the URL");
+        assert_eq!(
+            found[0].url,
+            "https://tracker.example.com/projects/issues/#12345"
+        );
+        assert_eq!(found[0].column_range.start, 0);
+        assert_eq!(
+            found[0].column_range.end,
+            unicode_display_width("https://tracker.example.com/projects/issues/#12345")
+        );
     }
 
     #[test]

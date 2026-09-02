@@ -1,4 +1,4 @@
-//! Match-highlight overlay shared by the list pane and other search surfaces.
+//! Match-highlight overlay shared by the list pane and other views that show search matches.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -10,21 +10,18 @@ use crate::render::wrapping::{
 
 /// Invert (REVERSED) the buffer cells covering every match of `re` in `text`.
 ///
-/// Run as a post-pass after a line has been drawn, so matches are highlighted
-/// regardless of the underlying colors.
+/// Run as a post-pass after a line has been drawn, so matches are highlighted regardless of the underlying colors.
 ///
 /// - `area`: the pane area; `area.x` / `area.width` bound painting horizontally.
 /// - `row_y`: buffer row of the line's first visible row.
 /// - `viewport_bottom`: exclusive bottom row; wrapped rows at or below it stop.
 /// - `skip`: leading wrapped rows of this line clipped above the viewport.
 /// - `prefix_w`: display column where `text` begins (e.g. a line-number gutter).
-/// - `text`: plain text the regex runs against (logical order; RTL matches are
-///   mapped to visual columns to match painted cells).
+/// - `text`: plain text the regex runs against (logical order; RTL matches are mapped to visual columns to match painted cells).
 /// - `single_row`: the line occupies one buffer row (NoWrap, or any 1-row item).
-/// - `map_visual`: whether the caller painted `text` bidi-reordered (via
-///   `set_line_safe_bidi`). Only then are match columns remapped to visual
-///   cells; callers that paint logically (custom list renderers) pass `false`
-///   so highlights are not shifted off the glyphs they paint.
+/// - `map_visual`: whether the caller painted `text` bidi-reordered (via `set_line_safe_bidi`).
+///   Only then are match columns remapped to visual cells.
+///   Callers that paint logically (custom list renderers) pass `false` so highlights are not shifted off the glyphs they paint.
 #[allow(clippy::too_many_arguments)]
 pub fn paint_match_highlights(
     buf: &mut Buffer,
@@ -94,8 +91,7 @@ pub fn paint_match_highlights(
     }
 }
 
-/// Apply the terminal's REVERSED attribute so the fg/bg swap is native and
-/// respects the user's theme.
+/// Apply the terminal's REVERSED attribute so the fg/bg swap is native and respects the user's theme.
 fn invert_cell(cell: &mut ratatui::buffer::Cell) {
     cell.modifier.insert(ratatui::style::Modifier::REVERSED);
 }

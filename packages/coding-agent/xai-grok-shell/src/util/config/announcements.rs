@@ -1,7 +1,6 @@
 use toml::Value as TomlValue;
 
 /// Announcement entry received from cli-chat-proxy `/v1/settings`.
-/// Re-exported from `xai-grok-announcements` for backward compatibility.
 pub use xai_grok_announcements::RemoteAnnouncement;
 
 // ---------------------------------------------------------------------------
@@ -32,10 +31,9 @@ pub(crate) fn merge_announcements(sources: &[&[RemoteAnnouncement]]) -> Vec<Remo
     out
 }
 
-/// Dev/test override for announcements via `GROK_ANNOUNCEMENTS_OVERRIDE` (a JSON
-/// array of announcements). Returns `Some` only when the env var holds valid
-/// JSON; an empty array (`[]`) suppresses all announcements. Every announcement
-/// resolution path honors this so it works for testing regardless of source.
+/// Dev/test override for announcements via `GROK_ANNOUNCEMENTS_OVERRIDE` (a JSON array of announcements).
+/// Returns `Some` only when the env var holds valid JSON; an empty array (`[]`) suppresses all announcements.
+/// Every announcement resolution path honors this so it works for testing regardless of source.
 pub(crate) fn announcements_override() -> Option<Vec<RemoteAnnouncement>> {
     let raw = std::env::var("GROK_ANNOUNCEMENTS_OVERRIDE").ok()?;
     match serde_json::from_str::<Vec<RemoteAnnouncement>>(&raw) {
@@ -47,10 +45,8 @@ pub(crate) fn announcements_override() -> Option<Vec<RemoteAnnouncement>> {
     }
 }
 
-/// Resolve announcements from pre-loaded config layers.
-///
-/// Priority: requirements > remote > user config > managed config.
-/// `GROK_ANNOUNCEMENTS_OVERRIDE` env var overrides everything (dev-only escape hatch).
+/// Priority order: requirements, then remote, then user config, then managed config.
+/// The `GROK_ANNOUNCEMENTS_OVERRIDE` env var overrides everything (dev only).
 pub fn resolve_announcements(
     requirements: Option<&TomlValue>,
     user: Option<&TomlValue>,

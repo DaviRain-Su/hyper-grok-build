@@ -24,9 +24,8 @@ pub struct TerminalRunRequest {
     /// - `true`: Agent tool calls (streaming updates, killable via x.ai/terminal/kill)
     /// - `false`: Extension methods, git helpers (no updates, not killable)
     pub stream: bool,
-    /// Optional file path to write output incrementally (for background tasks).
     /// When Some, the streaming loop writes output to this file as it arrives.
-    /// This allows retrieval of full output even after in-memory buffer is truncated.
+    /// Background tasks use it to retrieve the full output after the in-memory buffer truncates.
     pub output_file: Option<PathBuf>,
 }
 

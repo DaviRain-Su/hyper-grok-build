@@ -12,22 +12,17 @@ use crate::prompt::ignore::{build_gitignore, is_ignored};
 
 use xai_grok_tools::types::compat::CompatConfig;
 
-/// Represents an agent config file with its path and content.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AgentConfigFile {
     /// The filename (e.g., "AGENTS.md", "Claude.md")
     pub file_name: String,
     /// The full absolute path to the config file
     pub file_path: String,
-    /// The content of the config file
     pub content: String,
 }
 
-/// Find matching agent config files in a directory.
-///
-/// `filenames` is the (compat-gated) recognized list, precomputed once by the
-/// caller so the cwd→root walk doesn't re-allocate it per directory. When all
-/// cells are on it equals the legacy `AGENT_FILENAMES` list exactly.
+/// `filenames` is the (compat-gated) recognized list, precomputed once by the caller so the cwd-to-root walk doesn't re-allocate it per directory.
+/// When all compat cells are on it equals the legacy `AGENT_FILENAMES` list exactly.
 fn find_agent_files(dir: &Path, filenames: &[&str]) -> Vec<PathBuf> {
     filenames
         .iter()
@@ -38,9 +33,8 @@ fn find_agent_files(dir: &Path, filenames: &[&str]) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Find `*.md` files in `.grok/rules/`, `.claude/rules/`, and `.cursor/rules/`,
-/// sorted alphabetically. `rules_subdirs` is the (compat-gated) list, precomputed
-/// once by the caller so the walk doesn't re-allocate it per directory.
+/// Find `*.md` files in `.grok/rules/`, `.claude/rules/`, and `.cursor/rules/`, sorted alphabetically.
+/// `rules_subdirs` is the (compat-gated) list, precomputed once by the caller so the walk doesn't re-allocate it per directory.
 fn find_rules_files(dir: &Path, rules_subdirs: &[&str]) -> Vec<PathBuf> {
     let mut results = Vec::new();
     for rules_subdir in rules_subdirs {
@@ -66,8 +60,6 @@ fn find_rules_files(dir: &Path, rules_subdirs: &[&str]) -> Vec<PathBuf> {
     results
 }
 
-/// Canonicalize a path for discovery deduplication, falling back to the
-/// original path when canonicalization fails.
 fn canonical_for_dedup(path: &Path) -> PathBuf {
     dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
@@ -142,11 +134,9 @@ fn add_discovered_candidate(
 }
 
 /// Read Agents.md from ~/.grok/, git repo root, and session cwd.
-/// Returns a list of AgentConfigFile with their file names, full paths, and contents.
 ///
-/// `compat` gates which vendor (`.claude`/`.cursor`) surfaces are scanned for
-/// rules / project-instruction files; pass `CompatConfig::default()` to
-/// preserve the historical all-vendors behavior.
+/// `compat` gates which vendor (`.claude`/`.cursor`) directories are scanned for rules and project-instruction files.
+/// Pass `CompatConfig::default()` to preserve the historical all-vendors behavior.
 pub async fn read_agents_config_with_paths(
     working_directory: &str,
     compat: CompatConfig,
@@ -155,8 +145,7 @@ pub async fn read_agents_config_with_paths(
     read_agents_config_with_options(working_directory, workspace_user_dir.as_deref(), compat).await
 }
 
-/// Inner implementation that accepts an optional workspace user dir as a
-/// parameter, making it testable without environment variable mutation.
+/// Inner implementation that accepts an optional workspace user dir as a parameter, making it testable without environment variable mutation.
 async fn read_agents_config_with_options(
     working_directory: &str,
     workspace_user_dir: Option<&Path>,
@@ -313,8 +302,7 @@ pub fn format_agents_md_section(configs: &[AgentConfigFile]) -> Option<String> {
 }
 
 /// Verbatim leading bytes [`render_agents_md`] emits for every reminder block.
-/// Used by `xai-grok-shell` to structurally detect legacy untagged AGENTS.md
-/// copies (pre-`SyntheticReason::ProjectInstructions`) on resumed sessions.
+/// Used by `xai-grok-shell` to structurally detect legacy untagged AGENTS.md copies (pre-`SyntheticReason::ProjectInstructions`) on resumed sessions.
 pub const LEGACY_AGENTS_MD_REMINDER_PREFIX: &str =
     "\n\n<system-reminder>\nAs you answer the user's questions, you can use the following context";
 
@@ -322,11 +310,11 @@ pub const LEGACY_AGENTS_MD_REMINDER_PREFIX: &str =
 /// Shared with unit tests so CI fails if the pattern is ever invalid or too narrow.
 const SYSTEM_REMINDER_TAG_PATTERN: &str = r"(?i)<(\s*/?\s*system[-_]reminder)";
 
-/// Literal pattern only — compile failure is a programmer bug, not a runtime input error.
+/// Literal pattern only: compile failure is a programmer bug, not a runtime input error.
 static SYSTEM_REMINDER_TAG_RE: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(SYSTEM_REMINDER_TAG_PATTERN).unwrap());
 
-/// HTML-escape leading `<` so untrusted AGENTS.md cannot break out of / forge harness framing.
+/// HTML-escape leading `<` so untrusted AGENTS.md cannot break out of or forge harness framing.
 fn neutralize_reminder_tags(content: &str) -> String {
     SYSTEM_REMINDER_TAG_RE
         .replace_all(content, "&lt;$1")
@@ -377,8 +365,7 @@ mod tests {
         fs::write(tmp.path().join("AGENTS.md"), "# Instructions").unwrap();
 
         let files = find_agent_files(tmp.path(), &CompatConfig::default().agent_filenames());
-        // On case-insensitive filesystems (macOS), both "Agents.md" and "AGENTS.md"
-        // resolve to the same file, so we may get more than 1 result.
+        // On case-insensitive filesystems (macOS), both "Agents.md" and "AGENTS.md" resolve to the same file, so we may get more than 1 result
         assert!(!files.is_empty());
         assert!(
             files
@@ -489,7 +476,6 @@ mod tests {
             content: long_content,
         }];
         let section = format_agents_md_section(&configs).unwrap();
-        // No cap: the full content is delivered verbatim, with no truncation marker.
         assert!(
             section.contains(&"A".repeat(5000)),
             "full content must be preserved"
@@ -518,7 +504,7 @@ mod tests {
         )
         .unwrap();
 
-        // cwd = repo root (user dir is NOT in the walk path)
+        // cwd is the repo root (user dir is NOT in the walk path)
         let configs = read_agents_config_with_options(
             repo_root.to_str().unwrap(),
             Some(&user_dir),
@@ -545,7 +531,7 @@ mod tests {
         fs::create_dir_all(&user_dir).unwrap();
         fs::write(user_dir.join("AGENTS.md"), "# Dedup test instructions").unwrap();
 
-        // cwd IS the user dir — the walk already includes it
+        // cwd IS the user dir: the walk already includes it
         let configs = read_agents_config_with_options(
             user_dir.to_str().unwrap(),
             Some(&user_dir),
@@ -553,7 +539,6 @@ mod tests {
         )
         .await;
 
-        // "Dedup test instructions" should appear exactly once
         let count = configs
             .iter()
             .filter(|c| c.content.contains("Dedup test instructions"))
@@ -576,7 +561,7 @@ mod tests {
         fs::create_dir_all(&user_dir).unwrap();
         fs::write(user_dir.join("AGENTS.md"), "# Ghost instructions").unwrap();
 
-        // Pass None — simulates env vars not set
+        // Pass None: simulates env vars not set
         let configs = read_agents_config_with_options(
             repo_root.to_str().unwrap(),
             None,
@@ -951,7 +936,6 @@ mod tests {
         )
         .await;
 
-        // Both should be found
         let has_repo = configs
             .iter()
             .any(|c| c.content.contains("XYZZY_REPO_ROOT_MARKER"));
@@ -992,7 +976,7 @@ mod tests {
         ] {
             assert!(re.is_match(sample), "should match: {sample}");
         }
-        // Prefix match by design (attrs ok); only reject shapes that are not the tag name.
+        // Prefix match by design (attributes may follow); only reject shapes that are not the tag name
         for sample in [
             "system-reminder",
             "<system-remind>",

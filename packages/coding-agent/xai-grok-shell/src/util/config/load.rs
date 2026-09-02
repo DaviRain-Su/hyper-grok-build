@@ -1,9 +1,6 @@
 use super::mcp::*;
 use toml::Value as TomlValue;
-/// Resolve a bool from an optional env var > config.toml `[section] key` > false.
-///
-/// Uses [`crate::agent::config::env_bool`] for consistent env var parsing
-/// (`1/true/yes/on/enabled` and their negations).
+/// Resolve a bool from an optional env var, then config.toml `[section] key`, then false.
 fn toml_bool_sync(env_var: Option<&str>, section: &str, key: &str) -> bool {
     if let Some(var) = env_var
         && let Some(val) = crate::agent::config::env_bool(var)
@@ -25,10 +22,9 @@ fn toml_bool_sync(env_var: Option<&str>, section: &str, key: &str) -> bool {
 pub(crate) fn load_relay_sync_enabled_sync() -> bool {
     toml_bool_sync(Some("GROK_RELAY_SYNC_ENABLED"), "relay", "enabled")
 }
-/// `[harness]` blocking-upload settings from ONE effective-config parse:
-/// `block_for_upload` (default false — prompt handling waits for turn-end
-/// uploads when set) and `upload_flush_timeout_secs` (default 60 — budget for
-/// that wait).
+/// `[harness]` blocking-upload settings from ONE effective-config parse.
+/// `block_for_upload` (default false): when set, prompt handling waits for turn-end uploads.
+/// `upload_flush_timeout_secs` (default 60): the budget for that wait.
 pub(crate) fn load_blocking_upload_config_sync() -> (bool, std::time::Duration) {
     const DEFAULT_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
     let root: TomlValue = match crate::config::load_effective_config() {
@@ -58,7 +54,7 @@ pub async fn load_config() -> Config {
     };
     load_config_from_toml(&root)
 }
-/// Parse `Config` from a pre-loaded TOML value. Used by both async and sync paths.
+/// Both the async and sync load paths call this.
 pub fn load_config_from_toml(root: &TomlValue) -> Config {
     let table = match root.as_table() {
         Some(t) => t,

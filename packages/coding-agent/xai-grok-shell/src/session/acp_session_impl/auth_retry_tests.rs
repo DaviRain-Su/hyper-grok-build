@@ -5,8 +5,7 @@ use xai_grok_sampling_types::SentCredential;
 use super::{AuthRetryDecision, AuthRetrySchedule};
 use crate::util::dual_clock::DualClock;
 
-/// `now` shifted `wall_ahead` on the wall clock only — the signature a
-/// suspend leaves behind (monotonic pauses, wall keeps advancing).
+/// `now` shifted `wall_ahead` on the wall clock only, the pattern a suspend leaves behind (monotonic pauses, wall keeps advancing).
 fn after_suspend(base: DualClock, wall_ahead: Duration) -> DualClock {
     DualClock {
         mono: base.mono,
@@ -14,9 +13,8 @@ fn after_suspend(base: DualClock, wall_ahead: Duration) -> DualClock {
     }
 }
 
-/// Pins the exact schedule. Guards against the `from_millis(1000)` footgun
-/// (baseⁿ semantics), which produced field sleeps of 1s, 16m40s, and 11.57
-/// days.
+/// Pins the exact schedule.
+/// Guards against the `from_millis(1000)` mistake, where the 1000 became the exponent base and real delays came out as 1s, 16m40s, and 11.57 days.
 #[test]
 fn schedule_is_one_two_four_seconds_then_exhausted() {
     let mut schedule = AuthRetrySchedule::new();
@@ -47,8 +45,8 @@ fn schedule_is_one_two_four_seconds_then_exhausted() {
     assert_eq!(schedule.incident_counts(), (4, 4));
 }
 
-/// Unknown provenance charges like an authenticated 401 (fail closed toward
-/// terminating) but is not reported as a proven credential rejection.
+/// `SentCredential::Unknown` charges the budget like an authenticated 401, failing closed toward terminating.
+/// It is not reported as a proven credential rejection.
 #[test]
 fn unknown_credential_charges_but_is_not_counted_authenticated() {
     let mut schedule = AuthRetrySchedule::new();
@@ -62,8 +60,7 @@ fn unknown_credential_charges_but_is_not_counted_authenticated() {
     assert_eq!(schedule.incident_counts(), (1, 0));
 }
 
-/// The overnight-failure regression: a credential-less 401 never consumes a
-/// budget slot; only the runaway guard bounds it.
+/// The overnight-failure regression: a 401 with no credential sent never consumes a budget slot; only the runaway guard bounds it.
 #[test]
 fn missing_credential_never_charges_until_runaway_guard() {
     let mut schedule = AuthRetrySchedule::new();
@@ -89,10 +86,8 @@ fn missing_credential_never_charges_until_runaway_guard() {
     );
 }
 
-/// A success ends every open failure narrative: the escalating delays, the
-/// attempt numbering, and the runaway counter all restart (a 200 disproves
-/// the runaway premise, so a productive multi-day turn can never accumulate
-/// into the guard).
+/// A success resets everything: the escalating delays, the attempt numbering, and the runaway counter all restart.
+/// A 200 proves the session is not running away, so a productive multi-day turn can never accumulate into the guard.
 #[test]
 fn success_resets_budget_and_uncharged_counter() {
     let mut schedule = AuthRetrySchedule::new();
@@ -115,8 +110,7 @@ fn success_resets_budget_and_uncharged_counter() {
     );
 }
 
-/// The uncharged counter survives a suspend reset (the guard spans sleep
-/// cycles — that is its point) while the charged budget restarts.
+/// The uncharged counter survives a suspend reset while the charged budget restarts; the runaway guard exists to span sleep cycles.
 #[test]
 fn suspend_reset_preserves_uncharged_counter() {
     let mut schedule = AuthRetrySchedule::new();
@@ -141,9 +135,8 @@ fn suspend_reset_preserves_uncharged_counter() {
     );
 }
 
-/// Suspend resets are capped per success-free stretch: a fault that
-/// persists across wakes must eventually exhaust instead of retrying
-/// forever. A success re-arms the cap.
+/// Suspend resets are capped until a success: a fault that persists across wakes must eventually exhaust instead of retrying forever.
+/// A success restores the cap.
 #[test]
 fn suspend_resets_cap_without_success_and_rearm_on_success() {
     let mut schedule = AuthRetrySchedule::new();
@@ -170,8 +163,7 @@ fn suspend_resets_cap_without_success_and_rearm_on_success() {
     );
 }
 
-/// No suspend, no reset: sub-threshold wall drift (NTP jitter) and a
-/// schedule with no open incident are both no-ops.
+/// No suspend, no reset: wall drift below the suspend threshold (NTP jitter) and a schedule with no open incident are both no-ops.
 #[test]
 fn suspend_reset_requires_open_incident_and_real_drift() {
     let mut schedule = AuthRetrySchedule::new();

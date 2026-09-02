@@ -151,22 +151,25 @@ impl ChatStateActor {
         })
     }
 
-    /// Return the current turn's last assistant message with non-empty text, or
-    /// `None` when the turn produced none.
-    ///
-    /// Like [`Self::get_last_assistant_text`], but the backwards walk stops at the
-    /// turn boundary (a user item with `prompt_index` set, a genuine user message,
-    /// or a synthetic reason with [`SyntheticReason::starts_prompt_turn`]); mid-turn
-    /// synthetic injections are walked past.
-    ///
-    /// [`SyntheticReason::starts_prompt_turn`]: xai_grok_sampling_types::SyntheticReason::starts_prompt_turn
-    pub(super) fn get_last_assistant_text_in_turn(&self) -> Option<String> {
-        for item in self.state.conversation.iter().rev() {
+    /// Reassemble a Length-salvaged report: the turn's last assistant text
+    /// (same seek as [`Self::get_last_assistant_text_in_turn`], walking past
+    /// mid-turn synthetics and tool items), then earlier segments joined
+    /// backwards across `Reasoning` and `LengthContinue` user items only.
+    /// Joined forward with no separator — Length cuts mid-token and
+    /// continuations carry their own whitespace.
+    pub(super) fn get_trailing_assistant_report(&self) -> Option<String> {
+        let mut items = self.state.conversation.iter().rev();
+        let mut segments: Vec<&str> = Vec::new();
+        // Seek the last assistant text of this turn, old-query semantics.
+        // A tool-call-carrying item is still a joinable segment: a
+        // continuation may finish the cut sentence and then call a tool.
+        for item in items.by_ref() {
             match item {
                 xai_grok_sampling_types::ConversationItem::Assistant(a)
                     if !a.content.trim().is_empty() =>
                 {
-                    return Some(a.content.as_ref().to_owned());
+                    segments.push(a.content.as_ref());
+                    break;
                 }
                 xai_grok_sampling_types::ConversationItem::User(u)
                     if u.prompt_index.is_some()
@@ -179,7 +182,94 @@ impl ChatStateActor {
                 _ => {}
             }
         }
-        None
+        // Join earlier salvage segments. The reminder is injected only on
+        // the first continue, so later segments sit adjacent (with at most
+        // `Reasoning` siblings between) — bare-`Reasoning` adjacency must
+        // join or a multi-continue report loses every middle segment.
+        for item in items {
+            match item {
+                xai_grok_sampling_types::ConversationItem::Assistant(a) => {
+                    // An earlier tool-call step is a real boundary.
+                    if !a.tool_calls.is_empty() {
+                        break;
+                    }
+                    if !a.content.trim().is_empty() {
+                        segments.push(a.content.as_ref());
+                    }
+                }
+                // Committed between salvage segments on reasoning models;
+                // not report content, not a boundary.
+                xai_grok_sampling_types::ConversationItem::Reasoning(_) => {}
+                // Join only across the salvage reminder; any other reminder
+                // separates distinct answers.
+                xai_grok_sampling_types::ConversationItem::User(u)
+                    if u.synthetic_reason
+                        == Some(xai_grok_sampling_types::SyntheticReason::LengthContinue) => {}
+                // Boundary — deliberately including `BackendToolCall`: a
+                // hosted-tool step between segments is a real step boundary.
+                _ => break,
+            }
+        }
+        if segments.is_empty() {
+            return None;
+        }
+        Some(segments.iter().rev().copied().collect())
+    }
+
+    /// Non-empty assistant texts in the current turn, chronological.
+    ///
+    /// The backwards walk stops at the turn boundary (a user item with
+    /// `prompt_index` set, a genuine user message, or a synthetic reason with
+    /// [`SyntheticReason::starts_prompt_turn`]); mid-turn synthetic injections
+    /// are walked past. Whitespace-only assistant items are skipped.
+    ///
+    /// [`SyntheticReason::starts_prompt_turn`]: xai_grok_sampling_types::SyntheticReason::starts_prompt_turn
+    fn assistant_texts_in_turn(&self) -> Vec<String> {
+        let mut texts = Vec::new();
+        for item in self.state.conversation.iter().rev() {
+            match item {
+                xai_grok_sampling_types::ConversationItem::Assistant(a)
+                    if !a.content.trim().is_empty() =>
+                {
+                    texts.push(a.content.as_ref().to_owned());
+                }
+                xai_grok_sampling_types::ConversationItem::User(u)
+                    if u.prompt_index.is_some()
+                        || u.synthetic_reason
+                            .as_ref()
+                            .is_none_or(|r| r.starts_prompt_turn()) =>
+                {
+                    break;
+                }
+                _ => {}
+            }
+        }
+        texts.reverse();
+        texts
+    }
+
+    /// Return the current turn's last assistant message with non-empty text, or
+    /// `None` when the turn produced none.
+    ///
+    /// Like [`Self::get_last_assistant_text`], but bounded to the current prompt
+    /// turn; see [`Self::assistant_texts_in_turn`].
+    pub(super) fn get_last_assistant_text_in_turn(&self) -> Option<String> {
+        self.assistant_texts_in_turn().pop()
+    }
+
+    /// Concatenate every non-empty assistant message in the current turn
+    /// (chronological, `"\n"`-joined), or `None` when the turn produced none.
+    ///
+    /// Same turn-boundary rules as [`Self::get_last_assistant_text_in_turn`].
+    /// Use this for turn-scoped export that must keep earlier bubbles of a
+    /// multi-round tool turn, not only the last.
+    pub(super) fn get_assistant_text_in_turn(&self) -> Option<String> {
+        let texts = self.assistant_texts_in_turn();
+        if texts.is_empty() {
+            None
+        } else {
+            Some(texts.join("\n"))
+        }
     }
 
     /// Return the text of the **first content part** of the first `User` message,

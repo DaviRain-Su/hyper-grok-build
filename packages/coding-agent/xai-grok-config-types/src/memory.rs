@@ -1,8 +1,6 @@
-//! Memory-system configuration value types, extracted from xai-grok-shell
-//! (config dependency inversion).
+//! Memory-system configuration value types, extracted from xai-grok-shell so crates the shell depends on can use them.
 //!
-//! These are the raw optional settings and resolved leaf value types for
-//! `[memory.*]` and the memory-owned `[compaction.*]` tables.
+//! These are the raw optional settings and resolved leaf value types for `[memory.*]` and the memory-owned `[compaction.*]` tables.
 
 use serde::{Deserialize, Serialize};
 
@@ -127,7 +125,7 @@ pub struct PruningSettings {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct MemoryIndexConfig {
-    /// Maximum chunk size in characters (approx tokens × 4).
+    /// Maximum chunk size in characters (about 4 characters per token).
     pub max_chunk_chars: usize,
     /// Character overlap between consecutive chunks.
     pub chunk_overlap_chars: usize,
@@ -176,13 +174,12 @@ pub struct MemorySearchConfig {
     pub vector_weight: f32,
     /// Weight for BM25 text similarity in hybrid scoring.
     pub text_weight: f32,
-    /// **Deprecated** — use `temporal_decay` instead.
+    /// **Deprecated**: use `temporal_decay` instead.
     ///
-    /// Per-day decay factor for recency boosting (0.0–1.0).
+    /// Per-day decay factor for recency boosting (0.0 to 1.0).
     /// When `temporal_decay.enabled` is true, this field is ignored.
-    /// When `temporal_decay.enabled` is false and this is set, it is
-    /// converted to an approximate half-life for backward compatibility:
-    /// `half_life ≈ -1 / log₂(recency_decay)`.
+    /// When `temporal_decay.enabled` is false and this is set, it is converted to an approximate half-life for backward compatibility.
+    /// The conversion is `half_life ≈ -1 / log₂(recency_decay)`.
     pub recency_decay: f32,
     /// Temporal decay configuration for time-aware scoring.
     pub temporal_decay: TemporalDecayConfig,
@@ -214,10 +211,9 @@ impl Default for MemorySearchConfig {
 
 /// Temporal decay configuration for time-aware search scoring.
 ///
-/// Controls how memory chunk scores decay over time. Chunks from
-/// "evergreen" sources (`global`, `workspace`) are exempt from decay
-/// since they contain curated long-term knowledge. Only `session`
-/// chunks decay, using an exponential half-life formula:
+/// Controls how memory chunk scores decay over time.
+/// Chunks from "evergreen" sources (`global`, `workspace`) are exempt from decay since they contain curated long-term knowledge.
+/// Only `session` chunks decay, using an exponential half-life formula:
 ///
 /// ```text
 /// decayed_score = base_score × e^(-λ × age_days)
@@ -243,10 +239,9 @@ impl Default for TemporalDecayConfig {
 
 /// MMR (Maximal Marginal Relevance) diversity re-ranking configuration.
 ///
-/// When enabled, re-ranks search results to penalize redundancy. Uses
-/// Jaccard similarity on tokenized snippets to measure inter-result
-/// similarity, then greedily selects results that balance relevance
-/// with diversity:
+/// When enabled, re-ranks search results to penalize redundancy.
+/// It uses Jaccard similarity on tokenized snippets to measure how alike two results are.
+/// It then greedily selects results that balance relevance with diversity:
 ///
 /// ```text
 /// MMR(d) = λ × relevance(d) - (1-λ) × max_similarity(d, selected)
@@ -257,8 +252,8 @@ pub struct MmrConfig {
     /// Whether MMR re-ranking is enabled. Default: true.
     pub enabled: bool,
     /// Trade-off between relevance and diversity.
-    /// 0.0 = maximum diversity, 1.0 = pure relevance (no re-ranking).
-    /// Clamped to [0.0, 1.0] at parse time. Default: 0.7.
+    /// 0.0 means maximum diversity, 1.0 means pure relevance (no re-ranking).
+    /// It is clamped to [0.0, 1.0] at parse time. Default: 0.7.
     #[serde(deserialize_with = "deserialize_clamped_unit")]
     pub lambda: f64,
 }
@@ -300,12 +295,10 @@ impl MemorySearchConfig {
     /// Resolve the effective half-life for temporal decay.
     ///
     /// Priority order:
-    /// 1. `temporal_decay.enabled = true` → use `temporal_decay.half_life_days`
-    /// 2. `temporal_decay.enabled = false` AND `recency_decay` differs from
-    ///    the default (0.95) → convert the legacy per-day factor to an
-    ///    approximate half-life: `half_life ≈ -1.0 / log₂(recency_decay)`.
-    ///    This preserves behavior for users who only set `recency_decay`.
-    /// 3. Otherwise → `None` (decay fully disabled).
+    /// 1. `temporal_decay.enabled = true`: use `temporal_decay.half_life_days`.
+    /// 2. Otherwise, when `recency_decay` differs from the default (0.95): convert the legacy per-day factor to an approximate half-life.
+    ///    The conversion `half_life ≈ -1.0 / log₂(recency_decay)` preserves behavior for users who only set `recency_decay`.
+    /// 3. Otherwise `None` (decay fully disabled).
     pub fn effective_half_life_days(&self) -> Option<f64> {
         if self.temporal_decay.enabled {
             if self.temporal_decay.half_life_days <= 0.0 {
@@ -318,8 +311,7 @@ impl MemorySearchConfig {
             return Some(self.temporal_decay.half_life_days);
         }
 
-        // Legacy backward compat: if the user explicitly set recency_decay
-        // to a non-default value, convert it to an approximate half-life.
+        // Legacy backward compat: if the user explicitly set recency_decay to a non-default value, convert it to an approximate half-life
         if (self.recency_decay - DEFAULT_RECENCY_DECAY).abs() > f32::EPSILON
             && self.recency_decay > 0.0
             && self.recency_decay < 1.0
@@ -345,8 +337,7 @@ pub struct MemoryInitialInjectionConfig {
     /// Whether to search memory and inject a reminder on the first turn.
     pub enabled: bool,
     /// Optional score threshold override for first-turn injection.
-    /// When `None`, the first-turn search uses the historical default of `0.0`
-    /// (no threshold filtering).
+    /// When `None`, the first-turn search uses the historical default of `0.0` (no threshold filtering).
     pub min_score: Option<f32>,
 }
 
@@ -386,7 +377,7 @@ pub struct MemoryDreamConfig {
     /// Seconds before a stale dream lock is reclaimed.
     pub stale_lock_secs: u64,
     /// Periodic dream check interval in seconds.
-    /// `None` = disabled (dream only at session end or via /dream).
+    /// `None` disables it (dream only at launch or via /dream).
     /// When set, the session actor checks dream gates on this interval.
     pub check_interval_secs: Option<u64>,
 }
@@ -410,8 +401,8 @@ impl Default for MemoryDreamConfig {
 /// - Created/modified files are reindexed.
 /// - Deleted files have their stale chunks removed from the index.
 ///
-/// Events are coalesced in a lock-free `ArcSwap` set; sync runs at most once
-/// per search call when dirty files are present and the claim is acquired.
+/// Events are coalesced in a lock-free `ArcSwap` set.
+/// Sync runs at most once per search call, when dirty files are present and the claim is acquired.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct MemoryWatcherConfig {
@@ -434,8 +425,7 @@ impl Default for MemoryWatcherConfig {
 /// Garbage collection for orphaned workspace memory directories (`[memory.gc]`).
 ///
 /// On session init, directories under `~/.grok/memory/` are scanned:
-/// - `tmp*` dirs: empty ones removed unconditionally, non-empty ones removed
-///   after 7 days.
+/// - `tmp*` dirs: empty ones removed unconditionally, non-empty ones removed after 7 days.
 /// - Other workspaces with no session files: removed after `max_age_days`.
 /// - Non-empty non-tmp workspaces: never touched.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -458,18 +448,17 @@ pub struct MemoryFlushConfig {
     pub enabled: bool,
     /// Token headroom before the compact threshold to trigger flush.
     pub soft_threshold_tokens: u64,
-    /// Model to use for the flush turn. `None` = session's primary model.
+    /// Model to use for the flush turn. `None` uses the session's primary model.
     pub flush_model: Option<String>,
     /// Max characters the flush response may write to memory.
     pub max_flush_write_chars: usize,
-    /// Idle timeout in seconds: when no user message is received for this
-    /// duration, a background flush is triggered automatically.
-    /// `None` = disabled (flush only before compaction).
+    /// Idle timeout in seconds: when no user message is received for this duration, a background flush is triggered automatically.
+    /// `None` disables it (flush only before compaction).
     #[serde(default)]
     pub idle_timeout_secs: Option<u64>,
     /// Cosine similarity threshold for semantic dedup of flush content.
-    /// When `None`, falls back to the compiled-in default (0.92).
-    /// Clamped to [0.0, 1.0] at parse time.
+    /// When `None`, it falls back to the compiled-in default (0.92).
+    /// It is clamped to [0.0, 1.0] at parse time.
     #[serde(default, deserialize_with = "deserialize_clamped_unit_option")]
     pub semantic_dedup_threshold: Option<f64>,
 }
@@ -852,7 +841,7 @@ mod tests {
     fn effective_half_life_converts_legacy_recency_decay() {
         let mut s = MemorySearchConfig::default();
         s.temporal_decay.enabled = false;
-        s.recency_decay = 0.5; // non-default → converted
+        s.recency_decay = 0.5; // Non-default, so it gets converted
         let hl = s.effective_half_life_days().unwrap();
         assert!(
             (hl - 1.0).abs() < 1e-9,
@@ -864,7 +853,7 @@ mod tests {
     fn effective_half_life_none_when_disabled_and_default_recency() {
         let mut s = MemorySearchConfig::default();
         s.temporal_decay.enabled = false;
-        // recency_decay left at default ⇒ no decay
+        // recency_decay is left at the default, so no decay
         assert_eq!(s.effective_half_life_days(), None);
     }
 }

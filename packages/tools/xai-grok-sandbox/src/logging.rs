@@ -1,15 +1,11 @@
-//! Sandbox event logger.
-//!
-//! Records sandbox events (profile applied, violations, bypasses) for
-//! telemetry and debugging. Events are kept in memory and can be flushed
-//! to a JSONL file at `~/.grok/sandbox-events.jsonl`.
+//! Records sandbox events (profile applied, violations, bypasses) for telemetry and debugging.
+//! Events are kept in memory and can be flushed to a JSONL file under the sessions directory.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
 
 use crate::types::{SandboxEvent, SandboxEventType, SandboxMetrics};
 
-/// Logger that collects sandbox events and maintains violation counters.
 pub struct SandboxLogger {
     events: Mutex<Vec<SandboxEvent>>,
     metrics: SandboxMetrics,
@@ -23,7 +19,7 @@ impl SandboxLogger {
         }
     }
 
-    /// Record an event, updating metrics counters as appropriate.
+    /// Records the event; violation and bypass events also bump their counters.
     pub fn log(&self, event: SandboxEvent) {
         match &event.event_type {
             SandboxEventType::FsViolation => self.metrics.inc_fs_violation(),
@@ -46,12 +42,10 @@ impl SandboxLogger {
         }
     }
 
-    /// Get a reference to the metrics counters.
     pub fn metrics(&self) -> &SandboxMetrics {
         &self.metrics
     }
 
-    /// Take all accumulated events, draining the internal buffer.
     pub fn take_events(&self) -> Vec<SandboxEvent> {
         self.events
             .lock()
@@ -59,8 +53,6 @@ impl SandboxLogger {
             .unwrap_or_default()
     }
 
-    /// Flush accumulated events to the JSONL log file.
-    /// Each event is written as a single JSON line.
     pub fn flush_to_disk(&self) -> anyhow::Result<()> {
         let events = self.take_events();
         if events.is_empty() {
@@ -94,7 +86,7 @@ impl SandboxLogger {
     }
 
     fn log_file_path() -> PathBuf {
-        xai_grok_config::grok_home().join("sandbox-events.jsonl")
+        crate::paths::sandbox_events_log_path()
     }
 }
 

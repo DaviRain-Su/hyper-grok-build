@@ -1,17 +1,13 @@
 //! Targeted fetch of specific commit object ids for session restore.
 //!
-//! Unbounded `git fetch origin` on a shallow monorepo clone unshallows millions
-//! of objects. Restore fetches only snapshot HEAD / public base:
-//! `git fetch --no-tags [--depth=1] origin <full-sha>`.
-//! `--depth=1` is used only when the destination is already shallow, so a full
-//! clone (or a linked worktree sharing one) is not converted to shallow.
+//! Unbounded `git fetch origin` on a shallow monorepo clone unshallows millions of objects.
+//! Restore fetches only the snapshot HEAD and public base: `git fetch --no-tags [--depth=1] origin <full-sha>`.
+//! `--depth=1` is used only when the destination is already shallow, so a full clone (or a linked worktree sharing one) never becomes shallow.
 //!
-//! Head and base share [`RESTORE_FETCH_BUDGET`]. Head is capped so at least
-//! [`RESTORE_FETCH_BASE_RESERVE`] remains for public-base after head's
-//! wait-timeout **and** TERM/KILL/stderr teardown when that oid is a distinct
-//! missing object. The child process group is torn down with SIGTERM, then
-//! SIGKILL, then a bounded wait so a detached `setsid` fetch cannot outlive
-//! the restore attempt.
+//! Head and base share [`RESTORE_FETCH_BUDGET`].
+//! Head is capped so at least [`RESTORE_FETCH_BASE_RESERVE`] remains for a distinct missing public base.
+//! The cap allows for head's wait timeout and TERM/KILL/stderr teardown.
+//! The child process group gets SIGTERM, then SIGKILL, then a bounded wait, so a detached `setsid` fetch cannot outlive the restore attempt.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -24,13 +20,13 @@ use anyhow::{Context, Result, bail};
 use wait_timeout::ChildExt;
 use xai_tty_utils::{ProcessGroup, git_command, git_command_locking, global_process_scope};
 
-/// Shared wall-clock budget for head+base targeted fetches.
+/// Shared wall-clock budget for head and base targeted fetches.
 pub(crate) const RESTORE_FETCH_BUDGET: Duration = Duration::from_secs(60);
 
 /// Minimum slice reserved for a distinct missing public-base after the head attempt.
 pub(crate) const RESTORE_FETCH_BASE_RESERVE: Duration = Duration::from_secs(10);
 
-/// Extra time for `spawn_blocking` join after the sync fetch budget + teardown.
+/// Extra time for `spawn_blocking` join after the sync fetch budget and teardown.
 pub(crate) const RESTORE_FETCH_JOIN_SLACK: Duration = Duration::from_secs(15);
 
 const FETCH_TERM_GRACE: Duration = Duration::from_secs(2);
@@ -38,9 +34,8 @@ const FETCH_KILL_WAIT: Duration = Duration::from_secs(2);
 const FETCH_ABANDON_REAP_WAIT: Duration = Duration::from_secs(5);
 const STDERR_JOIN_WAIT: Duration = Duration::from_secs(2);
 
-/// Wall-clock `wait_success` may still spend after a timed-out `wait_timeout`
-/// (TERM grace + KILL wait + stderr join) plus a small scheduling slack.
-/// Subtracted from the head slice so a hung head fetch cannot eat the base reserve.
+/// Wall-clock time `wait_success` may still spend after a timed-out `wait_timeout` (TERM grace + KILL wait + stderr join + scheduling slack).
+/// It is subtracted from the head slice so a hung head fetch cannot eat the base reserve.
 pub(crate) const RESTORE_FETCH_TEARDOWN_RESERVE: Duration = Duration::from_secs(
     FETCH_TERM_GRACE.as_secs() + FETCH_KILL_WAIT.as_secs() + STDERR_JOIN_WAIT.as_secs() + 2,
 );
@@ -101,13 +96,10 @@ fn is_abbreviated_object_id(value: &str) -> bool {
     plausible_abbrev && value.as_bytes().iter().all(u8::is_ascii_hexdigit)
 }
 
-/// Map a checkout name to a `git fetch origin <spec>` source.
-///
-/// Local remote-tracking names (`origin/foo`, `refs/remotes/origin/foo`) are
-/// valid `git checkout` targets but not origin fetch sources. Fetch the
-/// corresponding remote branch instead. Full object ids and other simple refs
-/// (`main`, `refs/heads/…`, `refs/tags/…`) pass through unchanged. Abbreviated
-/// SHAs are rejected — they checkout locally when present but cannot be fetched.
+/// Local remote-tracking names (`origin/foo`, `refs/remotes/origin/foo`) are valid `git checkout` targets but not origin fetch sources.
+/// Fetch the corresponding remote branch instead.
+/// Full object ids and other simple refs (`main`, `refs/heads/…`, `refs/tags/…`) pass through unchanged.
+/// Abbreviated SHAs are rejected: they checkout locally when present but cannot be fetched.
 pub(crate) fn origin_fetch_spec_for_checkout_target(target: &str) -> Option<&str> {
     if is_full_object_id(target) {
         return Some(target);
@@ -125,8 +117,7 @@ pub(crate) fn origin_fetch_spec_for_checkout_target(target: &str) -> Option<&str
 
 /// Local git object lookup and origin fetch used by restore.
 ///
-/// Implementors must only fetch a caller-supplied full object id — never a bare
-/// `origin` fetch or `--unshallow`.
+/// Implementors must only fetch a caller-supplied full object id, never a bare `origin` fetch or `--unshallow`.
 pub(crate) trait RestoreGit {
     fn has_object(&self, repo: &Path, oid: &str) -> bool;
     fn fetch_oid(&self, repo: &Path, oid: &str, timeout: Duration) -> Result<()>;
@@ -146,14 +137,13 @@ impl RestoreGit for LocalGit {
 
 /// Fetch `head`, then `public_base` if it is still missing, from `origin`.
 ///
-/// Invalid oids are not passed to git. Fetch failures are returned after both
-/// attempts so the caller can log and continue; missing objects are left for
-/// checkout-strategy selection.
+/// Invalid oids are not passed to git.
+/// Fetch failures are returned after both attempts so the caller can log and continue; missing objects are left for checkout-strategy selection.
 ///
 /// # Errors
 ///
-/// Spawn failure, timeout/teardown, or non-zero git exit. An error does **not**
-/// imply the objects are unreachable — re-check before aborting restore.
+/// Spawn failure, timeout/teardown, or non-zero git exit.
+/// An error does **not** imply the objects are unreachable; re-check before aborting restore.
 pub fn ensure_commits_reachable(
     repo: &Path,
     head: &str,
@@ -179,8 +169,8 @@ pub(crate) fn ensure_commits_reachable_with<G: RestoreGit>(
     git: &G,
     deadline: Instant,
 ) -> Result<EnsureCommitsOutcome> {
-    // Reserve only when a later base fetch is actually expected. A present or
-    // identical base would otherwise shrink the head attempt (the common case).
+    // Reserve only when a later base fetch is actually expected
+    // A present or identical base would otherwise shrink the head attempt (the common case)
     let reserve_for_base =
         is_full_object_id(public_base) && public_base != head && !git.has_object(repo, public_base);
     let head_timeout = if reserve_for_base {
@@ -294,8 +284,8 @@ pub(crate) fn targeted_fetch_args(spec: &str, is_shallow: bool) -> Vec<String> {
         args.push("--depth=1".to_owned());
     }
     args.push("origin".to_owned());
-    // `--no-tags` still fetches the object into FETCH_HEAD only. A dst
-    // refspec materializes the local tag so `git checkout refs/tags/…` works.
+    // `--no-tags` still fetches the object into FETCH_HEAD only
+    // A dst refspec creates the local tag so `git checkout refs/tags/…` works
     if spec.starts_with("refs/tags/") && is_safe_git_ref(spec) {
         args.push(format!("{spec}:{spec}"));
     } else {
@@ -432,8 +422,7 @@ impl FetchChild {
         if result.leader_reaped {
             self.child.take();
         } else if let Some(child) = self.child.take() {
-            // Hold enrollment until a detached reaper finishes a bounded wait,
-            // then drop the Arc so kill_all cannot later hit a recycled pgid.
+            // Hold enrollment until a detached reaper finishes a bounded wait, then drop the Arc so kill_all cannot later hit a recycled pgid
             spawn_abandon_reaper(child, Arc::clone(&self.group));
             self.abandoned = true;
         }

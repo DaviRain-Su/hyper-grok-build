@@ -1,13 +1,10 @@
-//! E2E: trusted local plugin install snapshot refresh on session start.
-//!
-//! Replicates an enterprise feedback scenario:
+//! Replicates a scenario an enterprise customer reported:
 //! 1. Install a local plugin (full copy into `installed-plugins/`).
 //! 2. Add a new agent only on the **live** source tree.
-//! 3. Start a headless session — startup must re-copy trusted/user-home locals.
-//! 4. Smoke-validate session JSON under `$GROK_HOME/sessions/` after exit.
+//! 3. Start a headless session: startup must re-copy trusted and user-home local installs.
+//! 4. After exit, check the session JSON under `$GROK_HOME/sessions/` parses.
 //!
-//! Requires a built `grok` binary (`GROK_BINARY` or cargo-built pager) for the
-//! ignored headless test.
+//! Requires a built `grok` binary (`GROK_BINARY` or cargo-built pager) for the ignored headless test.
 //!
 //! ```bash
 //! cargo test -p xai-grok-shell --test test_trusted_local_plugin_refresh_e2e
@@ -77,16 +74,13 @@ fn register_local_install(registry: &mut InstallRegistry, source: &Path) -> Inst
     repo
 }
 
-/// Library-level e2e in a sandboxed tmp dir (always runs — no external binary).
+/// Library-level e2e in a sandboxed tmp dir (always runs, no external binary).
 ///
-/// Proves the enterprise symptom is fixed: an agent added to the live source after
-/// install must surface to discovery (the `/agents` dashboard reads the same
-/// `all_subagents_with_plugins` list) without a reinstall, driven through the
-/// real session-spawn path (`refresh_and_build_for_cwd`, which refreshes first).
-/// RAII: set an env var, restore the prior value (or unset) on drop, so a test
-/// never leaves process-global env pointing at a dropped tempdir. Local copy —
-/// each test holds two guards at once, and the canonical lock-holding guard
-/// deadlocks when nested.
+/// Proves the reported symptom is fixed: an agent added to the live source after install shows up in discovery without a reinstall.
+/// The test drives the real session-spawn path, `refresh_and_build_for_cwd`, which refreshes before building.
+/// The `/agents` dashboard reads the same `all_subagents_with_plugins` list.
+/// RAII: set an env var, restore the prior value (or unset) on drop, so a test never leaves process-global env pointing at a dropped tempdir.
+/// This is a local copy: each test holds two guards at once, and the canonical lock-holding guard deadlocks when nested.
 struct EnvVarGuard {
     key: &'static str,
     prev: Option<std::ffi::OsString>,
@@ -110,8 +104,7 @@ impl Drop for EnvVarGuard {
 #[test]
 #[serial]
 fn trusted_local_refresh_surfaces_new_agent_via_discovery() {
-    // Canonicalize so under-home auto-trust holds where the temp root is a
-    // symlink (macOS `/var` -> `/private/var`).
+    // Canonicalize so auto-trust for installs under the home dir holds when the temp root is a symlink (on macOS `/var` links to `/private/var`)
     let home_tmp = TempDir::new().unwrap();
     let home = dunce::canonicalize(home_tmp.path()).unwrap();
     let grok_home = home.join(".grok");
@@ -126,17 +119,17 @@ fn trusted_local_refresh_surfaces_new_agent_via_discovery() {
     write_minimal_plugin(&source, "demo-plugin");
     write_agent(&source, "old", "old-agent", "exists at install");
 
-    // Install = full snapshot copy into installed-plugins (not a live symlink).
+    // The install copies a full snapshot into installed-plugins, not a live symlink
     let mut registry = InstallRegistry::empty(grok_home.join("installed-plugins"));
     let installed = register_local_install(&mut registry, &source);
     registry.save().expect("save registry");
 
-    // New agent added to the live source only — not yet in the snapshot.
+    // New agent added to the live source only, not yet in the snapshot
     write_agent(&source, "new", "new-agent", "added after install");
     assert!(!installed.path.join("agents/new.md").exists());
 
-    // Session spawn: refresh_and_build_for_cwd re-copies trusted local installs,
-    // then rediscovers. Mirror the install command auto-enabling the plugin.
+    // Session spawn: refresh_and_build_for_cwd re-copies trusted local installs, then rediscovers
+    // Enabling the plugin here mirrors the install command's auto-enable
     let cwd = home.join("workspace");
     std::fs::create_dir_all(&cwd).unwrap();
     let handle = SharedPluginRegistryHandle::new(None, Vec::new());
@@ -155,7 +148,7 @@ fn trusted_local_refresh_surfaces_new_agent_via_discovery() {
         "session-spawn refresh must re-copy the new agent into the snapshot"
     );
 
-    // The new agent must surface to discovery (the reported symptom).
+    // The new agent must show up in discovery (the reported symptom)
     let agents = xai_grok_agent::discovery::all_subagents_with_plugins(
         &cwd,
         &HashMap::new(),
@@ -167,9 +160,9 @@ fn trusted_local_refresh_surfaces_new_agent_via_discovery() {
         "new agent must surface in /agents after session-start refresh; got {names:?}"
     );
 
-    // Session `_meta.pluginDirs` load. Lives in the same test because
-    // grok_home() caches the first GROK_HOME per process; a separate test
-    // could seed the cache first and break the assertions above.
+    // Session `_meta.pluginDirs` load
+    // This runs in the same test because grok_home() caches the first GROK_HOME per process
+    // A separate test could seed the cache first and break the assertions above
     let plugin_dir = home.join("session-plugin");
     write_minimal_plugin(&plugin_dir, "session-plugin");
     write_agent(&plugin_dir, "helper", "helper-agent", "session-scoped");
@@ -196,12 +189,12 @@ fn trusted_local_refresh_surfaces_new_agent_via_discovery() {
     assert!(plugin.trusted && plugin.enabled);
     assert_eq!(registry.session_plugin_dirs(), session_dirs.as_slice());
 
-    // A rebuild without the dirs (the shared fan-out shape) must not carry them.
+    // Rebuilding without the dirs, as the shared code path does, must not carry them over
     let shared = session_handle.build_for_cwd(&cwd, &session_config, &[], true);
     assert!(shared.is_none_or(|r| r.session_plugin_dirs().is_empty()));
 }
 
-/// Full binary smoke: session start runs refresh then writes session JSON.
+/// Runs the real binary end to end: session start refreshes the snapshot, then writes session JSON.
 #[tokio::test]
 #[ignore = "requires pre-built grok binary; run with --ignored"]
 #[serial]
@@ -210,8 +203,7 @@ async fn headless_session_refreshes_trusted_local_plugin_and_writes_session_json
         .await
         .expect("start mock server");
 
-    // Canonicalize so under-home auto-trust holds where the temp root is a
-    // symlink (macOS `/var` -> `/private/var`).
+    // Canonicalize so auto-trust for installs under the home dir holds when the temp root is a symlink (on macOS `/var` links to `/private/var`)
     let home_tmp = TempDir::new().unwrap();
     let home = dunce::canonicalize(home_tmp.path()).unwrap();
     let grok_home = home.join(".grok");
@@ -224,9 +216,9 @@ async fn headless_session_refreshes_trusted_local_plugin_and_writes_session_json
     write_minimal_plugin(&source, "demo-plugin");
     write_agent(&source, "old", "old-agent", "exists at install");
 
-    // The spawned binary gets HOME/GROK_HOME via `cmd.env` below; this global env
-    // is only for the in-process post-run discovery assertion (which resolves the
-    // registry via grok_home()). `#[serial]` keeps it from racing other tests.
+    // The spawned binary gets HOME and GROK_HOME via `cmd.env` below
+    // This global env only serves the discovery assertion run in-process after the binary exits; it resolves the registry via grok_home()
+    // `#[serial]` keeps it from racing other tests
     let _home_guard = EnvVarGuard::set("HOME", &home);
     let _grok_guard = EnvVarGuard::set("GROK_HOME", &grok_home);
 
@@ -273,9 +265,8 @@ async fn headless_session_refreshes_trusted_local_plugin_and_writes_session_json
         result.stderr
     );
 
-    // The real binary's session start refreshed the on-disk snapshot; rebuild the
-    // registry for the workdir and assert the new agent surfaces in `/agents`
-    // (same proof as the library test, but through the real binary).
+    // The real binary's session start refreshed the on-disk snapshot
+    // Rebuild the registry for the workdir and assert the new agent shows up in `/agents`, the same proof as the library test
     let config = DiscoveryConfig {
         cli_plugin_dirs: Vec::new(),
         config_paths: Vec::new(),
@@ -295,7 +286,7 @@ async fn headless_session_refreshes_trusted_local_plugin_and_writes_session_json
         "new agent must surface in /agents after the binary's session-start refresh"
     );
 
-    // Smoke: session storage under GROK_HOME/sessions has JSON artifacts.
+    // Session storage under GROK_HOME/sessions must hold JSON files that parse
     let sessions_root = grok_home.join("sessions");
     assert!(
         sessions_root.is_dir(),

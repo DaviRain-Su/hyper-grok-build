@@ -1,15 +1,14 @@
 //! Server-authoritative prompt queue wire types.
 //!
-//! Canonical definitions live in `xai_prompt_queue`; this re-export keeps every existing
-//! `crate::session::prompt_queue::*` and cross-crate `xai_grok_shell::session::prompt_queue::*`
-//! path resolving without edits.
+//! Canonical definitions live in `xai_prompt_queue`.
+//! This re-export keeps every existing `crate::session::prompt_queue::*` and `xai_grok_shell::session::prompt_queue::*` path resolving without edits.
 
 pub use xai_prompt_queue::{
     COMBINED_DISPLAY_TEXTS_META, CombineGate, QueueChanged, QueueEntryMeta, QueueEntryWire,
     TEXT_SEPARATOR, combine_prefix_len, is_combined, join_texts, stamp_combined_display_texts,
 };
 
-// Outbound method for broadcast_queue_changed. An ACP routing concern, not a queue concern.
+// Outbound method for broadcast_queue_changed. This is an ACP routing concern, not a queue concern.
 pub const QUEUE_CHANGED_METHOD: &str = "x.ai/queue/changed";
 
 #[cfg(test)]

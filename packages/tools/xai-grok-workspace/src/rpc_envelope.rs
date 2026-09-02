@@ -1,19 +1,10 @@
-//! `WorkspaceError` <-> wire-code mapping for the workspace RPC envelope
-//! (the envelope types are canonical in `xai_grok_workspace_types::rpc`).
-//!
-//! `error_code` uses a non-wildcard match so the compiler enforces
-//! coverage of new `WorkspaceError` variants.
+//! Maps `WorkspaceError` to and from wire codes for the workspace RPC envelope (the envelope types are canonical in `xai_grok_workspace_types::rpc`).
 use crate::error::WorkspaceError;
 pub use xai_grok_workspace_types::rpc::{RpcEnvelope, RpcError};
-/// Build an error envelope from a `WorkspaceError`.
 pub fn envelope_err<T>(error: &WorkspaceError) -> RpcEnvelope<T> {
     RpcEnvelope::err_parts(error_code(error), error.to_string())
 }
-/// Map a `WorkspaceError` to its wire code string.
-///
-/// Uses an exhaustive match with no wildcard -- the compiler will
-/// error when new variants are added to `WorkspaceError`, forcing
-/// the implementer to assign a wire code.
+/// The match has no wildcard, so a new `WorkspaceError` variant fails to compile until it gets a wire code.
 pub fn error_code(err: &WorkspaceError) -> &'static str {
     match err {
         WorkspaceError::ParentSessionNotFound(_) => "parent_session_not_found",
@@ -37,23 +28,10 @@ pub fn error_code(err: &WorkspaceError) -> &'static str {
         WorkspaceError::ToolsetExternallyOwned(_) => "toolset_externally_owned",
     }
 }
-/// Map a wire [`RpcError`] back to a [`WorkspaceError`].
-///
-/// Known codes are mapped to their specific variants. Unknown codes
-/// degrade gracefully to `WorkspaceError::HubError`, ensuring
-/// forward compatibility when a newer workspace sends codes an older
-/// shell does not recognise.
-///
-/// # Intentional degradation
-///
-/// The structured variants `CapabilityWidening`, `Unauthorized`, and
-/// `MaxDepthExceeded` carry multiple fields that are not preserved in
-/// the wire `message` string. These are mapped to `HubError` on the
-/// deserializing side because reconstructing the original struct fields
-/// from a flattened `Display` string would be fragile and error-prone.
-/// Callers that need to distinguish these errors can match on the
-/// `HubError` message which contains the original error code as a
-/// prefix (e.g. `"capability_widening: ..."`).
+/// Known codes map back to their variants.
+/// Unknown codes become `WorkspaceError::HubError`, so an older shell survives codes a newer workspace sends.
+/// `CapabilityWidening`, `Unauthorized`, and `MaxDepthExceeded` lose their struct fields in the wire `message`, so they also map to `HubError`.
+/// The `HubError` message keeps the original code as a prefix (e.g. `"capability_widening: ..."`).
 pub fn rpc_error_to_workspace(err: RpcError) -> WorkspaceError {
     if let Some(kind) =
         xai_grok_workspace_types::rpc::export_github::ExportGithubError::from_wire_code(&err.code)
@@ -95,7 +73,6 @@ pub fn rpc_error_to_workspace(err: RpcError) -> WorkspaceError {
 mod tests {
     use super::*;
     use crate::capability::CapabilityMode;
-    /// Verify round-trip fidelity for every `WorkspaceError` variant.
     #[test]
     fn error_code_round_trip_all_variants() {
         let mut variants: Vec<WorkspaceError> = vec![
@@ -197,7 +174,6 @@ mod tests {
         let msg = recovered.to_string();
         assert!(msg.contains("future_new_variant"));
     }
-    /// Verify serde round-trip of RpcEnvelope.
     #[test]
     fn envelope_serde_round_trip_ok() {
         let env: RpcEnvelope<String> = RpcEnvelope::ok("hello".into());
@@ -208,8 +184,7 @@ mod tests {
             Err(e) => panic!("expected Ok, got {e:?}"),
         }
     }
-    /// Verify serde round-trip of RpcEnvelope error, through the
-    /// `WorkspaceError` mapping in both directions.
+    /// Verify serde round-trip of RpcEnvelope error, through the `WorkspaceError` mapping in both directions.
     #[test]
     fn envelope_serde_round_trip_err() {
         let err = WorkspaceError::SessionNotFound("ghost".into());

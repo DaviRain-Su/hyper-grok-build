@@ -1,32 +1,21 @@
-//! End-to-end tests for the lock-free concurrent-updater convergence model
-//! (the "double download" fix): updaters key staleness off the on-disk
-//! install, so a binary another process already installed is never
-//! downloaded again — and the accepted same-instant residual race is
-//! genuinely harmless thanks to per-attempt download temp names.
+//! End-to-end tests for the lock-free concurrent-updater convergence model.
+//! Updaters key staleness off the on-disk install, so a binary another process already installed is never downloaded again.
+//! The accepted same-instant race stays harmless because every download attempt writes its own temp file.
 //!
-//! Production has three independent downloader paths that can race around a
-//! release:
+//! Production has three independent downloader paths that can race around a release:
 //!
-//! 1. TUI startup: `check_update_background` spawns a detached `grok update`
-//!    (the Ctrl+U path now adopts this child instead of spawning a second).
-//! 2. Explicit `grok update` (incl. the Ctrl+U fallback when there is no
-//!    live child).
-//! 3. Leader mode: the hourly checker runs `ensure_latest_on_disk`
-//!    in-process.
+//! 1. TUI startup: `check_update_background` spawns a detached `grok update` (the Ctrl+U path adopts this child instead of spawning a second).
+//! 2. Explicit `grok update` (including the Ctrl+U fallback when there is no live child).
+//! 3. Leader mode: the hourly checker runs `ensure_latest_on_disk` in-process.
 //!
 //! Two layers are exercised here:
 //!
-//! - **Convergence** (`ensure_latest_on_disk`, `run_update`): a sequential
-//!   updater finds the target already on disk and skips the download. The
-//!   artifact server / fake `gh` count downloads so the skip is asserted,
-//!   not assumed.
-//! - **Race integrity** (`install_internal_from_base` run concurrently): the
-//!   same-instant race is accepted as rare; these tests pin the property
-//!   that makes it acceptable — concurrent installs (same or *different*
-//!   versions) never corrupt the active binary. Before the per-attempt
-//!   temp-name fix, every `0.1.x` download shared one `grok-0.1.tmp`
-//!   (`with_extension("tmp")` eats everything after the last dot), so racer
-//!   A could atomically rename racer B's half-written file into place.
+//! - **Convergence** (`ensure_latest_on_disk`, `run_update`): a sequential updater finds the target already on disk and skips the download.
+//!   The artifact server and fake `gh` count downloads so the skip is asserted, not assumed.
+//! - **Race integrity** (`install_internal_from_base` run concurrently): the same-instant race is accepted as rare.
+//!   These tests pin the property that makes it acceptable: concurrent installs (same or *different* versions) never corrupt the active binary.
+//!   Before per-attempt temp names, every `0.1.x` download shared one `grok-0.1.tmp` (`with_extension("tmp")` eats everything after the last dot).
+//!   Racer A could atomically rename racer B's half-written file into place.
 
 #![cfg(all(unix, not(feature = "community-build")))]
 
@@ -77,9 +66,7 @@ fn assert_active_binary(home: &Path, version: &str, platform: &str, expected_con
     assert!(ran_ok, "active grok must pass the smoke-test");
 }
 
-/// Lay down a managed-install layout in the test GROK_HOME:
-/// `bin/grok -> ../downloads/grok-<version>-<platform>` (what
-/// `install_internal_from_base` produces).
+/// Lay down what `install_internal_from_base` produces in the test GROK_HOME: `bin/grok -> ../downloads/grok-<version>-<platform>`.
 fn fake_managed_install(version: &str) {
     let home = test_home();
     let downloads = home.join("downloads");
@@ -100,10 +87,9 @@ fn fake_managed_install(version: &str) {
     .unwrap();
 }
 
-/// Fake `gh` that logs argv to `<dir>/gh-args.log`, answers
-/// `release list --exclude-pre-releases` from `<dir>/gh-stable-only-stdout`,
-/// and for `release download ... --output <path>` writes a smoke-passing
-/// artifact to the output path.
+/// Fake `gh` that logs argv to `<dir>/gh-args.log`.
+/// It answers `release list --exclude-pre-releases` from `<dir>/gh-stable-only-stdout`.
+/// For `release download ... --output <path>` it writes an executable `exit 0` script to the output path.
 fn fake_gh_serving_releases(dir: &std::path::Path) -> String {
     let dq = format!("'{}'", dir.to_string_lossy().replace('\'', "'\\''"));
     format!(
@@ -149,10 +135,8 @@ fn setup_gh_release(running_version: &str) -> FakeBinGuard {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Convergence: ensure_latest_on_disk downloads once, then every subsequent
-// pass (the leader's hourly re-entry) converges without re-downloading.
-// This is the e2e companion to the decision-level tests in
-// test_downgrade_matrix.rs — it asserts on actual download invocations.
+// Convergence: ensure_latest_on_disk downloads once, then every subsequent pass (the leader's hourly re-entry) converges without re-downloading
+// This is the e2e companion to the decision-level tests in test_downgrade_matrix.rs; it asserts on actual download invocations
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -166,16 +150,15 @@ async fn ensure_latest_downloads_once_then_converges_without_redownload() {
     g.set_stable_only_stdout("v0.2.7\n");
     let cfg = make_update_config("stable");
 
-    // Pass 1: disk is empty → downloads and installs.
+    // Pass 1: disk is empty, so it downloads and installs
     let first = ensure_latest_on_disk(&cfg).await.unwrap();
     assert_eq!(first.installed.as_deref(), Some("0.2.7"));
     assert!(first.relaunch_needed, "running 0.2.5 < disk 0.2.7");
     assert_eq!(gh_download_count(&g), 1, "first pass downloads");
     assert_eq!(installed_on_disk_version().as_deref(), Some("0.2.7"));
 
-    // Pass 2 (the pre-fix hourly re-download): disk already current →
-    // no download, but the stale running process still gets the relaunch
-    // signal.
+    // Pass 2, the hourly re-entry that used to re-download: disk is already current, so no download
+    // The stale running process still gets the relaunch signal
     let second = ensure_latest_on_disk(&cfg).await.unwrap();
     assert_eq!(second.installed, None, "second pass must not re-download");
     assert!(second.relaunch_needed, "still running 0.2.5 < disk 0.2.7");
@@ -187,9 +170,8 @@ async fn ensure_latest_downloads_once_then_converges_without_redownload() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Convergence: explicit `grok update` (the Ctrl+U fallback path) finds the
-// binary another process already installed and skips the download — while
-// still returning the target version so stale leaders get signalled.
+// Convergence: explicit `grok update` (the Ctrl+U fallback path) finds the binary another process already installed and skips the download
+// It still returns the target version so stale leaders get signalled
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -249,10 +231,8 @@ async fn run_update_force_still_redownloads_when_disk_current() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Installer gating: the disk-version probe must only be trusted for
 // installers that actually maintain the managed `~/.grok/bin/grok` symlink
-// (internal, gh-release). For npm, a symlink left over from a previous
-// internal install LIES about the npm install's version — and in the worst
-// direction (leftover "newer" than the registry) it would silently suppress
-// npm updates forever.
+// (internal, gh-release). For npm, a symlink left over from a previous internal install LIES about the npm install's version.
+// In the worst direction (leftover "newer" than the registry) it would silently suppress npm updates forever
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn setup_npm(running_version: &str) -> FakeBinGuard {
@@ -273,9 +253,8 @@ async fn npm_update_not_suppressed_by_leftover_newer_internal_symlink() {
     }
     let g = setup_npm("0.2.5");
     g.set_stdout("\"0.2.7\"\n");
-    // Leftover symlink from a previous internal install, claiming to be
-    // NEWER than the npm registry. It says nothing about the npm-managed
-    // global install and must be ignored for npm staleness decisions.
+    // Leftover symlink from a previous internal install, claiming to be NEWER than the npm registry
+    // It says nothing about the npm-managed global install and must be ignored for npm staleness decisions
     fake_managed_install("0.2.9");
     let mut cfg = make_update_config("stable");
 
@@ -330,8 +309,8 @@ async fn ensure_latest_npm_ignores_leftover_internal_symlink() {
 async fn disk_probe_preserves_prerelease_versions() {
     let _ = test_home();
     reset_home();
-    // An alpha install must read back as the full pre-release version —
-    // truncating to "0.1.220" would mask the alpha → stable update.
+    // An alpha install must read back as the full pre-release version
+    // Truncating to "0.1.220" would mask the update from alpha to stable
     fake_managed_install("0.1.220-alpha.4");
     assert_eq!(
         installed_on_disk_version().as_deref(),
@@ -372,9 +351,8 @@ async fn ensure_latest_repairs_dangling_symlink_by_downloading() {
         eprintln!("skipping: shell scripts cannot execute in this sandbox");
         return;
     }
-    // Dangling symlink + stale running process: the probe returns None, so
-    // the decision falls back to the running version and the download runs,
-    // repairing the install instead of wedging on "already up to date".
+    // Dangling symlink and stale running process: the probe returns None, so the decision falls back to the running version
+    // The download then runs, repairing the install instead of wedging on "already up to date"
     let g = setup_gh_release("0.2.5");
     g.set_stable_only_stdout("v0.2.7\n");
     let home = test_home();
@@ -403,11 +381,9 @@ async fn ensure_latest_repairs_dangling_symlink_by_downloading() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Race integrity: the accepted same-instant race must stay harmless. Two (or
-// three) installers running concurrently — even for DIFFERENT versions —
-// must never leave a corrupt active binary. Pre-fix, all 0.1.x downloads
-// shared one `grok-0.1.tmp`, so a concurrent racer could atomically rename a
-// half-written file into place.
+// Race integrity: the accepted same-instant race must stay harmless
+// Two (or three) installers running concurrently, even for DIFFERENT versions, must never leave a corrupt active binary
+// Pre-fix, all 0.1.x downloads shared one `grok-0.1.tmp`, so a concurrent racer could atomically rename a half-written file into place
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn run_concurrent_installs(
@@ -443,7 +419,7 @@ async fn concurrent_same_version_installs_leave_valid_active_binary() {
     let platform = host_platform();
     let artifact = small_good_artifact();
     let server = ArtifactServer::start(artifact.clone());
-    // Hold responses open so the racers genuinely overlap mid-download.
+    // Hold responses open so the racers overlap mid-download
     server.set_slow(true);
 
     let results = run_concurrent_installs(&server, &["0.1.181", "0.1.181", "0.1.181"]).await;
@@ -451,8 +427,7 @@ async fn concurrent_same_version_installs_leave_valid_active_binary() {
         r.expect("every racing install must succeed (atomic swap, last writer wins)");
     }
 
-    // Lock-free model: concurrent racers may each download (accepted waste);
-    // the invariant is integrity, not the count.
+    // Lock-free model: concurrent racers may each download (accepted waste); the invariant is integrity, not the count
     assert!(server.request_count() >= 1);
     assert_active_binary(home, "0.1.181", &platform, &artifact);
 }
@@ -471,9 +446,8 @@ async fn concurrent_different_version_installs_do_not_corrupt_each_other() {
     let server = ArtifactServer::start(artifact.clone());
     server.set_slow(true);
 
-    // Pre-fix, BOTH of these wrote to downloads/grok-0.1.tmp concurrently
-    // (with_extension("tmp") truncates at the last dot), so one racer could
-    // rename the other's partial file into its own versioned path.
+    // Pre-fix, BOTH of these wrote to downloads/grok-0.1.tmp concurrently (with_extension("tmp") truncates at the last dot)
+    // One racer could rename the other's partial file into its own versioned path
     let results = run_concurrent_installs(&server, &["0.1.181", "0.1.182"]).await;
     for r in results {
         r.expect("both racing installs must succeed");
@@ -491,8 +465,7 @@ async fn concurrent_different_version_installs_do_not_corrupt_each_other() {
         );
     }
 
-    // The active symlink points at whichever racer swapped last; it must
-    // resolve and run regardless.
+    // The active symlink points at whichever racer swapped last; it must resolve and run regardless
     let resolved = dunce::canonicalize(home.join("bin").join("grok")).unwrap();
     assert_eq!(std::fs::read(&resolved).unwrap(), artifact);
     let name = resolved.file_name().unwrap().to_string_lossy().to_string();
@@ -501,7 +474,6 @@ async fn concurrent_different_version_installs_do_not_corrupt_each_other() {
         "active grok must never be a temp file: {name}"
     );
 
-    // No stray shared temp file left behind (the pre-fix collision name).
     assert!(
         !home.join("downloads").join("grok-0.1.tmp").exists(),
         "the pre-fix shared temp name must not exist"

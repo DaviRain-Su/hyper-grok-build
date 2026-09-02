@@ -148,7 +148,7 @@ The operations below are treated as read-only and run without prompting, in ever
 - `grep` (content search)
 - `web_search`
 - `todo_write`
-- `get_command_or_subagent_output` / `wait_commands_or_subagents` / `kill_command_or_subagent` (subagent control)
+- `get_command_or_subagent_output` / `kill_command_or_subagent` (subagent control)
 - Invoking skills
 
 ### Read-Only Shell Commands
@@ -355,8 +355,10 @@ Path patterns are globs matched against the tool path after lexical normalizatio
 - There are no anchor prefixes: a leading `//` or `~/` in a pattern is treated as literal glob text. Write absolute-path patterns or `**/` patterns instead.
 - Because `.`/`..` are collapsed before matching, rooted patterns cannot be escaped by traversal: `Read(./**)` scopes to the working directory (bare relatives like `src/main.rs` match; `./../../etc/passwd` does not), and `Read(src/**)` stays under `src/`. Unrooted patterns (`*`, or a leading `**` as in `**/*.rs`) intentionally match at any depth, anywhere.
 - `Read` rules also govern `grep` searches; `Grep(...)` rules match only grep.
+- Native Read/Edit/Grep checks follow in-path symlinks for deny and ask on the resolved target. An allow that matches only the resolved target does not grant allow for the tool argument.
+- An in-path symlink that cannot be resolved prompts when any deny or ask file rule applies to that tool.
 
-`Read` and `Edit` deny rules additionally apply to file paths that shell commands touch (for example `cat` or `sed` on a denied path), including literal inline scripts passed to `bash`, `sh`, `dash`, `zsh`, or `ksh` with `-c`; that shell-level check uses the same working-directory-aware normalization (an absolute operand under the working directory also matches rooted rules like `Read(src/**)`) and also resolves symlinks. The direct `read_file`/`search_replace` tool checks do not resolve symlinks. For OS-level enforcement that covers every process, combine deny rules with the sandbox ([18-sandbox.md](18-sandbox.md)).
+`Read` and `Edit` deny rules additionally apply to file paths that shell commands touch (for example `cat` or `sed` on a denied path), including literal inline scripts passed to `bash`, `sh`, `dash`, `zsh`, or `ksh` with `-c`. The shell-level check uses the same working-directory-aware normalization and symlink follow for deny/ask as the direct Read/Edit/Grep tools described above (an absolute operand under the working directory also matches rooted rules like `Read(src/**)`). For OS-level enforcement that covers every process, combine deny rules with the sandbox ([18-sandbox.md](18-sandbox.md)).
 
 ### MCP Rules
 

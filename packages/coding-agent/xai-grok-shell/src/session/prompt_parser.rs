@@ -5,30 +5,24 @@ use std::path::PathBuf;
 use xai_grok_workspace::file_system::{
     FileReference, render_embedded_resource, render_file_reference,
 };
-/// Parsed prompt with context and query kept separate.
-///
 /// Some templates put `<user_query>` last (context first); Grok puts it first.
-/// Keeping them separate lets the caller truncate context without
-/// searching for the query boundary in a flat string.
+/// Keeping them separate lets the caller truncate context without searching for the query boundary in a flat string.
 #[derive(Debug, Clone)]
 pub struct ParsedPrompt {
     /// Context blocks: `<attached_files>` payloads and resource-link sections.
     /// Grok mode may include editor open/focus metadata; the compat mode does not.
     /// Empty string when there is no context.
     pub context: String,
-    /// The user's query, already wrapped in `<user_query>` tags
-    /// (or raw when verbatim).
+    /// The user's query, already wrapped in `<user_query>` tags (or raw when verbatim).
     pub query: String,
-    /// Skill information block: `<skill_information>` envelope with expanded
-    /// skill content. Empty string when no skills were invoked.
+    /// Skill information block: `<skill_information>` envelope with expanded skill content.
+    /// Empty string when no skills were invoked.
     pub skill_information: String,
-    /// Extracted images from the prompt.
     pub images: Vec<ImageContent>,
     /// Whether the prompt was parsed in query-last mode.
     pub is_cursor: bool,
 }
 impl ParsedPrompt {
-    /// Assemble into the final message string with correct ordering.
     pub fn assemble(&self) -> String {
         Self::assemble_parts_with_skills(
             &self.context,
@@ -37,14 +31,12 @@ impl ParsedPrompt {
             self.is_cursor,
         )
     }
-    /// Assemble context, query, and skill information into the final message string.
-    ///
     /// Layout:
-    /// - **Grok mode:** `<user_query>` + `<skill_information>` + context
-    /// - **Query-last mode:** context + `<user_query>` + `<skill_information>`
+    /// - **Grok mode:** `<user_query>`, then `<skill_information>`, then context
+    /// - **Query-last mode:** context, then `<user_query>`, then `<skill_information>`
     ///
-    /// The `<skill_information>` block always follows `<user_query>` immediately
-    /// so the model sees the user's request and skill instructions together.
+    /// The `<skill_information>` block always follows `<user_query>` immediately.
+    /// This way the model sees the user's request and skill instructions together.
     pub fn assemble_parts_with_skills(
         context: &str,
         query: &str,
@@ -63,9 +55,6 @@ impl ParsedPrompt {
         format!("{query_block}\n\n{context}")
     }
 }
-/// Parses ACP prompt content blocks into a [`ParsedPrompt`] with context
-/// and query kept separate.
-///
 /// When `is_cursor` is true, produces query-last format output:
 /// - `<attached_files>` (bare), resource links, then `<user_query>` last
 /// - File references use `<code_selection>` tags
@@ -91,10 +80,7 @@ pub async fn parse_prompt(
     )
     .await
 }
-/// Parse prompt with optional pre-built skill information block.
-///
-/// This is the full-featured entry point. `parse_prompt` delegates here with
-/// an empty `skill_information` string for backward compatibility.
+/// This is the full-featured entry point. `parse_prompt` delegates here with an empty `skill_information` string for backward compatibility.
 pub(crate) async fn parse_prompt_with_skills(
     prompt: &[acp::ContentBlock],
     working_directory: PathBuf,
@@ -168,8 +154,8 @@ pub(crate) async fn parse_prompt_with_skills(
         is_cursor,
     })
 }
-/// Returns `(context, query)` — the two halves of the prompt kept separate
-/// so the caller can truncate context without searching for the query boundary.
+/// Returns `(context, query)`, the two halves of the prompt kept separate.
+/// The caller can truncate context without searching for the query boundary.
 fn render_message(
     message: String,
     embedded_contents: Vec<String>,
@@ -301,8 +287,7 @@ fn render_regular_links(links: &[&acp::ResourceLink]) -> String {
     }
     s.trim_end_matches('\n').to_string()
 }
-/// Grok-format resource links: `<focused_files>` / `<open_files>` with
-/// metadata inside a `<system-reminder>` wrapper.
+/// Grok-format resource links: `<focused_files>` / `<open_files>` with metadata inside a `<system-reminder>` wrapper.
 fn render_resource_links_grok(resource_links: &[acp::ResourceLink]) -> String {
     let mut regular_links = Vec::new();
     let mut focused_files = Vec::new();
@@ -379,7 +364,7 @@ mod tests {
             format!("{query}\n\n{context}")
         }
     }
-    /// Shorthand: render + assemble for grok mode.
+    /// Shorthand: render and assemble for grok mode.
     fn render_grok(
         message: &str,
         embedded: Vec<String>,

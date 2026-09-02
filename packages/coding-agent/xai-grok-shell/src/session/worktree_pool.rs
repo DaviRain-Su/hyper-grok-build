@@ -7,8 +7,8 @@
 //!
 //! Layout: each pool instance owned
 //! `~/.grok/worktree_pool/<instance_id>/<pool_id>/` with a `.pid` liveness
-//! file in the instance directory. Cleanup only touches directories whose
-//! owning process is dead.
+//! file in the instance directory.
+//! Cleanup only touches directories whose owning process is dead.
 
 use std::path::{Path, PathBuf};
 
@@ -18,38 +18,24 @@ use crate::util::grok_home::grok_home;
 
 const WORKTREE_POOL_LOG: &str = "xai_worktree_pool";
 
-/// Guard ensuring the expensive directory walk + `git worktree remove`
-/// loop runs at most once per process.
 static CLEANUP_ONCE: std::sync::Once = std::sync::Once::new();
 
-/// Guard ensuring stale pool registration removal runs at most once per process.
 static REGISTRATION_CLEANUP_ONCE: std::sync::Once = std::sync::Once::new();
 
 /// Remove pooled worktrees belonging to dead agent instances.
 ///
-/// **The expensive part (directory walk + `git worktree remove`) runs at
-/// most once per process.** Multiple call sites (`initialize`,
-/// `new_session`) may race to invoke this; only the first caller does the
-/// real work, the rest return instantly.
+/// **The expensive part (directory walk and `git worktree remove`) runs at most once per process.**
+/// Multiple call sites (`initialize`, `new_session`) may race to invoke this; only the first caller does the real work, the rest return instantly.
 ///
-/// Stale registration removal is gated separately so the first caller
-/// that provides a `source_git_root` triggers it, even if the directory
-/// cleanup already ran from an earlier call with `None`.
+/// Stale registration removal is gated separately: the first caller that provides a `source_git_root` triggers it.
+/// It runs even if the directory cleanup already ran from an earlier call with `None`.
 ///
 /// Multi-instance safe: iterates instance subdirectories under
 /// `~/.grok/worktree_pool/`, reads each `.pid` file, and checks
-/// whether the PID is still alive. Only cleans directories where the
-/// owning process is dead.
+/// whether the PID is still alive.
 ///
-/// Three-step cleanup:
-/// 1. `git worktree remove --force` each worktree in a dead instance dir.
-/// 2. Delete the instance directory from disk.
-/// 3. Remove any remaining stale *pool-owned* registrations from the source
-///    repo's `.git/worktrees/` as a safety net.
-///
-/// This is a **synchronous** function intended to be called via
-/// `tokio::task::spawn_blocking` so it runs on the thread pool and
-/// never competes with the agent's single-threaded `LocalSet`.
+/// This is a **synchronous** function intended to be called via `tokio::task::spawn_blocking`.
+/// It then runs on the thread pool and never competes with the agent's single-threaded `LocalSet`.
 #[tracing::instrument(skip_all)]
 pub fn cleanup_stale_pool_worktrees(source_git_root: Option<&Path>) {
     CLEANUP_ONCE.call_once(|| {
@@ -132,9 +118,8 @@ fn cleanup_stale_pool_worktrees_inner() {
             "CLEANUP_DEAD: found dead instance pool directory"
         );
 
-        // Deregister and delete every worktree subdirectory. (The old pool
-        // adopted structurally valid worktrees here; with the pool gone they
-        // are reclaimed like any other stale directory.)
+        // Deregister and delete every worktree subdirectory
+        // (The old pool adopted structurally valid worktrees here; with the pool gone they are reclaimed like any other stale directory.)
         if let Ok(entries) = std::fs::read_dir(&instance_path) {
             for wt_entry in entries.flatten() {
                 let wt_path = wt_entry.path();
@@ -174,7 +159,6 @@ fn cleanup_stale_pool_worktrees_inner() {
 }
 
 /// The base pool directory under `~/.grok/`.
-/// Instance-scoped directories live under this: `worktree_pool/<instance_id>/`.
 fn pool_base_directory() -> PathBuf {
     grok_home().join("worktree_pool")
 }
@@ -207,8 +191,7 @@ mod tests {
         std::fs::write(fake_wt_a.join("file.txt"), "leftover").unwrap();
         std::fs::write(fake_wt_b.join("file.txt"), "leftover").unwrap();
 
-        // Call the inner function directly to bypass the process-global
-        // `Once` guard (other tests may have already triggered it).
+        // Call the inner function directly to bypass the process-global `Once` guard (other tests may have already triggered it)
         cleanup_stale_pool_worktrees_inner();
 
         assert!(

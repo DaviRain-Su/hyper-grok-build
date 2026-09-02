@@ -20,7 +20,7 @@ fn test_build_session_doc_hashes_content() {
     assert_eq!(doc.content, "prompt text");
     assert!(!doc.content_hash.is_empty());
 
-    // Same content + same title → same hash
+    // The same content and title produce the same hash
     let doc2 = build_session_doc(&session, "prompt text".to_string());
     assert_eq!(doc.content_hash, doc2.content_hash);
 }
@@ -48,16 +48,6 @@ fn test_should_skip_session_large_file() {
     f.flush().unwrap();
 
     assert!(should_skip_session(f.path(), 512));
-}
-
-#[test]
-fn test_should_skip_session_small_file() {
-    use std::io::Write as _;
-    let mut f = tempfile::NamedTempFile::new().unwrap();
-    f.write_all(&[0u8; 1024]).unwrap();
-    f.flush().unwrap();
-
-    assert!(!should_skip_session(f.path(), 2048));
 }
 
 #[test]

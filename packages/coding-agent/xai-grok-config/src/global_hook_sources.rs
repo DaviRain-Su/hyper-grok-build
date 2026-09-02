@@ -1,5 +1,5 @@
-//! Grok-owned direct global hook paths shared by shell discovery and sandbox
-//! write-deny: `$GROK_HOME/hooks`, `hooks-paths`, and absolute registry targets.
+//! Grok-owned direct global hook paths shared by shell discovery and sandbox write-deny.
+//! These are `$GROK_HOME/hooks`, `hooks-paths`, and absolute registry targets.
 //! Relative registry lines, project hooks, and vendor compat are out of scope.
 
 use std::io;
@@ -12,13 +12,13 @@ use crate::loader::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GlobalHookSourceKind {
-    /// `$GROK_HOME/hooks/` (discovered + protected).
+    /// `$GROK_HOME/hooks/` (discovered and protected).
     HookDirectory,
     /// `$GROK_HOME/hooks-paths` (protected; never loaded as hook JSON).
     RegistryFile,
     /// Absolute registry target (must exist before sandbox apply).
     ConfiguredSource,
-    /// `$GROK_HOME` trust-boundary file (protected; never hook JSON / discovery).
+    /// `$GROK_HOME` trust-boundary file (protected; never hook JSON or a discovery source).
     TrustBoundaryFile,
 }
 
@@ -86,8 +86,8 @@ pub enum GlobalHookSourceError {
     },
 }
 
-/// Hard-fail omits all sources. Soft `configured_error` keeps fixed slots and
-/// omits configured targets (sandbox must fail closed; discovery may log).
+/// Hard-fail omits all sources.
+/// Soft `configured_error` keeps fixed slots and omits configured targets (sandbox must fail closed; discovery may log).
 #[derive(Debug)]
 pub struct ResolvedGlobalHookSources {
     pub sources: Vec<GlobalHookSource>,
@@ -162,7 +162,7 @@ pub fn existing_ancestor_chain(path: &Path) -> Vec<PathBuf> {
     chain
 }
 
-/// Linux: `st_dev` differs from parent, or listed in mountinfo. Else false.
+/// Linux: true when `st_dev` differs from the parent's or the path is listed in mountinfo; other platforms return false.
 pub(crate) fn is_filesystem_mountpoint(path: &Path) -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -204,8 +204,8 @@ pub(crate) fn is_filesystem_mountpoint(path: &Path) -> bool {
     }
 }
 
-/// Ancestors to RW self-bind so rename is EBUSY: parent→root, skip already-
-/// mounted nodes but keep pinning renameable ancestors above them (never `/`).
+/// Ancestors to RW self-bind so rename is EBUSY, walking from parent to root (never `/`).
+/// Already-mounted nodes are skipped, but renameable ancestors above them are still pinned.
 pub fn ancestors_to_pin_as_mountpoints(path: &Path) -> Vec<PathBuf> {
     ancestors_to_pin_as_mountpoints_with(path, is_filesystem_mountpoint)
 }
@@ -303,9 +303,9 @@ fn ensure_real_file_slot(path: &Path) -> Result<(), GlobalHookSourceError> {
     Ok(())
 }
 
-/// Ensure real `$GROK_HOME/hooks` dir + `hooks-paths` file (create if missing).
-/// Race-resistant create (`create_dir` / `create_new`+`O_NOFOLLOW`); never
-/// truncates an existing registry; rejects symlinks/wrong types.
+/// Ensure real `$GROK_HOME/hooks` dir and `hooks-paths` file (create if missing).
+/// The create is race-resistant (`create_dir` / `create_new` with `O_NOFOLLOW`) and never truncates an existing registry.
+/// Symlinks and wrong types are rejected.
 pub fn ensure_grok_hook_slots(grok_home: &Path) -> Result<(), GlobalHookSourceError> {
     if path_has_symlink_component(grok_home) {
         return Err(GlobalHookSourceError::SymlinkedGrokHome {
@@ -382,7 +382,7 @@ pub const TRUST_BOUNDARY_FILENAMES: &[&str] = &[
 ];
 
 /// Ensure real regular files for [`TRUST_BOUNDARY_FILENAMES`] (create if missing).
-/// Same create-if-absent / never-truncate contract as `hooks-paths`.
+/// Files are created if absent and never truncated, the same contract as `hooks-paths`.
 pub(crate) fn ensure_grok_trust_boundary_slots(
     grok_home: &Path,
 ) -> Result<(), GlobalHookSourceError> {

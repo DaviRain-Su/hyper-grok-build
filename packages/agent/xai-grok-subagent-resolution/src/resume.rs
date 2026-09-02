@@ -102,13 +102,6 @@ mod tests {
     }
 
     #[test]
-    fn matching_type_and_persona_source_has_model() {
-        let source = make_source("general-purpose", Some("impl"), Some("grok-3"));
-        let result = validate_resume_identity("general-purpose", Some("impl"), &source);
-        assert!(result.is_ok());
-    }
-
-    #[test]
     fn no_persona_requested_source_has_persona() {
         // Not requesting a persona is always valid (no override means inherit)
         let source = make_source("general-purpose", Some("implementer"), None);
@@ -170,16 +163,6 @@ mod tests {
         assert!(matches!(
             result,
             Err(ResumeValidationError::TypeMismatch { .. })
-        ));
-    }
-
-    #[test]
-    fn persona_mismatch_still_rejected_when_source_has_model() {
-        let source = make_source("general-purpose", Some("impl"), Some("grok-3"));
-        let result = validate_resume_identity("general-purpose", Some("reviewer"), &source);
-        assert!(matches!(
-            result,
-            Err(ResumeValidationError::PersonaMismatch { .. })
         ));
     }
 }

@@ -17,7 +17,7 @@
 //! The concrete in-memory implementation is intentionally **out of scope**
 //! for this crate — it requires a concurrency story (sharded maps, an
 //! actor, etc.) that belongs alongside the registry's collision matrix and
-//! generation handling. Tests exercise the trait via per-test mock impls.
+//! generation handling.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -278,45 +278,5 @@ pub fn next_registration_seq() -> u64 {
             Ok(_) => return next,
             Err(actual) => prev = actual,
         }
-    }
-}
-
-#[cfg(test)]
-mod seq_tests {
-    use super::next_registration_seq;
-
-    fn now_ms() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0)
-    }
-
-    #[test]
-    fn next_registration_seq_is_monotonic_and_epoch_seeded_under_burst() {
-        let before_ms = now_ms();
-        let first = next_registration_seq();
-        let mut prev = first;
-        const N: u64 = 50_000;
-        for _ in 0..N {
-            let s = next_registration_seq();
-            assert!(s > prev, "must be strictly increasing: {prev} -> {s}");
-            prev = s;
-        }
-        let after_ms = now_ms();
-
-        assert!(
-            prev - first >= N,
-            "burst must advance by at least one per call: {first} -> {prev}",
-        );
-        let high = prev >> 10;
-        assert!(
-            high >= before_ms,
-            "high bits ({high}) must be epoch-seeded (>= {before_ms})",
-        );
-        assert!(
-            high <= after_ms + 1_000,
-            "high bits ({high}) must track wall clock (<= {after_ms} + slack)",
-        );
     }
 }

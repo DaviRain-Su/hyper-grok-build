@@ -1,7 +1,7 @@
-//! Shared plugin lifecycle operations (output-agnostic).
+//! Shared plugin install, uninstall, update, and marketplace operations (output-agnostic).
 //!
-//! Called by the CLI (`plugin_cmd.rs`). The in-session slash commands
-//! (`acp_session.rs`) currently inline similar logic and should migrate here.
+//! Called by the CLI (`plugin_cmd.rs`).
+//! The in-session slash commands (`acp_session.rs`) currently inline similar logic and should migrate here.
 //!
 //! Callers own output formatting and telemetry.
 
@@ -37,10 +37,8 @@ pub struct InstallOutcome {
     pub is_local: bool,
 }
 
-/// Parse, clone/symlink, register, and enable a plugin. Does not emit telemetry.
-/// Classify an install source as local (filesystem) vs git (remote) without
-/// installing — used for telemetry `install_kind` on the failure path, where no
-/// [`InstallOutcome`] is available.
+/// Classify an install source as local (filesystem) vs git (remote) without installing.
+/// Used for telemetry `install_kind` on the failure path, where no [`InstallOutcome`] is available.
 pub(crate) fn install_source_is_local(source: &str, cwd: &Path) -> bool {
     matches!(
         git_install::parse_install_source(source, cwd),
@@ -48,6 +46,7 @@ pub(crate) fn install_source_is_local(source: &str, cwd: &Path) -> bool {
     )
 }
 
+/// Parse, clone/symlink, register, and enable a plugin. Does not emit telemetry.
 pub fn install_plugin(source: &str, cwd: &Path) -> Result<InstallOutcome, InstallError> {
     let install_source = git_install::parse_install_source(source, cwd);
     let is_local = matches!(install_source, git_install::InstallSource::Local { .. });
@@ -468,8 +467,7 @@ pub fn name_from_path(path: &Path) -> String {
         .unwrap_or_else(|| "marketplace".to_string())
 }
 
-/// A `marketplace add` input, split into the two source kinds the config
-/// supports (`git = "..."` vs `path = "..."`).
+/// A `marketplace add` input, split into the two source kinds the config supports (`git = "..."` vs `path = "..."`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MarketplaceAddInput {
     /// Local directory. Tilde-expanded and absolutized against the caller's cwd.
@@ -480,12 +478,10 @@ pub enum MarketplaceAddInput {
 
 /// Classify a `marketplace add` input as a local directory or a git URL.
 ///
-/// The explicit path indicators (leading `/`, `.`, `~`, `\`, or a Windows
-/// drive prefix) mirror `is_github_shorthand`'s path checks in
-/// `git_install::parse_install_source`. Unlike `plugin install`, unmarked
-/// inputs (`foo`, `a/b/c`) keep the legacy git-URL normalization for
-/// back-compat. Without this split, a path input would be mangled into
-/// `https://github.com/<path>.git` and only fail after network clone attempts.
+/// The explicit path indicators are a leading `/`, `.`, `~`, `\`, or a Windows drive prefix.
+/// They mirror `is_github_shorthand`'s path checks in `git_install::parse_install_source`.
+/// Unlike `plugin install`, unmarked inputs (`foo`, `a/b/c`) keep the legacy git-URL normalization for back-compat.
+/// Without this split, a path input would be mangled into `https://github.com/<path>.git` and only fail after network clone attempts.
 pub fn classify_marketplace_add_input(input: &str, cwd: &Path) -> MarketplaceAddInput {
     if !looks_like_local_path(input) {
         return MarketplaceAddInput::GitUrl(normalize_git_url(input));
@@ -496,14 +492,12 @@ pub fn classify_marketplace_add_input(input: &str, cwd: &Path) -> MarketplaceAdd
         let p = PathBuf::from(input);
         if p.is_relative() { cwd.join(p) } else { p }
     };
-    // Lexical cleanup only (`.` segments, trailing slashes; `..` is kept — no
-    // symlink resolution): keeps the stored string canonical enough for the
-    // writer's raw-string idempotency check to match the loader's PathBuf one.
+    // Lexical cleanup only (`.` segments, trailing slashes; `..` is kept, no symlink resolution)
+    // It keeps the stored string canonical enough for the writer's raw-string idempotency check to match the loader's PathBuf one
     MarketplaceAddInput::LocalPath(path.components().collect())
 }
 
-/// Expand a leading `~` to the home directory — the same expansion the
-/// marketplace loader applies to `path =` config entries.
+/// Expand a leading `~` to the home directory, the same expansion the marketplace loader applies to `path =` config entries.
 fn expand_tilde(input: &str) -> PathBuf {
     match input.strip_prefix('~') {
         Some(rest) => xai_dirs::home_dir()
@@ -583,8 +577,7 @@ pub enum MarketplaceInstallError {
 }
 
 impl MarketplaceInstallError {
-    /// Stable telemetry category, reusing [`classify_install_error`] for the
-    /// underlying install failure.
+    /// Stable telemetry category, reusing [`classify_install_error`] for the underlying install failure.
     pub fn category(&self) -> String {
         match self {
             Self::UnknownQualifier { .. } => "unknown_marketplace".to_string(),
@@ -703,12 +696,11 @@ fn bullet_list(items: &[String]) -> String {
         .join("\n")
 }
 
-/// The require-sha pin policy for remote plugin code. Disk-only config + env,
-/// both tighten-only: neither a remote campaign nor the `GROK_CONFIG` /
-/// `GROK_CONFIG_PATH` overlay must be able to relax a local security policy, and
-/// an unreadable config falls back to the env knob. Read from the overlay-free
-/// layer merge (the overlay-free contract in `ConfigLayers::env_overlay`) so an
-/// overlay `require_sha = false` cannot defeat a disk-set `true`.
+/// The require-sha pin policy for remote plugin code. Disk-only config and env, both tighten-only.
+/// Neither a remote campaign nor the `GROK_CONFIG` / `GROK_CONFIG_PATH` overlay must be able to relax a local security policy.
+/// An unreadable config falls back to the env setting.
+/// Read from the overlay-free layer merge (the overlay-free contract in `ConfigLayers::env_overlay`).
+/// That way an overlay `require_sha = false` cannot defeat a disk-set `true`.
 pub(crate) fn marketplace_require_sha() -> bool {
     xai_grok_config::ConfigLayers::load()
         .map(|layers| {
@@ -719,7 +711,7 @@ pub(crate) fn marketplace_require_sha() -> bool {
         .unwrap_or_else(|_| xai_grok_plugin_marketplace::env_require_sha())
 }
 
-/// Marketplace sources from config.toml + settings JSON, unfiltered.
+/// Marketplace sources from config.toml and settings JSON, unfiltered.
 pub(crate) fn load_marketplace_sources() -> Vec<MarketplaceSource> {
     let config = crate::config::load_effective_config()
         .ok()
@@ -729,9 +721,8 @@ pub(crate) fn load_marketplace_sources() -> Vec<MarketplaceSource> {
     sources
 }
 
-/// Like [`load_marketplace_sources`] but drops git sources blocked by the
-/// managed `marketplace_allowlist`. Install paths must use this so policy
-/// cannot be bypassed.
+/// Like [`load_marketplace_sources`] but drops git sources blocked by the managed `marketplace_allowlist`.
+/// Install paths must use this so policy cannot be bypassed.
 pub(crate) fn load_filtered_marketplace_sources() -> Vec<MarketplaceSource> {
     let allowlist =
         &xai_grok_workspace::permission::resolution::managed_settings().marketplace_allowlist;
@@ -815,8 +806,8 @@ struct InstallPlan {
     skipped_sources: Vec<String>,
 }
 
-/// Map a marketplace ref to the source + entry to install, or a typed error.
-/// Pure over `sources` + the `scan` closure so it is unit-testable.
+/// Map a marketplace ref to the source and entry to install, or a typed error.
+/// Pure over `sources` and the `scan` closure so it is unit-testable.
 fn plan_install(
     sources: &[MarketplaceSource],
     name: &str,
@@ -931,9 +922,8 @@ fn plan_install(
     }
 }
 
-/// Install a plugin by marketplace name, optionally pinned via `qualifier`
-/// (`owner/repo` or `local/<slug>`). Loads allowlist-filtered sources and
-/// delegates selection to [`plan_install`].
+/// Install a plugin by marketplace name, optionally pinned via `qualifier` (`owner/repo` or `local/<slug>`).
+/// Loads allowlist-filtered sources and delegates selection to [`plan_install`].
 pub fn install_marketplace_plugin(
     name: &str,
     qualifier: Option<&str>,
@@ -1166,8 +1156,7 @@ pub fn remove_toml_marketplace_block(content: &str, source_identity: &str) -> Op
             return git.trim_end_matches(".git") == identity_normalized;
         }
         if let Some(path) = entry.get("path").and_then(|v| v.as_str()) {
-            // The identity comes from a loaded source, whose `~` was expanded —
-            // match hand-written `path = "~/x"` entries by expanding them too.
+            // The identity comes from a loaded source, whose `~` was expanded; match hand-written `path = "~/x"` entries by expanding them too
             return path == source_identity || expand_tilde(path) == Path::new(source_identity);
         }
         false
@@ -1175,9 +1164,9 @@ pub fn remove_toml_marketplace_block(content: &str, source_identity: &str) -> Op
 
     sources.remove(idx);
 
-    // Keep other `[marketplace]` keys (the sticky official_marketplace_auto_installed
-    // flag) when `sources` empties; drop the table only when fully empty. Else
-    // removing an unrelated source wipes the flag and auto-register re-adds it.
+    // Keep other `[marketplace]` keys (the sticky official_marketplace_auto_installed flag) when `sources` empties
+    // Drop the table only when fully empty
+    // Otherwise removing an unrelated source wipes the flag and auto-register re-adds it
     let sources_now_empty = doc
         .get("marketplace")
         .and_then(|m| m.get("sources"))
@@ -1198,9 +1187,8 @@ pub fn remove_toml_marketplace_block(content: &str, source_identity: &str) -> Op
 /// Try removing a source from `settings.json` / `known_marketplaces.json` under
 /// `~/.grok/` and `~/.claude/`. Returns `true` if removed from at least one file.
 pub fn try_remove_source_from_json_files(source_url_or_path: &str) -> bool {
-    // Resolve user grok via user_grok_home() (None when no home resolves) and
-    // home separately, so removal still runs from $GROK_HOME when no home dir
-    // exists, and never touches a cwd-relative .grok.
+    // Resolve user grok via user_grok_home() (None when no home resolves) and home separately
+    // Removal then still runs from $GROK_HOME when no home dir exists, and never touches a cwd-relative .grok
     let home = xai_dirs::home_dir();
     let grok = xai_grok_config::user_grok_home();
 
@@ -1340,7 +1328,7 @@ mod tests {
             normalize_git_url("user/repo"),
             "https://github.com/user/repo.git"
         );
-        // .git suffix not doubled
+        // The .git suffix is not doubled
         assert_eq!(
             normalize_git_url("user/repo.git"),
             "https://github.com/user/repo.git"
@@ -1418,13 +1406,13 @@ mod tests {
 
     #[test]
     fn name_from_url_edge_cases() {
-        assert_eq!(name_from_url("https://github.com/org/repo/"), "repo"); // trailing slash bug fix
+        assert_eq!(name_from_url("https://github.com/org/repo/"), "repo"); // trailing slash is trimmed
         assert_eq!(name_from_url(""), "marketplace"); // empty fallback
     }
 
     #[test]
     fn classify_error_strings_match_canonical() {
-        // Must match acp_session.rs::classify_install_error exactly — prevents telemetry drift.
+        // Must match acp_session.rs::classify_install_error exactly; that prevents telemetry drift
         assert_eq!(
             classify_install_error(&InstallError::AlreadyInstalled { key: "k".into() }),
             "already_installed"
@@ -1511,8 +1499,7 @@ mod tests {
 
     #[test]
     fn remove_toml_matches_tilde_path_entry_by_expanded_identity() {
-        // Loaded sources carry expanded paths, so removal by identity must
-        // still find a hand-written `path = "~/x"` entry.
+        // Loaded sources carry expanded paths, so removal by identity must still find a hand-written `path = "~/x"` entry
         let Some(home) = xai_dirs::home_dir() else {
             return;
         };

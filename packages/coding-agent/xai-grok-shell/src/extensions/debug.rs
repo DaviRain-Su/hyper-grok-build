@@ -1,12 +1,10 @@
 //! `x.ai/debug/*` extension handlers for local client testing.
 //!
-//! These methods bypass heuristics, sampling, cooldowns, and enabled checks
-//! so client engineers can exercise notification → response flows without
-//! needing real experiments, real sessions, or real model inference.
+//! These methods bypass heuristics, sampling, cooldowns, and enabled checks.
+//! Client engineers can exercise a notification and its response without real experiments, real sessions, or real model inference.
 //!
 //! - `trigger_feedback`: fire a synthetic `FeedbackRequestNotification`.
-//! - `arm_auto_compact`: arm the next turn to unconditionally trigger
-//!   auto-compaction, regardless of context window usage.
+//! - `arm_auto_compact`: make the next turn trigger auto-compaction unconditionally, regardless of context window usage.
 //! - `agent`: agent-process diagnostics (registry counts).
 
 use agent_client_protocol as acp;

@@ -1,8 +1,7 @@
 //! Shared parser for an auth command's stdout.
 //!
-//! Both auth paths run a command that prints a bearer token and parse it here:
-//! the session external-auth path ([`super::external_auth`]) and the per-model
-//! provider mint ([`super::auth_provider`]).
+//! [`super::external_auth`] (session auth) and [`super::auth_provider`] (the per-model provider mint) each run a command that prints a bearer token.
+//! Both parse the command's stdout here.
 
 #[derive(serde::Deserialize)]
 pub(crate) struct ExternalAuthOutput {
@@ -11,15 +10,13 @@ pub(crate) struct ExternalAuthOutput {
     pub refresh_token: Option<String>,
     #[serde(default)]
     pub expires_in: Option<u64>,
-    /// An xAI issuer marks the credential as first-party
-    /// (see [`crate::auth::GrokAuth::is_xai_auth`]).
+    /// An xAI issuer marks the credential as first-party (see [`crate::auth::GrokAuth::is_xai_auth`]).
     #[serde(default)]
     pub issuer: Option<String>,
 }
 
-/// A bearer must be a single line: reject control characters (including an
-/// interior newline) so a malformed token can never be smuggled onto an HTTP
-/// header, rather than relying on the HTTP layer to reject it later.
+/// A bearer must be a single line: reject control characters (including an interior newline) so a malformed token can never reach an HTTP header.
+/// Failing here is clearer than relying on the HTTP layer to reject it later.
 fn reject_control_chars(token: &str) -> anyhow::Result<()> {
     if token.contains(char::is_control) {
         anyhow::bail!("token contains control characters");
@@ -40,10 +37,9 @@ pub(crate) struct ParsedTokenOutput {
     pub issuer: Option<String>,
 }
 
-/// Accepts a bare token or JSON `{access_token, expires_in, issuer, ...}`. A
-/// non-zero exit, non-UTF-8 or empty stdout, an empty `access_token`, or
-/// JSON-object output that is not a valid token payload are all errors, so a
-/// malformed mint fails closed rather than putting garbage on the wire.
+/// Accepts a bare token or JSON `{access_token, expires_in, issuer, ...}`.
+/// A non-zero exit, non-UTF-8 or empty stdout, an empty `access_token`, or JSON-object output that is not a valid token payload are all errors.
+/// A malformed mint fails closed instead of putting garbage on the wire.
 pub(crate) fn parse_token_output(
     output: &std::process::Output,
 ) -> anyhow::Result<ParsedTokenOutput> {
@@ -57,10 +53,9 @@ pub(crate) fn parse_token_output(
         anyhow::bail!("produced no output on stdout");
     }
 
-    // Output that starts with `{` is meant to be a token payload: require it to
-    // parse and carry a non-empty access_token. Anything else is a bare token
-    // (JWTs and opaque tokens never start with `{`), so an error object like
-    // `{"error":"expired"}` can never be mistaken for a bearer.
+    // Output that starts with `{` is meant to be a token payload: require it to parse and carry a non-empty access_token
+    // Anything else is a bare token, since JWTs and opaque tokens never start with `{`
+    // This way an error object like `{"error":"expired"}` can never be mistaken for a bearer
     if stdout.starts_with('{') {
         let parsed: ExternalAuthOutput = serde_json::from_str(stdout)
             .map_err(|e| anyhow::anyhow!("produced JSON that is not a token payload: {e}"))?;
@@ -110,8 +105,7 @@ mod tests {
         assert!(expiry_after_seconds(3600).is_some());
     }
 
-    /// The provider path reads `refresh_token`, which the bare-token fallback
-    /// cannot carry; only JSON output does.
+    /// The provider path reads `refresh_token`, which the bare-token fallback cannot carry; only JSON output does.
     #[test]
     fn parse_token_output_reads_refresh_token_from_json_only() {
         let ok = |stdout: &str| std::process::Output {
@@ -128,8 +122,7 @@ mod tests {
         assert_eq!(parse_token_output(&ok("bare")).unwrap().refresh_token, None);
     }
 
-    /// JSON-shaped output must be a valid, non-empty token payload; a botched or
-    /// error payload fails closed instead of going on the wire as a bearer.
+    /// JSON-shaped output must be a valid, non-empty token payload; a botched or error payload fails closed instead of going on the wire as a bearer.
     #[test]
     fn parse_token_output_rejects_invalid_json_payloads() {
         let ok = |stdout: &str| std::process::Output {
@@ -147,8 +140,7 @@ mod tests {
         let parsed = parse_token_output(&ok("{\"access_token\":\" tok \"}")).unwrap();
         assert_eq!(parsed.access_token, "tok");
 
-        // An interior control character is rejected on both paths, so a
-        // malformed token can never reach an HTTP header.
+        // An interior control character is rejected on both paths, so a malformed token can never reach an HTTP header
         assert!(parse_token_output(&ok("{\"access_token\":\"tok\\ninjected\"}")).is_err());
         assert!(parse_token_output(&ok("tok\ninjected")).is_err());
     }

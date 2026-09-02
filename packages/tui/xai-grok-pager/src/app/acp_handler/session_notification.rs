@@ -1053,6 +1053,7 @@ pub(super) fn handle_session_notification_with_origin(
         } => {
             if let Some(ref mut modal) = agent.extensions_modal {
                 use crate::views::extensions_modal::TabDataState;
+                modal.seed_hook_groups_once(&hooks);
                 modal.hooks_data =
                     TabDataState::Loaded(xai_hooks_plugins_types::HooksListResponse {
                         hooks,
@@ -1459,6 +1460,15 @@ pub(super) fn handle_session_notification_with_origin(
         }
     }
 
+    if !app.reconnect_pending
+        && let Some(agent) = app.agents.get(&parent_id)
+        && agent.running_wake_turn.is_none()
+        && agent.session.state.is_idle()
+        && !agent.session.pending_prompts.is_empty()
+    {
+        let effects = crate::app::dispatch::maybe_drain_queue_and_note_peek(app, parent_id);
+        app.pending_effects.extend(effects);
+    }
     if let Some(outcome) = terminal_outcome {
         return super::super::turn_completion::apply_terminal_outcome(
             outcome, app, parent_id, is_active,
@@ -1690,11 +1700,13 @@ pub(super) fn apply_retry_state(
             attempt,
             max_retries,
             reason,
+            error_type,
         } => {
             session.set_retry_activity(Some(TurnActivity::Retrying {
                 attempt: *attempt,
                 max_retries: *max_retries,
                 reason: reason.clone(),
+                error_type: error_type.clone(),
             }));
         }
         RetryState::Exhausted {

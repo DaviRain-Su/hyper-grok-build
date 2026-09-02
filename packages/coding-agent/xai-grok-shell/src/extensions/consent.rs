@@ -1,7 +1,5 @@
-//! `x.ai/consent/record` extension handler.
-//!
-//! POSTs an accepted notice to the configured proxy. The client has already accepted it
-//! locally, so a failure here loses the server-side record but does not block the user.
+//! POSTs an accepted consent notice to the configured proxy.
+//! The client has already accepted it locally, so a failure here loses the server-side record but does not block the user.
 
 use agent_client_protocol as acp;
 use serde::Deserialize;

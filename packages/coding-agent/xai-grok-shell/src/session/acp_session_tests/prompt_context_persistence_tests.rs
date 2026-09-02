@@ -1,9 +1,7 @@
 use super::support::create_test_actor;
 use super::*;
 
-/// Test that PromptContext can round-trip through JSON serialization,
-/// matching the save/load format used by `save_prompt_context` and
-/// `load_prompt_context`.
+/// Test that PromptContext round-trips through JSON in the save/load format used by `save_prompt_context` and `load_prompt_context`.
 #[test]
 fn test_json_round_trip() {
     let ctx = xai_grok_agent::PromptContext {
@@ -16,10 +14,9 @@ fn test_json_round_trip() {
     assert_eq!(loaded.version, 1);
 }
 
-/// Test that PromptContext survives a JSON write-to-disk / read-from-disk
-/// cycle with field-level fidelity. This exercises serde + filesystem I/O
-/// but not the `save_prompt_context`/`load_prompt_context` wrappers (which
-/// depend on `grok_home()` and `SessionInfo` path encoding).
+/// Test that PromptContext survives a JSON write to disk and read back with field-level fidelity.
+/// This exercises serde and filesystem I/O but not the `save_prompt_context`/`load_prompt_context` wrappers.
+/// Those wrappers depend on `grok_home()` and `SessionInfo` path encoding.
 #[test]
 fn test_json_round_trip_via_filesystem() {
     let tmp = tempfile::tempdir().unwrap();
@@ -99,8 +96,7 @@ fn test_canonical_artifacts_coexist() {
     assert_eq!(read_ctx.version, 1);
 }
 
-/// Core invariant: `system_prompt.txt` must match the first System
-/// entry in `chat_history.jsonl`.
+/// Core invariant: `system_prompt.txt` must match the first System entry in `chat_history.jsonl`.
 #[test]
 fn test_system_prompt_matches_chat_history_system_message() {
     let tmp = tempfile::tempdir().unwrap();
@@ -144,7 +140,7 @@ fn test_missing_file_deserializes_as_none() {
     assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::NotFound);
 }
 
-/// Test that corrupt JSON gracefully returns a deserialization error.
+/// Test that corrupt JSON returns a deserialization error.
 #[test]
 fn test_corrupt_json_returns_error() {
     let tmp = tempfile::tempdir().unwrap();
@@ -235,8 +231,8 @@ fn test_load_prompt_context_returns_none_for_corrupt_json() {
 
 // ── Large-prompt truncation: maybe_truncate_large_prompt_with_skills ────
 //
-// Oversized prompts are offloaded to an owner-only file; the bounding logic is
-// the pure `build_truncated_prompt_message` helper, tested directly below.
+// Oversized prompts are offloaded to an owner-only file
+// The bounding logic is the pure `build_truncated_prompt_message` helper, tested directly below
 
 // Distinctive markers so head/middle/tail are individually assertable.
 const HEAD_TOKEN: &str = "HEADSTART_TOKEN_aaa";
@@ -246,12 +242,12 @@ fn fake_prompt_path() -> std::path::PathBuf {
     std::path::PathBuf::from("/tmp/grok-test-home/sessions/cwd/sid/prompts/prompt_0.txt")
 }
 
-/// `truncate_bytes_suffix` keeps a char-boundary-safe suffix (multibyte-safe).
+/// `truncate_bytes_suffix` keeps a suffix that starts on a UTF-8 char boundary, so multibyte text never splits.
 #[test]
 fn truncate_bytes_suffix_is_utf8_safe() {
     assert_eq!(truncate_bytes_suffix("hello", 5), "hello");
     assert_eq!(truncate_bytes_suffix("hello world", 5), "world");
-    // "a🎉🎉b" = 10 bytes; asking for 6 lands mid-codepoint → advances to boundary.
+    // "a🎉🎉b" is 10 bytes; asking for 6 lands mid-codepoint, so the cut advances to the next boundary
     let s = "a🎉🎉b";
     let out = truncate_bytes_suffix(s, 6);
     assert!(out.len() <= 6);
@@ -259,13 +255,13 @@ fn truncate_bytes_suffix_is_utf8_safe() {
     assert!(std::str::from_utf8(out.as_bytes()).is_ok());
 }
 
-/// `bound_head_tail`: input when it fits, else head+marker+tail within budget.
+/// `bound_head_tail` returns the input when it fits, else the head, the elision marker, and the tail within budget.
 #[test]
 fn bound_head_tail_boundary_and_utf8() {
-    // At budget → unchanged (`<=`).
+    // Exactly at budget stays unchanged (the check is `<=`)
     let fits = "a".repeat(100);
     assert_eq!(bound_head_tail(&fits, 100), fits);
-    // One over → bounded.
+    // One byte over gets bounded
     let over = "a".repeat(101);
     let out = bound_head_tail(&over, 100);
     assert!(
@@ -282,8 +278,8 @@ fn bound_head_tail_boundary_and_utf8() {
     assert!(out_mb.ends_with('🎉'));
 }
 
-/// (a) Oversized query: the bounded message keeps a HEAD and a TAIL (trailing
-/// question survives), elides the middle; full body never inlined.
+/// Oversized query: the bounded message keeps a HEAD and a TAIL, so the trailing question survives, and elides the middle.
+/// The full body is never inlined.
 #[test]
 fn build_truncated_keeps_query_head_and_tail() {
     let path = fake_prompt_path();
@@ -328,7 +324,7 @@ fn build_truncated_keeps_query_head_and_tail() {
     );
 }
 
-/// (b) Large context + small query: query intact, context truncated.
+/// Large context and small query: the query stays intact, the context is truncated.
 #[test]
 fn build_truncated_preserves_small_query_truncates_context() {
     let path = fake_prompt_path();
@@ -350,7 +346,7 @@ fn build_truncated_preserves_small_query_truncates_context() {
     assert!(message.len() <= TRUNCATED_PROMPT_PREFIX_SIZE);
 }
 
-/// Both query and context oversized (the 80/20 split arm): both bounded, neither full body inlined.
+/// Both query and context oversized (the 80/20 split arm): both are bounded and neither full body is inlined.
 #[test]
 fn build_truncated_both_oversized_keeps_bounded_heads() {
     let path = fake_prompt_path();
@@ -390,7 +386,7 @@ fn build_truncated_both_oversized_keeps_bounded_heads() {
     );
 }
 
-/// Compat-harness ordering: context + notice first, query block last.
+/// Compat-harness ordering: the context and the notice come first, the query block last.
 #[test]
 fn build_truncated_cursor_ordering() {
     let path = fake_prompt_path();
@@ -420,7 +416,7 @@ fn build_truncated_cursor_ordering() {
     assert!(message.len() <= TRUNCATED_PROMPT_PREFIX_SIZE);
 }
 
-/// Skills survive inline even when the query is oversized (own reservation).
+/// Skills survive inline even when the query is oversized; they have their own inline budget.
 #[test]
 fn build_truncated_preserves_skill_information() {
     let path = fake_prompt_path();
@@ -443,12 +439,12 @@ fn build_truncated_preserves_skill_information() {
     assert!(message.len() <= TRUNCATED_PROMPT_PREFIX_SIZE);
 }
 
-/// A skill over `SKILL_INLINE_BUDGET` is bounded head+tail; full body not inlined.
+/// A skill over `SKILL_INLINE_BUDGET` is bounded to a head and a tail; the full body is not inlined.
 #[test]
 fn build_truncated_bounds_oversized_skill_head_and_tail() {
     let path = fake_prompt_path();
     let query = "short query".to_string();
-    // Skill well over the 4 KB budget, with distinct head/tail markers.
+    // The skill is well over the 4 KB budget and carries distinct head and tail markers
     let skills = format!(
         "SKILLHEAD_TOKEN {} SKILLTAIL_TOKEN",
         "S".repeat(SKILL_INLINE_BUDGET * 2)
@@ -479,12 +475,12 @@ fn build_truncated_bounds_oversized_skill_head_and_tail() {
     assert!(message.len() <= TRUNCATED_PROMPT_PREFIX_SIZE);
 }
 
-/// Multibyte query + context: bounding must not panic, stays within budget.
+/// Multibyte query and context: bounding must not panic and stays within budget.
 #[test]
 fn build_truncated_multibyte_no_panic() {
     let path = fake_prompt_path();
-    let query = "路".repeat(LARGE_PROMPT_THRESHOLD); // 3 bytes each → oversized
-    let context = "🎉".repeat(LARGE_PROMPT_THRESHOLD); // 4 bytes each → oversized
+    let query = "路".repeat(LARGE_PROMPT_THRESHOLD); // 3 bytes each, so oversized
+    let context = "🎉".repeat(LARGE_PROMPT_THRESHOLD); // 4 bytes each, so oversized
     let full = crate::session::prompt_parser::ParsedPrompt::assemble_parts_with_skills(
         &context, &query, "", false,
     );
@@ -506,13 +502,12 @@ fn build_offload_notice_reports_bytes_marker_and_path() {
     assert!(notice.contains("read_file"));
 }
 
-// ── Method gate + call-site wiring (hermetic) ───────────────────────────
+// ── Method gate and call-site wiring (hermetic) ─────────────────────────
 //
-// `grok_home()` is a process-wide `OnceLock`, so the real async method is
-// only exercised for the no-offload gate; the offload + fallback wiring is
-// covered via the injected-writer seam.
+// `grok_home()` is a process-wide `OnceLock`, so the real async method is only exercised for the no-offload gate
+// The offload and fallback wiring is covered by injecting the writer function instead
 
-/// Threshold gate: a prompt exactly at `LARGE_PROMPT_THRESHOLD` is returned unchanged, no file.
+/// Threshold gate: a prompt exactly at `LARGE_PROMPT_THRESHOLD` is returned unchanged and no file is written.
 #[tokio::test(flavor = "current_thread")]
 async fn maybe_truncate_at_threshold_returns_unchanged_no_file() {
     let local = tokio::task::LocalSet::new();
@@ -523,7 +518,7 @@ async fn maybe_truncate_at_threshold_returns_unchanged_no_file() {
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(0, 1_000_000, 85, gateway_tx, persistence_tx).await;
 
-            // Empty context ⇒ full_message == query.
+            // With an empty context the full message is just the query
             let at = "Q".repeat(LARGE_PROMPT_THRESHOLD);
             let expected = crate::session::prompt_parser::ParsedPrompt::assemble_parts_with_skills(
                 "", &at, "", false,
@@ -543,8 +538,8 @@ async fn maybe_truncate_at_threshold_returns_unchanged_no_file() {
         .await;
 }
 
-/// Call-site wiring (injected-writer seam): success → bounded message + `Some(path)`;
-/// write failure → the SAME bounded message + `None` (never the oversized original).
+/// Call-site wiring with the injected writer: success returns the bounded message and `Some(path)`.
+/// A write failure returns the SAME bounded message and `None`, never the oversized original.
 #[test]
 fn write_offload_and_build_wires_offload_and_fallback() {
     let temp = tempfile::tempdir().unwrap();
@@ -585,9 +580,8 @@ fn write_offload_and_build_wires_offload_and_fallback() {
         "success points the model at the real offloaded file"
     );
 
-    // Failure path: erroring writer → bounded excerpt (NOT the oversized
-    // original), no path, AND the file-referencing notice stripped so the model
-    // is never told to read a file that was never written.
+    // Failure path: an erroring writer yields the bounded excerpt (not the oversized original) and no path
+    // The file-referencing notice is stripped so the model is never told to read a file that was never written
     let (fallback_msg, fallback_path) =
         write_offload_and_build(&full, bounded.clone(), file_path.clone(), |_p, _b| {
             Err(std::io::Error::other("simulated disk full"))
@@ -626,8 +620,8 @@ fn write_offload_and_build_wires_offload_and_fallback() {
     );
 }
 
-/// `strip_offload_notice` swaps the exact file-referencing notice for the no-file
-/// failure notice, and is a no-op when the notice is absent (defensive).
+/// `strip_offload_notice` swaps the exact file-referencing notice for the failure notice that points at no file.
+/// It is a no-op when the notice is absent (defensive).
 #[test]
 fn strip_offload_notice_swaps_notice_for_no_file_text() {
     let path = fake_prompt_path();
@@ -650,15 +644,15 @@ fn strip_offload_notice_swaps_notice_for_no_file_text() {
         stripped.contains("could not be saved"),
         "no-file failure notice substituted"
     );
-    // Absent notice → message returned unchanged.
+    // When the notice is absent the message is returned unchanged
     assert_eq!(
         strip_offload_notice("plain message", &notice),
         "plain message"
     );
 }
 
-/// Compat-harness ordering puts the notice MID-message (before the trailing query block);
-/// a write failure must strip it in place without discarding that query block.
+/// Compat-harness ordering puts the notice mid-message, before the trailing query block.
+/// A write failure must strip it in place without discarding that query block.
 #[test]
 fn write_offload_failure_strips_cursor_midmessage_notice() {
     let temp = tempfile::tempdir().unwrap();

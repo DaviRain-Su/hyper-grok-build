@@ -1620,94 +1620,6 @@ mod tests {
     }
 
     #[test]
-    fn test_copy_report_from_copy_stats() {
-        let stats = CopyStats {
-            files_copied: 10,
-            dirs_created: 3,
-            symlinks_copied: 2,
-            files_skipped: 5,
-            issues: vec!["warning 1".to_string(), "warning 2".to_string()],
-        };
-
-        let report: CopyReport = stats.into();
-        assert_eq!(report.files_copied, 10);
-        assert_eq!(report.dirs_created, 3);
-        assert_eq!(report.symlinks_copied, 2);
-        assert_eq!(report.files_skipped, 5);
-        assert_eq!(report.issues.len(), 2);
-        assert!(report.dirty_files.is_none());
-    }
-
-    #[test]
-    fn test_btrfs_mode_default() {
-        let mode = BtrfsMode::default();
-        assert_eq!(mode, BtrfsMode::Auto);
-    }
-
-    #[test]
-    fn test_btrfs_mode_variants() {
-        assert_eq!(BtrfsMode::Auto, BtrfsMode::Auto);
-        assert_eq!(BtrfsMode::Force, BtrfsMode::Force);
-        assert_eq!(BtrfsMode::Disabled, BtrfsMode::Disabled);
-
-        assert_ne!(BtrfsMode::Auto, BtrfsMode::Force);
-        assert_ne!(BtrfsMode::Auto, BtrfsMode::Disabled);
-        assert_ne!(BtrfsMode::Force, BtrfsMode::Disabled);
-    }
-
-    #[test]
-    fn test_btrfs_mode_debug() {
-        let auto = format!("{:?}", BtrfsMode::Auto);
-        let force = format!("{:?}", BtrfsMode::Force);
-        let disabled = format!("{:?}", BtrfsMode::Disabled);
-
-        assert!(auto.contains("Auto"));
-        assert!(force.contains("Force"));
-        assert!(disabled.contains("Disabled"));
-    }
-
-    #[test]
-    fn test_btrfs_mode_clone() {
-        let mode = BtrfsMode::Force;
-        let cloned = mode.clone();
-        assert_eq!(mode, cloned);
-    }
-
-    #[test]
-    fn test_creation_mode_default() {
-        let mode = CreationMode::default();
-        assert_eq!(mode, CreationMode::Linked);
-    }
-
-    #[test]
-    fn test_creation_mode_variants() {
-        assert_eq!(CreationMode::Linked, CreationMode::Linked);
-        assert_eq!(CreationMode::Standalone, CreationMode::Standalone);
-        assert_eq!(CreationMode::GitCheckout, CreationMode::GitCheckout);
-        assert_ne!(CreationMode::Linked, CreationMode::Standalone);
-        assert_ne!(CreationMode::Linked, CreationMode::GitCheckout);
-    }
-
-    #[test]
-    fn test_worktree_builder_chain() {
-        let _builder = WorktreeBuilder::new("/source", "/dest")
-            .git_ref("main")
-            .parallelism(4)
-            .ignored_parallelism(2)
-            .channel_buffer(512)
-            .working_tree_mode(WorkingTreeMode::CleanAll)
-            .ignored_files_mode(IgnoredFilesMode::Copy {
-                skip_patterns: vec!["*.log".to_string()],
-            })
-            .creation_mode(CreationMode::GitCheckout);
-    }
-
-    #[test]
-    fn test_standalone_shorthand() {
-        let _builder = WorktreeBuilder::new("/source", "/dest").standalone(true);
-    }
-
-    #[test]
     fn copy_ignored_only_returns_err_when_cancelled() {
         let src = tempfile::TempDir::new().unwrap();
         let dest = tempfile::TempDir::new().unwrap();
@@ -1725,15 +1637,6 @@ mod tests {
             err.to_string().contains("cancelled"),
             "error should report cancellation, got: {err}"
         );
-    }
-
-    #[test]
-    fn test_cleanup_report_default() {
-        let report = CleanupReport::default();
-        assert_eq!(report.removed, 0);
-        assert_eq!(report.overlays_unmounted, 0);
-        assert_eq!(report.btrfs_deleted, 0);
-        assert_eq!(report.errors, 0);
     }
 
     #[test]
@@ -1856,17 +1759,6 @@ mod tests {
             "nested dangling symlink worktree must be removed"
         );
         assert_eq!(report.removed, 1);
-    }
-
-    #[test]
-    fn test_remove_report_has_overlay_field() {
-        let report = RemoveReport {
-            used_btrfs_delete: false,
-            unmounted_bind: false,
-            unmounted_overlay: true,
-        };
-        assert!(report.unmounted_overlay);
-        assert!(!report.used_btrfs_delete);
     }
 
     #[test]

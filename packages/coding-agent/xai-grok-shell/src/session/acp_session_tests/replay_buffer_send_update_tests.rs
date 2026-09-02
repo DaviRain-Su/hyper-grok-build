@@ -64,6 +64,8 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
     let tool_context = ToolContext::new(cwd.clone(), None, None, fs, terminal, hunk_tracker_handle);
     let state = TokioMutex::new(State {
         running_task: None,
+        finalization_gate: Default::default(),
+        message_delivery: Default::default(),
         pending_inputs: VecDeque::new(),
         edit_holds: HashMap::new(),
         pending_notifications: Vec::new(),
@@ -75,6 +77,8 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
     });
     let (event_tx, event_rx) = mpsc::unbounded_channel::<SessionEvent>();
     let actor = SessionActor {
+        repo_status_prefetch: crate::session::repo_status_prefix::RepoStatusPrefetchState::default(
+        ),
         transient_retry_enabled: true,
         transient_retries_prompt_total: std::cell::Cell::new(0),
         transient_episode_start: std::cell::Cell::new(None),
@@ -105,6 +109,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         chat_state_handle: xai_chat_state::ChatStateHandle::noop(),
         unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
         current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        active_work: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
@@ -151,6 +156,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
             injection_count: std::sync::atomic::AtomicU64::new(0),
             compaction_recovery_count: std::sync::atomic::AtomicU64::new(0),
             chunks_added: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            init_reindex_handle: std::cell::RefCell::new(None),
             dream_config: Default::default(),
             dream_count: std::sync::atomic::AtomicU64::new(0),
             dream_success_count: std::sync::atomic::AtomicU64::new(0),
@@ -213,6 +219,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         goal_classifier_enabled: false,
         goal_planner_enabled: false,
         goal_summary_enabled: false,
+        length_salvage_remote_budget: None,
         goal_verifier_skeptic_count: 1,
         goal_role_models: Default::default(),
         goal_use_current_model_only: false,
@@ -339,17 +346,13 @@ async fn send_update_buffers_streaming_chunks_and_flush_sends_merged_notificatio
         })
         .await;
 }
-/// Regression for the cancel-during-long-reasoning trace upload gap:
-/// the `SessionCommand::Cancel` and `SessionCommand::CopyFile` handlers
-/// in `run_session` must flush the actor-owned `ReplayBuffer` so streamed
-/// chunks (notably `AgentThoughtChunk` reasoning) still pending at cancel
-/// time are persisted to `updates.jsonl` before `mvp_agent` issues
-/// `CopyFile` to snapshot the session directory for the trace upload.
+/// Regression test: a cancel during a long reasoning stream must not lose buffered chunks from the trace upload.
+/// The `SessionCommand::Cancel` and `SessionCommand::CopyFile` handlers in `run_session` must flush the actor-owned `ReplayBuffer`.
+/// That persists chunks still pending at cancel time (notably `AgentThoughtChunk` reasoning) to `updates.jsonl`.
+/// The flush must land before `mvp_agent` issues `CopyFile` to snapshot the session directory for the trace upload.
 ///
-/// Without the flush, the tail of a long reasoning stream sitting in the
-/// buffer when the user hits Ctrl+C never reaches disk before
-/// `copy_session_dir_to_memory` reads `updates.jsonl`. This test
-/// exercises the exact code added to both match arms.
+/// Without the flush, the tail of a long reasoning stream sitting in the buffer at Ctrl+C never reaches disk.
+/// `copy_session_dir_to_memory` then reads an `updates.jsonl` missing that tail.
 #[tokio::test(flavor = "current_thread")]
 async fn cancel_and_copyfile_handlers_flush_buffered_chunks_to_persistence() {
     let local = tokio::task::LocalSet::new();
@@ -404,9 +407,8 @@ async fn cancel_and_copyfile_handlers_flush_buffered_chunks_to_persistence() {
         })
         .await;
 }
-/// Negative control for `cancel_and_copyfile_handlers_flush_buffered_chunks_to_persistence`:
-/// without the flush, a buffered chunk does NOT reach persistence on its
-/// own — proving the flush call is load-bearing in the cancel path.
+/// Negative control for `cancel_and_copyfile_handlers_flush_buffered_chunks_to_persistence`.
+/// Without the flush, a buffered chunk does not reach persistence on its own, so the cancel path needs the explicit flush call.
 #[tokio::test(flavor = "current_thread")]
 async fn buffered_chunk_does_not_reach_persistence_without_explicit_flush() {
     let local = tokio::task::LocalSet::new();

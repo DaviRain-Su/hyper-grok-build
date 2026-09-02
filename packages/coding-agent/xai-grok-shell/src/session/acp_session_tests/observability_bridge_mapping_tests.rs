@@ -39,7 +39,7 @@ fn turn_result_completed() {
         snapshot: Box::new(None),
         tools_called: vec![],
         structured_output: None,
-        refusal: None,
+        stop: CompletedStop::EndTurn,
     });
     assert_eq!(
         turn_result_to_hook_outcome(&result),

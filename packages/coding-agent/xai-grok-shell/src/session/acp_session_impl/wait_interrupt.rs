@@ -1,7 +1,6 @@
-//! Mid-turn wait interrupt: remember aborted wait ids (union across
-//! concurrent aborts) and strip extras from the next wait that is a
-//! proper superset. Apply never forgets the set (siblings in the same
-//! batch still see it). Complete drops only the finished ids.
+//! Mid-turn wait interrupt: remember aborted wait ids (union across concurrent aborts) and strip extras from the next wait that is a proper superset.
+//! Apply never forgets the set (siblings in the same batch still see it).
+//! Complete drops only the finished ids.
 
 use xai_grok_tools::types::output::{ToolOutput as ToolsToolOutput, ToolRunResult};
 use xai_tool_types::{TaskOutputOutput, TaskOutputResult};
@@ -15,8 +14,8 @@ pub(super) enum InterruptedWaitFilter {
     Unchanged,
 }
 
-/// `task_ids` wins over singular `task_id`; same lenient list + trim/dedup
-/// as the wait tool, so a payload it would run cannot yield an empty set here.
+/// `task_ids` wins over singular `task_id`.
+/// Same lenient list parsing, trim, and dedup as the wait tool, so a payload it would run cannot yield an empty set here.
 pub(super) fn wait_task_ids_from_args(args: &serde_json::Value) -> Vec<String> {
     let raw = args
         .get("task_ids")
@@ -26,8 +25,7 @@ pub(super) fn wait_task_ids_from_args(args: &serde_json::Value) -> Vec<String> {
     xai_tool_types::resolve_task_ids(&raw)
 }
 
-/// Extras drop only when the next interruptible wait contains every
-/// interrupted id plus at least one new one.
+/// Extras drop only when the next interruptible wait contains every interrupted id plus at least one new one.
 fn wait_ids_after_interrupt(interrupted: &[String], requested: &[String]) -> Option<Vec<String>> {
     if interrupted.is_empty() || requested.is_empty() {
         return None;
@@ -44,14 +42,13 @@ fn wait_ids_after_interrupt(interrupted: &[String], requested: &[String]) -> Opt
 fn write_rewritten_task_ids(parsed_args: &mut serde_json::Value, kept: &[String]) {
     if let Some(obj) = parsed_args.as_object_mut() {
         obj.insert("task_ids".to_string(), serde_json::json!(kept));
-        // `task_id` is a serde alias of `task_ids`; leaving both keys
-        // makes TaskOutputToolInput deserialize fail.
+        // `task_id` is a serde alias of `task_ids`; leaving both keys makes TaskOutputToolInput deserialize fail
         obj.remove("task_id");
     }
 }
 
-/// Apply never forgets the set: a sibling wait in the same dispatch
-/// batch still needs it. Empty / non-superset waits leave it unchanged.
+/// Apply never forgets the set: a sibling wait in the same dispatch batch still needs it.
+/// Empty or non-superset waits leave it unchanged.
 pub(super) fn apply_interrupted_wait_filter(
     state: &BlockingWaitState,
     parsed_args: &mut serde_json::Value,
@@ -86,10 +83,9 @@ fn is_terminal_wait_status(status: &str) -> bool {
     )
 }
 
-/// Ids that actually finished. A `timeout_ms` wait leaves running tasks
-/// non-terminal, so those ids must stay in the remembered set.
-/// `not_found` / `TaskNotFound` are gone: keep them and later supersets
-/// keep stripping new work against dead ids.
+/// Ids that actually finished.
+/// A `timeout_ms` wait leaves running tasks non-terminal, so those ids must stay in the remembered set.
+/// `not_found` and `TaskNotFound` ids are gone; if they stayed remembered, later supersets would keep stripping new work against dead ids.
 pub(super) fn finished_wait_ids(result: &ToolRunResult) -> Vec<String> {
     match &result.output {
         ToolsToolOutput::TaskOutput(TaskOutputOutput::Result(res))
@@ -110,8 +106,8 @@ pub(super) fn finished_wait_ids(result: &ToolRunResult) -> Vec<String> {
     }
 }
 
-/// Abort unions. Complete drops only terminal ids so a timeout or
-/// concurrent abort does not wipe still-running work.
+/// An abort unions the waited ids into the remembered set.
+/// Complete drops only terminal ids so a timeout or concurrent abort does not wipe still-running work.
 pub(super) fn record_interruptible_wait_outcome(
     state: &BlockingWaitState,
     generation: u64,

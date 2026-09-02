@@ -1,8 +1,6 @@
-//! Goal planner subagent runner. Mirrors [`crate::session::goal_classifier`]
-//! but is fail-CLOSED: any failure pauses the goal. Writes a structured plan
-//! to the [`GoalTracker::plan_path`](crate::session::goal_tracker::GoalTracker::plan_path)
-//! file; the spawn is hidden behind [`GoalPlannerSpawner`] so tests can inject
-//! a deterministic spawner.
+//! Mirrors [`crate::session::goal_classifier`] but is fail-CLOSED: any failure pauses the goal.
+//! Writes a structured plan to the [`GoalTracker::plan_path`](crate::session::goal_tracker::GoalTracker::plan_path) file.
+//! The spawn is hidden behind [`GoalPlannerSpawner`] so tests can inject a deterministic spawner.
 
 #![allow(dead_code)]
 
@@ -16,60 +14,46 @@ use xai_grok_tools::implementations::grok_build::task::types::{
     SubagentOwner, SubagentRequest, SubagentRuntimeOverrides,
 };
 
-// Shared per-role model override + spawn-and-retry-once fail-open wrapper
+// Shared per-role model override and spawn-and-retry-once fail-open wrapper
 
-/// Every `/goal` role (planner, strategist, each verifier skeptic) spawns its
-/// subagent as `general-purpose`. The role's configured `agent_type` selects
-/// only the HARNESS (system prompt + toolset flavor),
-/// threaded as [`SubagentRuntimeOverrides::harness_agent_type`]; the
-/// subagent_type stays fixed so the role keeps a capable toolset on whichever
-/// harness is chosen. Single source of truth shared by the three role spawners
-/// and the parent-side `describe_subagent_type` probe so the gated/probed
-/// toolset matches the spawned one.
+/// Every `/goal` role (planner, strategist, each verifier skeptic) spawns its subagent as `general-purpose`.
+/// The role's configured `agent_type` selects only the harness, threaded as [`SubagentRuntimeOverrides::harness_agent_type`].
+/// The subagent_type stays fixed so the role keeps a capable toolset on whichever harness is chosen.
+/// The three role spawners and the parent-side `describe_subagent_type` probe all read it, so the gated/probed toolset matches the spawned one.
 ///
 /// [`SubagentRuntimeOverrides::harness_agent_type`]: xai_grok_tools::implementations::grok_build::task::types::SubagentRuntimeOverrides::harness_agent_type
 pub(crate) const GOAL_ROLE_SUBAGENT_TYPE: &str = "general-purpose";
 pub(crate) const GOAL_ROLE_AWAIT_BUDGET_EXCEEDED: &str =
     "goal role subagent exceeded foreground wait budget";
 
-/// Best-effort wait for a subagent cancel to be acknowledged before giving up.
-/// The planner is aborting regardless, so this is a bound on cleanup, not a
-/// correctness gate.
+/// The planner is aborting regardless, so this is a bound on cleanup, not a correctness gate.
 const GOAL_PLANNER_CANCEL_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Resolved per-role spawn override.
-///
-/// `None`/`None` ⇒ inherit the current model + the session harness (the
-/// historic `SubagentRuntimeOverrides::default()` behavior). When either field
-/// is `Some` the pair is "explicit" and the spawn-and-retry-once wrapper
-/// ([`spawn_with_fail_open_retry`]) retries on the current model + session
-/// harness if the first attempt fails. Shared by the planner, strategist, and
-/// per-skeptic classifier spawners.
+/// `None`/`None` inherits the current model and the session harness (the historic `SubagentRuntimeOverrides::default()` behavior).
+/// When either field is `Some` the pair is "explicit".
+/// The spawn-and-retry-once wrapper ([`spawn_with_fail_open_retry`]) retries on the current model and session harness if the first attempt fails.
+/// The planner, strategist, and per-skeptic classifier spawners share it.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RoleSpawnOverride {
     /// Resolved, post-auth, post-fail-open model id, or `None` to inherit.
     pub model: Option<String>,
-    /// Resolved harness `agent_type` (e.g. `"grok-build-plan"`)
-    /// whose `AgentDefinition` decides the spawned subagent's harness flavor
-    /// (system prompt + toolset), applied REGARDLESS of the
-    /// parent agent. `None` ⇒ inherit the session harness. NOT a subagent type —
-    /// the subagent_type stays fixed at [`GOAL_ROLE_SUBAGENT_TYPE`].
+    /// Resolved harness `agent_type` (e.g. `"grok-build-plan"`), applied REGARDLESS of the parent agent.
+    /// Its `AgentDefinition` decides the spawned subagent's harness flavor (system prompt and toolset).
+    /// `None` inherits the session harness.
+    /// NOT a subagent type: the subagent_type stays fixed at [`GOAL_ROLE_SUBAGENT_TYPE`].
     pub agent_type: Option<String>,
 }
 
 impl RoleSpawnOverride {
-    /// `true` when a configured `{model, agent_type}` pair was committed
-    /// (so a spawn failure triggers the one current-model retry).
+    /// `true` when a configured `{model, agent_type}` pair was committed (so a spawn failure triggers the one current-model retry).
     pub(crate) fn is_explicit(&self) -> bool {
         self.model.is_some() || self.agent_type.is_some()
     }
 }
 
-/// The model id a `/goal` role actually runs on: the committed override's
-/// model when present, else the inherited parent. Reported as
-/// `GoalPlannerFired.model_id` / `GoalStrategistFired.model_id` so a committed
-/// remote override isn't under-reported as the parent model. Not the
-/// classifier — its skeptic pool has no single representative model.
+/// The model id a `/goal` role actually runs on: the committed override's model when present, else the inherited parent.
+/// Reported as `GoalPlannerFired.model_id`/`GoalStrategistFired.model_id` so a committed remote override isn't under-reported as the parent model.
+/// Not used for the classifier: its skeptic pool has no single representative model.
 pub(crate) fn effective_role_model_id<'a>(
     override_model: Option<&'a str>,
     parent: &'a str,
@@ -77,35 +61,23 @@ pub(crate) fn effective_role_model_id<'a>(
     override_model.unwrap_or(parent)
 }
 
-/// A role prompt rendered for both the toolset the FIRST attempt runs on and
-/// the toolset the fail-open RETRY falls back to.
-///
-/// The explicit-pair retry re-runs on the default/parent toolset, so its
-/// tool-name placeholders (`{READ_TOOL}`, `{WRITE_TOOL}`, …) must name THAT
-/// toolset — not the configured pair's. The caller renders both up front and
-/// [`spawn_with_fail_open_retry`] picks the matching one per attempt. On the
-/// inherit path no retry occurs and `fallback` is never read, so callers on
-/// that path may leave it empty.
+/// The explicit-pair retry re-runs on the default/parent toolset.
+/// So its tool-name placeholders (`{READ_TOOL}`, `{WRITE_TOOL}`, …) must name THAT toolset, not the configured pair's.
+/// The caller renders both up front and [`spawn_with_fail_open_retry`] picks the matching one per attempt.
+/// On the inherit path no retry occurs and `fallback` is never read, so callers on that path may leave it empty.
 pub(crate) struct RoleRenderedPrompt {
     /// Rendered for the role's RESOLVED toolset (the first/only attempt).
     pub primary: String,
-    /// Rendered for the DEFAULT/parent toolset the explicit-pair fail-open
-    /// retry falls back to.
+    /// Rendered for the DEFAULT/parent toolset the explicit-pair fail-open retry falls back to.
     pub fallback: String,
 }
 
-/// A spawn error the fail-open wrapper can inspect to decide whether a
-/// retry is appropriate.
-///
-/// Implemented by both `goal_planner::SpawnError` and
-/// `goal_classifier::SpawnError` (structurally identical) so the generic
-/// wrapper can exclude cancellations from the retry without coupling to one
-/// concrete error type.
+/// Implemented by both `goal_planner::SpawnError` and `goal_classifier::SpawnError` (structurally identical).
+/// That lets the generic wrapper exclude cancellations from the retry without coupling to one concrete error type.
 pub(crate) trait RetryableSpawnError {
-    /// `true` when this error is a cancellation (user / turn abort). A
-    /// cancelled explicit-pair spawn must propagate WITHOUT a fail-open retry
-    /// so today's semantics are preserved (e.g. the planner still pauses as
-    /// `Aborted` rather than silently re-running on the current model).
+    /// `true` when this error is a cancellation (user / turn abort).
+    /// A cancelled explicit-pair spawn must propagate WITHOUT a fail-open retry.
+    /// For example the planner still pauses as `Aborted` rather than silently re-running on the current model.
     fn is_cancelled(&self) -> bool;
 }
 
@@ -121,27 +93,19 @@ impl RetryableSpawnError for SpawnError {
     }
 }
 
-/// Spawn-and-retry-once fail-open wrapper (Key Decision #13, load-bearing).
+/// An inherit override makes exactly one attempt on the current model and session harness.
+/// An explicit override makes one attempt with the configured `{model, harness}` pair.
+/// If that returns a NON-cancellation `Err`, the wrapper emits `GoalRoleModelFailOpen { reason: spawn_failed }`.
+/// It then retries ONCE with `model = None` and harness `None` (the current-model and session-harness fallback); only a SECOND failure propagates.
+/// A cancellation propagates as-is (no retry), so a bad configured pair can never change the failure behavior.
+/// For example it can never regress the fail-CLOSED planner into a goal-pause.
 ///
-/// Inherit override ⇒ exactly one attempt on the current model + session
-/// harness (the `prompt` is moved, never cloned). Explicit override ⇒ one
-/// attempt with the configured `{model, harness}` pair; if it returns a
-/// NON-cancellation `Err`, emits `GoalRoleModelFailOpen { reason: spawn_failed }`
-/// and retries ONCE with `model = None` + harness `None` (the current-model +
-/// session-harness fallback); only a SECOND failure propagates. A cancellation
-/// propagates as-is (no retry), so a bad configured pair can never change
-/// today's failure semantics (e.g. it can never regress the fail-CLOSED planner
-/// into a goal-pause).
+/// The `spawn` closure receives `(model, harness_agent_type, prompt)` and owns the fixed subagent_type ([`GOAL_ROLE_SUBAGENT_TYPE`]).
+/// The second arg is the harness override (`None` inherits the session harness), NOT a subagent type.
 ///
-/// The `spawn` closure receives `(model, harness_agent_type, prompt)` and owns
-/// the fixed subagent_type ([`GOAL_ROLE_SUBAGENT_TYPE`]); the second arg is the
-/// harness override (`None` ⇒ session harness), NOT a subagent type.
-///
-/// The first attempt uses `prompt.primary` (rendered for the configured
-/// harness's toolset); the retry uses `prompt.fallback` (rendered for the
-/// session-harness toolset it actually runs on), so the retried prompt never
-/// names the wrong toolset's tools. Each render is moved into its attempt — no
-/// clone on any path.
+/// The first attempt uses `prompt.primary` (rendered for the configured harness's toolset).
+/// The retry uses `prompt.fallback` (rendered for the session-harness toolset it actually runs on).
+/// Each render is moved into its attempt, with no clone on any path.
 pub(crate) async fn spawn_with_fail_open_retry<E, F, Fut>(
     role: &'static str,
     skeptic_idx: Option<u32>,
@@ -155,8 +119,7 @@ where
     F: FnMut(Option<String>, Option<String>, String) -> Fut,
     Fut: std::future::Future<Output = Result<String, E>>,
 {
-    // Inherit path: single attempt on the current model + session harness; move
-    // the prompt.
+    // Inherit path: single attempt on the current model and session harness; move the prompt
     if !override_.is_explicit() {
         return spawn(None, None, prompt.primary).await;
     }
@@ -180,32 +143,27 @@ where
             reason: GoalRoleModelFailOpenReason::SpawnFailed.as_const_str(),
         });
     }
-    // Retry on the session harness — use the matching `fallback` render so the
-    // prompt names the toolset the retry actually runs on.
+    // Retry on the session harness, using the matching `fallback` render so the prompt names the toolset the retry actually runs on
     spawn(None, None, prompt.fallback).await
 }
 
 // Constants
 
-/// Telemetry value on `GoalPlannerFired`. Does not cap user-initiated
-/// `/goal resume` retries, which re-run the planner unbounded.
+/// Telemetry value on `GoalPlannerFired`.
+/// It does not cap user-initiated `/goal resume` retries, which re-run the planner unbounded.
 pub(crate) const GOAL_PLANNER_MAX_RUNS: u32 = 1;
 
-/// Same general-purpose inventory each verifier skeptic uses: the
-/// planner reads and greps the workspace and, when web search is
-/// enabled, researches external facts to clarify scope. The configured
-/// `agent_type` selects the HARNESS, not this subagent type.
+/// The planner reads and greps the workspace and, when web search is enabled, researches external facts to clarify scope.
 const GOAL_PLANNER_SUBAGENT_TYPE: &str = GOAL_ROLE_SUBAGENT_TYPE;
 
 const GOAL_PLANNER_SUBAGENT_DESCRIPTION: &str = "goal plan writer";
 
 const GOAL_PLANNER_PROMPT_TEMPLATE: &str = include_str!("templates/goal_planner_prompt.md");
 
-// Outcome + spawner abstraction
+// Outcome and spawner abstraction
 
-/// Result of one planner attempt. `Planned` carries the path the
-/// planner wrote (always the input `plan_file`). `FailClosed` carries
-/// the reason — every variant pauses the goal at the call site.
+/// `Planned` carries the path the planner wrote (always the input `plan_file`).
+/// `FailClosed` carries the reason; every variant pauses the goal at the call site.
 #[derive(Debug, Clone)]
 #[expect(dead_code, reason = "`latency_ms` is consumed by future telemetry")]
 pub(crate) enum GoalPlannerOutcome {
@@ -213,12 +171,9 @@ pub(crate) enum GoalPlannerOutcome {
         plan_file: PathBuf,
         latency_ms: u64,
     },
-    /// Produced only by the planner's [`ChannelSpawner`], whose `cancel_token`
-    /// is wired to user steering / Send Now through `start_planner_run`; when
-    /// that token fires mid-spawn the attempt returns `Interrupted` so the loop
-    /// replans. The strategist and summarizer spawners pass a fresh,
-    /// never-cancelled token, so their equivalent cancel arms are unreachable in
-    /// practice.
+    /// Produced only by the planner's [`ChannelSpawner`], whose `cancel_token` is wired to user steering / Send Now through `start_planner_run`.
+    /// When that token fires mid-spawn the attempt returns `Interrupted` so the loop replans.
+    /// The strategist and summarizer spawners pass a fresh, never-cancelled token, so their equivalent cancel arms are unreachable in practice.
     Interrupted,
     FailClosed {
         reason: GoalPlannerFailClosedReason,
@@ -226,13 +181,10 @@ pub(crate) enum GoalPlannerOutcome {
     },
 }
 
-/// Subagent spawn abstraction. Production uses [`ChannelSpawner`];
-/// tests use `MockSpawner` (defined in the tests module).
+/// Production uses [`ChannelSpawner`]; tests use `MockSpawner` (defined in the tests module).
 #[async_trait::async_trait]
 pub(crate) trait GoalPlannerSpawner: Send + Sync {
-    /// Spawn under `id` and return the terminal response when the
-    /// subagent finishes. `prompt` carries both the configured-pair render
-    /// (`primary`) and the default-toolset fail-open retry render (`fallback`).
+    /// Spawn under `id` and return the terminal response when the subagent finishes.
     async fn spawn_planner(
         &self,
         id: &str,
@@ -240,8 +192,7 @@ pub(crate) trait GoalPlannerSpawner: Send + Sync {
     ) -> Result<String, SpawnError>;
 }
 
-/// Spawn-time error. Deliberately mirrored from the verifier rather
-/// than shared — unifying would be a wider refactor.
+/// Deliberately mirrored from the verifier rather than shared.
 #[derive(Debug)]
 pub(crate) enum SpawnError {
     Transport(String),
@@ -266,8 +217,7 @@ impl std::fmt::Display for SpawnError {
 
 // Terminal-token parse
 
-/// Accepts only the literal `Done` (after trim). A malformed token isn't
-/// fatal on its own — the runner gates on the plan file's presence.
+/// A malformed token isn't fatal on its own; the runner gates on the plan file's presence.
 pub(crate) fn parse_terminal_response(text: &str) -> bool {
     text.trim() == "Done"
 }
@@ -283,15 +233,14 @@ pub(crate) struct ChannelSpawner {
     pub(crate) parent_session_id: String,
     pub(crate) parent_prompt_id: Option<String>,
     pub(crate) cwd: Option<String>,
-    /// Trace-artifact sink + resolved `task` tool name; `None` disables
-    /// recording. See [`super::goal_classifier::record_subagent_trace`].
+    /// Trace-artifact sink and resolved `task` tool name; `None` disables recording.
+    /// See [`super::goal_classifier::record_subagent_trace`].
     pub(crate) trace_sink: Option<(xai_chat_state::ChatStateHandle, String)>,
-    /// Resolved per-role model+toolset override. Default (inherit) keeps the
-    /// historic `::default()` spawn behavior.
+    /// Resolved per-role model and toolset override.
+    /// Default (inherit) keeps the historic `::default()` spawn behavior.
     pub(crate) role_override: RoleSpawnOverride,
     pub(crate) cancel_token: tokio_util::sync::CancellationToken,
-    /// Event sink for the spawn-and-retry-once fail-open telemetry; `None`
-    /// in tests / when no event log is wired.
+    /// Event sink for the spawn-and-retry-once fail-open telemetry; `None` in tests / when no event log is wired.
     pub(crate) events: Option<EventWriter>,
 }
 
@@ -302,8 +251,7 @@ impl GoalPlannerSpawner for ChannelSpawner {
         id: &str,
         prompt: RoleRenderedPrompt,
     ) -> Result<String, SpawnError> {
-        // Clone the primary render for the trace pair only when tracing; the
-        // wrapper moves each render into its attempt (no other clone).
+        // Clone the primary render for the trace pair only when tracing; the wrapper moves each render into its attempt (no other clone)
         let trace_prompt = self.trace_sink.as_ref().map(|_| prompt.primary.clone());
         let outcome = spawn_with_fail_open_retry(
             "planner",
@@ -315,8 +263,7 @@ impl GoalPlannerSpawner for ChannelSpawner {
         )
         .await;
 
-        // Trace the FINAL attempt's output / runtime error (transport errors
-        // carry no subagent output, matching the prior behavior).
+        // Trace the FINAL attempt's output / runtime error (transport errors carry no subagent output)
         match &outcome {
             Ok(text) => crate::session::goal_classifier::record_subagent_trace(
                 self.trace_sink.as_ref(),
@@ -343,11 +290,8 @@ impl GoalPlannerSpawner for ChannelSpawner {
 }
 
 impl ChannelSpawner {
-    /// Send one spawn (model + harness override resolved by the caller) and
-    /// await its terminal result. The fail-open wrapper calls this once or
-    /// twice (retry on the current model + session harness). The subagent_type
-    /// is always [`GOAL_PLANNER_SUBAGENT_TYPE`]; `harness_agent_type` selects
-    /// the harness flavor (`None` ⇒ session harness).
+    /// Send one spawn (model and harness override resolved by the caller) and await its terminal result.
+    /// The fail-open wrapper calls this once or twice (retry on the current model and session harness).
     async fn send_one(
         &self,
         id: &str,
@@ -423,18 +367,15 @@ pub(crate) struct GoalPlannerInputs<'a> {
     pub plan_file: &'a Path,
     pub attempt: u32,
     pub model_id: &'a str,
-    /// Resolved tool names for the planner role's prompt placeholders
-    /// (`{READ_TOOL}`/`{SEARCH_TOOL}`/`{LIST_TOOL}`/`{WRITE_TOOL}`). Built
-    /// parent-side from the planner's resolved toolset.
+    /// Resolved tool names for the planner role's prompt placeholders (`{READ_TOOL}`/`{SEARCH_TOOL}`/`{LIST_TOOL}`/`{WRITE_TOOL}`).
+    /// Built parent-side from the planner's resolved toolset.
     pub tool_names: &'a RoleToolNames,
-    /// Default/parent-toolset tool names used to render the fail-open RETRY
-    /// prompt, so a retry that falls back to the default toolset names THAT
-    /// toolset's tools. On the inherit path this equals `tool_names`.
+    /// Default/parent-toolset tool names used to render the fail-open RETRY prompt.
+    /// On the inherit path this equals `tool_names`.
     pub inherit_tool_names: &'a RoleToolNames,
 }
 
-/// Run one planner attempt. Fail-CLOSED: any failure path returns
-/// `FailClosed { reason }` and the caller pauses the goal.
+/// Fail-CLOSED: any failure path returns `FailClosed { reason }` and the caller pauses the goal.
 pub(crate) async fn run_goal_planner(
     spawner: Arc<dyn GoalPlannerSpawner>,
     inputs: GoalPlannerInputs<'_>,
@@ -465,8 +406,7 @@ pub(crate) async fn run_goal_planner(
 
     let plan_file_str = inputs.plan_file.to_string_lossy();
     let with_plan_file = GOAL_PLANNER_PROMPT_TEMPLATE.replace("{PLAN_FILE}", &plan_file_str);
-    // Render once per toolset: `primary` for the resolved toolset, `fallback`
-    // for the default/parent toolset the explicit-pair retry falls back to.
+    // Render once per toolset: `primary` for the resolved toolset, `fallback` for the default/parent toolset the explicit-pair retry falls back to
     let render = |tool_names: &RoleToolNames| -> String {
         let rendered = tool_names.apply(&with_plan_file);
         let mut full = String::with_capacity(rendered.len() + inputs.objective.len() + 256);
@@ -574,8 +514,6 @@ mod tests {
 
     #[test]
     fn planner_template_explicit_render_has_no_leftover_placeholders() {
-        // The explicit `from_summary` path must leave no
-        // tool placeholder unresolved on the planner template.
         for summary in [
             summary_with(&[
                 (ToolKind::Read, "cursor_read"),
@@ -598,9 +536,7 @@ mod tests {
 
     #[test]
     fn planner_template_default_render_names_the_web_tools() {
-        // The research mandate is inert if the planner can't see the tool: the
-        // inherit/default render must NAME a real web tool (the stock
-        // `web_search`/`web_fetch`) and leave no tool placeholder unresolved.
+        // The research mandate is inert if the planner can't see the tool
         let rendered = RoleToolNames::inherit_defaults().apply(GOAL_PLANNER_PROMPT_TEMPLATE);
         assert!(
             rendered.contains("web_search"),
@@ -612,9 +548,8 @@ mod tests {
 
     #[test]
     fn planner_template_cursor_render_names_the_web_search_tool() {
-        // The previously-broken case: on the alternate toolset the web
-        // tool is named "WebSearch", so the planner prompt must render THAT —
-        // otherwise the weak model never reaches for it and plans from memory.
+        // The previously-broken case: on the alternate toolset the web tool is named "WebSearch", so the planner prompt must render THAT
+        // Otherwise the weak model never reaches for it and plans from memory
         let rendered = RoleToolNames::from_summary(&summary_with(&[
             (ToolKind::WebSearch, "WebSearch"),
             (ToolKind::WebFetch, "WebFetch"),
@@ -679,8 +614,7 @@ mod tests {
         assert!(!parse_terminal_response(""));
     }
 
-    /// Deterministic spawner with knobs for response text, whether to
-    /// write the plan file, and the file body.
+    /// Deterministic spawner with knobs for response text, whether to write the plan file, and the file body.
     struct MockSpawner {
         response: Result<String, SpawnError>,
         write_plan: bool,
@@ -957,7 +891,6 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_terminal_with_file_present_still_succeeds() {
-        // A botched terminal token is fine as long as the plan file is written.
         let plan_file = tmp_plan_file("malformed-but-written");
         let mut spawner = MockSpawner::ok_writes(&plan_file, b"# Plan: foo\n");
         spawner.response = Ok("done.".to_string());
@@ -985,7 +918,6 @@ mod tests {
 
     #[tokio::test]
     async fn empty_plan_file_fails_closed() {
-        // Existence isn't enough; the file must be non-empty.
         let plan_file = tmp_plan_file("empty");
         let spawner = Arc::new(MockSpawner::ok_writes(&plan_file, b""));
         let (log, emit) = collect_events();
@@ -1062,13 +994,12 @@ mod tests {
         let _ = std::fs::remove_file(&plan_file);
     }
 
-    // ── RoleSpawnOverride + spawn-and-retry-once wrapper ─────
+    // ── RoleSpawnOverride and spawn-and-retry-once wrapper ─────
 
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// A `RoleRenderedPrompt` whose two renders are identical (the inherit /
-    /// same-toolset case). Tests that exercise the distinct-fallback path build
-    /// the struct inline instead.
+    /// A `RoleRenderedPrompt` whose two renders are identical (the inherit / same-toolset case).
+    /// Tests that exercise the distinct-fallback path build the struct inline instead.
     fn role_prompt(p: &str) -> RoleRenderedPrompt {
         RoleRenderedPrompt {
             primary: p.to_string(),
@@ -1076,8 +1007,6 @@ mod tests {
         }
     }
 
-    /// 3-role parity: an explicit planner pair threads `agent_type` as the
-    /// request's `harness_agent_type`, not the subagent_type.
     #[tokio::test]
     async fn channel_spawner_threads_harness_override_to_request() {
         use xai_grok_tools::implementations::grok_build::task::types::{
@@ -1176,7 +1105,6 @@ mod tests {
             |model, harness, prompt| {
                 let c = c.clone();
                 async move {
-                    // The prompt is forwarded to every attempt.
                     assert_eq!(prompt, "PROMPT");
                     let n = c.fetch_add(1, Ordering::SeqCst);
                     if n == 0 {
@@ -1185,7 +1113,7 @@ mod tests {
                         assert_eq!(harness.as_deref(), Some("cfg-type"));
                         Err(SpawnError::Transport("boom".into()))
                     } else {
-                        // Retry drops the model + harness (inherit session harness).
+                        // Retry drops the model and harness (inherit session harness)
                         assert_eq!(model, None, "retry must inherit the current model");
                         assert_eq!(harness, None, "retry must inherit the session harness");
                         Ok("retried".into())
@@ -1202,8 +1130,6 @@ mod tests {
         );
     }
 
-    /// The explicit-pair retry must use the `fallback` render (default-toolset
-    /// tool names), not re-send the `primary` render (configured pair's names).
     #[tokio::test]
     async fn retry_uses_fallback_render_not_primary() {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1300,9 +1226,6 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
-    /// A CANCELLATION on the explicit-pair path must propagate
-    /// WITHOUT a fail-open retry (so the planner still pauses as `Aborted`
-    /// rather than silently re-running on the current model).
     #[tokio::test]
     async fn cancellation_on_explicit_path_does_not_retry() {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1376,10 +1299,6 @@ mod tests {
         assert!(body.contains("\"skeptic_idx\":1"), "skeptic_idx carried");
     }
 
-    /// Load-bearing (Key Decision #13): a bad configured pair must NOT
-    /// convert the fail-CLOSED planner into a goal-pause. The retry-once
-    /// wrapper degrades the explicit pair to the current model, so a
-    /// `ChannelSpawner` whose explicit spawn fails still returns `Planned`.
     #[tokio::test]
     async fn planner_retries_to_inherit_instead_of_failing_closed() {
         use xai_grok_tools::implementations::grok_build::task::types::{
@@ -1388,8 +1307,7 @@ mod tests {
         let plan_file = tmp_plan_file("retry-failopen");
         let plan_for_coord = plan_file.clone();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        // Fake coordinator: explicit-model spawn fails; the inherit retry
-        // (model None) writes the plan and succeeds.
+        // Fake coordinator: explicit-model spawn fails; the inherit retry (model None) writes the plan and succeeds
         let coord = tokio::spawn(async move {
             while let Some(ev) = rx.recv().await {
                 let SubagentEvent::Spawn(req) = ev else {
@@ -1448,10 +1366,6 @@ mod tests {
         let _ = std::fs::remove_file(&plan_file);
     }
 
-    /// Integration: a CANCELLED explicit-pair planner spawn must
-    /// still pause the goal as `Aborted` — the cancellation propagates with
-    /// NO inherit retry (only ONE spawn is sent), preserving today's
-    /// fail-CLOSED cancellation semantics.
     #[tokio::test]
     async fn planner_cancellation_pauses_as_aborted_without_retry() {
         use std::sync::atomic::{AtomicUsize, Ordering};

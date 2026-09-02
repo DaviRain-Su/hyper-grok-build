@@ -1,6 +1,5 @@
-//! Exit detection and completion for ACP background terminals: awaits
-//! `wait_for_exit` while polling `terminal/output` into the [`OutputRecorder`],
-//! then completes and releases the terminal.
+//! Awaits `wait_for_exit` on an ACP background terminal while polling `terminal/output` into the [`OutputRecorder`].
+//! On exit it completes the task and releases the terminal.
 
 use std::time::Duration;
 
@@ -151,8 +150,7 @@ pub(super) async fn watch_for_exit(
             .await
         {
             Ok(output) => output,
-            // The fetch failed; fall back to what we already mirrored to disk so
-            // the completion snapshot is not empty while the log file has data.
+            // The fetch failed; fall back to what we already mirrored to disk so the completion snapshot is not empty while the log file has data
             Err(_) => acp::TerminalOutputResponse::new(recorder.mirrored().to_string(), false),
         },
     };
@@ -217,9 +215,9 @@ pub(super) async fn release_terminal(
     }
 }
 
-/// Fallback exit detector for the blocking `wait_for_completion` path. Unlike
-/// [`watch_for_exit`] it only detects exit and does not mirror output. Returns
-/// `true` on exit, `false` on deadline or [`GATEWAY_LOST_AFTER`] of failures.
+/// Fallback exit detector for the blocking `wait_for_completion` path.
+/// Unlike [`watch_for_exit`] it only detects exit and does not mirror output.
+/// Returns `true` on exit, `false` on deadline or [`GATEWAY_LOST_AFTER`] of failures.
 pub(super) async fn poll_for_terminal_exit(
     gateway: &GatewaySender,
     session_id: &acp::SessionId,

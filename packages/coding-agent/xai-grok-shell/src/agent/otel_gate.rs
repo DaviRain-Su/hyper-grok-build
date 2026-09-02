@@ -1,14 +1,9 @@
-//! External-OTEL emission gate.
+//! The single owner of the fail-closed gate that decides whether customer-owned OTEL telemetry may ship.
+//! It drives the process-global flag in [`xai_grok_telemetry::external`]:
 //!
-//! Single owner of the fail-closed gate that decides whether customer-owned
-//! OTEL telemetry may ship, over the process-global flag in
-//! [`xai_grok_telemetry::external`]:
-//!
-//! 1. Startup (no leader instance yet): [`suppress`] closes the gate before
-//!    telemetry init; [`open_at_startup`] re-opens it when nothing will deliver
-//!    a fleet policy to this process ([`should_open_at_startup`]).
-//! 2. Post-auth/refresh (per-leader): [`OtelGate::resolve`] drives the gate
-//!    from the [`SettingsFetch`] outcome for the still-live identity.
+//! 1. Startup (no leader instance yet): [`suppress`] closes the gate before telemetry init.
+//!    [`open_at_startup`] re-opens it when nothing will deliver a fleet policy to this process ([`should_open_at_startup`]).
+//! 2. After auth or a refresh, per leader: [`OtelGate::resolve`] drives the gate from the [`SettingsFetch`] outcome for the still-live identity.
 
 use std::time::Duration;
 
@@ -17,14 +12,13 @@ use crate::util::config::RemoteSettings;
 
 pub(crate) const SETTINGS_GATE_MAX_WAIT: Duration = crate::http::SETTINGS_REAPPLY_TIMEOUT;
 
-/// Closes the gate. Process-global and idempotent; callable before any
-/// `AgentConfig` exists.
+/// Closes the gate. It is process-global, idempotent, and callable before any `AgentConfig` exists.
 pub(crate) fn suppress() {
     xai_grok_telemetry::external::set_settings_gate_max_wait(SETTINGS_GATE_MAX_WAIT);
     xai_grok_telemetry::external::suppress_external_otel_until_settings();
 }
 
-/// Whether an xAI fleet policy can govern this process at all.
+/// Whether an xAI fleet policy can govern this process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PolicyChannel {
     Applies,
@@ -54,8 +48,7 @@ pub(crate) fn policy_channel(remote_fetch_enabled: bool, proxy_is_xai: bool) -> 
     PolicyChannel::Applies
 }
 
-/// [`policy_channel`] resolved against live config for the proxy actually in
-/// use.
+/// [`policy_channel`] resolved against live config for the proxy actually in use.
 pub(crate) fn policy_channel_for(proxy_url: &str) -> PolicyChannel {
     policy_channel(
         crate::util::config::resolve_remote_fetch_enabled(),
@@ -63,13 +56,12 @@ pub(crate) fn policy_channel_for(proxy_url: &str) -> PolicyChannel {
     )
 }
 
-/// [`policy_channel_for`] against the effective config, for startup call sites
-/// that run before an `AgentConfig` exists.
+/// [`policy_channel_for`] against the effective config, for startup call sites that run before an `AgentConfig` exists.
 pub(crate) fn resolved_policy_channel() -> PolicyChannel {
     policy_channel_for(&crate::agent::config::EndpointsConfig::from_effective_config().proxy_url())
 }
 
-/// Inputs to [`should_open_at_startup`]. Named fields prevent transposed
+/// Inputs to [`should_open_at_startup`]. Named fields keep the two booleans from being transposed at call sites.
 pub(crate) struct StartupGate {
     pub(crate) channel: PolicyChannel,
     pub(crate) has_session: bool,
@@ -99,15 +91,14 @@ pub(crate) fn open_at_startup() {
     xai_grok_telemetry::external::mark_external_otel_settings_resolved();
 }
 
-/// Per-leader memory over the process-global external-OTEL gate: the credential
+/// Remembers, per leader, which credential identity the process-global external-OTEL gate was resolved for.
 #[derive(Default)]
 pub(crate) struct OtelGate {
     resolved_for: std::cell::RefCell<Option<String>>,
 }
 
 impl OtelGate {
-    /// Re-closes the gate before fetching a different identity's policy, so a
-    /// stale open can't leak across an account switch.
+    /// Re-closes the gate before fetching a different identity's policy, so a stale open can't leak across an account switch.
     pub(crate) fn rearm_on_switch(&self, identity: &str, channel: PolicyChannel) {
         if channel.is_unavailable() {
             return;
@@ -117,9 +108,8 @@ impl OtelGate {
         }
     }
 
-    /// Drives the gate from a settings-fetch `outcome` for `identity`. Every
-    /// outcome for the live identity is definitive and opens the gate; only the
-    /// `Fetched` one carries a policy (and settings) to apply.
+    /// Drives the gate from a settings-fetch `outcome` for `identity`.
+    /// Every outcome for the live identity is definitive and opens the gate; only the `Fetched` one carries a policy (and settings) to apply.
     pub(crate) fn resolve(
         &self,
         identity: &str,
@@ -141,7 +131,7 @@ impl OtelGate {
         }
     }
 
-    /// Applies the tighten-only fleet policy from `settings` (`None` on a `401`), then opens the gate and records `identity` (policy before open).
+    /// Applies the tighten-only fleet policy from `settings` (`None` on a `401`), then opens the gate and records `identity`.
     fn apply_and_open(&self, identity: &str, settings: Option<&RemoteSettings>) {
         crate::agent::config::apply_external_otel_remote_policy(settings);
         xai_grok_telemetry::external::mark_external_otel_settings_resolved();
@@ -162,7 +152,7 @@ mod tests {
         suppress_external_otel_until_settings,
     };
 
-    /// Restore the process-global gate open on exit so a closed gate never leaks.
+    /// Re-opens the process-global gate on drop so a closed gate never leaks out of a test.
     struct RestoreGate;
     impl Drop for RestoreGate {
         fn drop(&mut self) {

@@ -1,4 +1,4 @@
-//! MCP server re-exports + shell-side wrappers for timeout override resolution.
+//! MCP server re-exports and shell-side wrappers for timeout override resolution.
 
 pub use xai_grok_mcp::servers::{
     AcpServerEntry, HttpConfig, MCP_TOOL_NAME_DELIMITER, McpClient, McpClientTimeoutOverrides,
@@ -24,8 +24,8 @@ fn resolve_overrides(
         Some(cwd) => crate::util::config::get_mcp_server_config_with_project(server_name, cwd),
         None => crate::util::config::get_mcp_server_config(server_name),
     };
-    // Fall back to the globally-resolved startup timeout so servers without a
-    // per-server `startup_timeout_sec` (e.g. `~/.claude.json` imports) still get it.
+    // Fall back to the globally-resolved startup timeout
+    // Servers without a per-server `startup_timeout_sec` (e.g. `~/.claude.json` imports) still get it.
     let global_startup = crate::util::config::resolved_mcp_startup_timeout_secs();
     Some(inner::McpClientTimeoutOverrides {
         startup_timeout_sec: config
@@ -38,7 +38,6 @@ fn resolve_overrides(
     })
 }
 
-/// Build the config-resolved event data from a list of MCP server configs.
 pub(crate) fn build_config_resolved_event(
     configs: &[acp::McpServer],
     cwd: &Path,
@@ -73,11 +72,10 @@ pub(crate) async fn start_mcp_server(
     inner::start_mcp_server(mcp_server, overrides.as_ref(), meta_config, byo_config, ctx).await
 }
 
-/// Build all pending MCP clients for one init pass as a single merged list: config-declared
-/// servers (HTTP/stdio, spawned lock-free via [`start_mcp_servers`]) and SDK in-process
-/// servers (built under a brief lock via `McpState::build_pending_acp_clients`). SDK clients
-/// never fail to build, so they enter as `Ok`. One entry point so the init batch doesn't
-/// invoke two builders.
+/// Build all pending MCP clients for one init pass as a single merged list.
+/// Config-declared servers (HTTP/stdio) are spawned lock-free via [`start_mcp_servers`].
+/// SDK in-process servers are built under a brief lock via `McpState::build_pending_acp_clients`.
+/// SDK clients never fail to build, so they enter as `Ok`.
 pub(crate) async fn build_pending_clients(
     mcp_state: &tokio::sync::Mutex<inner::McpState>,
     configs_to_start: Vec<acp::McpServer>,
@@ -94,9 +92,8 @@ pub(crate) async fn build_pending_clients(
         ctx,
     )
     .await;
-    // Re-resolve SDK (ACP) config.toml overrides for THIS init, matching HTTP/stdio, so a
-    // mid-session config change applies on the next init (resolved outside the lock — it
-    // reads config.toml — then handed to the pure, under-lock builder).
+    // Re-resolve SDK (ACP) config.toml overrides for THIS init, matching HTTP/stdio, so a mid-session config change applies on the next init
+    // The overrides are resolved outside the lock (resolution reads config.toml), then handed to the pure, under-lock builder
     let acp_overrides: HashMap<String, inner::McpClientTimeoutOverrides> = {
         let names = mcp_state.lock().await.pending_acp_server_names();
         names

@@ -1,16 +1,14 @@
-//! Reconstructs a client-side terminal's log file from its `terminal/output`
-//! snapshots, for the truncation `read_file` path and the monitor file tail.
+//! Reconstructs a client-side terminal's log file from its `terminal/output` snapshots.
+//! The truncation `read_file` path and the monitor file tail read that file.
 //!
-//! TODO: fallback until clients push exact output via an
-//! `x.ai/terminal/output_delta` notification (tracked separately).
+//! TODO: this is a fallback until clients push exact output via an `x.ai/terminal/output_delta` notification.
 
 use std::path::PathBuf;
 
 pub(crate) struct OutputRecorder {
     path: PathBuf,
     last: String,
-    /// Must span the whole client buffer, or a rolled buffer's overlap is missed
-    /// and the snapshot is re-appended each poll.
+    /// Must span the whole client buffer, or a rolled buffer's overlap is missed and the snapshot is re-appended each poll.
     overlap_window: usize,
     realign_warned: bool,
     file: Option<tokio::fs::File>,
@@ -44,12 +42,10 @@ impl OutputRecorder {
         }
     }
 
-    /// Append what `current` adds beyond the previous snapshot, realigning on the
-    /// largest overlap once the buffer rolls. On write error `last` is left
-    /// unadvanced so the next poll retries, and the error is returned.
+    /// Append what `current` adds beyond the previous snapshot, realigning on the largest overlap once the buffer rolls.
+    /// On write error `last` is left unadvanced so the next poll retries, and the error is returned.
     pub(crate) async fn append(&mut self, current: &str) -> std::io::Result<()> {
-        // Empty snapshot must not clear the baseline, or the next cumulative one
-        // gets re-appended in full.
+        // An empty snapshot must not clear the baseline, or the next cumulative one gets re-appended in full
         if current.is_empty() || current == self.last {
             return Ok(());
         }
@@ -102,9 +98,8 @@ impl OutputRecorder {
     }
 }
 
-/// Largest suffix of `last` (within its last `window` bytes) that is a prefix of
-/// `current`, via a linear KMP over `current ++ tail`. Best-effort: repetitive
-/// output can over-match and drop a segment.
+/// Largest suffix of `last` (within its last `window` bytes) that is a prefix of `current`, via a linear KMP over `current ++ tail`.
+/// Best-effort: repetitive output can over-match and drop a segment.
 fn largest_overlap(
     last: &str,
     current: &str,

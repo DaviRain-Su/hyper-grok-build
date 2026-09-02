@@ -18,15 +18,21 @@ use tokio::io::AsyncWriteExt;
 use xai_grok_tools::util::ProcessGroup;
 
 use crate::config::{HookSpec, RUNNER_ALWAYS_SET_ENV};
-use crate::event::{HookEventEnvelope, clip_reason};
+use crate::event::{
+    HookEventEnvelope, MAX_HOOK_FEEDBACK_CHARS, MAX_HOOK_OUTPUT_REPLACEMENT_CHARS, clip_reason,
+    clip_text,
+};
 use crate::result::StopHookOutcome;
 
 use super::{
-    GateHookJson, GateKind, GateOutcome, HookHealth, HookRunnerResult, PromptHookJson, RunContext,
-    StopHookJson, extract_system_message, gate_outcome, prompt_json_to_block, stop_json_to_outcome,
+    GateHookJson, GateKind, GateOutcome, HookHealth, HookRunnerResult, PostToolUseHookJson,
+    PostToolUseParse, PromptHookJson, RunContext, StopHookJson, extract_system_message,
+    gate_outcome, post_tool_use_json_to_outcome, prompt_json_to_block, stop_json_to_outcome,
 };
 
-pub(crate) const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+const CAPTURE_HEADROOM_OVER_REPLACEMENT: usize = 16;
+pub(crate) const MAX_OUTPUT_BYTES: usize =
+    CAPTURE_HEADROOM_OVER_REPLACEMENT * MAX_HOOK_OUTPUT_REPLACEMENT_CHARS;
 
 const GATE_EXIT_CODE: i32 = 2;
 
@@ -289,6 +295,9 @@ pub async fn run_command_hook(
                 }
                 GateKind::Stop => {
                     parse_stop_result(&stdout, &stderr, exit_code, &spec.name, elapsed)
+                }
+                GateKind::PostTool => {
+                    parse_post_tool_use_result(&stdout, &stderr, exit_code, &spec.name, elapsed)
                 }
                 GateKind::Prompt => {
                     parse_prompt_result(&stdout, &stderr, exit_code, &spec.name, elapsed)
@@ -823,6 +832,63 @@ fn parse_prompt_result(
     }
 }
 
+fn parse_post_tool_use_result(
+    stdout: &str,
+    stderr: &str,
+    exit_code: i32,
+    hook_name: &str,
+    elapsed: Duration,
+) -> (HookRunnerResult, Duration) {
+    let health = HookHealth::from_success(exit_code == 0);
+    let trimmed = stdout.trim();
+    let PostToolUseParse {
+        mut outcome,
+        failure,
+    } = if trimmed.is_empty() {
+        PostToolUseParse::default()
+    } else {
+        match serde_json::from_str::<PostToolUseHookJson>(trimmed) {
+            Ok(json) => post_tool_use_json_to_outcome(json, hook_name, health),
+            Err(err) => {
+                if trimmed.starts_with('{') {
+                    tracing::warn!(
+                        hook_name,
+                        error = %err,
+                        "post_tool_use hook stdout looks like JSON but failed to parse; ignoring"
+                    );
+                }
+                PostToolUseParse::default()
+            }
+        }
+    };
+
+    if exit_code == GATE_EXIT_CODE && outcome.block_reason.is_none() {
+        let feedback = stderr.trim();
+        if !feedback.is_empty() {
+            outcome.block_reason = Some(clip_text(feedback, MAX_HOOK_FEEDBACK_CHARS));
+        }
+    }
+
+    if exit_code != 0 && exit_code != GATE_EXIT_CODE {
+        let exit_failure = append_stderr_line(
+            &format!("hook '{hook_name}' failed with exit code {exit_code}"),
+            stderr,
+        );
+        if outcome.is_empty() {
+            return (HookRunnerResult::Failed(exit_failure), elapsed);
+        }
+        return (
+            HookRunnerResult::PostToolUse {
+                outcome,
+                failure: Some(exit_failure),
+            },
+            elapsed,
+        );
+    }
+
+    (HookRunnerResult::PostToolUse { outcome, failure }, elapsed)
+}
+
 fn truncate_output(bytes: &[u8]) -> String {
     if bytes.len() <= MAX_OUTPUT_BYTES {
         String::from_utf8_lossy(bytes).into_owned()
@@ -850,7 +916,10 @@ pub fn resolve_command_path(spec: &HookSpec) -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{MAX_HOOK_FEEDBACK_CHARS, MAX_REASON_CHARS};
+    use crate::event::{
+        MAX_HOOK_FEEDBACK_CHARS, MAX_HOOK_OUTPUT_REPLACEMENT_CHARS, MAX_REASON_CHARS,
+    };
+    use crate::result::{OutputReplacement, ReplacementKind};
 
     fn parse(json: &str) -> HookRunnerResult {
         parse_blocking_result(json, "", 0, "test", Duration::ZERO).0
@@ -1705,12 +1774,85 @@ mod tests {
         }
     }
 
+    fn post_tool_use_outcome(result: HookRunnerResult) -> crate::result::PostToolUseHookOutcome {
+        match result {
+            HookRunnerResult::PostToolUse { outcome, .. } => outcome,
+            other => panic!("expected PostToolUse outcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn post_tool_use_exit_2_feeds_stderr() {
+        let (result, _) =
+            parse_post_tool_use_result("", "lint found 3 issues\n", 2, "p", Duration::ZERO);
+        assert_eq!(
+            post_tool_use_outcome(result).block_reason.as_deref(),
+            Some("lint found 3 issues")
+        );
+    }
+
+    #[test]
+    fn post_tool_use_broken_hook_keeps_only_its_block_reason() {
+        let json = serde_json::json!({
+            "decision": "block",
+            "reason": "tests failed",
+            "hookSpecificOutput": {
+                "additionalContext": "all tests passed",
+                "updatedToolOutput": { "type": "Bash" },
+                "updatedMCPToolOutput": "all tests passed",
+            },
+        })
+        .to_string();
+        let (result, _) = parse_post_tool_use_result(&json, "boom", 1, "p", Duration::ZERO);
+        let HookRunnerResult::PostToolUse { outcome, failure } = result else {
+            panic!("a surviving block reason must still be delivered");
+        };
+        assert_eq!(outcome.block_reason.as_deref(), Some("tests failed"));
+        assert_eq!(outcome.additional_context, None);
+        assert_eq!(outcome.output_replacement, None);
+        let failure = failure.expect("a non-zero exit is recorded even when a field parsed");
+        assert!(
+            failure.contains("exit code 1") && failure.contains("boom"),
+            "failure must carry exit code and stderr, got: {failure}"
+        );
+    }
+
     #[test]
     fn truncate_output_respects_limit() {
         assert_eq!(truncate_output(b"hello world"), "hello world");
 
         let large = truncate_output(&vec![b'x'; MAX_OUTPUT_BYTES + 1000]);
         assert!(large.ends_with(" [truncated]"));
+    }
+
+    #[test]
+    fn post_tool_use_replacement_at_ceiling_survives_capture_and_parse() {
+        let at_ceiling = "x".repeat(MAX_HOOK_OUTPUT_REPLACEMENT_CHARS);
+        let document = serde_json::json!({
+            "hookSpecificOutput": { "updatedMCPToolOutput": at_ceiling },
+        })
+        .to_string();
+
+        let captured = truncate_output(document.as_bytes());
+        assert!(
+            !captured.ends_with(" [truncated]"),
+            "a ceiling replacement must fit the capture cap without truncation"
+        );
+        let (result, _) = parse_post_tool_use_result(&captured, "", 0, "p", Duration::ZERO);
+        let outcome = post_tool_use_outcome(result);
+        let Some(OutputReplacement {
+            kind: ReplacementKind::Mcp,
+            value,
+            ..
+        }) = outcome.output_replacement.as_ref()
+        else {
+            panic!("the ceiling replacement must survive, not be dropped as an empty success");
+        };
+        assert_eq!(
+            value.as_str().map(str::len),
+            Some(MAX_HOOK_OUTPUT_REPLACEMENT_CHARS),
+            "the full ceiling-length replacement survives, unclipped"
+        );
     }
 
     #[test]

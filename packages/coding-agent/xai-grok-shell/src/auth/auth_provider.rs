@@ -1,23 +1,18 @@
 //! Model auth providers (`[auth_provider.<name>]`).
 //!
-//! A model opts in with `auth_provider = "<name>"`; the named table declares a
-//! command that prints a fresh bearer token, which this module mints, caches,
-//! and rotates for that model's requests.
+//! A model opts in with `auth_provider = "<name>"`; the named table declares a command that prints a fresh bearer token.
+//! This module mints, caches, and rotates that token for the model's requests.
 //!
-//! The minted token stays in memory only ([`AUTH_PROVIDER_SLOTS`] and chat
-//! state, never `auth.json`); the command is a credential helper that owns its
-//! own durable storage and OAuth2 refresh. See "Where model auth providers fit
-//! (and don't)"
-//! in `docs/internal/AUTH.md`.
+//! The minted token stays in memory only ([`AUTH_PROVIDER_SLOTS`] and chat state, never `auth.json`).
+//! The command is a credential helper that owns its own durable storage and OAuth2 refresh.
+//! See "Where model auth providers fit (and don't)" in `docs/internal/AUTH.md`.
 //!
-//! This is distinct from the `AuthCredentialProvider` HTTP consumers in
-//! [`crate::auth::credential_provider`].
+//! This is distinct from the `AuthCredentialProvider` HTTP consumers in [`crate::auth::credential_provider`].
 
 use super::token_output::{expiry_after_seconds, parse_token_output};
 
-/// One named `[auth_provider.<name>]` table, honored only from the trusted
-/// config layers (`parse_auth_providers`). A new field here needs a
-/// `parse_auth_providers` warning decision.
+/// One named `[auth_provider.<name>]` table, honored only from the trusted config layers (`parse_auth_providers`).
+/// A new field here needs a `parse_auth_providers` warning decision.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(default)]
 pub struct AuthProviderConfig {
@@ -46,9 +41,9 @@ pub struct AuthProviderRef {
     pub(crate) name: String,
     pub(crate) config: AuthProviderConfig,
     slot: ProviderSlot,
-    /// `true` once the trusted table is attached. A ref revived from bytes is
-    /// `false` and never mints or reads until [`AuthProviderRef::attach_trusted_config`]
-    /// joins the shared slot for its name.
+    /// `true` once the trusted table is attached.
+    /// A ref revived from bytes is `false` and never mints or reads.
+    /// [`AuthProviderRef::attach_trusted_config`] flips it by joining the shared slot for its name.
     resolved: bool,
     fail_closed: bool,
 }
@@ -80,7 +75,7 @@ impl From<AuthProviderRef> for AuthProviderRefData {
 }
 
 impl AuthProviderRef {
-    /// Production uses `unresolved` + `attach_trusted_config`.
+    /// Production uses `unresolved` and then `attach_trusted_config`.
     #[cfg(test)]
     pub(crate) fn new(name: String, config: AuthProviderConfig) -> Self {
         let slot = provider_slot(&name);
@@ -93,8 +88,7 @@ impl AuthProviderRef {
         }
     }
 
-    /// The in-memory form of a ref revived from bytes;
-    /// [`AuthProviderRef::attach_trusted_config`] resolves it.
+    /// The in-memory form of a ref revived from bytes; [`AuthProviderRef::attach_trusted_config`] resolves it.
     pub(crate) fn unresolved(name: String) -> Self {
         Self {
             name,
@@ -119,9 +113,8 @@ impl AuthProviderRef {
         self.fail_closed
     }
 
-    /// Re-attach the trusted config for this name at model resolution
-    /// (`None` = the table was removed, leaving an unusable config). The ref
-    /// becomes authoritative, joins the shared slot for its name, and may mint.
+    /// Re-attach the trusted config for this name at model resolution; `None` means the table was removed, leaving an unusable config.
+    /// The ref becomes authoritative, joins the shared slot for its name, and may mint.
     pub(crate) fn attach_trusted_config(&mut self, config: Option<&AuthProviderConfig>) {
         if self.fail_closed {
             return;
@@ -132,8 +125,7 @@ impl AuthProviderRef {
     }
 }
 
-/// Ignores the slot; a deserialized ref compares unequal until resolution
-/// re-attaches its config.
+/// Ignores the slot; a deserialized ref compares unequal until resolution re-attaches its config.
 impl PartialEq for AuthProviderRef {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name && self.config == other.config
@@ -159,20 +151,16 @@ struct MintedProviderToken {
     /// Drives the 401 fresh-mint guard.
     minted_at: std::time::Instant,
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// The table version that minted the token; a different version reads as
-    /// stale (see [`token_identity`]), so edits re-mint.
+    /// The table version that minted the token; a different version reads as stale (see [`token_identity`]), so edits re-mint.
     minted_with: AuthProviderConfig,
 }
 
-/// The async lock is held across the command run, single-flighting mints
-/// per provider name (shared across sessions). This dedupes concurrent
-/// successes; a persistently failing helper is retried per waiter, each bounded
-/// by the timeout clamp.
+/// The async lock is held across the command run, so only one mint runs at a time per provider name (shared across sessions).
+/// Concurrent callers wait and reuse a success; a persistently failing helper is retried per waiter, each run bounded by the timeout clamp.
 type ProviderSlot = std::sync::Arc<tokio::sync::Mutex<Option<MintedProviderToken>>>;
 
-/// Shared token slots, one per resolved provider name. Bounded by the configured
-/// provider names (only `attach_trusted_config` and test `new` insert), so no
-/// eviction.
+/// Shared token slots, one per resolved provider name.
+/// Bounded by the configured provider names (only `attach_trusted_config` and test `new` insert), so no eviction.
 static AUTH_PROVIDER_SLOTS: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<String, ProviderSlot>>,
 > = std::sync::OnceLock::new();
@@ -187,26 +175,21 @@ fn provider_slot(name: &str) -> ProviderSlot {
 pub(crate) const PROVIDER_TOKEN_EXPIRY_SKEW_SECS: u64 = 60;
 const PROVIDER_TOKEN_EXPIRY_SKEW: chrono::Duration =
     chrono::Duration::seconds(PROVIDER_TOKEN_EXPIRY_SKEW_SECS as i64);
-/// 401 fresh-mint guard: a token minted this recently is never re-minted on
-/// rejection. Same idea as the guard in `unauthorized_recovery`, with a shorter
-/// window because a provider mint is local and cheap.
+/// 401 fresh-mint guard: a token minted this recently is never re-minted on rejection.
+/// Same idea as the guard in `unauthorized_recovery`, with a shorter window because a provider mint is local and cheap.
 const PROVIDER_TOKEN_FRESH_MINT_GUARD: std::time::Duration = std::time::Duration::from_secs(30);
 const DEFAULT_PROVIDER_TIMEOUT_SECS: u64 = 30;
-/// The effective mint timeout is clamped to `[1, this]`. A configured value
-/// outside the range is honored up to the bound and draws a parse warning,
-/// since a turn waits on the mint.
+/// The effective mint timeout is clamped to `[1, this]`.
+/// A configured value outside the range is honored up to the bound and draws a parse warning, since a turn waits on the mint.
 pub(crate) const PROVIDER_TIMEOUT_CEILING_SECS: u64 = 600;
-/// Caps on the helper's captured output so a runaway command can't exhaust
-/// memory before the timeout fires. A bearer (even a large JWT) is far under
-/// the stdout cap; stderr only ever appears truncated in the failure log.
+/// Caps on the helper's captured output so a runaway command can't exhaust memory before the timeout fires.
+/// A bearer (even a large JWT) is far under the stdout cap; stderr only ever appears truncated in the failure log.
 const PROVIDER_STDOUT_CAP_BYTES: u64 = 1 << 20; // 1 MiB
 const PROVIDER_STDERR_CAP_BYTES: u64 = 64 << 10; // 64 KiB
 
-/// The table fields that shape the minted token; a cached token minted under a
-/// different set reads as stale, so a config edit re-mints. Destructured so a
-/// new `AuthProviderConfig` field is a compile error until it is classified as
-/// token-shaping (add it here) or an execution knob like `timeout_secs`
-/// (editing it never invalidates).
+/// The table fields that shape the minted token; a cached token minted under a different set reads as stale, so a config edit re-mints.
+/// Destructured so a new `AuthProviderConfig` field is a compile error until it is classified.
+/// Token-shaping fields go here; an execution knob like `timeout_secs` never invalidates the cache.
 fn token_identity(
     config: &AuthProviderConfig,
 ) -> (&str, Option<&[String]>, Option<u64>, Option<&str>) {
@@ -227,8 +210,7 @@ fn minted_token_is_stale(minted: &MintedProviderToken, config: &AuthProviderConf
             .is_some_and(|at| chrono::Utc::now() + PROVIDER_TOKEN_EXPIRY_SKEW >= at)
 }
 
-/// Log the missing-command warning once per provider, then at debug, so a
-/// misconfigured model doesn't warn on every turn.
+/// Log the missing-command warning once per provider, then at debug, so a misconfigured model doesn't warn on every turn.
 fn warn_empty_command(name: &str) {
     static WARNED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
         std::sync::OnceLock::new();
@@ -246,8 +228,8 @@ fn warn_empty_command(name: &str) {
     }
 }
 
-/// Read up to `keep` bytes into `buf`, then drain and discard any remainder so
-/// the child never blocks on a full pipe. Memory stays bounded by `keep`.
+/// Read up to `keep` bytes into `buf`, then drain and discard any remainder so the child never blocks on a full pipe.
+/// Memory stays bounded by `keep`.
 async fn read_capped<R>(reader: R, keep: u64, buf: &mut Vec<u8>) -> std::io::Result<()>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -259,25 +241,22 @@ where
     Ok(())
 }
 
-/// Remove every first-party credential from the helper's environment. BYOK
-/// isolates these keys on the wire, so the helper (the agent puts them in its
-/// own env at startup) must not inherit them.
+/// Remove every first-party credential from the helper's environment.
+/// BYOK isolates these keys on the wire, so the helper (the agent puts them in its own env at startup) must not inherit them.
 fn scrub_first_party_credentials(cmd: &mut tokio::process::Command) {
     for var in crate::agent::config::FIRST_PARTY_CREDENTIAL_ENV_VARS {
         cmd.env_remove(var);
     }
 }
 
-/// Spawn `cmd`, capture stdout/stderr with a byte cap (reading both
-/// concurrently so a full pipe on one can't deadlock the other; a runaway helper
-/// is drained to a sink past the cap so it can't wedge the wait), and bound the
-/// whole run by `timeout`. Exceeding the stdout cap is an error.
+/// Spawn `cmd`, capture stdout and stderr under byte caps, and bound the whole run by `timeout`; exceeding the stdout cap is an error.
+/// The pipes are read concurrently so a full pipe on one can't deadlock the other.
+/// Past the cap a runaway helper drains to a sink, so it can't wedge the wait.
 ///
-/// On timeout the child's entire process group is killed. The helper is a group
-/// leader (`detach_command`'s `setsid`), so a compound `sh -c` helper's
-/// grandchildren -- and the `GROK_AUTH_PROVIDER_*` credentials in their env --
-/// do not outlive the reported timeout; `kill_on_drop` alone would reap only the
-/// direct child.
+/// On timeout the child's entire process group is killed.
+/// The helper is a group leader (`detach_command`'s `setsid`), so even a compound `sh -c` helper's grandchildren die with the timeout.
+/// That keeps the `GROK_AUTH_PROVIDER_*` credentials in their env from outliving the reported timeout.
+/// `kill_on_drop` alone would reap only the direct child.
 async fn run_capped(
     cmd: &mut tokio::process::Command,
     timeout: std::time::Duration,
@@ -286,9 +265,8 @@ async fn run_capped(
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("command failed to start: {e}"))?;
-    // Enroll the child's process group so the timeout path can tear down the
-    // whole tree. Best-effort: if enrollment fails, `kill_on_drop` still reaps
-    // the direct child.
+    // Enroll the child's process group so the timeout path can tear down the whole tree
+    // Best-effort: if enrollment fails, `kill_on_drop` still reaps the direct child
     let mut group = xai_grok_tools::util::ProcessGroup::new()
         .map_err(|e| anyhow::anyhow!("process group setup failed: {e}"))?;
     if let Err(e) = group.attach(&child) {
@@ -300,8 +278,7 @@ async fn run_capped(
     let mut err_buf = Vec::new();
 
     // One extra stdout byte so an over-cap write is detectable, not truncated.
-    // The stderr read is advisory (it only feeds the failure log), so only
-    // stdout governs the mint.
+    // The stderr read is advisory (it only feeds the failure log), so only stdout governs the mint
     let capture = async {
         let (out_res, err_res) = tokio::join!(
             read_capped(stdout, PROVIDER_STDOUT_CAP_BYTES + 1, &mut out_buf),
@@ -356,9 +333,9 @@ async fn mint_provider_token(
 
     let name = &provider.name;
     let config = &provider.config;
-    // Clamp to [1, ceiling]: the slot lock is held across the run, so an
-    // unbounded timeout would let one hung helper stall every turn sharing this
-    // provider name. The ceiling is a hard bound, not just a parse warning.
+    // Clamp to [1, ceiling]: the slot lock is held across the run
+    // An unbounded timeout would let one hung helper stall every turn sharing this provider name
+    // The ceiling is a hard bound, not just a parse warning
     let timeout_secs = config
         .timeout_secs
         .unwrap_or(DEFAULT_PROVIDER_TIMEOUT_SECS)
@@ -393,14 +370,12 @@ async fn mint_provider_token(
         .stdout(Stdio::piped())
         // Capture stderr for the failure log; inheriting corrupts the TUI.
         .stderr(Stdio::piped())
-        // Reaps the direct child if the future is dropped; `run_capped`
-        // additionally kills the whole process group on timeout.
+        // Reaps the direct child if the future is dropped; `run_capped` additionally kills the whole process group on timeout
         .kill_on_drop(true);
     if mark_expired {
         cmd.env("GROK_AUTH_EXPIRED", "1");
     }
-    // Git-credential-helper handback: give the command the last stored
-    // credential so it can refresh instead of re-authenticating.
+    // Like a git credential helper, the command gets the last stored credential back so it can refresh instead of re-authenticating
     if let Some(prev) = previous {
         cmd.env("GROK_AUTH_PROVIDER_ACCESS_TOKEN", &prev.token);
         if let Some(refresh) = &prev.refresh_token {
@@ -469,9 +444,9 @@ impl ProviderRefreshOutcome {
 }
 
 impl AuthProviderRef {
-    /// The slot, locked for a mutating operation. A removed provider drops
-    /// its cached token and yields `None`, failing closed. An unresolved ref
-    /// (revived from bytes) fails closed without touching the shared slot.
+    /// The slot, locked for a mutating operation.
+    /// A removed provider drops its cached token and yields `None`, failing closed.
+    /// An unresolved ref (revived from bytes) fails closed without touching the shared slot.
     async fn locked_slot(
         &self,
     ) -> Option<tokio::sync::OwnedMutexGuard<Option<MintedProviderToken>>> {
@@ -494,9 +469,9 @@ impl AuthProviderRef {
         Some(slot)
     }
 
-    /// Cache-only read for sync resolution: never runs the command, blocks, or
-    /// mutates. `None` for an unresolved ref, a cold or stale cache, or a mint
-    /// in progress; minting happens pre-turn via [`AuthProviderRef::ensure_fresh_token`].
+    /// Cache-only read for sync resolution: never runs the command, blocks, or mutates.
+    /// `None` for an unresolved ref, a cold or stale cache, or a mint in progress.
+    /// Minting happens pre-turn via [`AuthProviderRef::ensure_fresh_token`].
     pub(crate) fn cached_token(&self) -> Option<String> {
         if !self.resolved {
             return None;
@@ -507,8 +482,7 @@ impl AuthProviderRef {
             }
             return None;
         }
-        // A mint in progress holds the lock; treat it as a miss rather than
-        // block the sync path.
+        // A mint in progress holds the lock; treat it as a miss rather than block the sync path
         let Ok(guard) = self.slot.try_lock() else {
             tracing::debug!(provider = %self.name, "cache read skipped: mint in progress");
             return None;
@@ -519,10 +493,9 @@ impl AuthProviderRef {
             .map(|m| m.token.clone())
     }
 
-    /// The token that should replace `current_key` on the wire: serves the
-    /// fresh cached token when chat-state lags behind a rotation, mints when
-    /// the cache is cold or stale. Mints or rotates a bearer; unrelated to an
-    /// OAuth refresh token.
+    /// The token that should replace `current_key` on the wire.
+    /// Serves the fresh cached token when chat-state lags behind a rotation; mints when the cache is cold or stale.
+    /// Mints or rotates a bearer; unrelated to an OAuth refresh token.
     pub(crate) async fn ensure_fresh_token(
         &self,
         current_key: Option<&str>,
@@ -556,11 +529,9 @@ impl AuthProviderRef {
         ProviderRefreshOutcome::Rotated(token)
     }
 
-    /// The replacement for a server-rejected `rejected_key` (chat-state's
-    /// current key): a fresher cached token is adopted without a re-run,
-    /// otherwise the command runs once. `None` for a token minted moments ago
-    /// under the current table (the fresh-mint guard, which an edited table
-    /// bypasses).
+    /// The replacement for a server-rejected `rejected_key` (chat-state's current key).
+    /// A fresher cached token is adopted without a re-run; otherwise the command runs once.
+    /// `None` for a token minted moments ago under the current table (the fresh-mint guard, which an edited table bypasses).
     pub(crate) async fn recover_rejected_token(&self, rejected_key: &str) -> Option<String> {
         let mut slot = self.locked_slot().await?;
         if let Some(ref minted) = *slot {
@@ -588,10 +559,8 @@ impl AuthProviderRef {
                     error = %e,
                     "auth provider 401 re-mint failed"
                 );
-                // The server rejected the cached token and the re-mint failed;
-                // mark it stale so it is not re-served next turn (fail closed).
-                // The entry stays so its refresh token still feeds the next
-                // handback attempt.
+                // The server rejected the cached token and the re-mint failed; mark it stale so it is not re-served next turn (fail closed)
+                // The entry stays so its refresh token is still handed back to the next run
                 if let Some(minted) = slot.as_mut() {
                     minted.expires_at = Some(chrono::Utc::now());
                 }

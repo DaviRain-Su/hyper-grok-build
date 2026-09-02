@@ -1,10 +1,8 @@
-//! Telemetry engine for Grok Build sessions: product events + Mixpanel emission +
-//! Sentry error reporting + OpenTelemetry tracing + structured unified log.
+//! Telemetry engine for Grok Build sessions.
+//! Covers product events, Mixpanel emission, Sentry error reporting, OpenTelemetry tracing, and the structured unified log.
 //!
-//! Extracted from `xai-file-utils` per review feedback so telemetry has
-//! its own ownership boundary (see CODEOWNERS) and so downstream consumers
-//! that only want event tracking + inference metrics no longer pull in
-//! Mixpanel/HTTP/identity dependencies.
+//! Extracted from `xai-file-utils` so telemetry has its own ownership boundary (see CODEOWNERS).
+//! Consumers that only want event tracking and inference metrics no longer pull in Mixpanel/HTTP/identity dependencies.
 
 pub mod activity;
 mod appender;
@@ -45,5 +43,5 @@ pub use client::{
 pub use events::TelemetryEvent;
 pub use session_ctx::{
     EmitterOrigin, TelemetryCtx, emit_event, emit_event_with_origin, log_event, log_event_dual,
-    log_session_event, log_session_event_with_origin, with_session_ctx,
+    log_session_event, log_session_event_with_origin, spawn_local_in_session_ctx, with_session_ctx,
 };

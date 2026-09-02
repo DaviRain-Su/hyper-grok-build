@@ -1,8 +1,7 @@
 #![allow(clippy::disallowed_methods)] // test clients hit localhost mocks
-//! Wire test: `log_event(ManualAuth)` must POST to the product events endpoint as
-//! `grok-shell-manual_auth` with the `reason`/`trigger`/`token_kind`/`principal`
-//! the `distinct(principal)` alert consumes. Mocks the observability backend
-//! (real HTTP collector) so the emit->wire path is checked, not just the struct.
+//! Wire test: `log_event(ManualAuth)` must POST to the product events endpoint as `grok-shell-manual_auth`.
+//! It must carry the `reason`/`trigger`/`token_kind`/`principal` fields the `distinct(principal)` alert consumes.
+//! The test mocks the observability backend with a real HTTP collector, so the path from emit to the wire is checked, not just the struct.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -105,17 +104,11 @@ async fn manual_auth_posts_to_events_endpoint_as_grok_shell_manual_auth() {
             "dev_build",
             serde_json::json!(xai_grok_version::IS_DEV_BUILD),
         ),
-        ("sessions_active", serde_json::json!(0)),
-        ("subagents_active", serde_json::json!(0)),
-        ("compaction_active", serde_json::json!(false)),
-        ("mcp_servers_connected", serde_json::json!(0)),
-        ("turns_active", serde_json::json!(0)),
-        ("workflow_runs_active", serde_json::json!(0)),
     ] {
         assert_eq!(
             meta.get(key),
             Some(&expected),
-            "identity and idle gauge values are wire contract: {key}",
+            "identity values are wire contract: {key}",
         );
     }
     assert!(
@@ -190,6 +183,13 @@ async fn manual_auth_posts_to_events_endpoint_as_grok_shell_manual_auth() {
         "memory_limit_bytes",
         "session_id",
         "turn_number",
+        // Activity gauges register on first use, so a fresh process emits none.
+        xai_grok_telemetry::activity::SESSIONS_ACTIVE_KEY,
+        xai_grok_telemetry::activity::SUBAGENTS_ACTIVE_KEY,
+        xai_grok_telemetry::activity::COMPACTIONS_ACTIVE_KEY,
+        xai_grok_telemetry::activity::MCP_SERVERS_CONNECTED_KEY,
+        xai_grok_telemetry::activity::TURNS_ACTIVE_KEY,
+        xai_grok_telemetry::activity::WORKFLOW_RUNS_ACTIVE_KEY,
         #[cfg(not(unix))]
         "cpu_time_ms",
         #[cfg(not(unix))]

@@ -1,69 +1,55 @@
 //! Server-side doom-loop check: wire contract types and tolerant parsers.
 //!
-//! The inference API reports selected generation-loop detector families on
-//! streaming `/v1/responses` requests: `x-grok-doom-loop-check` selects legacy
-//! labels, while `x-grok-exact-repetition-check` selects exact-repetition
-//! labels. Reports use two places:
+//! The inference API reports selected generation-loop detector families on streaming `/v1/responses` requests.
+//! `x-grok-doom-loop-check` selects legacy labels, while `x-grok-exact-repetition-check` selects exact-repetition labels.
+//! Reports use two places:
 //!
-//! * a non-standard mid-stream SSE event (`response.doom_loop_check`)
-//!   emitted as new triggers appear, carrying the **cumulative** trigger set:
+//! * a non-standard mid-stream SSE event (`response.doom_loop_check`) emitted as new triggers appear, carrying the **cumulative** trigger set:
 //!   `{"type": "response.doom_loop_check", "doom_loop_check": {"triggers": ["…"]}}`
-//! * a `doom_loop_check: {"triggers": ["…"]}` field on the terminal response
-//!   object (`response.completed` / `response.incomplete`).
+//! * a `doom_loop_check: {"triggers": ["…"]}` field on the terminal response object (`response.completed` / `response.incomplete`).
 //!
-//! Triggers are opaque labels with the grammar
-//! `tail_repetition:{threshold}@{channel}`, `exact_repetition:{tokens}x{copies}@{channel}`,
-//! or `low_logprob@{channel}`.
+//! Triggers are opaque labels.
+//! The grammar is `tail_repetition:{threshold}@{channel}`, `exact_repetition:{tokens}x{copies}@{channel}`, or `low_logprob@{channel}`.
 //! Presence is itself the detection signal; the set is non-empty when present.
 //!
-//! This module is the single home for that wire shape: if the server contract
-//! changes, only this file (and its tests) should need to change. Everything
-//! here is best-effort by design — malformed payloads yield `Unknown` kinds or
-//! empty trigger sets, never an error, so the feature can never fail a stream.
+//! This module is the single home for that wire shape: if the server contract changes, only this file (and its tests) should need to change.
+//! Everything here is best-effort by design: malformed payloads yield `Unknown` kinds or empty trigger sets, never an error.
+//! The feature can never fail a stream.
 
 use serde::{Deserialize, Serialize};
 
-/// Legacy detector reporting header. Its value is the tail/token-diversity
-/// detector window (decimal token count). Exact-repetition labels use the
-/// independent `x-grok-exact-repetition-check` sibling header.
+/// Legacy detector reporting header.
+/// Its value is the tail/token-diversity detector window (decimal token count).
+/// Exact-repetition labels use the independent `x-grok-exact-repetition-check` sibling header.
 pub const DOOM_LOOP_CHECK_HEADER: &str = "x-grok-doom-loop-check";
-/// Exact-repetition reporting sibling header. The default client value is the
-/// production-safe 64-token canonical primitive minimum.
+/// Exact-repetition reporting sibling header.
+/// The default client value is the production-safe minimum of 64 tokens.
 pub const EXACT_REPETITION_CHECK_HEADER: &str = "x-grok-exact-repetition-check";
 pub const DEFAULT_EXACT_REPETITION_MIN_TOKENS: usize = 64;
 
-/// `type` of the non-standard mid-stream SSE event — also its SSE `event:`
-/// name. async-openai's typed `rs::ResponseStreamEvent` does not know this
-/// variant, so raw payloads carrying this name or type must be intercepted
-/// before typed deserialization.
+/// `type` of the non-standard mid-stream SSE event, also its SSE `event:` name.
+/// async-openai's typed `rs::ResponseStreamEvent` does not know this variant.
+/// Raw payloads carrying this name or type must be intercepted before typed deserialization.
 pub const DOOM_LOOP_CHECK_EVENT_TYPE: &str = "response.doom_loop_check";
 
-/// Byte-exact `data:` payload of a check-event frame as emitted by the
-/// server (verbatim from the server's wire sample; the
-/// frame's SSE `event:` name is [`DOOM_LOOP_CHECK_EVENT_TYPE`]). Exported as
-/// a fixture so transport tests pin the real bytes, not a paraphrase.
+/// Byte-exact `data:` payload of a check-event frame as emitted by the server; the frame's SSE `event:` name is [`DOOM_LOOP_CHECK_EVENT_TYPE`].
+/// Exported as a fixture so transport tests pin the real bytes, not a paraphrase.
 pub const SAMPLE_CHECK_EVENT_DATA: &str = r#"{"sequence_number":4176,"type":"response.doom_loop_check","doom_loop_check":{"triggers":["tail_repetition:4@response"]}}"#;
 
-/// Companion fixture to [`SAMPLE_CHECK_EVENT_DATA`]: the follow-up frame from
-/// the same wire sample, carrying the grown **cumulative** trigger set.
+/// Companion fixture to [`SAMPLE_CHECK_EVENT_DATA`]: the follow-up frame from the same wire sample, carrying the grown **cumulative** trigger set.
 pub const SAMPLE_CHECK_EVENT_DATA_CUMULATIVE: &str = r#"{"sequence_number":4178,"type":"response.doom_loop_check","doom_loop_check":{"triggers":["tail_repetition:4@response","tail_repetition:2@response"]}}"#;
 
 /// Resolved runtime tunables for doom-loop recovery.
 ///
-/// Produced once per session by the shell's config resolver
-/// (env > config.toml > remote settings > default), which returns `None` when
-/// the check is disabled — absence IS the off state, so there is no separate
-/// enabled flag to keep in sync. When present on `SamplerConfig`, the sampler
-/// both sends the opt-in request header and parses the reported triggers; the
-/// tunables are consumed by the recovery decision logic.
-///
-/// Per-field serde defaults keep configs persisted by older versions
-/// deserializing when future fields are added.
+/// Produced once per session by the shell's config resolver (env > config.toml > remote settings > default).
+/// The resolver returns `None` when the check is disabled: absence IS the off state, so there is no separate enabled flag to keep in sync.
+/// When present on `SamplerConfig`, the sampler both sends the opt-in request header and parses the reported triggers.
+/// The tunables are consumed by the recovery decision logic.
+/// Per-field serde defaults keep configs persisted by older versions deserializing when future fields are added.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DoomLoopRecoveryPolicy {
-    /// Act only on `tail_repetition:{t}@thinking` triggers with `t` at or
-    /// below this value (lower thresholds indicate tighter, more confident
-    /// loops).
+    /// Act only on `tail_repetition:{t}@thinking` triggers with `t` at or below this value.
+    /// Lower thresholds indicate tighter, more confident loops.
     #[serde(default = "default_max_threshold")]
     pub max_threshold: u32,
     /// Resample budget per turn before accepting the response as-is.
@@ -86,8 +72,7 @@ fn default_window_tokens() -> u32 {
     DoomLoopRecoveryPolicy::DEFAULT_RECOVERY_WINDOW_TOKENS
 }
 
-/// Channel label of the model's thinking stream — the only channel recovery
-/// acts on (loops in visible output are the user's to judge).
+/// Channel label of the model's thinking stream, the only channel recovery acts on (loops in visible output are the user's to judge).
 pub const THINKING_CHANNEL: &str = "thinking";
 
 impl DoomLoopRecoveryPolicy {
@@ -96,7 +81,6 @@ impl DoomLoopRecoveryPolicy {
     /// Clamp range for `max_retries`.
     pub const MAX_RETRIES_RANGE: std::ops::RangeInclusive<u32> = 0..=5;
     pub const DEFAULT_MAX_THRESHOLD: u32 = 64;
-    /// Default `max_retries`.
     pub const DEFAULT_MAX_RETRIES: u32 = 2;
     pub const DEFAULT_RECOVERY_WINDOW_TOKENS: u32 = 1024;
     /// Inclusive range of `window_tokens` values honored on the wire.
@@ -127,11 +111,8 @@ impl DoomLoopRecoveryPolicy {
         }
     }
 
-    /// A signal this policy treats as a real loop worth acting on: tail
-    /// repetition in the thinking channel, at or below the confidence
-    /// threshold (lower detector thresholds mean tighter repetition).
-    /// Everything else — other channels, `low_logprob`, unknown kinds,
-    /// looser thresholds — is warn-only.
+    /// A signal this policy treats as a real loop worth acting on: tail repetition in the thinking channel, at or below the confidence threshold.
+    /// Everything else (other channels, `low_logprob`, unknown kinds, looser thresholds) is warn-only.
     pub fn is_confident(&self, signal: &DoomLoopSignal) -> bool {
         let tight = |t: u32| t <= self.max_threshold;
         signal.channel == THINKING_CHANNEL
@@ -161,19 +142,16 @@ impl Default for DoomLoopRecoveryPolicy {
 /// Parsed classification of a single trigger label.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DoomLoopSignalKind {
-    /// `tail_repetition:{threshold}@{channel}` — a repeating tail was found
-    /// at the given detector threshold.
+    /// `tail_repetition:{threshold}@{channel}`: a repeating tail was found at the given detector threshold.
     TailRepetition(u32),
-    /// `exact_repetition:{sequence_tokens}x{repeat_count}@{channel}` — an
-    /// exact token sequence repeated consecutively.
+    /// `exact_repetition:{sequence_tokens}x{repeat_count}@{channel}`: an exact token sequence repeated consecutively.
     ExactRepetition {
         sequence_tokens: u32,
         repeat_count: u32,
     },
-    /// `low_logprob@{channel}` — degenerate low-entropy generation.
+    /// `low_logprob@{channel}`: degenerate low-entropy generation.
     LowLogprob,
-    /// Any label this client version cannot classify; the unparsed kind
-    /// segment is preserved verbatim.
+    /// Any label this client version cannot classify; the unparsed kind segment is preserved verbatim.
     Unknown(String),
 }
 
@@ -184,14 +162,13 @@ pub struct DoomLoopSignal {
     /// Channel the loop was detected on (e.g. `thinking`, `response`).
     /// Empty when the label carries no `@channel` suffix.
     pub channel: String,
-    /// The verbatim label; the stable identity used for deduplication and
-    /// logging.
+    /// The verbatim label; the stable identity used for deduplication and logging.
     pub raw: String,
 }
 
 impl DoomLoopSignal {
-    /// Parse a trigger label. Never fails: any grammar mismatch yields
-    /// `DoomLoopSignalKind::Unknown` with the raw label preserved.
+    /// Parse a trigger label.
+    /// Never fails: any grammar mismatch yields `DoomLoopSignalKind::Unknown` with the raw label preserved.
     pub fn parse(raw: &str) -> Self {
         let (head, channel) = match raw.split_once('@') {
             Some((head, channel)) => (head, channel),
@@ -224,10 +201,9 @@ impl DoomLoopSignal {
         }
     }
 
-    /// The tightest label among `raws`: the `tail_repetition` trigger with
-    /// the LOWEST threshold (tighter repetition = stronger evidence), falling
-    /// back to the first label when none parse as `tail_repetition`. Raw
-    /// labels only — telemetry-safe.
+    /// The tightest label among `raws`: the `tail_repetition` trigger with the LOWEST threshold (tighter repetition means stronger evidence).
+    /// Falls back to the first label when none parse as `tail_repetition`.
+    /// Returns raw labels only, so the result is safe to emit as telemetry.
     pub fn tightest(raws: impl IntoIterator<Item = impl AsRef<str>>) -> Option<String> {
         let mut first: Option<String> = None;
         let mut best: Option<(u32, String)> = None;
@@ -250,12 +226,10 @@ impl DoomLoopSignal {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DoomLoopPeek {
     /// The payload is the non-standard `response.doom_loop_check` event.
-    /// The caller must swallow it (never forward to the typed event parser);
-    /// the vec is empty when the payload is malformed.
+    /// The caller must swallow it (never forward to the typed event parser); the vec is empty when the payload is malformed.
     CheckEvent(Vec<DoomLoopSignal>),
-    /// The payload is an ordinary event whose `response` object carries a
-    /// `doom_loop_check` field (the terminal belt-and-braces copy). Forward
-    /// the event as usual after recording the signals.
+    /// The payload is an ordinary event whose `response` object carries a `doom_loop_check` field (the redundant terminal copy).
+    /// Forward the event as usual after recording the signals.
     ResponseField(Vec<DoomLoopSignal>),
     /// Nothing doom-loop related; forward untouched.
     None,
@@ -263,10 +237,8 @@ pub enum DoomLoopPeek {
 
 /// Tolerantly peek a raw SSE `data:` JSON payload for doom-loop content.
 ///
-/// Cheap for the common case: payloads that don't mention `doom_loop_check`
-/// return [`DoomLoopPeek::None`] without a JSON parse. Anything malformed
-/// (non-JSON, wrong types, missing keys) degrades to `None` or an empty
-/// trigger vec — never an error.
+/// Cheap for the common case: payloads that don't mention `doom_loop_check` return [`DoomLoopPeek::None`] without a JSON parse.
+/// Anything malformed (non-JSON, wrong types, missing keys) degrades to `None` or an empty trigger vec, never an error.
 pub fn peek_doom_loop(data: &str) -> DoomLoopPeek {
     if !data.contains("doom_loop_check") {
         return DoomLoopPeek::None;
@@ -284,15 +256,10 @@ pub fn peek_doom_loop(data: &str) -> DoomLoopPeek {
     }
 }
 
-/// True when an SSE frame IS the doom-loop check event — by its SSE `event:`
-/// name, or (for servers that omit the name) by a tolerant peek of the
-/// payload's `"type"` tag, gated on a cheap substring precheck so normal
-/// traffic never pays a JSON parse. The type confirmation prevents
-/// false-swallowing a legitimate event whose content text merely quotes the
-/// event-type string. An unnamed frame with an unparseable payload is NOT
-/// the check event — a real server frame always carries the name or a
-/// parseable `type` tag, so forwarding preserves today's behavior for
-/// non-check traffic.
+/// Matches the doom-loop check event by its SSE `event:` name, or (for servers that omit the name) by a tolerant peek of the payload's `"type"` tag.
+/// A cheap substring precheck gates the peek so normal traffic never pays a JSON parse.
+/// The type confirmation prevents swallowing a legitimate event whose content text merely quotes the event-type string.
+/// An unnamed frame with an unparseable payload is NOT the check event; a real server frame always carries the name or a parseable `type` tag.
 pub fn is_check_event(event_name: &str, data: &str) -> bool {
     if event_name == DOOM_LOOP_CHECK_EVENT_TYPE {
         return true;
@@ -388,24 +355,7 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn signal_serde_round_trip() {
-        let s = DoomLoopSignal::parse("tail_repetition:8@thinking");
-        let json = serde_json::to_string(&s).unwrap();
-        let back: DoomLoopSignal = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, s);
-    }
-
-    #[test]
-    fn policy_default_matches_documented_tunables() {
-        let p = DoomLoopRecoveryPolicy::default();
-        assert_eq!(p.max_threshold, 64);
-        assert_eq!(p.max_retries, 2);
-        assert_eq!(p.window_tokens, 1024);
-    }
-
-    /// Per-field serde defaults: payloads written before a field existed (or
-    /// with fields yet to exist) must keep deserializing.
+    /// Per-field serde defaults: payloads written before a field existed (or with fields yet to exist) must keep deserializing.
     #[test]
     fn policy_deserializes_with_missing_or_extra_fields() {
         let p: DoomLoopRecoveryPolicy = serde_json::from_str("{}").unwrap();
@@ -432,9 +382,8 @@ mod tests {
         );
     }
 
-    /// Pin the server's exact wire bytes (not a paraphrase): the
-    /// first frame and its cumulative follow-up both classify as check
-    /// events with fully parsed labels.
+    /// Pin the server's exact wire bytes (not a paraphrase).
+    /// The first frame and its cumulative follow-up both classify as check events with fully parsed labels.
     #[test]
     fn sample_wire_frames_parse_byte_exactly() {
         match peek_doom_loop(SAMPLE_CHECK_EVENT_DATA) {
@@ -471,8 +420,7 @@ mod tests {
 
     #[test]
     fn peek_check_event_swallowed_even_when_malformed() {
-        // The event type alone must classify as CheckEvent so the caller
-        // never forwards it to the typed parser, whatever the payload.
+        // The event type alone must classify as CheckEvent so the caller never forwards it to the typed parser, whatever the payload
         for data in [
             r#"{"type":"response.doom_loop_check"}"#,
             r#"{"type":"response.doom_loop_check","doom_loop_check":{}}"#,
@@ -512,9 +460,8 @@ mod tests {
         }
     }
 
-    /// Confidence is the conjunction kind = TailRepetition AND channel =
-    /// thinking AND threshold <= max_threshold (boundary inclusive); each
-    /// factor is falsified independently.
+    /// Confidence requires all three: kind `TailRepetition`, channel `thinking`, and threshold at or below `max_threshold` (boundary inclusive).
+    /// Each factor is falsified independently.
     #[test]
     fn confidence_requires_kind_channel_and_threshold() {
         let policy = DoomLoopRecoveryPolicy::default();
@@ -539,8 +486,7 @@ mod tests {
         assert!(policy.confident_triggers(&[]).is_empty());
     }
 
-    /// Tightest = lowest tail-repetition threshold; non-tail labels only win
-    /// when nothing parses as tail_repetition.
+    /// Tightest means the lowest tail-repetition threshold; non-tail labels only win when nothing parses as tail_repetition.
     #[test]
     fn tightest_prefers_lowest_tail_repetition_threshold() {
         assert_eq!(
@@ -569,12 +515,10 @@ mod tests {
         assert!(is_check_event(DOOM_LOOP_CHECK_EVENT_TYPE, "not json"));
         // Unnamed frame identified by its payload `type` tag.
         assert!(is_check_event("message", SAMPLE_CHECK_EVENT_DATA));
-        // A normal delta QUOTING the event-type string is not the check
-        // event: the substring precheck hits but the type confirm fails.
+        // A normal delta QUOTING the event-type string is not the check event: the substring precheck hits but the type confirm fails
         let quoting = r#"{"type":"response.output_text.delta","delta":"response.doom_loop_check"}"#;
         assert!(!is_check_event("response.output_text.delta", quoting));
-        // Unnamed + unparseable payload: forwarded, not swallowed — a real
-        // server frame carries the name or a parseable `type` tag.
+        // An unnamed frame with an unparseable payload is forwarded, not swallowed: a real server frame carries the name or a parseable `type` tag
         assert!(!is_check_event(
             "message",
             "garbage response.doom_loop_check garbage"

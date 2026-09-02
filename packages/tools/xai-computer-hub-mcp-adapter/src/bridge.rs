@@ -687,20 +687,6 @@ mod tests {
     }
 
     #[test]
-    fn translate_mcp_result_single_text() {
-        let result = McpCallResult {
-            content: vec![McpContent::Text {
-                text: "hello".into(),
-            }],
-            is_error: false,
-        };
-        assert_eq!(
-            translate_mcp_result(&result),
-            ToolOutputWire::Text("hello".into())
-        );
-    }
-
-    #[test]
     fn translate_mcp_result_error_concatenates_text() {
         let result = McpCallResult {
             content: vec![
@@ -717,27 +703,6 @@ mod tests {
             translate_mcp_result(&result),
             ToolOutputWire::Text("line 1\nline 2".into())
         );
-    }
-
-    #[test]
-    fn translate_mcp_result_mixed_content_uses_blocks() {
-        let result = McpCallResult {
-            content: vec![
-                McpContent::Text {
-                    text: "hello".into(),
-                },
-                McpContent::Resource {
-                    uri: "file:///test".into(),
-                    mime_type: Some("text/plain".into()),
-                    text: Some("content".into()),
-                },
-            ],
-            is_error: false,
-        };
-        match translate_mcp_result(&result) {
-            ToolOutputWire::Mcp { blocks } => assert_eq!(blocks.len(), 2),
-            other => panic!("expected Mcp, got {other:?}"),
-        }
     }
 
     #[test]

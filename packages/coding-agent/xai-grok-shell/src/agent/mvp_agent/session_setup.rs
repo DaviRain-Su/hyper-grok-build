@@ -1,14 +1,14 @@
-//! ACP [session setup]: the four methods that create, attach to, and free a
-//! session. Split from `acp_agent.rs`, whose trait impl delegates all four.
+//! ACP [session setup]: the four methods that create, attach to, and free a session.
+//! Split from `acp_agent.rs`, whose trait impl delegates all four.
 //!
 //! [session setup]: https://agentclientprotocol.com/protocol/v1/session-setup
 use super::reasoning_effort::{
     EffortTarget, NewSessionEffort, resolve_new_session_effort_hint, split_new_session_effort,
 };
+use super::sampler_prewarm::spawn_sampler_transport_prewarm;
 use super::*;
 use crate::agent::session_metrics::SessionStartKind;
-/// Refusals resume must give verbatim, so a test cannot mistake some other
-/// `invalid_params` for the guard it is pinning.
+/// Refusals resume must give verbatim, so a test cannot mistake some other `invalid_params` for the guard it is pinning.
 pub(super) const RESUME_REFUSES_CHAT: &str =
     "session/resume is not supported for chat sessions; use session/load";
 pub(super) const RESUME_REFUSES_EXTRA_DIRS: &str =
@@ -37,6 +37,12 @@ async fn read_applied_tool_overrides(
         }
     }
 }
+/// The default-model `session/new` echo: the signature admits only spawn-time data, never an actor channel, so this reply path cannot wait on session startup.
+fn spawn_snapshot_tool_overrides(
+    snapshot: &crate::session::SpawnSnapshot,
+) -> Option<xai_grok_sampling_types::ToolOverrides> {
+    snapshot.applied_tool_overrides.clone()
+}
 fn insert_applied_tool_overrides(
     meta: &mut serde_json::Map<String, serde_json::Value>,
     echo: Option<&xai_grok_sampling_types::ToolOverrides>,
@@ -49,9 +55,8 @@ fn insert_applied_tool_overrides(
     }
 }
 /// Parse the client-claimed `_meta.sessionKind` on `session/new`.
-/// `headless` is the only client-minted kind; the `subagent*` namespace is
-/// server-owned. Other values stay forward-compatible and leave the session
-/// unstamped.
+/// `headless` is the only client-minted kind; the `subagent*` namespace is server-owned.
+/// Other values stay forward-compatible and leave the session unstamped.
 fn parse_client_session_kind(meta: Option<&acp::Meta>) -> Result<Option<String>, acp::Error> {
     let Some(kind) = meta
         .and_then(|m| m.get("sessionKind").or_else(|| m.get("session_kind")))
@@ -69,16 +74,16 @@ fn parse_client_session_kind(meta: Option<&acp::Meta>) -> Result<Option<String>,
     tracing::warn!(kind, "ignoring unsupported _meta.sessionKind claim");
     Ok(None)
 }
-/// Per-client capabilities for one session. Leader mode injects these per
-/// request, so they belong to the request rather than to the agent.
+/// Per-client capabilities for one session.
+/// Leader mode injects these per request, so they belong to the request rather than to the agent.
 struct ClientCaps {
     code_nav: bool,
     terminal: bool,
     fs_read: bool,
     fs_write: bool,
 }
-/// What an attach recovers from disk before the plan mode moves into the actor:
-/// telemetry counters, and the parked approval the rebuilt actor has to re-ask.
+/// What an attach recovers from disk before the plan mode moves into the actor.
+/// It holds telemetry counters and the parked approval the rebuilt actor has to re-ask.
 struct RestoredSignals {
     compaction_count: u64,
     turn_count: u64,
@@ -121,9 +126,8 @@ impl AttachOperation {
         }
     }
 }
-/// What the two attach methods do differently, decided in one exhaustive match
-/// so a branch further down cannot quietly skip [`AttachOperation`]. Not in the
-/// request's `_meta`, where resume used to write it: that lets a client spoof it.
+/// What the two attach methods do differently, decided in one exhaustive match so a branch further down cannot quietly skip [`AttachOperation`].
+/// It is not carried in the request's `_meta`, where resume used to write it: that lets a client spoof it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct AttachPolicy {
     /// Skip the transcript replay before responding.
@@ -152,9 +156,8 @@ impl AttachPolicy {
         }
     }
 }
-/// Client-supplied routing an attach's replay must echo: the `x.ai/persist`
-/// blob, the leader unicast target, and the reconnect cursor. All ride the
-/// load request's `_meta`.
+/// Client-supplied routing an attach's replay must echo: the `x.ai/persist` blob, the leader unicast target, and the reconnect cursor.
+/// All ride the load request's `_meta`.
 struct ReplayRouting<'a> {
     persist_data: Option<&'a serde_json::Value>,
     target_client_id: Option<&'a serde_json::Value>,
@@ -190,8 +193,7 @@ fn log_session_started(
     );
 }
 impl MvpAgent {
-    /// Read this client's capabilities, falling back to the agent's own state
-    /// where the request says nothing.
+    /// Read this client's capabilities, falling back to the agent's own state where the request says nothing.
     fn resolve_client_caps(
         &self,
         meta: Option<&acp::Meta>,
@@ -208,9 +210,8 @@ impl MvpAgent {
             fs_write,
         }
     }
-    /// Resolve the workspace both pipelines run in. Folder trust is recorded
-    /// before the MCP merge so an untrusted workspace's repo-local servers
-    /// are dropped before anything spawns against them.
+    /// Resolve the workspace both pipelines run in.
+    /// Folder trust is recorded before the MCP merge so an untrusted workspace's repo-local servers are dropped before anything spawns against them.
     async fn resolve_workspace(
         &self,
         cwd: &std::path::Path,
@@ -232,8 +233,8 @@ impl MvpAgent {
             mcp_meta_config_map: parse_mcp_meta_config(meta),
         })
     }
-    /// Start the relay mirror for a session and forward its connection state
-    /// to the client. `None` when relay is not configured.
+    /// Start the relay mirror for a session and forward its connection state to the client.
+    /// Returns `None` when relay is not configured.
     fn start_relay_sync(
         &self,
         session_id: &acp::SessionId,
@@ -411,7 +412,7 @@ impl MvpAgent {
                 Ok(_) => {
                     tracing::warn!(
                         requested_model = custom_model,
-                        "Requested model not allowed by allowed_models; falling back to current default model"
+                        "Requested model not allowed by the model allowlist; falling back to current default model"
                     );
                     if !campaign_nudged {
                         disallowed_custom = Some(custom_model.to_string());
@@ -465,6 +466,7 @@ impl MvpAgent {
             &session_id,
             EffortTarget::SummaryClient,
         );
+        spawn_sampler_transport_prewarm(&session_sampling.base_url);
         let (summary_client, summary_model) = self.build_summary_client(&session_sampling)?;
         let relay_sync = self.start_relay_sync(&session_id, &session_info);
         let model_id = match &session_initial_model {
@@ -607,7 +609,8 @@ impl MvpAgent {
                 crate::agent::handlers::model_switch::apply(
                     self,
                     acp::SetSessionModelRequest::new(session_id.clone(), acp::ModelId::new(model_id)),
-                    switch_effort,
+                    crate::agent::handlers::model_switch::SwitchEffort::Set(switch_effort),
+                    crate::agent::handlers::model_switch::ConfigNotice::Skip,
                 )
                 .await
             });
@@ -625,10 +628,16 @@ impl MvpAgent {
                 }
             }
         }
+        self.prewarm_final_model_base_url(
+            &session_id,
+            &session_sampling.base_url,
+            origin_client.clone(),
+        );
         if let Some(requested) = disallowed_custom {
             let current = self.models_manager.current_model_id();
             let reason = format!(
-                "\"{requested}\" isn't allowed by your allowed_models setting, so this session is using \"{}\".",
+                "\"{requested}\": {}. This session is using \"{}\".",
+                crate::agent::models::allowlist_denied_message(&self.cfg.borrow()),
                 current.0
             );
             self.send_model_auto_switched(
@@ -640,6 +649,8 @@ impl MvpAgent {
             .await;
         }
         let indexed_roots = self.indexed_roots_for(cwd.as_path());
+        let git_discovery_timer =
+            crate::instrumentation_timer!("session.new_session.git_discovery");
         let (git_root, is_git_repo, discovery_failed) =
             match xai_grok_workspace::session::git::discover_git_root(cwd.as_path()) {
                 GitDiscoveryResult::Found(root) => {
@@ -659,6 +670,7 @@ impl MvpAgent {
                     (None, false, true)
                 }
             };
+        drop(git_discovery_timer);
         let (show_non_git_warning, feedback_enabled) = {
             let cfg = self.cfg.borrow();
             let show_non_git_warning = !is_git_repo
@@ -684,7 +696,11 @@ impl MvpAgent {
         } else {
             self.model_state(Some(&session_id))
         };
+        let echo_timer = crate::instrumentation_timer!("session.new_session.tool_overrides_echo");
         let applied_tool_overrides = match self.session_handle_waiting_for_load(&session_id).await {
+            Some(handle) if resolved_custom_model.is_none() => {
+                spawn_snapshot_tool_overrides(&handle.spawn_snapshot)
+            }
             Some(handle) => read_applied_tool_overrides(&handle.cmd_tx).await,
             None => {
                 tracing::warn!(
@@ -694,6 +710,7 @@ impl MvpAgent {
                 None
             }
         };
+        drop(echo_timer);
         let mut meta = serde_json::json!({
             "currentWorkingDirectory": cwd.as_str().to_owned(),
             "codebaseIndexed": indexed_roots,
@@ -721,8 +738,10 @@ impl MvpAgent {
             session_started_at.elapsed(),
             false,
         );
+        let config_options = self.acp_config_options(Some(&session_id), &models);
         Ok(acp::NewSessionResponse::new(session_id)
             .models(Some(models))
+            .config_options(Some(config_options))
             .meta(meta.as_object().cloned()))
     }
     pub(super) async fn load_session_inner(
@@ -866,6 +885,10 @@ impl MvpAgent {
             goal_mode_state: _persisted_goal_mode,
             workflow_runs: persisted_workflow_runs,
         } = persistence_info;
+        let persisted_base_url = self
+            .resolve_sampling_config_for_model(&summary.current_model_id, origin_client.clone())
+            .base_url;
+        spawn_sampler_transport_prewarm(&persisted_base_url);
         let restored =
             RestoredSignals::read(persisted_signals.as_ref(), persisted_plan_mode.as_ref());
         self.set_turn_number(&session_id, summary.next_trace_turn);
@@ -993,6 +1016,11 @@ impl MvpAgent {
                 },
             )
             .await?;
+            self.prewarm_final_model_base_url(
+                &session_id,
+                &persisted_base_url,
+                origin_client.clone(),
+            );
             drop(spawn_timer);
             true
         } else {
@@ -1065,8 +1093,10 @@ impl MvpAgent {
             .build_attach_response_meta(&session_id, &summary, persist_data, code_restore_info)
             .await;
         xai_grok_telemetry::unified_log::info("session loaded", Some(session_id.0.as_ref()), None);
+        let config_options = self.acp_config_options(Some(&session_id), &model_state);
         let response = acp::LoadSessionResponse::new()
             .models(Some(model_state))
+            .config_options(Some(config_options))
             .meta(response_meta.as_object().cloned());
         if let Some(handle) = self.resident_handle(&session_id) {
             let _ = handle.cmd_tx.send(SessionCommand::AdvertiseCommands);
@@ -1102,8 +1132,7 @@ impl MvpAgent {
         );
         Ok(response)
     }
-    /// Restore-code phase: check the persisted HEAD out into `cwd`, then
-    /// worktree nor the session's own, so it cannot detach a real checkout.
+    /// Refuses a cwd that is neither a grok worktree nor the session's own, so it cannot detach a real checkout.
     async fn restore_session_code(
         &self,
         session_id: &acp::SessionId,
@@ -1171,8 +1200,7 @@ impl MvpAgent {
         }
         code_restore_info
     }
-    /// Replay-gate phase: replay the transcript (unless `no_replay`), reopen
-    /// the live-output gate, drain deltas so replay precedes the response.
+    /// Replay-gate phase: replay the transcript (unless `no_replay`), reopen the live-output gate, drain deltas so replay precedes the response.
     /// Stale-task reconciliation runs even under `no_replay`: it corrects state.
     async fn replay_transcript_gate(
         &self,
@@ -1248,8 +1276,7 @@ impl MvpAgent {
         }
         Ok((initial_total_tokens, unfinished_subagents))
     }
-    /// Reconnect phase: re-apply per-client capability and permission state
-    /// to the resident handle, which still reflects the client that spawned it.
+    /// Reconnect phase: re-apply per-client capability and permission state to the resident handle, which still reflects the client that spawned it.
     fn refresh_reconnect_session_state(
         &self,
         session_id: &acp::SessionId,
@@ -1285,9 +1312,9 @@ impl MvpAgent {
             }
         });
     }
-    /// Heal crash-orphaned subagents from both sources (replayed spawns with
-    /// no finish, on-disk `running` metas), keyed by id so a double orphan
-    /// heals once. Runs under `noReplay` too, and persists: skipping corrupts disk.
+    /// Heal crash-orphaned subagents from both sources (replayed spawns with no finish, on-disk `running` metas).
+    /// The pass is keyed by id so a double orphan heals once.
+    /// Runs under `noReplay` too, and persists: skipping corrupts disk.
     async fn heal_orphaned_subagents(
         &self,
         session_id: &acp::SessionId,
@@ -1317,8 +1344,7 @@ impl MvpAgent {
             .await;
         }
     }
-    /// Model-restore phase: point the actor at the persisted model without
-    /// writing the global `current_model_id` (shared across leader clients).
+    /// Model-restore phase: point the actor at the persisted model without writing the global `current_model_id` (shared across leader clients).
     /// A vanished model falls back within its family, or blocks prompts.
     pub(super) async fn restore_persisted_model(
         &self,
@@ -1446,7 +1472,8 @@ impl MvpAgent {
             if let Err(err) = crate::agent::handlers::model_switch::apply(
                 self,
                 acp::SetSessionModelRequest::new(session_id.to_owned(), model_id),
-                restore_effort,
+                crate::agent::handlers::model_switch::SwitchEffort::Set(restore_effort),
+                crate::agent::handlers::model_switch::ConfigNotice::Skip,
             )
             .await
             {
@@ -1458,8 +1485,7 @@ impl MvpAgent {
             }
         }
     }
-    /// Response phase: assemble the attach `_meta`, including the running
-    /// prompt id a mid-turn loader adopts to pass the `session/update` gate.
+    /// Response phase: assemble the attach `_meta`, including the running prompt id a mid-turn loader adopts to pass the `session/update` gate.
     async fn build_attach_response_meta(
         &self,
         session_id: &acp::SessionId,
@@ -1572,8 +1598,7 @@ impl MvpAgent {
             .config_options(loaded.config_options)
             .meta(loaded.meta))
     }
-    /// Closing an inactive session succeeds: the spec permits either, and
-    /// closes race disconnect-driven eviction routinely.
+    /// Closing an inactive session succeeds: the spec permits either, and closes race disconnect-driven eviction routinely.
     pub(super) async fn close_session_inner(
         &self,
         args: acp::CloseSessionRequest,
@@ -1592,9 +1617,9 @@ impl MvpAgent {
         Ok(acp::CloseSessionResponse::new().meta(meta))
     }
 }
-/// Reshape a resume into the load request that backs it. Policy is not encoded
-/// here: it rides on [`AttachOperation::Resume`], so a client cannot spoof it
-/// and a reader does not have to trace a `_meta` key to find it.
+/// Reshape a resume into the load request that backs it.
+/// Policy is not encoded here: it rides on [`AttachOperation::Resume`].
+/// A client thus cannot spoof it, and a reader does not have to trace a `_meta` key to find it.
 pub(super) fn load_request_for_resume(args: acp::ResumeSessionRequest) -> acp::LoadSessionRequest {
     let acp::ResumeSessionRequest {
         session_id,

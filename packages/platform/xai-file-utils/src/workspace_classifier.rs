@@ -196,11 +196,6 @@ mod tests {
         fn deep_project_is_safe() {
             assert!(is_project_dir(Path::new("/Users/someone/my-project/src")));
         }
-
-        #[test]
-        fn home_subdir_is_safe() {
-            assert!(is_project_dir(Path::new("/Users/someone/my-project")));
-        }
     }
 
     #[cfg(target_os = "macos")]
@@ -314,20 +309,6 @@ mod tests {
                 assert!(is_project_dir(&d.join("my-project")));
             }
         }
-
-        #[test]
-        fn bare_downloads_is_unsafe() {
-            if let Some(d) = dirs::download_dir() {
-                assert!(!is_project_dir(&d));
-            }
-        }
-
-        #[test]
-        fn bare_documents_is_unsafe() {
-            if let Some(d) = dirs::document_dir() {
-                assert!(!is_project_dir(&d));
-            }
-        }
     }
 
     mod edge_cases {
@@ -370,6 +351,19 @@ mod tests {
             let sub = tmp.path().join("deep/sub/dir");
             std::fs::create_dir_all(&sub).unwrap();
             assert!(is_project_dir(&sub));
+        }
+        #[test]
+        fn bare_downloads_is_unsafe() {
+            if let Some(d) = dirs::download_dir() {
+                assert!(!is_project_dir(&d));
+            }
+        }
+
+        #[test]
+        fn bare_documents_is_unsafe() {
+            if let Some(d) = dirs::document_dir() {
+                assert!(!is_project_dir(&d));
+            }
         }
     }
 }

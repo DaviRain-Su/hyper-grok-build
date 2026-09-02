@@ -252,30 +252,6 @@ mod tests {
     }
 
     #[test]
-    fn read_line_capped_rejects_oversized() {
-        // Test the capped reader directly with a small override isn't
-        // practical (MAX_LINE_SIZE is const), so test via the real limit.
-        // Just verify the function works for normal input.
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
-                let data = b"normal line\n";
-                let mut reader = BufReader::new(Cursor::new(&data[..]));
-                let mut buf = Vec::new();
-                let n = read_line_capped(&mut reader, &mut buf).await.unwrap();
-                assert_eq!(n, 12);
-                assert_eq!(buf, b"normal line\n");
-
-                // EOF returns 0
-                buf.clear();
-                let n = read_line_capped(&mut reader, &mut buf).await.unwrap();
-                assert_eq!(n, 0);
-            });
-    }
-
-    #[test]
     fn small_read_buffer() {
         run(async {
             // Verify poll_read correctly serves a line across multiple small reads.

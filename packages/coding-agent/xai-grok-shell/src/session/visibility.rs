@@ -1,4 +1,4 @@
-//! Session-kind visibility policy shared by local list and search surfaces.
+//! Visibility policy for `session_kind`, shared by the local session list and search.
 
 use std::collections::HashMap;
 
@@ -7,10 +7,9 @@ use crate::session::persistence::Summary;
 
 pub const SESSION_KIND_HEADLESS: &str = "headless";
 
-/// Listing/search policy for `session_kind=headless` rows. Applied before
-/// truncation; headless remains distinct from `Summary::is_hidden()`. The Rust
-/// default is the first-party picker policy; omitted wire values are handled
-/// separately by [`Self::from_wire`].
+/// Listing/search policy for `session_kind=headless` rows.
+/// Applied before truncation; headless remains distinct from `Summary::is_hidden()`.
+/// The Rust default is the first-party picker policy; omitted wire values are handled separately by [`Self::from_wire`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum HeadlessPolicy {
     #[default]
@@ -20,8 +19,8 @@ pub enum HeadlessPolicy {
 }
 
 impl HeadlessPolicy {
-    /// Missing values preserve the pre-policy inclusive wire behavior; unknown
-    /// explicit values fail closed to [`Self::Exclude`].
+    /// Missing values keep the wire behavior from before this policy existed: include everything.
+    /// Unknown explicit values fail closed to [`Self::Exclude`].
     pub fn from_wire(value: Option<&str>) -> Self {
         match value {
             None | Some("include") => Self::Include,
@@ -66,9 +65,8 @@ pub(crate) fn policy_admits(policy: HeadlessPolicy, kind: ClassifiedSessionKind)
     }
 }
 
-/// Filters local rows and their remote twins. Returns whether a scoped local
-/// row was removed. Remote-only untyped rows are preserved by Exclude/Include;
-/// Only omits them without treating them as scoped drops.
+/// Filters local rows and the remote rows that share their session ids; returns whether a local row was removed.
+/// Remote rows with no local twin have no known kind: Exclude and Include keep them, and Only drops them without reporting a removal.
 pub(crate) fn retain_session_lanes(
     local: &mut Vec<Summary>,
     remote: &mut Vec<SessionRecord>,

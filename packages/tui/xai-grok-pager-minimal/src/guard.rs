@@ -1,15 +1,10 @@
-//! Compile-time guard for minimal mode's resize strategy (design K6 / risk #2).
+//! Compile-time guard for minimal mode's resize strategy.
 //!
-//! The terminal owns committed history, so minimal must use only the built-in
-//! `autoresize` / `set_viewport_height` and must NEVER call the inline crate's
-//! RIS-rerender helpers or `emit_to_scrollback` — those re-emit history the
-//! terminal already has, double-printing (or, with ED3, wiping) committed
-//! scrollback. This test fails loudly if such a call ever sneaks into the
-//! minimal module.
+//! The terminal owns committed history, so minimal must use only the built-in `autoresize` / `set_viewport_height`.
+//! It must NEVER call the inline crate's RIS-rerender helpers or `emit_to_scrollback`.
+//! Those re-emit history the terminal already has, double-printing (or, with ED3, wiping) committed scrollback.
+//! This test fails loudly if such a call ever sneaks into the minimal module.
 
-/// The forbidden inline-crate helpers. Scanned against the minimal sources via
-/// `include_str!` (this guard file is intentionally not scanned, since it names
-/// the identifiers here).
 #[test]
 fn minimal_never_uses_ris_rerender_or_emit_to_scrollback() {
     const FORBIDDEN: &[&str] = &[
@@ -17,9 +12,8 @@ fn minimal_never_uses_ris_rerender_or_emit_to_scrollback() {
         "emit_to_scrollback",
         "resize_viewport_height",
     ];
-    // EVERY module of this crate except this guard file (which names the
-    // forbidden identifiers). Keep in sync with `lib.rs`'s module list — a
-    // module missing here is a hole in the K6 guard.
+    // EVERY module of this crate except this guard file (which names the forbidden identifiers)
+    // Keep in sync with `lib.rs`'s module list: a module missing here is a hole in the guard
     let sources = [
         ("lib.rs", include_str!("lib.rs")),
         ("auth.rs", include_str!("auth.rs")),

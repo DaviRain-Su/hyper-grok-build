@@ -100,7 +100,6 @@ fn test_user_feedback_dismiss_roundtrip() {
 
 #[test]
 fn test_feedback_jsonl_multi_line_roundtrip() {
-    // Simulate multiple entries written to a JSONL file
     let entries = vec![
         LocalFeedbackEntry::UserFeedback(UserFeedbackEntry {
             submitted_at: chrono::Utc::now(),
@@ -130,7 +129,6 @@ fn test_feedback_jsonl_multi_line_roundtrip() {
         jsonl.push('\n');
     }
 
-    // Deserialize each line
     let parsed: Vec<LocalFeedbackEntry> = jsonl
         .lines()
         .filter(|l| !l.is_empty())

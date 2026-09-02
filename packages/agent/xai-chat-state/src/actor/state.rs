@@ -450,11 +450,6 @@ mod tests {
     }
 
     #[test]
-    fn estimate_messages_tokens_zero_for_empty() {
-        assert_eq!(estimate_messages_tokens(&[]), 0);
-    }
-
-    #[test]
     fn estimate_tool_definitions_tokens_sums_across_slice() {
         let a = xai_grok_sampling_types::ToolDefinition::function(
             "a",

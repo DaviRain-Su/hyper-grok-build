@@ -108,8 +108,7 @@ fn revalidate_rejects_late_json_file_after_plan_capture() {
     std::fs::hard_link(&late, &alias).unwrap();
 
     let err = revalidate_plan(&plan).unwrap_err();
-    // Late hardlinked JSON may surface as Resolve (config validation wrapped via From)
-    // before a typed HardLink/JsonSnapshotChanged, depending on check order.
+    // Config validation (wrapped into Resolve via From) can catch the late hardlinked JSON before the typed HardLink/JsonSnapshotChanged checks
     assert!(
         matches!(
             err,

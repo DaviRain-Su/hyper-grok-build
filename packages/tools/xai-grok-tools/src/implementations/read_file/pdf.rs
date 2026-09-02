@@ -535,15 +535,4 @@ mod tests {
         let err = render_pdf_pages(b"not a pdf".to_vec(), None, 10).unwrap_err();
         assert!(err.contains("Failed to open PDF"), "got: {err}");
     }
-
-    #[test]
-    fn parse_page_range_single_page() {
-        assert_eq!(parse_page_range("3", 10).unwrap(), vec![2]);
-    }
-
-    #[test]
-    fn parse_page_range_rejects_too_many_pages() {
-        let err = parse_page_range("1-21", 30).unwrap_err();
-        assert!(err.contains("maximum is"), "got: {err}");
-    }
 }

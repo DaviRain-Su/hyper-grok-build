@@ -81,7 +81,7 @@ fn multiple_completions_batched_with_poll_tool() {
     ];
     let result = format_between_turn_completions(&completions, Some("get_task_output"), None);
     assert!(result.starts_with("While you were idle, 3 background subagents completed:\n"));
-    // All three entries should appear
+    // All three entries appear
     assert!(result.contains("subagent_id: a."));
     assert!(result.contains("subagent_id: b."));
     assert!(result.contains("subagent_id: c."));
@@ -89,9 +89,8 @@ fn multiple_completions_batched_with_poll_tool() {
 
 #[test]
 fn no_poll_tool_inlines_output() {
-    // No BackgroundTaskAction tool exposed. The
-    // model has no way to retrieve the subagent's output later, so the
-    // completion notification MUST inline the output text.
+    // No BackgroundTaskAction tool is exposed
+    // The model has no way to retrieve the subagent's output later, so the completion notification MUST inline the output text
     let completions = vec![summary(
         "abc-123",
         "explore",

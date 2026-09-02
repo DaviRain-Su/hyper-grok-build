@@ -1,5 +1,5 @@
-//! One binary, one home: `grok_home()` memoizes the first read for the process, so tests that
-//! need a temp home have to share one, and `#[serial]` keeps their env writes apart.
+//! One binary, one home: `grok_home()` memoizes the first read for the process, so tests that need a temp home have to share one.
+//! `#[serial]` keeps their env writes apart.
 
 use std::sync::{Arc, OnceLock};
 
@@ -25,8 +25,7 @@ fn home() -> &'static std::path::Path {
     .path()
 }
 
-/// The feature is the only door to a manager, so the test walks through it with
-/// the switch left at its default rather than reaching past it.
+/// `start_if_enabled` is the only way to get a manager, so the test calls it with `GROK_SESSION_SEARCH` left at its default.
 fn start_index() -> SearchIndexManager {
     let _default_on = EnvGuard::unset("GROK_SESSION_SEARCH");
     match start_if_enabled(&xai_grok_shell::agent::config::Config::default()) {
@@ -37,8 +36,8 @@ fn start_index() -> SearchIndexManager {
     }
 }
 
-/// Titles are one made-up token, searched back verbatim: a query of ordinary words ORs its
-/// tokens, which would let one session's row answer for another.
+/// Titles are one made-up token, searched back verbatim.
+/// A query of ordinary words ORs its tokens, which would let one session's row answer for another.
 async fn seed_session(root: &std::path::Path, id: &str, cwd: &str) {
     let storage = JsonlStorageAdapter::with_root(root.to_path_buf());
     let info = Info {
@@ -80,7 +79,7 @@ async fn deleting_a_session_clears_only_its_own_search_row() {
     let root = home();
     let index = start_index();
 
-    // All three up front: only the first search bootstraps.
+    // All three up front: only the first search builds the index
     seed_session(root, "orphan", "/ws-a").await;
     seed_session(root, "elsewhere", "/ws-b").await;
     seed_session(root, "scoped", "/ws-c").await;

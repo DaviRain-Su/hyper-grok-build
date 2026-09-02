@@ -1,15 +1,10 @@
 //! End-to-end serde round-trip tests for every wire-format enum.
 //!
-//! Every variant of every wire-format enum
-//! must JSON-round-trip cleanly. This integration test exercises the
-//! entire crate from the outside (only public API, no `pub(crate)`
-//! internals), which gives stronger coverage than the per-module tests.
+//! This integration test exercises the entire crate from the outside, using only the public API.
+//! That gives stronger coverage than the per-module tests.
 //!
-//! Each "rich" sample has at least one variant constructed with
-//! non-default fields (meaningful strings, non-zero numbers, `Some(...)`
-//! optionals, multi-element vecs, non-default enum members) so that
-//! regressions on those fields are caught here, not at the next
-//! protocol bug.
+//! Each "rich" sample has at least one variant built from non-default field values.
+//! A regression on those fields is caught here, not at the next protocol bug.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -17,8 +12,6 @@ use std::path::PathBuf;
 use chrono::{DateTime, TimeZone, Utc};
 use xai_grok_workspace_types::*;
 
-/// JSON round-trip helper. Asserts equality after a serialize +
-/// deserialize cycle.
 fn round_trip<T>(value: T)
 where
     T: serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug + PartialEq,
@@ -53,12 +46,10 @@ fn workspace_request_round_trips_for_every_variant() {
 #[test]
 fn ops_request_round_trips_for_every_variant_including_rich_payloads() {
     for r in [
-        // Rich GitStatusOpts: every bool flipped on.
         WorkspaceOpsRequest::GitStatus(GitStatusOpts {
             include_untracked: true,
             include_ignored: true,
         }),
-        // Rich GitDiffArgs: range + paths + staged.
         WorkspaceOpsRequest::GitDiff(GitDiffArgs {
             range: Some("main..HEAD".into()),
             paths: vec!["src/lib.rs".into(), "src/main.rs".into()],
@@ -70,8 +61,6 @@ fn ops_request_round_trips_for_every_variant_including_rich_payloads() {
         WorkspaceOpsRequest::ActOnHunk(HunkAction::Reject {
             hunk_id: HunkId::new("h"),
         }),
-        // Rich RipgrepArgs: pattern + cwd + globs + case_insensitive +
-        // max_matches.
         WorkspaceOpsRequest::Ripgrep(RipgrepArgs {
             pattern: "TODO".into(),
             cwd: Some("src".into()),
@@ -310,27 +299,6 @@ fn tool_response_round_trips_for_every_variant_including_rich_payloads() {
     ] {
         round_trip(r);
     }
-}
-
-#[test]
-fn user_question_round_trips_standalone() {
-    let q = UserQuestion {
-        question: "Confirm?".into(),
-        options: vec![
-            UserQuestionOption {
-                label: "Yes".into(),
-                description: "Proceed".into(),
-                preview: Some("# preview".into()),
-            },
-            UserQuestionOption {
-                label: "No".into(),
-                description: "Abort".into(),
-                preview: None,
-            },
-        ],
-        multi_select: true,
-    };
-    round_trip(q);
 }
 
 #[test]
@@ -575,54 +543,8 @@ fn workspace_error_round_trips_for_every_variant() {
     }
 }
 
-#[test]
-fn event_lag_round_trips() {
-    round_trip(EventLag::Lagged(0));
-    round_trip(EventLag::Lagged(1_000_000));
-}
-
-#[test]
-fn standard_metadata_keys_are_unique() {
-    use std::collections::HashSet;
-    let set: HashSet<&&str> = STANDARD_META_KEYS.iter().collect();
-    assert_eq!(set.len(), STANDARD_META_KEYS.len());
-}
-
-#[test]
-fn workspace_error_display_renders_for_every_variant() {
-    let errs = vec![
-        WorkspaceError::Io {
-            message: "x".into(),
-            kind: IoKind::NotFound,
-        },
-        WorkspaceError::Vcs("x".into()),
-        WorkspaceError::Permission { reason: "x".into() },
-        WorkspaceError::NotFound("/x".into()),
-        WorkspaceError::Cancelled,
-        WorkspaceError::Timeout { elapsed_ms: 1 },
-        WorkspaceError::SessionNotFound(SessionId::new("s")),
-        WorkspaceError::Tool {
-            code: "c".into(),
-            message: "m".into(),
-        },
-        WorkspaceError::Remote("x".into()),
-        WorkspaceError::ProtocolMismatch {
-            expected: "X".into(),
-            got: ChunkKind::Ack,
-        },
-        WorkspaceError::ProtocolViolation("x".into()),
-        WorkspaceError::EmptyStream,
-        WorkspaceError::Internal("x".into()),
-    ];
-    for err in errs {
-        let s = err.to_string();
-        assert!(!s.is_empty(), "Display empty for {err:?}");
-    }
-}
-
 // ---------------------------------------------------------------------------
-// JSON-shape assertions: lock down the wire field
-// names so any future drift back to camelCase fails loudly.
+// JSON-shape assertions: lock down the wire field names so any future drift back to camelCase fails loudly
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -643,36 +565,8 @@ fn tool_call_args_uses_snake_case_field_names() {
 }
 
 #[test]
-fn ops_request_inline_struct_variants_use_snake_case() {
-    // Use MemorySearch (an inline-struct variant with a non-trivial
-    // field name) to lock down snake_case rendering for ops-request
-    // inline-struct variants in general.
-    let req = WorkspaceOpsRequest::MemorySearch {
-        query: "auth".into(),
-        limit: 5,
-    };
-    let json = serde_json::to_string(&req).unwrap();
-    assert!(json.contains("\"query\""), "got {json}");
-    assert!(json.contains("\"limit\""), "got {json}");
-}
-
-#[test]
-fn session_request_inline_struct_variants_use_snake_case() {
-    let req = SessionLifecycleRequest::BeginPrompt {
-        session: SessionId::new("s"),
-        idx: 3,
-    };
-    let json = serde_json::to_string(&req).unwrap();
-    // The field name is `session`, but assert the explicit shape:
-    assert!(json.contains("\"session\""), "got {json}");
-    assert!(json.contains("\"idx\""), "got {json}");
-}
-
-#[test]
 fn workspace_event_inline_struct_variants_use_snake_case() {
-    // CodebaseIndexUpdated has a snake_case-able field (`files_indexed`)
-    // and is one of the remaining inline-struct WorkspaceEvent variants
-    // after the hunk events were removed.
+    // CodebaseIndexUpdated is an inline-struct WorkspaceEvent variant with a multi-word field (`files_indexed`)
     let ev = WorkspaceEvent::CodebaseIndexUpdated { files_indexed: 7 };
     let json = serde_json::to_string(&ev).unwrap();
     assert!(json.contains("\"files_indexed\""), "got {json}");
@@ -697,8 +591,7 @@ fn permission_decision_uses_adjacent_type_data_tag() {
     assert_eq!(json, r#"{"type":"deny","data":{"reason":"no"}}"#);
     // Tag key must be `type` (not the legacy `decision`).
     assert!(!json.starts_with(r#"{"decision":"#), "got {json}");
-    // Variant payload must NOT be inlined alongside `type` (would
-    // indicate a regression to internal tagging).
+    // Variant payload must NOT be inlined alongside `type` (would indicate a regression to internal tagging)
     assert!(!json.contains(r#""type":"deny","reason":"#), "got {json}");
 
     // Unit variant: no `data` field.
@@ -717,8 +610,7 @@ fn plan_mode_decision_uses_adjacent_type_data_tag() {
     assert_eq!(json, r#"{"type":"reject","data":{"feedback":"not yet"}}"#);
     // Tag key must be `type` (not the legacy `decision`).
     assert!(!json.starts_with(r#"{"decision":"#), "got {json}");
-    // Variant payload must NOT be inlined alongside `type` (would
-    // indicate a regression to internal tagging).
+    // Variant payload must NOT be inlined alongside `type` (would indicate a regression to internal tagging)
     assert!(
         !json.contains(r#""type":"reject","feedback":"#),
         "got {json}"
@@ -772,8 +664,7 @@ fn tool_progress_uses_adjacent_type_data_tag() {
     };
     let json = serde_json::to_string(&started).unwrap();
     assert_eq!(json, r#"{"type":"started","data":{"call_id":"c1"}}"#);
-    // Payload must NOT be inlined alongside "type" (would indicate a
-    // regression to internal tagging).
+    // Payload must NOT be inlined alongside "type" (would indicate a regression to internal tagging)
     assert!(
         !json.contains(r#""type":"started","call_id":"#),
         "got {json}"
@@ -794,9 +685,7 @@ fn tool_progress_uses_adjacent_type_data_tag() {
         "got {json}"
     );
 
-    // Lock down the "no two tagging styles in one document" property:
-    // ToolChunk::Progress(ToolProgress::Percent { ... }) should be a
-    // single uniform shape end-to-end.
+    // Lock down the "no two tagging styles in one document" property end-to-end through `ToolChunk::Progress`
     let chunk = ToolChunk::Progress(percent);
     let json = serde_json::to_string(&chunk).unwrap();
     assert_eq!(
@@ -807,10 +696,8 @@ fn tool_progress_uses_adjacent_type_data_tag() {
 
 #[test]
 fn tool_chunk_need_permission_uses_adjacent_type_data_tag() {
-    // NeedPermission is the new bidi-stream variant carrying the
-    // workspace's permission ask. Lock down the snake_case tag
-    // ("need_permission"), the snake_case field name ("req_id"), and
-    // adjacent tagging.
+    // NeedPermission carries the workspace's permission request over the bidi stream
+    // Lock down the snake_case tag ("need_permission"), the snake_case field name ("req_id"), and adjacent tagging
     let chunk = ToolChunk::NeedPermission {
         req_id: "perm-1".into(),
         request: PermissionRequest {
@@ -828,8 +715,7 @@ fn tool_chunk_need_permission_uses_adjacent_type_data_tag() {
     // Snake_case field-name guard.
     assert!(json.contains("\"req_id\""), "got {json}");
     assert!(!json.contains("\"reqId\""), "got {json}");
-    // Payload must NOT be inlined alongside "type" (would indicate a
-    // regression to internal tagging).
+    // Payload must NOT be inlined alongside "type" (would indicate a regression to internal tagging)
     assert!(
         !json.contains(r#""type":"need_permission","req_id":"#),
         "got {json}"
@@ -851,7 +737,7 @@ fn tool_chunk_need_user_answer_uses_adjacent_type_data_tag() {
         }],
     };
     let json = serde_json::to_string(&chunk).unwrap();
-    // Snake_case discriminator + snake_case fields.
+    // Snake_case discriminator and snake_case fields
     assert!(json.starts_with(r#"{"type":"need_user_answer","data":{"req_id":"q-1","questions":["#));
     assert!(json.contains("\"multi_select\""), "got {json}");
     assert!(!json.contains("\"multiSelect\""), "got {json}");
@@ -898,10 +784,8 @@ fn tool_response_permission_uses_adjacent_type_data_tag() {
 
 #[test]
 fn tool_chunk_need_plan_mode_change_uses_adjacent_type_data_tag() {
-    // NeedPlanModeChange is the bidi-stream variant carrying the
-    // workspace's plan-mode ask. Lock down the snake_case tag
-    // ("need_plan_mode_change"), the snake_case field name ("req_id"),
-    // and adjacent tagging.
+    // NeedPlanModeChange carries the workspace's plan-mode request over the bidi stream
+    // Lock down the snake_case tag ("need_plan_mode_change"), the snake_case field name ("req_id"), and adjacent tagging
     let chunk = ToolChunk::NeedPlanModeChange {
         req_id: "pm-1".into(),
         transition: PlanModeTransition::Enter {
@@ -916,8 +800,7 @@ fn tool_chunk_need_plan_mode_change_uses_adjacent_type_data_tag() {
     // Snake_case field-name guard.
     assert!(json.contains("\"req_id\""), "got {json}");
     assert!(!json.contains("\"reqId\""), "got {json}");
-    // Payload must NOT be inlined alongside "type" (would indicate a
-    // regression to internal tagging).
+    // Payload must NOT be inlined alongside "type" (would indicate a regression to internal tagging)
     assert!(
         !json.contains(r#""type":"need_plan_mode_change","req_id":"#),
         "got {json}"

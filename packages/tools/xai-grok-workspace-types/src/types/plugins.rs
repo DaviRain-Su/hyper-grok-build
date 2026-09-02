@@ -1,13 +1,11 @@
-//! Discovery shapes for plugins and hooks surfaced by `OpsChunk::Plugins`,
-//! `OpsChunk::Plugin`, `WorkspaceEvent::PluginsChanged`, and
-//! `WorkspaceEvent::HooksChanged`.
+//! Discovery shapes for plugins and hooks.
+//! They appear in `OpsChunk::Plugins`, `OpsChunk::Plugin`, `WorkspaceEvent::PluginsChanged`, and `WorkspaceEvent::HooksChanged`.
 //!
 //! TODO(workspace): align with the canonical types in
 //! `xai-hooks-plugins-types` and `xai-grok-plugin-marketplace`.
 
 use serde::{Deserialize, Serialize};
 
-/// Plugin metadata.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginInfo {
     /// Stable identifier.
@@ -29,7 +27,6 @@ pub struct PluginInfo {
     pub enabled: bool,
 }
 
-/// Hook metadata.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HookInfo {
     /// Stable identifier (e.g. `"pre-tool-call"`).

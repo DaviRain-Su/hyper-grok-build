@@ -4,7 +4,7 @@ use super::*;
 pub(crate) type ModelsFetchFuture =
     Pin<Box<dyn Future<Output = Option<IndexMap<String, ModelEntry>>> + Send>>;
 
-/// Injectable `/v1/models` transport; tests inject a fake.
+/// The `/v1/models` fetch behind a trait so tests can inject a fake.
 pub(crate) trait ModelsEndpoint: Send + Sync {
     fn fetch_models(
         &self,
@@ -14,7 +14,7 @@ pub(crate) trait ModelsEndpoint: Send + Sync {
     ) -> ModelsFetchFuture;
 }
 
-/// Default transport: the real `/v1/models` fetch.
+/// The default implementation: the real `/v1/models` fetch.
 pub(crate) struct HttpModelsEndpoint;
 
 impl ModelsEndpoint for HttpModelsEndpoint {

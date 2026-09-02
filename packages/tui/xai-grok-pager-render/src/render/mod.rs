@@ -1,5 +1,3 @@
-//! Low-level rendering utilities.
-//!
 //! Generic rendering primitives used by the scrollback and viewport.
 pub mod bidi;
 pub mod color;

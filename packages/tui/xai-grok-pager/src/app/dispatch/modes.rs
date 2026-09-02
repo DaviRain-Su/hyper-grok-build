@@ -318,10 +318,18 @@ pub(super) fn set_yolo_mode_inner(app: &mut AppView, new: bool) {
 
     // Telemetry and tracing fire only on a real state change
     if previous_state != new {
+        let from_mode = if agent.plan_mode_pending.unwrap_or(agent.plan_mode_active) {
+            "plan"
+        } else if previous_state {
+            "bypass_permissions"
+        } else {
+            "default"
+        };
         xai_grok_telemetry::session_ctx::log_event(xai_grok_telemetry::events::YoloToggled {
             enabled: new,
             previous_state,
             trigger: xai_grok_telemetry::events::YoloTrigger::Pager,
+            from_mode: Some(from_mode.to_owned()),
         });
         tracing::info!(target: "settings", key = "permission_mode", value = new, "setting changed");
     }

@@ -6,12 +6,10 @@
 //! Official catalog (25 languages):
 //! <https://docs.x.ai/developers/model-capabilities/audio/speech-to-text#supported-languages>
 //!
-//! Per the docs, the model can transcribe these languages regardless of the
-//! parameter; setting `language` enables Inverse Text Normalization (numbers,
-//! currencies, units → written form) for that language. The STT API does **not**
-//! accept `auto` (unlike TTS) — clients must send a concrete code. Use
-//! [`language_for_api`] to resolve a stored preference (including the client-only
-//! `auto` sentinel) before connecting.
+//! Per the docs, the model can transcribe these languages regardless of the parameter.
+//! Setting `language` enables Inverse Text Normalization for that language: numbers, currencies, and units come out in written form.
+//! The STT API does **not** accept `auto` (unlike TTS); clients must send a concrete code.
+//! Use [`language_for_api`] to resolve a stored preference (including the client-only `auto` sentinel) before connecting.
 
 /// One supported STT language from the public API catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,7 +21,7 @@ pub struct SttLanguage {
 }
 
 /// Client-only sentinel meaning “resolve from the process locale at connect time”.
-/// Never send this value to the STT API — use [`language_for_api`].
+/// Never send this value to the STT API; use [`language_for_api`].
 pub const STT_LANGUAGE_AUTO: &str = "auto";
 
 /// Default STT language when unset or unrecognized.
@@ -31,8 +29,8 @@ pub const STT_LANGUAGE_DEFAULT: &str = "en";
 
 /// Official Grok STT languages (docs.x.ai), sorted by English name.
 ///
-/// Keep this list in lockstep with the public docs. Adding a code that the API
-/// does not list will not break transcription, but ITN formatting may not apply.
+/// Keep this list in lockstep with the public docs.
+/// Adding a code that the API does not list will not break transcription, but ITN formatting may not apply.
 pub const STT_LANGUAGES: &[SttLanguage] = &[
     SttLanguage {
         code: "ar",
@@ -143,11 +141,11 @@ pub fn stt_language_by_code(code: &str) -> Option<&'static SttLanguage> {
 
 /// Map a user/config string to a catalog code or [`STT_LANGUAGE_AUTO`].
 ///
-/// - `None` / blank / unknown → [`STT_LANGUAGE_DEFAULT`] (`en`)
-/// - `auto` (any case) → [`STT_LANGUAGE_AUTO`]
-/// - Exact catalog code (any case) → that code
-/// - BCP-47 / locale forms (`en-US`, `pt_BR.UTF-8`) → primary subtag when supported
-/// - Common aliases: `tl` → `fil` (Tagalog → Filipino)
+/// - `None`, blank, and unknown values map to [`STT_LANGUAGE_DEFAULT`] (`en`)
+/// - `auto` (any case) maps to [`STT_LANGUAGE_AUTO`]
+/// - An exact catalog code (any case) maps to that code
+/// - BCP-47 / locale forms (`en-US`, `pt_BR.UTF-8`) map to the primary subtag when supported
+/// - Common aliases map too: `tl` (Tagalog) maps to `fil` (Filipino)
 pub fn canonicalize_stt_language(value: Option<&str>) -> &'static str {
     let raw = value.unwrap_or_default().trim();
     if raw.is_empty() {
@@ -174,7 +172,6 @@ pub fn canonicalize_stt_language(value: Option<&str>) -> &'static str {
 }
 
 /// Concrete language code to send on the STT wire.
-///
 /// Resolves [`STT_LANGUAGE_AUTO`] from the process locale; never returns `auto`.
 pub fn language_for_api(stored: &str) -> &'static str {
     let canonical = canonicalize_stt_language(Some(stored));
@@ -185,10 +182,8 @@ pub fn language_for_api(stored: &str) -> &'static str {
     }
 }
 
-/// Best-effort system locale → supported STT code (`None` if unset/unsupported).
-///
-/// POSIX precedence, treating set-but-empty vars as unset (an empty `LC_ALL`
-/// must not mask a usable `LANG`).
+/// Best-effort map from the system locale to a supported STT code (`None` if unset or unsupported).
+/// The vars are read in POSIX precedence, treating set-but-empty vars as unset (an empty `LC_ALL` must not mask a usable `LANG`).
 fn system_stt_language() -> Option<&'static str> {
     let loc = ["LC_ALL", "LC_MESSAGES", "LANG"]
         .into_iter()

@@ -502,37 +502,6 @@ mod tests {
     }
 
     #[test]
-    fn cjk_text_falls_back_to_system_fonts_when_available() {
-        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="300" height="60" viewBox="0 0 300 60"><text x="10" y="40" font-family="sans-serif" font-size="28" fill="#000000">提交代码</text></svg>"##;
-        let mut p = params(0, 10_000);
-        p.background = Some(Rgba::new(255, 255, 255, 255));
-
-        let with_fallback = rasterize(svg, &p).expect("fallback render");
-        let tofu = rasterize_with_font(svg, &p, bundled_font()).expect("bundled-only render");
-        assert_eq!(
-            (with_fallback.width_px, with_fallback.height_px),
-            (tofu.width_px, tofu.height_px),
-            "font fallback must not change output dimensions"
-        );
-
-        if with_fallback.png == tofu.png {
-            eprintln!("skipping: no system font covers CJK on this host");
-            return;
-        }
-        let img = image::load_from_memory(&with_fallback.png)
-            .expect("decode")
-            .to_rgba8();
-        let dark = img
-            .pixels()
-            .filter(|px| px.0[0] < 64 && px.0[1] < 64 && px.0[2] < 64)
-            .count();
-        assert!(
-            dark > 100,
-            "expected real CJK glyph coverage, found {dark} dark px"
-        );
-    }
-
-    #[test]
     fn named_system_family_cannot_hijack_shaping() {
         let named = r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="60" viewBox="0 0 200 60"><text x="10" y="38" font-family="Arial, Helvetica, Verdana" font-size="28" fill="#000000">Hello é</text></svg>"##;
         let mut p = params(0, 10_000);

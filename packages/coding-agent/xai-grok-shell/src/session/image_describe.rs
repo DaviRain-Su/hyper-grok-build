@@ -1,23 +1,17 @@
 //! Image processing helpers for sessions with image inputs.
 //!
-//! That harness uses a separate vision endpoint to describe images
-//! rather than passing them inline. When a user message contains image
-//! content blocks, the session calls a vision-capable Grok model
-//! (defaults to the agent's current model unless explicitly overridden)
-//! to produce text descriptions that are injected into the turn. Per-image
-//! requests are deduplicated via [`ImageDescribeCache`] (same bytes +
-//! same describe prompt fingerprint).
+//! That harness uses a separate vision endpoint to describe images rather than passing them inline.
+//! When a user message contains image content blocks, the session calls a vision-capable Grok model.
+//! The model's text descriptions are injected into the turn.
+//! The vision model defaults to the agent's current model unless explicitly overridden.
+//! Per-image requests are deduplicated via [`ImageDescribeCache`] (same bytes and same describe prompt fingerprint).
 //!
-//! This module owns the **pure** building blocks: the deterministic
-//! conversation outline assembled from prior real user messages, the
-//! describe-prompt template, and the final user-message envelope sent to
-//! the coding model. The sampling round-trip and the wiring inside
-//! `handle_prompt` live in `acp_session.rs`.
+//! This module owns the **pure** building blocks: the conversation outline, the describe-prompt template, and the final user-message envelope.
+//! The outline is deterministic and assembled from prior real user messages; the envelope goes to the coding model.
+//! The sampling round-trip and the wiring inside `handle_prompt` live in `acp_session.rs`.
 //!
-//! The pipeline is wired into `SessionActor::handle_prompt` so a user
-//! turn that contains image blocks is routed through the vision model
-//! before being pushed onto chat state. If the describe call fails the
-//! whole turn fails -- we never silently drop the images.
+//! A user turn that contains image blocks is routed through the vision model before being pushed onto chat state.
+//! If the describe call fails the whole turn fails; we never silently drop the images.
 use crate::sampling::{Client as OaiCompatClient, ConversationRequest};
 use agent_client_protocol::ImageContent;
 use base64::Engine as _;
@@ -27,32 +21,26 @@ use std::path::{Path, PathBuf};
 use xai_chat_state::compaction_utils::{extract_real_user_queries, extract_user_query};
 use xai_grok_sampling_types::conversation::{ContentPart, ConversationItem, UserItem};
 use xai_grok_tools::util::truncate::truncate_middle;
-/// Per-entry character cap for the conversation outline sent to the
-/// vision model. Mirrors the compat-harness behavior.
+/// Per-entry character cap for the conversation outline sent to the vision model.
+/// Mirrors the compat-harness behavior.
 pub(crate) const OUTLINE_PER_ENTRY_CAP: usize = 1_500;
 /// Total character cap for the assembled outline block.
 pub(crate) const OUTLINE_TOTAL_CAP: usize = 4_000;
-/// Maximum number of prior user requests to surface in the outline.
+/// Maximum number of prior user requests to include in the outline.
 pub(crate) const OUTLINE_MAX_ENTRIES: usize = 5;
-/// Character cap on the current `<user_query>` text injected into the
-/// describe prompt. Prevents pathological prompts from blowing up the
-/// vision request.
+/// Character cap on the current `<user_query>` text injected into the describe prompt.
 pub(crate) const CURRENT_QUERY_CAP: usize = 12_000;
-/// Maximum number of images that will be captioned per turn. Only the
-/// **last** N images are described; older ones receive
-/// [`SKIPPED_IMAGE_MARKER`]. Default 16.
+/// Maximum number of images that will be captioned per turn.
+/// Only the **last** N images are described; older ones receive [`SKIPPED_IMAGE_MARKER`].
 pub(crate) const IMAGE_DESCRIPTION_PROCESSING_LIMIT: usize = 16;
-/// Placeholder stamped on images that fall outside
-/// [`IMAGE_DESCRIPTION_PROCESSING_LIMIT`].
+/// Placeholder stamped on images that fall outside [`IMAGE_DESCRIPTION_PROCESSING_LIMIT`].
 pub(crate) const SKIPPED_IMAGE_MARKER: &str = "[skipped-due-to-limit]";
-/// Empty twin: no optional template is compiled in, nothing extra to strip.
+/// Without the `cursor` feature no optional template is compiled in, so there is nothing extra to strip.
 const OPTIONAL_CONTEXT_TAGS: &[&str] = &[];
-/// Strip template-specific context tags from text before it reaches the
-/// image-description prompt. Uses attribute-aware matching so tags like
-/// `<always_applied_workspace_rules type="...">` are caught.
+/// Strip template-specific context tags from text before it reaches the image-description prompt.
+/// Uses attribute-aware matching so tags like `<always_applied_workspace_rules type="...">` are caught.
 ///
-/// Runs **after** `extract_user_query` (which handles the shared tags),
-/// so this only needs to cover the template-specific additions.
+/// Runs **after** `extract_user_query` (which handles the shared tags), so this only needs to cover the template-specific additions.
 pub(crate) fn strip_template_context_tags(text: &str) -> String {
     let mut result = text.to_string();
     for tag in OPTIONAL_CONTEXT_TAGS {
@@ -97,24 +85,15 @@ fn collapse_newlines(s: &str) -> String {
     }
     result.trim().to_string()
 }
-/// Build the deterministic conversation outline from prior user
-/// messages.
+/// Build the deterministic conversation outline from prior user messages.
 ///
 /// Rules:
-/// - Source = `extract_real_user_queries(conversation)` (already filters
-///   synthetic, auto-continue, and disclaimer turns).
-/// - The caller passes the conversation snapshot **before** pushing the
-///   current turn, so we naturally exclude the latest user request --
-///   that text is rendered separately inside `<user_query>`.
-/// - Keep at most the last [`OUTLINE_MAX_ENTRIES`] real user messages.
-/// - Strip wrapper tags via [`extract_user_query`] (idempotent on already-
-///   stripped text).
-/// - Truncate each entry to [`OUTLINE_PER_ENTRY_CAP`] characters.
-/// - Join with blank lines and cap the joined string at
-///   [`OUTLINE_TOTAL_CAP`] characters.
+/// - The source is `extract_real_user_queries(conversation)` (already filters synthetic, auto-continue, and disclaimer turns).
+/// - The caller passes the conversation snapshot **before** pushing the current turn, so the latest user request is naturally excluded.
+///   That text is rendered separately inside `<user_query>`.
+/// - Strip wrapper tags via [`extract_user_query`] (idempotent on already-stripped text).
 ///
-/// Returns `None` when no prior user messages exist, so callers can omit
-/// the entire `<conversation_history_outline>` block from the prompt.
+/// Returns `None` when no prior user messages exist, so callers can omit the entire `<conversation_history_outline>` block from the prompt.
 pub(crate) fn build_conversation_outline(
     prior_conversation: &[ConversationItem],
 ) -> Option<String> {
@@ -142,13 +121,11 @@ pub(crate) fn build_conversation_outline(
     let capped = truncate_middle(&joined, OUTLINE_TOTAL_CAP);
     Some(capped)
 }
-/// Render the system/user prompt text shown to the image-description
-/// model. The actual image bytes/URLs are attached as separate content
-/// parts by the caller.
+/// Render the system/user prompt text shown to the image-description model.
+/// The actual image bytes/URLs are attached as separate content parts by the caller.
 ///
-/// `current_query` should be the extracted user query text (without
-/// `<user_query>` wrappers); we wrap it here to keep the template owned
-/// in one place.
+/// `current_query` should be the extracted user query text (without `<user_query>` wrappers).
+/// We wrap it here to keep the template owned in one place.
 pub(crate) fn build_describe_prompt(outline: Option<&str>, current_query: &str) -> String {
     let capped_query = truncate_middle(current_query, CURRENT_QUERY_CAP);
     let mut parts: Vec<String> = Vec::with_capacity(6);
@@ -183,22 +160,15 @@ pub(crate) fn build_describe_prompt(outline: Option<&str>, current_query: &str) 
         );
     parts.join(" ")
 }
-/// Sanitize a **single-line** string before interpolating it into a
-/// structured envelope.
+/// Sanitize a **single-line** string before interpolating it into a structured envelope.
 ///
-/// Intended for fields whose semantic shape is a single line — paths,
-/// MIME types, upstream error messages — where newlines / CR / NUL
-/// would forge log lines in text-formatted subscribers. Strips every
-/// ASCII control char (including `\n` and `\r`) and replaces `<` / `>`
-/// with the typographic look-alikes `‹` / `›` so envelope-close tags
-/// cannot be forged.
+/// Intended for fields that are one logical line: paths, MIME types, upstream error messages.
+/// In those, newlines, CR, or NUL would forge log lines in text-formatted subscribers.
+/// Replaces `<` / `>` with the typographic look-alikes `‹` / `›` so envelope-close tags cannot be forged.
 ///
-/// For **multi-line body** content (e.g. the vision-model
-/// description), use [`scrub_envelope_body`] instead — preserving
-/// paragraph structure matters there.
+/// For **multi-line body** content (e.g. the vision-model description), use [`scrub_envelope_body`] instead, which preserves paragraph structure.
 ///
-/// Trade-off: model output sees `‹` instead of `<` in the scrubbed
-/// region. Acceptable — these are envelope fillers, not source code.
+/// Trade-off: model output sees `‹` instead of `<` in the scrubbed region; these are envelope fillers, not source code.
 pub(crate) fn scrub_for_envelope(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -211,16 +181,11 @@ pub(crate) fn scrub_for_envelope(s: &str) -> String {
     }
     out
 }
-/// Sanitize a **body** string (multi-paragraph) before interpolating
-/// it into a structured envelope.
+/// Sanitize a **body** string (multi-paragraph) before interpolating it into a structured envelope.
 ///
-/// Like [`scrub_for_envelope`] but **preserves `\n`** so multi-paragraph
-/// content keeps its structure inside the envelope. `\r` and `\0` are
-/// still stripped (CR mid-line is a log-forge risk regardless of
-/// newlines elsewhere, and NUL has no legitimate use in model text).
-/// Other ASCII controls (BEL, ESC, etc.) are also stripped because
-/// they have no meaningful rendering and may corrupt terminal output
-/// in TUI-side downstream consumers.
+/// Like [`scrub_for_envelope`] but **preserves `\n`** so multi-paragraph content keeps its structure inside the envelope.
+/// `\r` and `\0` are still stripped (CR mid-line is a log-forge risk regardless of newlines elsewhere, and NUL has no legitimate use in model text).
+/// Other ASCII controls (BEL, ESC, etc.) are also stripped; they render as nothing useful and can corrupt terminal output in TUI consumers.
 pub(crate) fn scrub_envelope_body(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -234,22 +199,17 @@ pub(crate) fn scrub_envelope_body(s: &str) -> String {
     }
     out
 }
-/// Build the `<image>...<image_description>...</image>` envelope that
-/// gets prepended to the user message sent to the coding model. The
-/// `description` is scrubbed via [`scrub_envelope_body`] (preserves
-/// newlines for paragraph structure, strips `<`/`>`/`\r`/`\0`) so a
-/// vision-model output containing a literal `</image_description>` or
-/// `</image>` cannot close the envelope early — without flattening
-/// multi-paragraph descriptions into a single line.
+/// Build the `<image>...<image_description>...</image>` envelope that gets prepended to the user message sent to the coding model.
+/// The `description` is scrubbed via [`scrub_envelope_body`], which keeps newlines.
+/// A vision-model output containing a literal `</image_description>` or `</image>` therefore cannot close the envelope early.
 pub(crate) fn render_image_description_block(description: &str) -> String {
     let description = scrub_envelope_body(description.trim_end());
     format!(
         "<image>This is an image, but instead of showing it, you are given a description of it.\n\n<image_description>\n{description}\n</image_description>\nDon't mention to the user that you only have a description of the image.</image>",
     )
 }
-/// Stable fingerprint of the text passed to the vision model (outline +
-/// current user query). When this changes, cached descriptions for the
-/// same image bytes are not reused.
+/// Stable fingerprint of the text passed to the vision model (outline and current user query).
+/// When this changes, cached descriptions for the same image bytes are not reused.
 pub(crate) fn describe_prompt_fingerprint(outline: Option<&str>, current_query: &str) -> String {
     let mut hasher = blake3::Hasher::new();
     if let Some(o) = outline {
@@ -261,8 +221,7 @@ pub(crate) fn describe_prompt_fingerprint(outline: Option<&str>, current_query: 
     hasher.update(current_query.as_bytes());
     hasher.finalize().to_hex().to_string()
 }
-/// Raw blake3 digest for binary cache keys; use [`content_fingerprint`]
-/// for log lines and on-disk paths.
+/// Raw blake3 digest for binary cache keys; use [`content_fingerprint`] for log lines and on-disk paths.
 pub(crate) fn content_fingerprint_bytes(bytes: &[u8]) -> [u8; 32] {
     *blake3::hash(bytes).as_bytes()
 }
@@ -272,13 +231,12 @@ pub(crate) fn content_fingerprint(bytes: &[u8]) -> String {
         .to_hex()
         .to_string()
 }
-/// Distinguishes cache namespaces (user attachment vs tool read).
+/// Distinguishes cache namespaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ImageDescribeSource {
     UserAttachment,
 }
-/// Session-scoped cache for auxiliary image outputs: keyed by source, stable
-/// path label, content hash, and prompt fingerprint.
+/// Session-scoped cache for auxiliary image outputs: keyed by source, stable path label, content hash, and prompt fingerprint.
 #[derive(Debug, Default)]
 pub(crate) struct ImageDescribeCache {
     inner: Mutex<HashMap<(ImageDescribeSource, String, String, String), String>>,
@@ -289,9 +247,7 @@ impl ImageDescribeCache {
             inner: Mutex::new(HashMap::new()),
         }
     }
-    /// Returns a cached description when `(source, path_key, bytes, prompt)`
-    /// matches a prior successful describe; otherwise calls the vision
-    /// model, stores the result, and returns it.
+    /// Returns a cached description when `(source, path_key, bytes, prompt)` matches a prior successful describe.
     pub(crate) async fn get_or_describe(
         &self,
         client: xai_grok_sampler::SamplingClient,
@@ -321,13 +277,10 @@ impl ImageDescribeCache {
         Ok(description)
     }
 }
-/// Build the `<image_files>` envelope that lists the workspace paths
-/// where copies of the user's images live. `paths` should be in the
-/// same order the user supplied them.
+/// Build the `<image_files>` envelope that lists the workspace paths where copies of the user's images live.
+/// `paths` should be in the same order the user supplied them.
 ///
-/// Each path is scrubbed via [`scrub_for_envelope`] before
-/// interpolation so a user-controlled path containing a literal
-/// `</image_files>` cannot close the envelope early.
+/// Each path goes through [`scrub_for_envelope`], so a user-controlled path containing a literal `</image_files>` cannot close the envelope early.
 pub(crate) fn render_image_files_block(paths: &[String]) -> Option<String> {
     if paths.is_empty() {
         return None;
@@ -342,25 +295,20 @@ pub(crate) fn render_image_files_block(paths: &[String]) -> Option<String> {
     out.push_str("\nThese images can be copied for use in other locations.\n</image_files>");
     Some(out)
 }
-/// Result of persisting one user-supplied image to the session's
-/// `assets/` directory.
+/// Result of persisting one user-supplied image to the session's `assets/` directory.
 #[derive(Debug, Clone)]
 pub(crate) struct PersistedImage {
-    /// Absolute path on disk; surfaced to the coding model in the
-    /// `<image_files>` block.
+    /// Absolute path on disk; shown to the coding model in the `<image_files>` block.
     pub path: PathBuf,
-    /// Raw image bytes (decoded from the user attachment). Used for
-    /// session-local describe caching keyed by content + describe context.
+    /// Used for session-local describe caching keyed by content and describe context.
     pub raw_bytes: Vec<u8>,
     /// MIME type from the original [`ImageContent`].
     pub mime_type: String,
 }
 /// Persist a batch of normalized images to `<session_dir>/assets/`.
 ///
-/// Each file is written as `image-<uuid>.<ext>` where `<ext>` is
-/// inferred from `mime_type` (falling back to `png`). Returns one
-/// [`PersistedImage`] per input, in input order, so callers can render
-/// the `<image_files>` list deterministically.
+/// Each file is written as `image-<uuid>.<ext>` where `<ext>` is inferred from `mime_type` (falling back to `png`).
+/// Returns one [`PersistedImage`] per input, in input order, so callers can render the `<image_files>` list deterministically.
 pub(crate) fn persist_user_images(
     session_dir: &Path,
     images: &[ImageContent],
@@ -398,47 +346,25 @@ fn mime_to_extension(mime: &str) -> &'static str {
         _ => "png",
     }
 }
-/// Errors surfaced by the image describe round-trip.
-///
-/// Variants are kept distinct so the caller in `acp_session.rs` can branch
-/// — e.g. a [`Self::Sampling`] error is a transport problem that may
-/// resolve on retry, while [`Self::EmptyResponse`] indicates the vision
-/// model returned blank text and any retry will likely repeat the same
-/// outcome. Degradation policy (whether to abort, retry, or emit a
-/// stub `ToolResult` with the raw image bytes inline) is the caller's
-/// responsibility; this module never silently fakes a successful
-/// description.
+/// Variants are kept distinct so the caller in `acp_session.rs` can branch.
+/// Degradation policy (whether to abort, retry, or emit a stub `ToolResult` with the raw image bytes inline) is the caller's responsibility.
+/// This module never silently fakes a successful description.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DescribeError {
-    /// The describe sampling call itself failed (transport error, auth
-    /// failure, model not found, etc.). The string is the upstream error
-    /// rendered with `{e}` — opaque to this module but useful for the
-    /// caller's log line and the model-facing degraded message.
-    ///
-    /// Recommended caller behaviour: treat the round-trip as unavailable
-    /// for this turn; fall back to attaching the raw image bytes inline
-    /// when the surface supports it.
+    /// The describe sampling call itself failed (transport error, auth failure, model not found, etc.).
+    /// The string is the upstream error rendered with `{e}`.
     #[error("image describe call failed: {0}")]
     Sampling(String),
-    /// The vision model returned blank text after `trim()`. This is a
-    /// soft failure (the call itself succeeded) but the description is
-    /// unusable.
-    ///
-    /// Recommended caller behaviour: treat transcription as unavailable
-    /// for this image; do not retry on the same bytes; surface the
-    /// failure to the coding model as a degraded `ToolResult` (image
-    /// bytes inline if supported, otherwise a text-only "transcription
-    /// unavailable" note) rather than abort the turn.
+    /// The vision model returned blank text after `trim()`.
+    /// This is a soft failure (the call itself succeeded) but the description is unusable.
     #[error("image describe model returned no content")]
     EmptyResponse,
 }
 /// Call the vision model and return its description text.
 ///
-/// `image_urls` should be the cached URLs from
-/// [`persist_user_images`] (`uri` if present on the original
-/// [`ImageContent`], otherwise the `data:<mime>;base64,...` URI). The
-/// caller is responsible for outline + prompt assembly so this stays a
-/// pure transport helper.
+/// `image_urls` should be the cached URLs from [`persist_user_images`].
+/// That is `uri` if present on the original [`ImageContent`], otherwise the `data:<mime>;base64,...` URI.
+/// The caller is responsible for outline and prompt assembly so this stays a pure transport helper.
 pub(crate) async fn describe_user_images(
     client: OaiCompatClient,
     model: &str,
@@ -483,10 +409,8 @@ pub(crate) async fn describe_user_images(
     }
     Ok(trimmed.to_owned())
 }
-/// Compose the final user-message text shown to the coding model when a
-/// turn includes images. The order matches the compat-harness wire format:
-/// `<image>` block(s), `<image_files>` block, then the original
-/// `<user_query>`-wrapped user text.
+/// Compose the final user-message text shown to the coding model when a turn includes images.
+/// The order matches the compat-harness wire format: `<image>` block(s), `<image_files>` block, then the original `<user_query>`-wrapped user text.
 pub(crate) fn render_image_user_message(
     description: &str,
     image_paths: &[String],
@@ -544,8 +468,7 @@ mod tests {
         let assets = std::fs::read_dir(dir.path().join("assets")).unwrap();
         assert_eq!(assets.count(), 1);
     }
-    /// User attachments can be a session's first write — the assets dir must
-    /// be born owner-only.
+    /// User attachments can be a session's first write; the assets dir must be created owner-only.
     #[cfg(unix)]
     #[test]
     fn persist_user_images_creates_owner_only_assets_dir() {

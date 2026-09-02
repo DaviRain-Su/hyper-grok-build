@@ -1,5 +1,4 @@
-//! Scroll flight recorder — `GROK_SCROLL_LOG` JSONL log of scroll-stream
-//! transitions, for offline analysis of real gestures.
+//! `GROK_SCROLL_LOG` enables a JSONL log of scroll-stream transitions for offline analysis of real gestures.
 //!
 //! The scroll-debug HUD ([`crate::views::scroll_debug_hud`]) samples state
 //! per frame; this recorder captures every state-machine transition
@@ -16,15 +15,11 @@
 //!
 //! Enablement: `GROK_SCROLL_LOG=1` (or set-but-empty) logs to
 //! `~/.grok/logs/scroll-log-<timestamp>.jsonl`; any other non-`0` value is
-//! used as the target path. Unset (or `0`, matching `GROK_SCROLL_DEBUG`)
-//! disables: [`super::mouse::MouseScrollState`] then holds `None` and every
-//! emission point costs one branch.
+//! used as the target path.
+//! Unset (or `0`, matching `GROK_SCROLL_DEBUG`) disables: [`super::mouse::MouseScrollState`] holds `None` and each emission point costs one branch.
 //!
-//! Invariant (same contract as the HUD): pure observation — the recorder is
-//! write-only for the state machine and never feeds back into scroll
-//! behavior. IO failures drop the record and disable the recorder with a
-//! single `tracing::warn!` (never stderr — that is the TUI's terminal), and
-//! never panic.
+//! Invariant (same contract as the HUD): pure observation; the recorder never feeds back into scroll behavior.
+//! IO failures drop the record and disable the recorder with a single `tracing::warn!` (never stderr; that is the TUI's terminal), and never panic.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -37,15 +32,13 @@ use serde::Serialize;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ScrollLogEvt {
-    /// A new stream was created; its `carry` field shows the sub-line
-    /// remainder that rode in from the previous same-direction stream.
+    /// A new stream was created; its `carry` field shows the sub-line remainder that rode in from the previous same-direction stream.
     StreamStart,
     /// A flush delivered lines mid-stream.
     Flush,
-    /// The stream ended (80ms gap or direction flip): `flushed` is the
-    /// tapered catch-up flush (0 once the post-gap drain ran dry), `dropped`
-    /// the whole-line backlog discarded with the stream (flip cancellations
-    /// and coast-budget write-offs).
+    /// The stream ended (80ms gap or direction flip).
+    /// `flushed` is the tapered catch-up flush (0 once the post-gap drain ran dry).
+    /// `dropped` is the whole-line backlog discarded with the stream (flip cancellations and coast-budget write-offs).
     Finalize,
 }
 
@@ -59,18 +52,15 @@ pub(crate) enum ScrollLogTrigger {
     Tick,
     /// Immediate flush when Auto-mode wheel promotion fired.
     Promotion,
-    /// The capped flush inside stream finalize. Detection path is
-    /// recoverable: a finalize followed at the same `ts_ms` by a
-    /// `stream_start` came from the event path (flip/regrasp); one with no
-    /// successor came from the tick path (fingers stopped).
+    /// The capped flush inside stream finalize.
+    /// A finalize followed at the same `ts_ms` by a `stream_start` came from the event path (flip/regrasp).
+    /// One with no successor came from the tick path (fingers stopped).
     Finalize,
 }
 
-/// Config echo carried by `stream_start` records only: attributes the
-/// gesture to a playground variant offline (speed/lines are otherwise
-/// confounded inside `desired`/`accel`). Per-flush records skip it.
-/// `ept`/`lpt` abbreviate events/lines per tick; `mode` is the
-/// [`super::mouse::ScrollInputMode`] label in effect.
+/// Config echo carried by `stream_start` records only.
+/// It attributes the gesture to a playground variant offline (speed/lines are otherwise confounded inside `desired`/`accel`).
+/// `ept`/`lpt` abbreviate events/lines per tick; `mode` is the [`super::mouse::ScrollInputMode`] label in effect.
 #[derive(Clone, Copy, Debug, Serialize)]
 pub(crate) struct ScrollLogConfigEcho {
     pub mode: &'static str,
@@ -82,9 +72,8 @@ pub(crate) struct ScrollLogConfigEcho {
     pub viewport_height: u16,
 }
 
-/// Per-record facts supplied by the state machine ([`super::mouse`]); the
-/// recorder adds the bookkeeping fields (`ts_ms`, `events_since_flush`,
-/// `ms_since_prev_flush`) when building the [`ScrollLogRecord`].
+/// Per-record facts supplied by the state machine ([`super::mouse`]).
+/// The recorder adds the bookkeeping fields (`ts_ms`, `events_since_flush`, `ms_since_prev_flush`) when building the [`ScrollLogRecord`].
 pub(crate) struct ScrollLogEvent {
     pub evt: ScrollLogEvt,
     pub trigger: ScrollLogTrigger,
@@ -92,8 +81,7 @@ pub(crate) struct ScrollLogEvent {
     pub kind: &'static str,
     /// Events accumulated in the stream so far.
     pub events_total: usize,
-    /// Rolling average inter-event interval (ms); `None` until two
-    /// accel-countable events arrived.
+    /// Rolling average inter-event interval (ms); `None` until two accel-countable events arrived.
     pub avg_interval_ms: Option<f32>,
     /// Acceleration multiplier in effect.
     pub accel: f32,
@@ -109,18 +97,16 @@ pub(crate) struct ScrollLogEvent {
     pub carry: f32,
     /// Per-flush delta cap in effect.
     pub cap: i32,
-    /// Finalize only: whole lines discarded with the stream (equals
-    /// `backlog_after` there by construction).
+    /// Finalize only: whole lines discarded with the stream (equals `backlog_after` there by construction).
     pub dropped: Option<i32>,
     /// Stream-start only: the config captured on the stream.
     pub config: Option<ScrollLogConfigEcho>,
 }
 
-/// One serialized JSONL line: [`ScrollLogEvent`] plus recorder-computed
-/// `ts_ms` (monotonic ms since recorder start), `events_since_flush`
-/// (arrivals since the last logged flush/finalize of this stream), and
-/// `ms_since_prev_flush` (spacing from the previous flush-bearing record;
-/// absent before the first).
+/// One serialized JSONL line: [`ScrollLogEvent`] plus fields the recorder computes.
+/// `ts_ms` is monotonic ms since recorder start.
+/// `events_since_flush` counts arrivals since the last logged flush/finalize of this stream.
+/// `ms_since_prev_flush` is the spacing from the previous flush-bearing record, absent before the first.
 #[derive(Serialize)]
 struct ScrollLogRecord {
     ts_ms: f64,
@@ -155,15 +141,13 @@ enum Sink {
     Disabled,
 }
 
-/// Appends [`ScrollLogRecord`]s to the `GROK_SCROLL_LOG` file. Owned as
-/// `Option<Self>` by [`super::mouse::MouseScrollState`]; construction reads
-/// the env once, the file opens on the first record so an enabled-but-idle
-/// session creates nothing.
+/// Appends [`ScrollLogRecord`]s to the `GROK_SCROLL_LOG` file.
+/// Owned as `Option<Self>` by [`super::mouse::MouseScrollState`].
+/// Construction reads the env once; the file opens on the first record so an enabled-but-idle session creates nothing.
 #[derive(Debug)]
 pub(crate) struct ScrollLogRecorder {
-    /// Time origin for `ts_ms`; the state machine's construction instant
-    /// (tests: the synthetic timeline), or the toggle instant for a
-    /// `/debug log` runtime-enabled recorder — self-consistent either way.
+    /// Time origin for `ts_ms`: the state machine's construction instant (tests: the synthetic timeline), or the instant `/debug log` enabled it.
+    /// Either origin keeps the log self-consistent.
     base: Instant,
     sink: Sink,
     /// Emission time of the previous flush-bearing record.
@@ -173,8 +157,7 @@ pub(crate) struct ScrollLogRecorder {
 }
 
 impl ScrollLogRecorder {
-    /// Build from `GROK_SCROLL_LOG` (see module docs for value semantics);
-    /// `None` when unset or `0`.
+    /// Build from `GROK_SCROLL_LOG` (the module docs describe the accepted values); `None` when unset or `0`.
     pub(crate) fn from_env_at(base: Instant) -> Option<Self> {
         let raw = std::env::var("GROK_SCROLL_LOG").ok()?;
         let value = raw.trim();
@@ -199,8 +182,8 @@ impl ScrollLogRecorder {
         }
     }
 
-    /// Append one record. `now` must be the same instant the state machine
-    /// used for the transition, so the log is exactly its timeline.
+    /// Append one record.
+    /// `now` must be the same instant the state machine used for the transition, so the log is exactly its timeline.
     pub(crate) fn record(&mut self, now: Instant, event: ScrollLogEvent) {
         if matches!(self.sink, Sink::Disabled) {
             return;
@@ -257,7 +240,7 @@ impl ScrollLogRecorder {
             return;
         };
         let result = writeln!(writer, "{line}").and_then(|()| {
-            // Finalize marks a gesture boundary: surface it to tail -f.
+            // Finalize marks a gesture boundary: flush so a live `tail -f` sees it
             if flush_now { writer.flush() } else { Ok(()) }
         });
         if let Err(err) = result {
@@ -277,8 +260,8 @@ fn open_writer(path: &Path) -> std::io::Result<BufWriter<File>> {
 }
 
 /// `~/.grok/logs/scroll-log-<utc-ts>.jsonl` — the input-debug dump's dir
-/// and timestamp conventions ([`crate::input_log`]). Also the target of the
-/// `/debug log` runtime toggle ([`super::mouse::MouseScrollState`]).
+/// and timestamp conventions ([`crate::input_log`]).
+/// It is also the target of the `/debug log` runtime toggle ([`super::mouse::MouseScrollState`]).
 pub(crate) fn default_log_path() -> PathBuf {
     let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
     xai_grok_tools::util::grok_home::grok_home()

@@ -1,12 +1,11 @@
 //! Wire protocol between the `__mic-capture` helper child and its parent.
 //!
 //! One status header line on stdout, then (in capture mode) raw PCM:
-//! - `READY <device>` — capture stream open, PCM follows;
-//! - `INFO <name>\t<detail>` — device lookup result (no stream);
-//! - `ERR <message>` — failure, non-zero exit.
+//! - `READY <device>`: capture stream open, PCM follows;
+//! - `INFO <name>\t<detail>`: device lookup result (no stream);
+//! - `ERR <message>`: failure, non-zero exit.
 //!
-//! The child builds lines with the helpers here and the parent parses with
-//! the same tags, so the two sides cannot drift.
+//! The child builds lines with the helpers here and the parent parses with the same tags, so the two sides cannot drift.
 
 /// Capture stream is open; raw PCM follows this line.
 pub(super) const READY: &str = "READY";
@@ -33,9 +32,8 @@ pub(super) fn err_line(message: &str) -> String {
     format!("{ERR} {}", sanitize(message))
 }
 
-/// Header payloads must stay single-line for the parent's line-oriented
-/// handshake, and must not contain the `INFO` field separator (a device name
-/// with a tab would otherwise bleed into the detail field).
+/// Header payloads must stay single-line for the parent's line-oriented handshake, and must not contain the `INFO` field separator.
+/// (A device name with a tab would otherwise bleed into the detail field.)
 fn sanitize(s: &str) -> String {
     s.replace(['\n', '\r', INFO_FIELD_SEPARATOR], " ")
 }

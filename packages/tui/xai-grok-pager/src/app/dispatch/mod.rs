@@ -39,8 +39,8 @@ mod voice;
 pub(crate) use auth::scrollback_has_recent_disk_full;
 pub(in crate::app) use auth::scrollback_has_recent_error_banner;
 pub(crate) use billing::{
-    UPSELL_ACTION_DISMISS, UPSELL_ACTION_SWITCH_MODEL, UPSELL_URL_PAYG, UPSELL_URL_UPGRADE,
-    is_credit_limit_error,
+    CREDIT_LIMIT_RETRY_OPTION_ID, UPSELL_ACTION_DISMISS, UPSELL_ACTION_SWITCH_MODEL,
+    UPSELL_URL_PAYG, UPSELL_URL_UPGRADE, is_credit_limit_error,
 };
 #[cfg(feature = "codex-live")]
 pub(crate) use live::stop_live_on_teardown;
@@ -53,7 +53,9 @@ pub(crate) use notes::FEEDBACK_TRACE_UPLOAD_TIMEOUT_MS;
 pub(crate) use notes::{recap_unavailable_toast, scrollback_has_user_messages};
 pub(crate) use permissions::resolve_permission_queue_transition;
 pub(crate) use prompt::dispatch_initial_prompt;
-pub(in crate::app) use prompt::{show_small_screen_tip, show_ssh_wrap_tip};
+pub(in crate::app) use prompt::{
+    present_export_copy_tip, show_small_screen_tip, show_ssh_wrap_tip,
+};
 pub(super) use queue::{
     apply_turn_start_shim, arm_send_now_and_paint, maybe_drain_queue_and_note_peek,
     note_peek_page_flip, shim_renders_own_user_block,

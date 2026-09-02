@@ -1,11 +1,6 @@
-//! Shared telemetry/config enums extracted from shell.
-//!
-//! These were originally defined inside `xai-grok-shell` (in
-//! `session::mcp_servers` and `util::config`) but are referenced by
-//! telemetry payload structs in this crate, so they live here and shell
-//! re-exports them from their original paths to keep callers unchanged.
+//! Telemetry payload structs in this crate reference these enums, so they live here.
+//! `xai-grok-shell` re-exports them from their original paths (`session::mcp_servers`, `util::config`) to keep callers unchanged.
 
-/// MCP initialization strategy
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum McpInitStrategy {
@@ -25,8 +20,7 @@ impl<S: AsRef<str>> From<S> for McpInitStrategy {
     }
 }
 
-/// How a PR creation was performed. Shared between the shell's session
-/// signals (`turn_result.json`) and the `pr_created` telemetry event.
+/// Shared between the shell's session signals (`turn_result.json`) and the `pr_created` telemetry event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PrCreationSource {
@@ -36,7 +30,6 @@ pub enum PrCreationSource {
     Mcp,
 }
 
-/// How the agent handles tool execution permissions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionMode {

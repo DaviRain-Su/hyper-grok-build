@@ -1,25 +1,21 @@
 //! Session lifecycle hooks for the memory system.
 //!
-//! Provides `on_session_end()` which auto-saves a session summary to memory
-//! when a session ends. This runs best-effort — failures are logged but
-//! don't prevent shutdown.
+//! Provides `on_session_end()` which auto-saves a session summary to memory when a session ends.
+//! This runs best-effort; failures are logged but don't prevent shutdown.
 //!
 //! ## What is saved
 //!
-//! The current implementation writes a **structured metadata summary** with
-//! zero latency and no LLM call:
+//! The current implementation writes a **structured metadata summary** with zero latency and no LLM call:
 //! - message counts (user / assistant / tool results)
 //! - the first few real user topics from the session (never synthetic prefixes)
 //! - session date
 //!
-//! For richer content capture (decisions, patterns, reasoning)
-//! use `/flush`, which is user-initiated and produces an LLM-generated summary.
+//! For richer content capture (decisions, patterns, reasoning) use `/flush`, which is user-initiated and produces an LLM-generated summary.
 //!
 //! ## Reliability
 //!
-//! - **Minimum conversation gate:** Skip sessions with < 3 *real* user prompts
-//!   or < 50 total query bytes (synthetic metadata-only prefixes and
-//!   auto-continue markers are excluded).
+//! - **Minimum conversation gate:** Skip sessions with fewer than 3 *real* user prompts or under 50 total query bytes.
+//!   Synthetic metadata-only prefixes and auto-continue markers are excluded.
 //! - **`save_on_end` config gate:** Skipped when `[memory.session].save_on_end = false`.
 //! - **SIGTERM:** Triggered via `SessionCommand::Shutdown` handler
 
@@ -28,24 +24,17 @@ use crate::session::memory::storage::{MemoryStorage, slugify};
 
 /// Minimum number of *real* user prompts required to save a session summary.
 ///
-/// "Real" excludes synthetic metadata prefixes and auto-continue sentinels —
-/// see [`extract_real_user_queries`].
+/// "Real" excludes synthetic metadata prefixes and auto-continue sentinels; see [`extract_real_user_queries`].
 const MIN_USER_MESSAGES: usize = 3;
 
-/// Minimum total byte length of all real user queries required to save.
-///
-/// Prevents trivial sessions (e.g. "hey" / "ok" / "thanks") from being indexed
-/// even when they technically exceed [`MIN_USER_MESSAGES`].
-///
-/// Uses `str::len()` (byte length) rather than `chars().count()` — for the
-/// mostly-ASCII inputs this gate targets, the distinction is immaterial.
+/// Prevents trivial sessions (e.g. "hey" / "ok" / "thanks") from being indexed even when they technically exceed [`MIN_USER_MESSAGES`].
+/// Uses `str::len()` (byte length) rather than `chars().count()`; for the mostly-ASCII inputs this gate targets, the distinction is immaterial.
 const MIN_TOTAL_QUERY_BYTES: usize = 50;
 
-/// Result of the session end hook.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionEndResult {
-    /// Session was too short (< [`MIN_USER_MESSAGES`] real user prompts or
-    /// < [`MIN_TOTAL_QUERY_BYTES`] total bytes), or `save_on_end` was false.
+    /// Session was too short (under [`MIN_USER_MESSAGES`] real user prompts or under [`MIN_TOTAL_QUERY_BYTES`] total bytes).
+    /// Also returned when `save_on_end` was false.
     Skipped,
     /// Summary was written to the daily log.
     Written(String),
@@ -53,22 +42,19 @@ pub enum SessionEndResult {
     Failed(String),
 }
 
-/// Real user queries iff the conversation meets the session-end size gate
-/// (enough real prompts, enough total bytes). `None` for empty/brief sessions.
-/// Independent of `save_on_end` so exit dream can still consolidate prior
-/// logs when auto-save is off for a substantial session.
+/// Real user queries iff the conversation meets the session-end size gate (enough real prompts, enough total bytes).
+/// `None` for empty/brief sessions.
 pub(crate) fn queries_meeting_session_end_threshold(
     conversation: &[ConversationItem],
 ) -> Option<Vec<String>> {
-    // Real queries exclude synthetic metadata prefixes and `__auto_continue__`
-    // sentinels (raw user-item counts inflate the gate).
+    // Real queries exclude synthetic metadata prefixes and `__auto_continue__` sentinels (raw user-item counts inflate the gate)
     let real_queries =
         crate::session::helpers::session_compact::extract_real_user_queries(conversation);
     if real_queries.len() < MIN_USER_MESSAGES {
         tracing::debug!(
             real_count = real_queries.len(),
             min = MIN_USER_MESSAGES,
-            "session too short for memory save/dream"
+            "session too short for memory save"
         );
         return None;
     }
@@ -77,23 +63,17 @@ pub(crate) fn queries_meeting_session_end_threshold(
         tracing::debug!(
             total_bytes,
             min = MIN_TOTAL_QUERY_BYTES,
-            "session content too brief for memory save/dream"
+            "session content too brief for memory save"
         );
         return None;
     }
     Some(real_queries)
 }
 
-/// Run the session end hook — save a structured metadata summary to memory.
+/// Run the session end hook: save a structured metadata summary to memory.
 ///
-/// This is called from the `SessionCommand::Shutdown` handler and the
-/// channel-closed path. It is best-effort: errors are logged but do not
-/// prevent shutdown.
-///
-/// Generates a metadata summary with zero latency — **no LLM call is made**.
-/// The summary includes message counts, real user topics, and session date.
-///
-/// For rich content capture (decisions, patterns, reasoning), use `/flush`.
+/// This is called from the `SessionCommand::Shutdown` handler and the channel-closed path.
+/// It is best-effort: errors are logged but do not prevent shutdown.
 ///
 /// Returns the path written (if any) for logging purposes.
 pub fn on_session_end(
@@ -102,9 +82,8 @@ pub fn on_session_end(
     session_id: &str,
     save_on_end: bool,
 ) -> SessionEndResult {
-    // Respect the user's config choice.  Callers that have `save_on_end = false`
-    // should still call this function (to keep the call-site simple), trusting
-    // that the gate is enforced here.
+    // Callers that have `save_on_end = false` should still call this function (to keep the call-site simple)
+    // The gate is enforced here
     if !save_on_end {
         tracing::debug!("session end: save_on_end=false, skipping memory summary");
         return SessionEndResult::Skipped;
@@ -119,7 +98,6 @@ pub fn on_session_end(
     let slug = slugify(first_real_query, 30);
     let slug = if slug.is_empty() { "session" } else { &slug };
 
-    // Generate a lightweight summary from conversation metadata (no LLM).
     let summary = generate_metadata_summary(conversation, &real_queries);
 
     // Write to daily session log.
@@ -140,15 +118,8 @@ pub fn on_session_end(
     }
 }
 
-/// Generate a structured session summary from conversation metadata.
-///
-/// Uses `real_queries` (pre-computed via [`extract_real_user_queries`]) for
-/// the user-message count and topics so that synthetic bootstrap messages and
-/// auto-continue sentinels are never surfaced in the saved summary.
-///
-/// This does NOT call an LLM — it extracts structured information directly
-/// from the conversation items: message counts, session date, and the first
-/// few real user topics. For richer content capture use `/flush`.
+/// Uses `real_queries` (pre-computed via [`extract_real_user_queries`]) for the user-message count and topics.
+/// Synthetic bootstrap messages and auto-continue sentinels therefore never appear in the saved summary.
 pub(crate) fn generate_metadata_summary(
     conversation: &[ConversationItem],
     real_queries: &[String],
@@ -177,7 +148,7 @@ pub(crate) fn generate_metadata_summary(
         chrono::Utc::now().format("%Y-%m-%d %H:%M UTC")
     ));
 
-    // Topics — first few real queries (never the synthetic prefix text).
+    // Topics: first few real queries (never the synthetic prefix text)
     // chars().take(100) avoids byte-boundary panics on multi-byte Unicode.
     let topics: Vec<String> = real_queries
         .iter()
@@ -210,9 +181,9 @@ mod tests {
         })
     }
 
-    /// Build a realistic first-turn user message: metadata prefix + user query in tags.
+    /// Build a realistic first-turn user message: metadata prefix plus user query in tags.
     ///
-    /// This matches what `construct_user_message` + `user_query()` produce.
+    /// This matches what `SessionActor::construct_legacy_prefix` + `user_query()` produce.
     fn make_synthetic_prefix_with_query(query: &str) -> ConversationItem {
         make_user(&format!(
             "<user_info>\nOS Version: macos\nShell: /bin/bash\n</user_info>\n\
@@ -221,8 +192,8 @@ mod tests {
         ))
     }
 
-    /// Build a metadata-only prefix (no <user_query> tag) — represents the
-    /// synthetic bootstrap message on sessions that never received a real prompt.
+    /// Build a metadata-only prefix (no <user_query> tag).
+    /// It represents the synthetic bootstrap message on sessions that never received a real prompt.
     fn make_metadata_only() -> ConversationItem {
         make_user("<user_info>\nOS Version: macos\n</user_info>")
     }
@@ -246,7 +217,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Existing behaviour tests (updated for new signatures / semantics)
+    // Existing behaviour tests
     // -----------------------------------------------------------------------
 
     #[test]
@@ -255,7 +226,7 @@ mod tests {
         let storage = test_storage(&tmp);
         storage.ensure_initialized().unwrap();
 
-        // Only 1 real user message — should skip.
+        // Only 1 real user message
         let conv = vec![make_user("hello"), make_assistant("hi")];
         let result = on_session_end(&storage, &conv, "test-session-id", true);
         assert_eq!(result, SessionEndResult::Skipped);
@@ -267,7 +238,7 @@ mod tests {
         let storage = test_storage(&tmp);
         storage.ensure_initialized().unwrap();
 
-        // 3 real messages but very short — total bytes < MIN_TOTAL_QUERY_BYTES (50).
+        // 3 real messages but very short: total bytes under MIN_TOTAL_QUERY_BYTES (50)
         // "hi" (2) + "ok" (2) + "bye" (3) = 7 bytes
         let conv = vec![
             make_user("hi"),
@@ -394,7 +365,7 @@ mod tests {
     // Real-user-query extraction tests
     // -----------------------------------------------------------------------
 
-    /// `save_on_end = false` always skips — even for a long conversation.
+    /// `save_on_end = false` always skips, even for a long conversation.
     #[test]
     fn test_on_session_end_save_on_end_false_skips() {
         let tmp = TempDir::new().unwrap();
@@ -415,8 +386,7 @@ mod tests {
             "save_on_end=false must skip even with enough messages"
         );
 
-        // No session log file should have been written (the MEMORY.md templates
-        // created by ensure_initialized are expected and are not session logs).
+        // No session log file should have been written (the MEMORY.md templates created by ensure_initialized are expected and are not session logs)
         let files = storage.list_memory_files().unwrap();
         let session_logs: Vec<_> = files
             .iter()
@@ -428,7 +398,6 @@ mod tests {
         );
     }
 
-    /// Threshold is independent of `save_on_end` so exit dream can still run.
     #[test]
     fn test_conversation_meets_session_end_threshold_ignores_save_config() {
         let short = vec![make_user("hi"), make_assistant("hey")];
@@ -459,16 +428,16 @@ mod tests {
         );
     }
 
-    /// Synthetic metadata-only prefix (no `<user_query>`) is excluded from the
-    /// real-message count so it cannot push the session over the gate threshold.
+    /// Synthetic metadata-only prefix (no `<user_query>`) is excluded from the real-message count.
+    /// It cannot push the session over the gate threshold.
     #[test]
     fn test_synthetic_prefix_alone_does_not_count_as_real_message() {
         let tmp = TempDir::new().unwrap();
         let storage = test_storage(&tmp);
         storage.ensure_initialized().unwrap();
 
-        // The conversation has 2 User items, but the first is metadata-only
-        // and the second is a real query.  Only 1 real prompt → still skipped.
+        // The conversation has 2 User items, but the first is metadata-only and the second is a real query
+        // Only 1 real prompt, so the session is still skipped
         let conv = vec![
             make_metadata_only(), // synthetic, no <user_query>
             make_assistant("hi"),
@@ -484,8 +453,8 @@ mod tests {
         );
     }
 
-    /// With a real synthetic prefix + two real queries the session IS written,
-    /// and the slug is derived from the first real query (not the prefix text).
+    /// With a real synthetic prefix plus two real queries the session IS written.
+    /// The slug is derived from the first real query (not the prefix text).
     #[test]
     fn test_slug_derived_from_real_query_not_prefix() {
         let tmp = TempDir::new().unwrap();
@@ -510,8 +479,6 @@ mod tests {
         );
 
         let files = storage.list_memory_files().unwrap();
-        // The file name slug should come from "fix the login bug", not from the
-        // raw metadata prefix text.
         assert!(
             files
                 .iter()
@@ -564,12 +531,10 @@ mod tests {
         );
     }
 
-    /// The *actual* AUTO_CONTINUE_PROMPT text pushed into the conversation after
-    /// auto-compaction must not be counted as a real user message, and must not
-    /// appear in session-end topics.
+    /// The *actual* AUTO_CONTINUE_PROMPT text pushed into the conversation after auto-compaction must not be counted as a real user message.
+    /// It must not appear in session-end topics either.
     ///
-    /// This is the key regression test for the correctness fix: we use the
-    /// real stored text, not just the `"__auto_continue__"` request-id sentinel.
+    /// The gate matches the real stored text, not just the `"__auto_continue__"` request-id sentinel.
     #[test]
     fn test_actual_auto_continue_prompt_excluded() {
         use crate::session::helpers::session_compact::AUTO_CONTINUE_PROMPT;
@@ -578,8 +543,7 @@ mod tests {
         let storage = test_storage(&tmp);
         storage.ensure_initialized().unwrap();
 
-        // Old sessions may contain AUTO_CONTINUE_PROMPT as a User item after
-        // auto-compaction. Verify it's excluded from real user query counts.
+        // Old sessions may contain AUTO_CONTINUE_PROMPT as a User item after auto-compaction
         let conv = vec![
             make_synthetic_prefix_with_query("implement feature Z"),
             make_assistant("done"),
@@ -588,7 +552,7 @@ mod tests {
             make_assistant("continuing..."),
         ];
 
-        // Only 1 real query ("implement feature Z") — should skip (< MIN_USER_MESSAGES).
+        // Only 1 real query ("implement feature Z"), under MIN_USER_MESSAGES
         let result = on_session_end(&storage, &conv, "sess-autocompact", true);
         assert_eq!(
             result,
@@ -604,8 +568,7 @@ mod tests {
         let storage = test_storage(&tmp);
         storage.ensure_initialized().unwrap();
 
-        // Build a query that is > 100 chars when byte-counted but the 100th byte
-        // falls inside a multi-byte sequence (emoji are 4 bytes each).
+        // Build a query that is over 100 bytes but whose 100th byte falls inside a multi-byte sequence (emoji are 4 bytes each)
         let emoji_query = "🦀".repeat(30); // 30 × 4 = 120 bytes, but 30 chars
         assert!(emoji_query.len() > 100, "precondition: > 100 bytes");
 
@@ -618,7 +581,6 @@ mod tests {
             make_assistant("yes"),
         ];
 
-        // Must not panic; the summary should be produced successfully.
         let result = on_session_end(&storage, &conv, "sess-unicode", true);
         assert!(
             matches!(result, SessionEndResult::Written(_)),
@@ -633,8 +595,7 @@ mod tests {
         let storage = test_storage(&tmp);
         storage.ensure_initialized().unwrap();
 
-        // Session has only 1 real human query; the other two User items are
-        // auto-continue sentinels.
+        // Session has only 1 real human query; the other two User items are auto-continue sentinels
         let conv = vec![
             make_user("<user_query>\n__auto_continue__\n</user_query>"),
             make_assistant("continuing"),
@@ -656,8 +617,7 @@ mod tests {
     // Summary format tests
     // -----------------------------------------------------------------------
 
-    /// Summary only contains Session Summary and Topics Discussed — no
-    /// Tools Used or Files Touched sections (those are low-value noise).
+    /// Summary only contains Session Summary and Topics Discussed; no Tools Used or Files Touched sections (those are low-value noise).
     #[test]
     fn test_generate_metadata_summary_only_session_and_topics() {
         let conv = vec![

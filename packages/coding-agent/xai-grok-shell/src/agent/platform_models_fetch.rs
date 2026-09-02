@@ -425,6 +425,7 @@ fn nexus_wire_to_entry(
             .and_then(|s| s.parse().ok()),
         supports_reasoning_effort: think_efforts.is_some() || supports_reasoning,
         reasoning_efforts,
+        variants: Vec::new(),
         extra_headers,
         query_params: IndexMap::new(),
         context_window,
@@ -550,6 +551,7 @@ pub(crate) fn platform_wire_model_to_entry(
         // Live think levels, or any reasoning-capable model without levels.
         supports_reasoning_effort: think_efforts.is_some() || supports_reasoning,
         reasoning_efforts,
+        variants: Vec::new(),
         extra_headers: {
             let mut headers = IndexMap::new();
             if platform == PlatformId::KimiCode {
@@ -918,6 +920,7 @@ fn radius_wire_model_to_entry(base_url: &str, wire: RadiusWireModel) -> Option<M
             .map(|option| option.value),
         supports_reasoning_effort: wire.reasoning && !reasoning_efforts.is_empty(),
         reasoning_efforts,
+        variants: Vec::new(),
         extra_headers: IndexMap::new(),
         query_params: IndexMap::new(),
         context_window: std::num::NonZeroU64::new(wire.context_window)?,

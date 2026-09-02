@@ -69,7 +69,7 @@ pub struct PathIdentity {
     pub nlink: u64,
 }
 
-/// No-follow identity; regular files require `st_nlink == 1`.
+/// Captures identity without following symlinks; regular files require `st_nlink == 1`.
 #[cfg(any(target_os = "linux", all(unix, test)))]
 pub fn capture_path_identity(path: &Path) -> Result<PathIdentity, HookWriteDenyError> {
     use std::os::unix::fs::MetadataExt;
@@ -231,7 +231,7 @@ pub fn profile_hook_write_deny(profile: &ProfileName) -> anyhow::Result<Vec<Glob
     resolve_hook_write_deny_snapshot().map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-/// Top-level sources plus validated immediate discovery JSON under directories.
+/// Returns the top-level source paths plus the validated hook JSON files directly under each directory source.
 #[cfg(target_os = "linux")]
 pub fn enforcement_leaf_paths(
     sources: &[GlobalHookSource],

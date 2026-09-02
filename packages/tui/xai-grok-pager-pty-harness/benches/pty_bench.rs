@@ -1,8 +1,5 @@
-//! `pty-bench` — PTY benchmark CLI for `xai-grok-pager`.
-//!
-//! Spawns the real pager binary in a PTY, dispatches named scenarios, and
-//! emits aggregated results as JSON. Supports baseline comparison for CI
-//! regression detection.
+//! Spawns the real pager binary in a PTY, dispatches named scenarios, and emits aggregated results as JSON.
+//! Supports baseline comparison for CI regression detection.
 //!
 //! ## Typical use
 //!
@@ -52,8 +49,8 @@ struct Cli {
     #[arg(long)]
     all: bool,
 
-    /// Path to the pager binary. Defaults to auto-resolve (PAGER_BINARY env
-    /// or a locally-built debug binary).
+    /// Path to the pager binary.
+    /// Defaults to auto-resolve (PAGER_BINARY env or a locally-built debug binary).
     #[arg(long)]
     binary: Option<PathBuf>,
 
@@ -65,8 +62,7 @@ struct Cli {
     #[arg(long, default_value_t = 120)]
     cols: u16,
 
-    /// Compare results against a baseline file and exit non-zero on
-    /// regression (>15% p99 delta by default).
+    /// Compare results against a baseline file and exit non-zero on regression (>15% p99 delta by default).
     #[arg(long, value_name = "PATH")]
     baseline: Option<PathBuf>,
 
@@ -79,7 +75,7 @@ struct Cli {
     threshold: f64,
 
     /// Accepted for `cargo bench` compatibility (libtest-style argument).
-    /// We ignore it — this isn't a libtest harness.
+    /// We ignore it; this isn't a libtest harness.
     #[arg(long, hide = true)]
     #[allow(dead_code)]
     bench: bool,

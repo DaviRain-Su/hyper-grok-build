@@ -3,42 +3,34 @@
 use xai_grok_tools::registry::types::{ToolConfig, ToolServerConfig};
 use xai_grok_tools::types::tool::ToolKind;
 
-/// Capability mode applied to a session's toolset.
-///
-/// A partial order is defined via [`CapabilityMode::is_subset_of`]:
-/// `ReadOnly < ReadWrite < All` and `ReadOnly < Execute < All`.
-/// `ReadWrite` and `Execute` are *incomparable* (neither is a subset
-/// of the other). `fork_session` enforces `child <= parent`.
+/// A partial order is defined via [`CapabilityMode::is_subset_of`]: `ReadOnly < ReadWrite < All` and `ReadOnly < Execute < All`.
+/// `ReadWrite` and `Execute` are *incomparable* (neither is a subset of the other).
+/// `fork_session` enforces `child <= parent`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityMode {
     /// Reading and searching only. No edits, no shell, no background tasks.
     ReadOnly,
-    /// Read + edit. No shell execution.
+    /// Read and edit. No shell execution.
     ReadWrite,
-    /// Read + shell execution + background-task control. No edits.
+    /// Read, shell execution, and background-task control. No edits.
     Execute,
     /// Every tool kind allowed.
     All,
 }
 
 impl Default for CapabilityMode {
-    /// Defaults to [`CapabilityMode::ReadWrite`] (subagent default;
-    /// the main/root session is always `All`).
+    /// The subagent default; the main/root session is always `All`.
     fn default() -> Self {
         Self::ReadWrite
     }
 }
 
 impl CapabilityMode {
-    /// Filter `config.tools` by capability mode, returning a copy with
-    /// disallowed tools dropped.
+    /// Filter `config.tools` by capability mode, returning a copy with disallowed tools dropped.
     ///
-    /// Tools whose `kind` is `None` (baseline, e.g. ad-hoc tools
-    /// declared via `ToolConfig::simple`) are preserved across all
-    /// modes. **MCP-origin** `kind: None` tools are NOT preserved by
-    /// this method; see `resolve_session_toolset` for the asymmetric
-    /// handling.
+    /// Tools whose `kind` is `None` (baseline, e.g. ad-hoc tools declared via `ToolConfig::simple`) are preserved across all modes.
+    /// **MCP-origin** `kind: None` tools are NOT preserved by this method; see `resolve_session_toolset` for the asymmetric handling.
     pub fn filter(self, config: &ToolServerConfig) -> ToolServerConfig {
         let kept: Vec<ToolConfig> = config
             .tools
@@ -67,9 +59,8 @@ impl CapabilityMode {
     }
 }
 
-/// Every `ToolKind` variant. Used by `is_subset_of` and by parameterised
-/// tests. When a new variant is added to `ToolKind`, the compile-time
-/// assertion below fires so it can't be silently omitted.
+/// Every `ToolKind` variant. Used by `is_subset_of` and by parameterised tests.
+/// When a new variant is added to `ToolKind`, the compile-time assertion below fires so it can't be silently omitted.
 pub(crate) const ALL_TOOL_KINDS: &[ToolKind] = &[
     ToolKind::Read,
     ToolKind::Edit,
@@ -109,17 +100,13 @@ pub(crate) const ALL_TOOL_KINDS: &[ToolKind] = &[
     ToolKind::Other,
 ];
 
-// Compile-time guard: if a new `ToolKind` variant is added but not listed in
-// `ALL_TOOL_KINDS`, this assertion fails.
 const _: () = assert!(
     ALL_TOOL_KINDS.len() == ToolKind::VARIANT_COUNT,
     "ALL_TOOL_KINDS is out of sync with ToolKind — add the new variant"
 );
 
-/// Maps `(CapabilityMode, ToolKind)` -> kept-or-dropped.
-///
-/// This `match` is intentionally exhaustive: when `ToolKind` gains a
-/// new variant the compiler errors here, forcing a triage decision.
+/// Whether tools of `kind` survive filtering under `mode`.
+/// This `match` is intentionally exhaustive: when `ToolKind` gains a new variant the compiler errors here, forcing a triage decision.
 pub(crate) fn kind_allowed(mode: CapabilityMode, kind: ToolKind) -> bool {
     use CapabilityMode as M;
     use ToolKind::*;
@@ -158,7 +145,7 @@ pub(crate) fn kind_allowed(mode: CapabilityMode, kind: ToolKind) -> bool {
         // Integration dispatch.
         UseTool => matches!(mode, M::ReadWrite | M::Execute),
 
-        // Catch-all -- only `All` mode keeps it (early-return above).
+        // Catch-all: only `All` mode keeps it (early-return above)
         Other => false,
     }
 }

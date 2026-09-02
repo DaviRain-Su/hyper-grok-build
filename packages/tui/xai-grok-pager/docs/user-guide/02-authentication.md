@@ -397,7 +397,8 @@ On team accounts, only a team admin can change coding-data sharing.
 Team admins can also enable or disable Zero Data Retention (ZDR) for their team.
 See [How to enable ZDR](https://docs.x.ai/developers/faq/security#how-to-enable-zdr).
 When ZDR is on, coding-data sharing cannot be changed at all — the settings
-row shows `ZDR` in place of the value.
+row shows `ZDR` in place of the value. ZDR does not turn off external OTEL
+or `user.email` — see [ZDR and this stream](24-monitoring-usage.md#zdr-and-this-stream).
 
 See [Monitoring Usage](24-monitoring-usage.md#related-settings) and [Configuration](05-configuration.md#telemetry).
 

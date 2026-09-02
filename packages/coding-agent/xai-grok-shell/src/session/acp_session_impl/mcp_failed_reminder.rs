@@ -1,7 +1,5 @@
-//! `SessionActor`-free half of the "MCP servers that failed to connect"
-//! reminder: failure-fact classification and section rendering. Episode
-//! dedupe lives in [`crate::session::announcement_state::McpAnnounced`];
-//! injection wiring lives in `acp_session_impl/mcp.rs`.
+//! The half of the "MCP servers that failed to connect" reminder that needs no `SessionActor`: classifying failures and rendering the section.
+//! Episode dedupe lives in [`crate::session::announcement_state::McpAnnounced`]; the reminder is injected from `acp_session_impl/mcp.rs`.
 
 use crate::session::announcement_state::{AnnouncedFailure, FailedServer};
 use crate::session::managed_mcp::mcp_server_name;
@@ -9,15 +7,12 @@ use crate::util::text_sanitize::{flatten_spoofable, flatten_to_spaces};
 use agent_client_protocol as acp;
 use std::hash::{Hash, Hasher};
 
-/// Hash of the parts of a config a user edits to fix a broken server
-/// (transport, url/command/args, header and env names — never header or
-/// env values), so an in-place edit starts a new failure episode. Only
-/// ever compared for equality; a hash keeps credential-capable fields
-/// (URLs, arg values) out of the value itself. Live-only — never
-/// persisted, so restored episodes adopt the current identity instead.
+/// Hash of the config parts a user edits to fix a broken server (transport, url/command/args, header and env names, never header or env values).
+/// An in-place edit therefore starts a new failure episode.
+/// Only ever compared for equality; hashing keeps fields that can carry credentials (URLs, arg values) out of the value itself.
+/// Never persisted, so restored episodes adopt the current identity instead.
 fn config_identity(cfg: &acp::McpServer) -> u64 {
-    // Tuple/slice `Hash` impls delimit fields and prefix lengths, so empty
-    // items cannot collide across field boundaries.
+    // Tuple/slice `Hash` impls delimit fields and prefix lengths, so empty items cannot collide across field boundaries
     fn hash_all(parts: impl Hash) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         parts.hash(&mut hasher);
@@ -33,24 +28,21 @@ fn config_identity(cfg: &acp::McpServer) -> u64 {
             let env_names: Vec<&str> = c.env.iter().map(|e| e.name.as_str()).collect();
             hash_all(("stdio", &c.command, &c.args, env_names))
         }
-        // Future transports: fall back to the name (never Debug — an
-        // unknown variant's Debug output is unstable across versions).
+        // Future transports: fall back to the name (never Debug; an unknown variant's Debug output is unstable across versions)
         other => hash_all(("unknown", mcp_server_name(other))),
     }
 }
 
-/// Classify every configured-but-unconnected server for the "failed to
-/// connect" reminder: the failures to feed
-/// [`crate::session::announcement_state::McpAnnounced::note_failures`]
-/// (sorted by name) plus the full unconnected-configured name set that
-/// keeps existing episodes alive.
+/// Classify every configured but unconnected server for the "failed to connect" reminder.
+/// Returns the failures to feed [`crate::session::announcement_state::McpAnnounced::note_failures`], sorted by name.
+/// Also returns the full set of unconnected configured names, which keeps existing episodes alive.
 ///
 /// Skipped from the failure list (but kept in the unconnected set):
-/// - servers whose retry handshake is in flight, and
-/// - servers with no recorded failure while init is still settling —
-///   the episode's one announcement should carry the real cause, not
-///   the "connection failed" placeholder. Once init is complete the
-///   placeholder is a legitimate fallback for an unrecorded crash.
+/// - servers whose retry handshake is still running, and
+/// - servers with no recorded failure while init is still settling.
+///
+/// The skip while settling exists because the episode's one announcement should carry the real cause, not the "connection failed" placeholder.
+/// Once init is complete, the placeholder is a legitimate fallback for an unrecorded crash.
 pub(super) fn classify_failed_servers(
     mcp_state: &crate::session::mcp_servers::McpState,
     connected_names: &std::collections::HashSet<&str>,
@@ -92,11 +84,10 @@ pub(super) fn classify_failed_servers(
     (failed, unconnected)
 }
 
-/// Render the "failed to connect" reminder section from the episodes being
-/// announced now. The single sanitization boundary: remote-influenced
-/// detail and names are flattened here so they cannot forge extra reminder
-/// lines or smuggle invisible/bidi characters; a detail with nothing
-/// legible left falls back to the generic reason.
+/// Render the "failed to connect" reminder section from the episodes being announced now.
+/// This is the single sanitization boundary: remote-influenced detail and names are flattened here.
+/// Flattening stops them forging extra reminder lines or smuggling invisible/bidi characters.
+/// A detail with nothing legible left falls back to the generic reason.
 pub(super) fn render_failed_section(to_announce: &[FailedServer]) -> String {
     let mut s = "\nMCP servers that failed to connect:\n".to_string();
     for f in to_announce {
@@ -104,17 +95,14 @@ pub(super) fn render_failed_section(to_announce: &[FailedServer]) -> String {
         let base = match f.class {
             AnnouncedFailure::AuthRequired => "auth required".to_string(),
             AnnouncedFailure::Transport => match f.detail.as_deref().and_then(flatten_spoofable) {
-                // Quoted so printable remote text (e.g. an injected `) -
-                // other (…`) cannot pose as a sibling entry; embedded
-                // double quotes are downgraded to keep the delimiters
-                // unambiguous.
+                // Quoted so printable remote text (e.g. an injected `) - other (…`) cannot pose as a sibling entry.
+                // Embedded double quotes are downgraded to keep the delimiters unambiguous
                 Some(detail) => format!("\"{}\"", detail.replace('"', "'")),
                 None => "connection failed".to_string(),
             },
         };
-        // The retry hint keeps the model using the server (a tool call
-        // re-handshakes it) instead of giving up — giving up is
-        // self-fulfilling. Auth failures need user action.
+        // The retry hint keeps the model using the server (a tool call re-handshakes it) instead of giving up, and giving up is self-fulfilling
+        // Auth failures need user action
         let suffix = if f.retries_on_use {
             " — retries automatically on next tool call"
         } else {

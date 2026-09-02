@@ -20,9 +20,8 @@ pub struct ClaudeSettings {
     #[serde(default)]
     pub permissions: Option<ParsedPermissions>,
 
-    /// Raw `defaultMode` string when present (canonical under `permissions`, or
-    /// grok-only root legacy). Recognized values: `acceptEdits`,
-    /// `bypassPermissions`, `default`, `plan`, `dontAsk`, `auto`.
+    /// Raw `defaultMode` string when present (canonical under `permissions`, or grok-only root legacy).
+    /// Recognized values: `acceptEdits`, `bypassPermissions`, `default`, `plan`, `dontAsk`, `auto`.
     #[serde(default)]
     pub default_mode: Option<String>,
 
@@ -48,7 +47,6 @@ pub struct ParsedPermissions {
 }
 
 impl ParsedPermissions {
-    /// Translate into native `PermissionConfig`.
     /// Unsupported or malformed entries are skipped with warnings.
     pub fn into_permission_config(self) -> (PermissionConfig, Vec<String>) {
         let mut rules = Vec::new();
@@ -71,26 +69,11 @@ impl ParsedPermissions {
     }
 }
 
-/// Load Claude settings from a file path.
-///
-/// Returns:
-///   - `None` only for: file missing, unreadable, or unparseable JSON
-///   - `Some(ClaudeSettings)` even if `permissions` key is absent
-///
-/// This allows callers to observe `defaultMode` / `additionalDirectories` even when
-/// no `permissions` block exists, supporting the observability model.
-///
-/// **Tolerant parsing**:
-///   - `permissions.allow` / `permissions.deny` are extracted element-by-element
-///     from `serde_json::Value`. Non-string entries are skipped with warnings.
-///   - This enables partial success when some entries are malformed.
-///   - `defaultMode` / `additionalDirectories` prefer the canonical location
-///     under `permissions.*`. Root-level keys are **grok legacy only** (not in
-///     the vendor schema) and are used only when the nested key is **absent** —
-///     not when it is present but the wrong type.
+/// Returns `None` only when the file is missing, unreadable, or unparseable JSON.
+/// A `Some(ClaudeSettings)` may lack the `permissions` key, so callers still see `defaultMode` and `additionalDirectories`.
+/// Non-string array entries are skipped with warnings, and the canonical `permissions.*` keys win over the grok-legacy root keys.
 pub fn load_claude_settings(path: &Path) -> Option<ClaudeSettings> {
-    // Opening a FIFO for read blocks until a writer appears; this runs on the
-    // session actor, so refuse non-regular files up front.
+    // Opening a FIFO for read blocks until a writer appears; this runs on the session actor, so refuse non-regular files up front
     match std::fs::metadata(path) {
         Ok(m) if m.is_file() => {}
         Ok(_) => {
@@ -117,7 +100,6 @@ pub fn load_claude_settings(path: &Path) -> Option<ClaudeSettings> {
         let (deny, deny_warnings) = extract_string_array(p.get("deny"));
         let (ask, ask_warnings) = extract_string_array(p.get("ask"));
 
-        // Log any warnings from tolerant extraction
         for w in allow_warnings
             .iter()
             .chain(deny_warnings.iter())
@@ -133,7 +115,6 @@ pub fn load_claude_settings(path: &Path) -> Option<ClaudeSettings> {
         }
     });
 
-    // Canonical vendor settings store these under `permissions`; root is grok legacy only.
     let default_mode = extract_default_mode(&value, path);
 
     let additional_directories = extract_additional_directories(&value, path);
@@ -150,10 +131,9 @@ pub fn load_claude_settings(path: &Path) -> Option<ClaudeSettings> {
 
 /// Canonical key is `permissions.defaultMode`.
 ///
-/// Root `defaultMode` is grok-only back-compat for older tests / hand-written
-/// configs. Fall back to root only when the nested key is **absent**. If nested
-/// is present but not a string, do not resurrect a root value (malformed
-/// canonical key must not revive stale legacy).
+/// Root `defaultMode` is grok-only back-compat for older tests / hand-written configs.
+/// Fall back to root only when the nested key is **absent**.
+/// If nested is present but not a string, do not resurrect a root value (a malformed canonical key must not revive stale legacy).
 pub(crate) fn extract_default_mode(value: &serde_json::Value, path: &Path) -> Option<String> {
     if let Some(perms) = value.get("permissions")
         && let Some(dm) = perms.get("defaultMode")
@@ -171,7 +151,7 @@ pub(crate) fn extract_default_mode(value: &serde_json::Value, path: &Path) -> Op
         };
     }
 
-    // Nested key absent — optional grok legacy root.
+    // Nested key absent, fall back to the optional grok legacy root
     match value.get("defaultMode") {
         Some(dm) => match dm.as_str() {
             Some(s) => Some(s.to_string()),
@@ -188,12 +168,11 @@ pub(crate) fn extract_default_mode(value: &serde_json::Value, path: &Path) -> Op
     }
 }
 
-/// Claude-canonical key is `permissions.additionalDirectories`; root is
-/// legacy/compat. Nested wins when both are present.
+/// Claude-canonical key is `permissions.additionalDirectories`; root is legacy/compat.
+/// Nested wins when both are present.
 fn extract_additional_directories(value: &serde_json::Value, path: &Path) -> Option<Vec<String>> {
-    // Mirror `extract_default_mode`: prefer the Claude-canonical nested key, and
-    // when it is present but the wrong type, do *not* resurrect the grok-legacy
-    // root value (a malformed canonical key must not revive stale legacy).
+    // Mirror `extract_default_mode`: prefer the Claude-canonical nested key
+    // A nested key of the wrong type does *not* resurrect the grok-legacy root value
     let arr = if let Some(nested) = value
         .get("permissions")
         .and_then(|p| p.get("additionalDirectories"))
@@ -230,9 +209,7 @@ fn extract_additional_directories(value: &serde_json::Value, path: &Path) -> Opt
     Some(result)
 }
 
-/// Extract a string array from a JSON value, skipping non-strings with warnings.
-///
-/// Returns `(strings, warnings)` where warnings describe skipped entries.
+/// Extract a string array from a JSON value; non-string entries are skipped and described in the returned warnings.
 fn extract_string_array(value: Option<&serde_json::Value>) -> (Vec<String>, Vec<String>) {
     match value {
         Some(serde_json::Value::Array(arr)) => {
@@ -261,15 +238,8 @@ fn extract_string_array(value: Option<&serde_json::Value>) -> (Vec<String>, Vec<
     }
 }
 
-/// Extract a `HashMap<String, String>` from a JSON object value.
-///
-/// Non-string scalars are coerced to their string form: numbers and booleans
-/// become their string representation. Null, array, and object values are
-/// skipped with warnings.
-///
-/// Note: nulls are intentionally skipped rather than coerced to the literal
-/// `"null"` — setting an env var to `"null"` is rarely useful and more likely a
-/// user mistake.
+/// Numbers and booleans are coerced to their string form; null, array, and object values are skipped with warnings.
+/// Nulls are not coerced to the literal `"null"` because an env var set to `"null"` is more likely a user mistake.
 fn extract_string_map(
     value: Option<&serde_json::Value>,
     path: &Path,
@@ -317,7 +287,7 @@ fn extract_string_map(
     }
 }
 
-/// Small helper to get a JSON value's type name for diagnostics.
+/// Type name of a JSON value, used in warnings.
 trait JsonTypeName {
     fn type_of(&self) -> &'static str;
 }
@@ -344,44 +314,34 @@ impl JsonTypeName for serde_json::Value {
 // permissions), consider extracting to a shared helper (e.g., in xai-grok-hooks
 // or a new claude-discovery crate).
 
-/// Discover `.claude/settings.json` and `.claude/settings.local.json` paths
-/// for permission loading.
+/// Discover `.claude/settings.json` and `.claude/settings.local.json` paths for permission loading.
 ///
 /// Files are returned in priority order (most-specific first):
-///   - Project: `<cwd>/.claude/settings.local.json`, `<cwd>/.claude/settings.json`
-///     (walking up to repo root; cwd entries listed first)
+///   - Project: `<cwd>/.claude/settings.local.json`, `<cwd>/.claude/settings.json` (walking up to repo root; cwd entries listed first)
 ///   - Global:  `~/.claude/settings.local.json`, `~/.claude/settings.json`
 ///
-/// Returns `true` if any `.claude/` configuration files exist in the project
-/// or user home directory.
+/// Returns `true` if any `.claude/` configuration files exist in the project or user home directory.
 pub fn has_claude_compat(cwd: &Path) -> bool {
     find_claude_settings_paths(cwd).iter().any(|p| p.exists())
 }
 
-/// Permission rules from all files are merged (later / more specific sources win
-/// for conflicts as documented below).
+/// Permission rules from all files are merged (later / more specific sources win for conflicts).
 /// `defaultMode` uses scope precedence: the most specific file that sets it wins.
 pub fn find_claude_settings_paths(cwd: &Path) -> Vec<PathBuf> {
     let mut paths = global_claude_settings_paths();
 
-    // Project paths (higher priority — closer to cwd wins)
-    // Walk from cwd up to find .claude directories
+    // Project paths (higher priority; closer to cwd wins)
     let project_paths = collect_project_claude_paths(cwd);
-    // Prepend project paths (so they come first, higher priority)
     paths.splice(0..0, project_paths);
 
     paths
 }
 
-/// Global (user-tier) `~/.claude` settings paths, highest-priority-first. Split
-/// out of [`find_claude_settings_paths`] so [`claude_settings_paths_for_trust`]
-/// can load ONLY the user tier when a folder is untrusted.
+/// Global (user-tier) `~/.claude` settings paths, highest-priority-first.
+/// Split out of [`find_claude_settings_paths`] so [`claude_settings_paths_for_trust`] can load ONLY the user tier when a folder is untrusted.
 ///
-/// `xai_dirs::home_dir()` matches both the settings' authoring tool
-/// (Node `os.homedir()`: `USERPROFILE` on Windows) and the import scanner
-/// (`claude_import.rs::scan_importable_settings`, `claude_import_state.rs`),
-/// so a path returned here reliably tests as global in the scanner's
-/// `is_global` check.
+/// `xai_dirs::home_dir()` matches Node's `os.homedir()` (`USERPROFILE` on Windows), used by both the settings' authoring tool and the import scanner.
+/// A path returned here therefore tests as global in the scanner's `is_global` check (`claude_import.rs::scan_importable_settings`).
 fn global_claude_settings_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Some(home) = xai_dirs::home_dir() {
@@ -394,10 +354,9 @@ fn global_claude_settings_paths() -> Vec<PathBuf> {
 
 /// Claude settings files to load under the folder-trust gate.
 ///
-/// When `project_trusted` is true, same as [`find_claude_settings_paths`]
-/// (project tree + user `~/.claude`). When false, only user-tier `~/.claude`
-/// — the single choke point for env injection and permission resolution so
-/// the two cannot drift on which files an untrusted clone may contribute.
+/// When `project_trusted` is true, same as [`find_claude_settings_paths`] (project tree and user `~/.claude`).
+/// When false, only the user-tier `~/.claude`.
+/// Both env injection and permission resolution go through here, so they cannot drift on which files an untrusted clone may contribute.
 pub(crate) fn claude_settings_paths_for_trust(cwd: &Path, project_trusted: bool) -> Vec<PathBuf> {
     if project_trusted {
         find_claude_settings_paths(cwd)
@@ -406,12 +365,9 @@ pub(crate) fn claude_settings_paths_for_trust(cwd: &Path, project_trusted: bool)
     }
 }
 
-/// Whether a project-tree `.claude/settings.json` / `settings.local.json` exists
-/// anywhere along the SAME `cwd`→repo-root walk the env/permission loaders read
-/// ([`collect_project_claude_paths`]). The folder-trust detector calls this so
-/// detection can never drift from the loader: a settings file in a SUBDIR — whose
-/// `env` is injected into every spawned subprocess — must flip the folder
-/// untrusted, not just one at the git root.
+/// Whether a project-tree `.claude/settings.json` / `settings.local.json` exists anywhere on the walk from `cwd` up to the repo root.
+/// The folder-trust detector shares that walk ([`collect_project_claude_paths`]) with the env/permission loaders, so detection can never drift.
+/// A settings file in a SUBDIR, whose `env` is injected into every spawned subprocess, must flip the folder untrusted, not just one at the git root.
 pub fn project_claude_settings_present(cwd: &Path) -> bool {
     collect_project_claude_paths(cwd)
         .iter()
@@ -420,17 +376,14 @@ pub fn project_claude_settings_present(cwd: &Path) -> bool {
 
 /// Collect .claude settings file paths from cwd up to repo root.
 ///
-/// Resolves the repo root by `.git` EXISTENCE (not `git2` validity), kept
-/// separate from the folder-trust gate's shared `git2` walk on purpose: the
-/// env/permission loader ([`find_claude_settings_paths`]) and this detector both
-/// go through here, so they share ONE root resolution and can't drift — but a
-/// directory with a bare/empty `.git` (no valid repo) must still bound the walk.
+/// Resolves the repo root by `.git` EXISTENCE (not `git2` validity), kept separate from the folder-trust gate's `git2` walk on purpose.
+/// A directory with a bare or empty `.git` (no valid repo) must still bound the walk.
+/// The env/permission loader ([`find_claude_settings_paths`]) and the trust detector both resolve the root here, so they can't drift.
 fn collect_project_claude_paths(cwd: &Path) -> Vec<PathBuf> {
-    // Home-is-a-git-repo (dotfiles in $HOME): drop a resolved repo root that is
-    // $HOME, or the walk would treat `~/.claude` as project-tier (injecting its
-    // env / applying its rules for any cwd under home). Fall back to cwd so the
-    // walk stays within the working dir. This is the shared choke point for both
-    // `project_claude_settings_present` and `find_claude_settings_paths`.
+    // When $HOME itself is a git repo (dotfiles), drop a resolved repo root that is $HOME
+    // Otherwise the walk would treat `~/.claude` as project-tier, injecting its env and applying its rules for any cwd under home
+    // Fall back to cwd so the walk stays within the working dir
+    // This is the shared choke point for both `project_claude_settings_present` and `find_claude_settings_paths`
     let repo_root = find_repo_root(cwd)
         .filter(|root| !crate::trust::is_home_dir(root))
         .unwrap_or_else(|| cwd.to_path_buf());
@@ -454,7 +407,6 @@ fn collect_project_claude_paths(cwd: &Path) -> Vec<PathBuf> {
     paths
 }
 
-/// Find the git repo root by walking up from cwd.
 fn find_repo_root(start: &Path) -> Option<PathBuf> {
     let mut current = start.to_path_buf();
     loop {
@@ -472,37 +424,27 @@ fn find_repo_root(start: &Path) -> Option<PathBuf> {
 // Environment Variables
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// Load merged environment variables from Claude settings files, gating the
-/// repo-tree `.claude/settings.json` `env` on `project_trusted`.
+/// Load merged environment variables from Claude settings files, gating the repo-tree `.claude/settings.json` `env` on `project_trusted`.
 ///
-/// Like permissions, env vars are merged cumulatively across all settings files
-/// (later layers override earlier keys) — walking `find_claude_settings_paths()`
-/// with precedence:
-///   - Global `~/.claude/settings.json` / `settings.local.json` (lowest)
-///   - Repo-root `.claude/settings.json` / `settings.local.json`
-///   - ... (intermediate directories up to cwd)
-///   - CWD `.claude/settings.json` / `settings.local.json` (highest)
-///
+/// Env vars merge cumulatively across the `find_claude_settings_paths()` files, later keys overriding earlier via `HashMap::extend`.
+/// Precedence runs from global `~/.claude` (lowest) through repo root and intermediate directories up to cwd (highest).
 /// Within each directory, `settings.local.json` overrides `settings.json`.
-/// Higher-precedence keys override lower via `HashMap::extend`.
 ///
-/// The repo-tree `env` is injected into every spawned subprocess (`BASH_ENV` /
-/// `GIT_SSH_COMMAND` / `PATH` / `LD_PRELOAD` …), so when `project_trusted` is
-/// false it is dropped — an untrusted clone must not contribute it; the user's
-/// own `~/.claude` env is always loaded.
+/// The repo-tree `env` is injected into every spawned subprocess (`BASH_ENV`, `GIT_SSH_COMMAND`, `PATH`, `LD_PRELOAD`, ...).
+/// When `project_trusted` is false that contribution is dropped; an untrusted clone must not supply it.
+/// The user's own `~/.claude` env is always loaded.
 pub fn load_claude_env_with_project(cwd: &Path, project_trusted: bool) -> HashMap<String, String> {
     // Phase 2 cutoff: if the user has imported, skip reading .claude/ at runtime.
     if is_claude_import_marked_with_log("load_claude_env_with_project") {
         return HashMap::new();
     }
 
-    // Untrusted folder: load ONLY the user-tier `~/.claude` env, dropping the
-    // repo-tree (project) contribution.
+    // Untrusted folder: load ONLY the user-tier `~/.claude` env, dropping the repo-tree (project) contribution
     let paths = claude_settings_paths_for_trust(cwd, project_trusted);
     let mut merged = HashMap::new();
 
-    // Paths are ordered highest-priority-first. Process in reverse so that
-    // higher-priority values overwrite lower-priority ones via `extend`.
+    // Paths are ordered highest-priority-first
+    // Process in reverse so that higher-priority values overwrite lower-priority ones via `extend`
     for path in paths.iter().rev() {
         if let Some(settings) = load_claude_settings(path)
             && let Some(env) = settings.env
@@ -523,18 +465,15 @@ pub fn load_claude_env_with_project(cwd: &Path, project_trusted: bool) -> HashMa
 // Phase 2 cutoff marker
 // =============================================================================
 //
-// `xai-grok-shell::claude_import` writes the marker. We re-implement a small
-// reader here because the gate consumers live in this crate and can't depend
-// on shell (it would create a cycle). Caching is intentionally omitted; if
-// this becomes a hotspot we can lift it into a shared crate.
+// `xai-grok-shell::claude_import` writes the marker
+// We re-implement a small reader here because the gate consumers live in this crate and can't depend on shell (it would create a cycle)
+// Caching is intentionally omitted; if this becomes a hotspot we can lift it into a shared crate
 
-/// True when the user marked Claude settings imported (`[claude_compat].imported`
-/// in config.toml, or the test override). Public so gate-mirroring callers stay consistent.
+/// True when the user marked Claude settings imported (`[claude_compat].imported` in config.toml, or the test override).
+/// Public so callers that mirror this gate elsewhere use the same check.
 pub fn is_claude_import_marked() -> bool {
-    // Test escape hatch: shell tests call `refresh_marker_cache(true)` which
-    // lives in xai-grok-shell (inaccessible from here at runtime). They also
-    // set this env var so the workspace-resident gate honours the override
-    // without a cross-crate dependency.
+    // Test escape hatch: shell tests call `refresh_marker_cache(true)`, which lives in xai-grok-shell (inaccessible from here at runtime)
+    // They also set this env var so the gate in this crate honours the override without a cross-crate dependency
     if std::env::var("_GROK_CLAUDE_MARKER_OVERRIDE").as_deref() == Ok("1") {
         return true;
     }
@@ -554,10 +493,7 @@ pub fn is_claude_import_marked() -> bool {
         .unwrap_or(false)
 }
 
-/// Returns true when the user has marked their Claude settings as imported.
-///
-/// Logs a single info line the first time the gate is hit (per process) so
-/// we can confirm the cutoff is taking effect without flooding logs.
+/// Logs a single info line the first time the gate is hit (per process) so we can confirm the cutoff is taking effect without flooding logs.
 pub(crate) fn is_claude_import_marked_with_log(gate_name: &'static str) -> bool {
     use std::sync::OnceLock;
     static LOGGED: OnceLock<()> = OnceLock::new();

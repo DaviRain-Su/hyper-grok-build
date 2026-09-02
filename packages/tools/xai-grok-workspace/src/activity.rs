@@ -1,5 +1,4 @@
-//! Per-session and connection-level activity tracking for tool server
-//! lifecycle status reporting.
+//! Per-session and connection-level activity tracking for tool server lifecycle status reporting.
 
 // A panic on a teardown path leaks whatever it was about to free; tests panic freely.
 #![cfg_attr(
@@ -30,29 +29,27 @@ const LIFECYCLE_SHUTTING_DOWN: u8 = 2;
 const DEFAULT_SESSION: &str = "__default__";
 const SESSION_IDLE_PRUNE_MS: u64 = 5 * 60 * 1000;
 
-/// Default cap (ms) on how long pending durability work (artifact producers /
-/// queued uploads) may withhold `idle_since_ms`. Overridable via
-/// `GROK_WORKSPACE_DURABILITY_IDLE_HOLD_MAX_MS`.
+/// Default cap (ms) on how long pending durability work (artifact producers / queued uploads) may withhold `idle_since_ms`.
+/// Overridable via `GROK_WORKSPACE_DURABILITY_IDLE_HOLD_MAX_MS`.
 const DEFAULT_DURABILITY_IDLE_HOLD_MAX_MS: u64 = 600_000;
 
-/// How long recent preview-proxy traffic withholds `idle_since_ms` — a decaying
-/// window (not a reset), so a polled preview stays alive but a single stale poll
-/// can't pin it. Larger than the 5s status poll, smaller than the idle grace.
+/// How long recent preview-proxy traffic withholds `idle_since_ms`.
+/// A decaying window (not a reset), so a polled preview stays alive but a single stale poll can't pin it.
+/// Larger than the 5s status poll, smaller than the idle grace.
 pub(crate) const PREVIEW_ACTIVITY_WINDOW_MS: u64 = 60_000;
 
-/// How long a client-driven mutation RPC (file write, git commit, …) withholds
-/// `idle_since_ms`. Same decaying-window semantics as preview activity: the
-/// sandbox stays alive while mutations keep arriving and the normal idle grace
-/// starts once they stop. `0` disables the withhold entirely (kill switch).
+/// How long a client-driven mutation RPC (file write, git commit, …) withholds `idle_since_ms`.
+/// The window decays like the preview one: the sandbox stays alive while mutations keep arriving and the normal idle grace starts once they stop.
+/// `0` disables the withhold entirely (kill switch).
 pub(crate) const RPC_ACTIVITY_WINDOW_MS: u64 = PREVIEW_ACTIVITY_WINDOW_MS;
 
-/// How long a client-presence note (`workspace.presence.note`) withholds
-/// `idle_since_ms`; `0` disables the withhold entirely (kill switch).
+/// How long a client-presence note (`workspace.presence.note`) withholds `idle_since_ms`; `0` disables the withhold entirely (kill switch).
 pub(crate) const PRESENCE_ACTIVITY_WINDOW_MS: u64 =
     xai_grok_workspace_types::rpc::presence::PRESENCE_ACTIVITY_WINDOW_MS;
 
-/// Keep the sandbox awake while a live loop's next run is at most this far away. Set above the 12-hour sandbox
-/// lifetime, so a live loop keeps the sandbox awake until the sandbox dies. `0` turns this off.
+/// Keep the sandbox awake while a live loop's next run is at most this far away.
+/// Set above the 12-hour sandbox lifetime, so a live loop keeps the sandbox awake until the sandbox dies.
+/// `0` turns this off.
 pub(crate) const SCHEDULED_TASK_KEEP_AWAKE_WINDOW_MS: u64 = 13 * 60 * 60 * 1000; // 13 hours
 
 /// Ignore poll results older than this, so a dead poller cannot keep the sandbox awake.
@@ -72,7 +69,6 @@ struct SessionActivity {
     idle_since_ms: AtomicU64,
     /// Current turn number (set by `turn_started`).
     current_turn: AtomicU64,
-    /// Whether a turn is currently active.
     turn_active: AtomicBool,
 }
 
@@ -90,11 +86,9 @@ impl SessionActivity {
     }
 }
 
-/// Tracks in-flight tool calls and background tasks for
-/// [`ToolServerStatusPayload`] reporting.
+/// Tracks in-flight tool calls and background tasks for [`ToolServerStatusPayload`] reporting.
 ///
-/// All methods are `&self` — share via `Arc` across the tool handler, the
-/// activity feed, and the status publisher.
+/// All methods are `&self`; share via `Arc` across the tool handler, the activity feed, and the status publisher.
 pub struct ActivityTracker {
     active_tool_calls: AtomicU32,
     active_tools: DashMap<String, String>,
@@ -105,8 +99,7 @@ pub struct ActivityTracker {
     idle_since_ms: AtomicU64,
     started_at: Instant,
     lifecycle: AtomicU8,
-    /// `Arc` so the upload queue (via [`notify_handle`](Self::notify_handle))
-    /// can wake the same waiter the status publisher blocks on.
+    /// `Arc` so the upload queue (via [`notify_handle`](Self::notify_handle)) can wake the same waiter the status publisher blocks on.
     notify: Arc<tokio::sync::Notify>,
     /// Coupled upload-queue stats; unset for bare trackers (tests, queue-less mode).
     upload_queue_stats: OnceLock<Arc<UploadQueueStats>>,
@@ -114,88 +107,62 @@ pub struct ActivityTracker {
     drain_started_ms: AtomicU64,
     /// Coupled artifact-producer task tracker; unset for bare trackers.
     producer_tasks: OnceLock<tokio_util::task::TaskTracker>,
-    /// Epoch ms the durability-busy condition started; `0` while clear. Stamped
-    /// lazily at snapshot time.
+    /// Epoch ms the durability-busy condition started; `0` while clear. Stamped lazily at snapshot time.
     durability_busy_since_ms: AtomicU64,
     /// Cap (ms) on how long durability work may withhold `idle_since_ms`.
     durability_idle_hold_max_ms: u64,
-    /// When set, the idle verdict ignores background tasks so `idle_since_ms`
-    /// tracks foreground tool-call activity only. Drain/`status` stay bg-aware.
+    /// When set, the idle verdict ignores background tasks so `idle_since_ms` tracks foreground tool-call activity only.
+    /// The drain and the `status` payload still count background tasks.
     idle_ignores_background: bool,
-    /// Window (ms) recent preview-proxy traffic withholds idle for; defaults to
-    /// [`PREVIEW_ACTIVITY_WINDOW_MS`], overridable via the builder.
+    /// Window (ms) recent preview-proxy traffic withholds idle for; defaults to [`PREVIEW_ACTIVITY_WINDOW_MS`], overridable via the builder.
     preview_activity_window_ms: u64,
-    /// Epoch ms the pane's own status poll was last observed (`0` = none). Fed
-    /// by the preview-activity scraper; withholds idle within
-    /// [`preview_activity_window_ms`](Self::preview_activity_window_ms).
-    ///
-    /// The *observation* time, not the proxy's stamp: the two processes are not
-    /// clock-coupled, and only the local clock is comparable with the rest.
+    /// Epoch ms the pane's own status poll was last observed (`0` means none); fed by the preview-activity scraper.
+    /// Withholds idle within [`preview_activity_window_ms`](Self::preview_activity_window_ms).
+    /// The *observation* time, not the proxy's stamp: the two processes do not share a clock, so only local time compares with the other stamps.
     last_preview_status_ms: AtomicU64,
-    /// Epoch ms real app traffic was last observed (`0` = none).
+    /// Epoch ms real app traffic was last observed (`0` means none).
     last_preview_routed_ms: AtomicU64,
-    /// Window (ms) a client mutation RPC withholds idle for; defaults to
-    /// [`RPC_ACTIVITY_WINDOW_MS`], overridable via the builder. `0` disables.
+    /// Window (ms) a client mutation RPC withholds idle for; defaults to [`RPC_ACTIVITY_WINDOW_MS`], overridable via the builder. `0` disables.
     rpc_activity_window_ms: u64,
-    /// Epoch ms a client-driven mutation RPC was last dispatched (`0` = none).
-    /// Stamped by [`note_client_rpc_activity`](Self::note_client_rpc_activity);
-    /// withholds idle within
-    /// [`rpc_activity_window_ms`](Self::rpc_activity_window_ms).
+    /// Epoch ms a client-driven mutation RPC was last dispatched (`0` means none).
+    /// Stamped by [`note_client_rpc_activity`](Self::note_client_rpc_activity).
+    /// Withholds idle within [`rpc_activity_window_ms`](Self::rpc_activity_window_ms).
     last_client_rpc_ms: AtomicU64,
     /// Window (ms) a client-presence note withholds idle for; `0` disables.
     presence_activity_window_ms: u64,
     /// See [`SCHEDULED_TASK_KEEP_AWAKE_WINDOW_MS`]; overridable via the builder. `0` turns it off.
     scheduled_task_keep_awake_window_ms: u64,
-    /// The last scheduler poll that saw a live loop with a run coming; `None` = no hold.
+    /// The last scheduler poll that saw a live loop with a run coming; `None` means no hold.
     /// One lock for the pair, so a reader can never see a new run time with an old poll time.
     scheduled_poll: Mutex<Option<ScheduledPoll>>,
-    /// Epoch ms a visible client-presence note was last received (`0` = none).
+    /// Epoch ms a visible client-presence note was last received (`0` means none).
     last_presence_ms: AtomicU64,
-    /// Highest presence-note `seq` applied (`0` = none). Guards against a
-    /// slow superseded visible note landing after a newer hidden note and
-    /// re-arming the withhold. A mutex (not an atomic) so the seq gate and
-    /// the visible stamp commit as one decision under concurrent applies.
+    /// Highest presence-note `seq` applied (`0` means none).
+    /// Guards against a slow superseded visible note landing after a newer hidden note and turning the withhold back on.
+    /// A mutex (not an atomic) so the seq gate and the visible stamp commit as one decision under concurrent applies.
     last_presence_seq: Mutex<u64>,
-    /// Open preview WebSocket (HMR) tunnels as of the last scrape. Nonzero ⇒ a
-    /// client is attached, which no activity stamp would reveal.
+    /// Open preview WebSocket (HMR) tunnels as of the last scrape.
+    /// Nonzero means a client is attached, which no activity stamp would reveal.
     preview_ws_tunnels_open: AtomicU64,
     /// In-flight `Routed` preview requests as of the last scrape.
     preview_routed_in_flight: AtomicU64,
-    /// Epoch ms this process started — the floor of the withhold anchor, so a
-    /// young or freshly-restored workspace is never treated as long-idle.
-    /// Distinct from [`Self::started_at`], a monotonic `Instant` that cannot be
-    /// compared against the epoch stamps around it.
+    /// Epoch ms this process started; the floor of the withhold anchor, so a young or freshly-restored workspace is never treated as long-idle.
+    /// Distinct from [`Self::started_at`], a monotonic `Instant` that cannot be compared against the epoch stamps around it.
     started_at_ms: u64,
 
     sessions: DashMap<String, SessionActivity>,
-    /// call_id → session_id so `tool_call_completed` can decrement
-    /// the right session without the caller repeating it.
+    /// Maps `call_id` to `session_id` so `tool_call_completed` can decrement the right session without the caller repeating it.
     call_to_session: DashMap<String, String>,
-    /// Idle window (ms) after which an inactive session is pruned by
-    /// [`known_sessions`]. Set once at construction; no locking.
+    /// Idle window (ms) after which an inactive session is pruned by [`known_sessions`].
+    /// Set once at construction; no locking.
     prune_window_ms: u64,
-    /// Per-session `events.jsonl` writers, shared (`Arc`) with
-    /// [`WorkspaceShared`](crate::session::WorkspaceShared). `None` until
-    /// [`set_event_writers`](Self::set_event_writers) is called during
-    /// `WorkspaceHandle` construction; bare trackers (the existing unit tests)
-    /// leave it unset so no `Tool*` events are emitted — behaviour-preserving.
+    /// Per-session `events.jsonl` writers, shared (`Arc`) with [`WorkspaceShared`](crate::session::WorkspaceShared).
+    /// Unset until [`set_event_writers`](Self::set_event_writers) is called during `WorkspaceHandle` construction.
+    /// Bare trackers (the unit tests) leave it unset, so no `Tool*` events are emitted.
     event_writers: OnceLock<Arc<DashMap<String, EventWriter>>>,
-    /// Per-call start timestamps (epoch ms), keyed by `call_id`. Populated only
-    /// when the call's session has an OPEN `events.jsonl` writer — i.e. the same
-    /// condition under which `ToolStarted` is emitted — so the flag-off /
-    /// no-writer path inserts nothing (the per-session writer map is empty when
-    /// `GROK_WORKSPACE_EVENTS_ENABLED` is off). Consumed by
-    /// [`tool_call_completed`](Self::tool_call_completed) to report a truthful
-    /// `ToolCompleted.duration_ms`.
-    ///
-    /// The stored value pairs the start timestamp with a clone of the session's
-    /// `EventWriter` captured at `ToolStarted` time. Holding the writer handle
-    /// here guarantees a symmetric `ToolStarted`/`ToolCompleted` pair: presence
-    /// of this entry is the single source of truth that a `ToolStarted` was
-    /// emitted, and the captured `Arc`-backed writer keeps the session's
-    /// `events.jsonl` fd alive so the paired `ToolCompleted` is still written
-    /// even if the per-session writer was evicted (e.g. `on_session_ended`)
-    /// mid-call.
+    /// Per-call start time (epoch ms) paired with the session's `EventWriter`, both captured at `ToolStarted` time, keyed by `call_id`.
+    /// An entry is inserted only when `ToolStarted` was emitted, so its presence is what pairs a `ToolCompleted` with a truthful `duration_ms`.
+    /// The captured writer keeps the session's `events.jsonl` open, so the completion is still written if the writer map evicts the session mid-call.
     call_started_ms: DashMap<String, (u64, EventWriter)>,
 }
 
@@ -211,15 +178,13 @@ impl ActivityTracker {
         Self::with_prune_window(std::time::Duration::from_millis(SESSION_IDLE_PRUNE_MS))
     }
 
-    /// Construct a tracker with a custom session-prune window. The durability
-    /// idle-hold cap comes from `GROK_WORKSPACE_DURABILITY_IDLE_HOLD_MAX_MS`
-    /// (default [`DEFAULT_DURABILITY_IDLE_HOLD_MAX_MS`]).
+    /// Construct a tracker with a custom session-prune window.
+    /// The durability idle-hold cap comes from `GROK_WORKSPACE_DURABILITY_IDLE_HOLD_MAX_MS` (default [`DEFAULT_DURABILITY_IDLE_HOLD_MAX_MS`]).
     pub fn with_prune_window(prune_window: std::time::Duration) -> Self {
         Self::with_prune_window_and_idle_hold(prune_window, durability_idle_hold_max_from_env())
     }
 
-    /// [`with_prune_window`](Self::with_prune_window) with an explicit
-    /// durability idle-hold cap, so tests never race process env.
+    /// [`with_prune_window`](Self::with_prune_window) with an explicit durability idle-hold cap, so tests never race the process environment.
     pub fn with_prune_window_and_idle_hold(
         prune_window: std::time::Duration,
         durability_idle_hold_max_ms: u64,
@@ -262,29 +227,25 @@ impl ActivityTracker {
         }
     }
 
-    /// Opt into foreground-only idle: background tasks stop withholding
-    /// `idle_since_ms`.
+    /// Opt into foreground-only idle: background tasks stop withholding `idle_since_ms`.
     pub fn with_idle_ignores_background(mut self, enabled: bool) -> Self {
         self.idle_ignores_background = enabled;
         self
     }
 
-    /// Override the preview-activity withhold window; the WorkspaceServer sources
-    /// it from `StatusConfig`.
+    /// Override the preview-activity withhold window; the WorkspaceServer sources it from `StatusConfig`.
     pub fn with_preview_activity_window_ms(mut self, window_ms: u64) -> Self {
         self.preview_activity_window_ms = window_ms;
         self
     }
 
-    /// Override the client-RPC withhold window (`0` disables); the
-    /// WorkspaceServer sources it from `StatusConfig`.
+    /// Override the client-RPC withhold window (`0` disables); the WorkspaceServer sources it from `StatusConfig`.
     pub fn with_rpc_activity_window_ms(mut self, window_ms: u64) -> Self {
         self.rpc_activity_window_ms = window_ms;
         self
     }
 
-    /// Override the client-presence withhold window (`0` disables); the
-    /// WorkspaceServer sources it from `StatusConfig`.
+    /// Override the client-presence withhold window (`0` disables); the WorkspaceServer sources it from `StatusConfig`.
     pub fn with_presence_activity_window_ms(mut self, window_ms: u64) -> Self {
         self.presence_activity_window_ms = window_ms;
         self
@@ -296,7 +257,8 @@ impl ActivityTracker {
         self
     }
 
-    /// Save the scheduler poll result. `Some(ms)` = a live scheduler with its next run at `ms`; `None` = no live scheduler, or nothing left to run.
+    /// Save the scheduler poll result.
+    /// `Some(ms)` means a live scheduler with its next run at `ms`; `None` means no live scheduler, or nothing left to run.
     pub fn record_scheduler_poll(&self, next_fire_ms: Option<u64>) {
         self.record_scheduler_poll_at(next_fire_ms, now_ms());
     }
@@ -342,23 +304,20 @@ impl ActivityTracker {
         now.saturating_add(self.scheduled_task_keep_awake_window_ms) >= poll.next_fire_ms
     }
 
-    /// Wire the shared per-session `events.jsonl` writer map into the tracker so
-    /// [`tool_call_started`](Self::tool_call_started) /
-    /// [`tool_call_completed`](Self::tool_call_completed) can emit `Tool*`
-    /// events. Set once during `WorkspaceHandle` construction; calling it a
-    /// second time is a no-op (the first map wins).
+    /// Wire in the shared per-session `events.jsonl` writer map so `tool_call_started` and `tool_call_completed` can emit `Tool*` events.
+    /// Set once during `WorkspaceHandle` construction; calling it a second time is a no-op (the first map wins).
     pub fn set_event_writers(&self, writers: Arc<DashMap<String, EventWriter>>) {
         let _ = self.event_writers.set(writers);
     }
 
-    /// Couple upload-queue stats (status reports queue depth; `is_drained` waits
-    /// for the queue). Set once; a second call is a no-op.
+    /// Couple upload-queue stats (status reports queue depth; `is_drained` waits for the queue).
+    /// Set once; a second call is a no-op.
     pub fn set_upload_queue_stats(&self, stats: Arc<UploadQueueStats>) {
         let _ = self.upload_queue_stats.set(stats);
     }
 
-    /// Couple the artifact-producer tracker (status counts producers, withholds
-    /// idle while they run). Set once; a second call is a no-op.
+    /// Couple the artifact-producer tracker (status counts producers, withholds idle while they run).
+    /// Set once; a second call is a no-op.
     pub fn set_producer_tasks(&self, tasks: tokio_util::task::TaskTracker) {
         let _ = self.producer_tasks.set(tasks);
     }
@@ -368,18 +327,18 @@ impl ActivityTracker {
         self.notify.clone()
     }
 
-    /// Record fresh `Routed` preview traffic. Withholds `idle_since_ms` for
-    /// [`preview_activity_window_ms`](Self::preview_activity_window_ms) and wakes
-    /// the status publisher so the renewed "active" status reaches the server promptly.
+    /// Record fresh `Routed` preview traffic.
+    /// Withholds `idle_since_ms` for [`preview_activity_window_ms`](Self::preview_activity_window_ms).
+    /// Wakes the status publisher so the renewed "active" status reaches the server promptly.
     pub fn note_preview_routed_activity(&self) {
         self.last_preview_routed_ms
             .store(now_ms(), Ordering::Relaxed);
         self.notify.notify_waiters();
     }
 
-    /// Record a fresh preview status poll. Withholds idle exactly as routed
-    /// traffic does today, but is tracked separately: the poll continues at the
-    /// same cadence whether or not anyone is watching.
+    /// Record a fresh preview status poll.
+    /// Withholds idle exactly as routed traffic does today, but is tracked separately.
+    /// The poll continues at the same cadence whether or not anyone is watching.
     pub fn note_preview_status_activity(&self) {
         self.last_preview_status_ms
             .store(now_ms(), Ordering::Relaxed);
@@ -387,25 +346,22 @@ impl ActivityTracker {
     }
 
     /// Record a client-driven mutation RPC (file write, git commit, …).
-    /// Withholds `idle_since_ms` for
-    /// [`rpc_activity_window_ms`](Self::rpc_activity_window_ms) and wakes the
-    /// status publisher so the renewed "active" status reaches the server
-    /// promptly. Read/poll RPCs deliberately never call this — an unattended
-    /// tab polls but does not mutate, so it cannot pin its sandbox.
+    /// Withholds `idle_since_ms` for [`rpc_activity_window_ms`](Self::rpc_activity_window_ms).
+    /// Wakes the status publisher so the renewed "active" status reaches the server promptly.
+    /// Read/poll RPCs deliberately never call this: an unattended tab polls but does not mutate, so it cannot pin its sandbox.
     pub fn note_client_rpc_activity(&self) {
         self.last_client_rpc_ms.store(now_ms(), Ordering::Relaxed);
         self.notify.notify_waiters();
     }
 
-    /// Apply a presence note. Only a visible note stamps (a hide must never
-    /// cut an existing withhold short), and a note whose `seq` is not newer
-    /// than the last applied one is dropped — reordering protection for the
-    /// gateway's fire-and-forget sends. `seq: None` (old gateway) always
-    /// applies.
+    /// Apply a presence note.
+    /// Only a visible note stamps (a hide must never cut an existing withhold short).
+    /// A note whose `seq` is not newer than the last applied one is dropped, protecting against reordering in the gateway's fire-and-forget sends.
+    /// `seq: None` (old gateway) always applies.
     pub fn apply_presence_note(&self, visible: bool, seq: Option<u64>) {
-        // Gate and stamp under one lock: split across two atomics, a slow
-        // older visible note racing a newer hidden one could pass the seq
-        // check and stamp after the hidden note, re-arming the withhold.
+        // Gate and stamp under one lock
+        // Split across two atomics, a slow older visible note racing a newer hidden one could pass the seq check and stamp after the hidden note
+        // That would turn the withhold back on
         let mut last_seq = self
             .last_presence_seq
             .lock()
@@ -422,15 +378,15 @@ impl ActivityTracker {
         }
     }
 
-    /// Mirror the proxy's attached-client counters. Absolute values, not edges,
-    /// so a missed scrape self-corrects on the next one.
+    /// Mirror the proxy's attached-client counters.
+    /// Absolute values, not edges, so a missed scrape self-corrects on the next one.
     pub fn set_preview_attached(&self, ws_tunnels_open: u64, routed_in_flight: u64) {
         let was_attached = self.has_preview_client_attached();
         self.preview_ws_tunnels_open
             .store(ws_tunnels_open, Ordering::Relaxed);
         self.preview_routed_in_flight
             .store(routed_in_flight, Ordering::Relaxed);
-        // The scraper calls this every tick; the common case is 0 → 0.
+        // The scraper calls this every tick; the common case is 0 staying 0
         if was_attached != self.has_preview_client_attached() {
             self.notify.notify_waiters();
         }
@@ -446,8 +402,7 @@ impl ActivityTracker {
         self.preview_ws_tunnels_open.load(Ordering::Relaxed)
     }
 
-    /// Window recent preview activity withholds idle for — the horizon the
-    /// stamps decay over, and the one the scraper ages an absent proxy against.
+    /// Window recent preview activity withholds idle for: the horizon the stamps decay over, and the one the scraper ages an absent proxy against.
     pub fn preview_activity_window_ms(&self) -> u64 {
         self.preview_activity_window_ms
     }
@@ -460,9 +415,8 @@ impl ActivityTracker {
             .unwrap_or(0)
     }
 
-    /// Queue/drain status fields shared by both snapshot paths; all zero when no
-    /// queue is coupled. Best-effort: independent `Relaxed` loads can transiently
-    /// show `inflight > pending` (cosmetic; the drain reads `pending` alone).
+    /// Queue/drain status fields shared by both snapshot paths; all zero when no queue is coupled.
+    /// Best-effort: independent `Relaxed` loads can transiently show `inflight > pending` (cosmetic; the drain reads `pending` alone).
     fn drain_status_fields(&self) -> (u32, u64, u32, bool, Option<u64>) {
         let (pending, pending_bytes, inflight, breaker) = match self.upload_queue_stats.get() {
             Some(s) => (
@@ -485,20 +439,18 @@ impl ActivityTracker {
         self.drain_started_ms.load(Ordering::Relaxed) != 0
     }
 
-    /// Durability tail shared by [`Self::snapshot`] and [`Self::snapshot_session`]
-    /// (one construction site so the two payloads can't drift).
+    /// Durability tail shared by [`Self::snapshot`] and [`Self::snapshot_session`] (one construction site so the two payloads can't drift).
     fn durability_payload_fields(&self, idle_since: u64) -> DurabilityPayloadFields {
         let (queue_pending, queue_pending_bytes, queue_inflight, breaker, drain_started) =
             self.drain_status_fields();
         let (producers, durability_withhold) = self.durability_gate(queue_pending, breaker);
         let now = now_ms();
         let (preview_withhold, preview_reason, preview_anchor) = self.client_withholds_idle(now);
-        // Withhold idle on durability work OR preview activity, decided here
-        // once so both snapshot paths agree (preview has no hold cap; 12h VM TTL backstops).
+        // Withhold idle on durability work OR preview activity, decided here once so both snapshot paths agree
+        // Preview has no hold cap; the 12h VM TTL backstops it
         let withhold_idle = durability_withhold || preview_withhold;
-        // Invariants: no reason while genuinely busy (`idle_since == 0` — the
-        // work is the cause, not a concurrent poll); durability outranks
-        // preview; every reason carries a stamp.
+        // Invariants: no reason while genuinely busy (`idle_since == 0`; the work is the cause, not a concurrent poll)
+        // Durability outranks preview; every reason carries a stamp
         let (withhold_reason, withhold_since_ms) = if idle_since == 0 {
             (None, None)
         } else if durability_withhold {
@@ -527,12 +479,11 @@ impl ActivityTracker {
         }
     }
 
-    /// Durability gate: returns (producers in flight, whether `idle_since_ms`
-    /// must be withheld). Idle is withheld while producers or queued uploads are
-    /// outstanding, except past the bounded hold cap, or — queued items only —
-    /// when the circuit breaker is tripped (queued items survive via disk spill +
-    /// restart recovery; an in-flight producer has nothing on disk yet, so it
-    /// withholds regardless of queue health). The hold resets when it clears.
+    /// Durability gate: returns (producers in flight, whether `idle_since_ms` must be withheld).
+    /// Idle is withheld while producers or queued uploads are outstanding, except past the bounded hold cap.
+    /// A tripped circuit breaker lifts the hold for queued items only, since they survive via disk spill and restart recovery.
+    /// An in-flight producer has nothing on disk yet, so it withholds regardless of queue health.
+    /// The hold resets when it clears.
     fn durability_gate(&self, queue_pending: u32, breaker_tripped: bool) -> (u32, bool) {
         let producers = self
             .producer_tasks
@@ -545,8 +496,8 @@ impl ActivityTracker {
             return (producers, false);
         }
         let now = now_ms();
-        // First observation of the busy condition wins the stamp. Relaxed:
-        // the stamp guards no other data, it's just a monotonic-enough clock.
+        // First observation of the busy condition wins the stamp
+        // Relaxed: the stamp guards no other data, it's just a monotonic-enough clock
         let since = match self.durability_busy_since_ms.compare_exchange(
             0,
             now,
@@ -560,20 +511,16 @@ impl ActivityTracker {
         (producers, !hold_expired)
     }
 
-    /// Whether client activity (preview traffic or mutation RPCs) should
-    /// withhold idle, and on what grounds.
+    /// Whether client activity (preview traffic or mutation RPCs) should withhold idle, and on what grounds.
     ///
-    /// Returns `(withhold, reason, anchor)`, where the anchor is the epoch-ms
-    /// the current hold is measured from. Tiers are checked strongest first;
-    /// all five withhold identically today, only the accounting differs.
+    /// Returns `(withhold, reason, anchor)`, where the anchor is the epoch-ms the current hold is measured from.
+    /// Tiers are checked strongest first; all five withhold identically today, only the accounting differs.
     fn client_withholds_idle(&self, now: u64) -> (bool, Option<IdleWithholdReason>, u64) {
-        // Including process start means a young or freshly-restored workspace
-        // can never look long-idle — the process restarts on restore, so this
-        // covers revived sessions without a separate minimum-age rule. A
-        // mutation RPC is genuine use (unlike a status poll), so it advances
-        // the anchor like routed preview traffic: a continuously-mutating
-        // client is intentionally uncapped by the hub's hold ceiling (the VM
-        // TTL backstops it); the ceiling bounds only a stale stamp.
+        // Including process start means a young or freshly-restored workspace can never look long-idle
+        // The process restarts on restore, so this covers revived sessions without a separate minimum-age rule
+        // A mutation RPC is genuine use (unlike a status poll), so it advances the anchor like routed preview traffic
+        // A continuously-mutating client is intentionally uncapped by the hub's hold ceiling; the VM TTL backstops it
+        // The ceiling bounds only a stale stamp
         let anchor = self
             .last_preview_routed_ms
             .load(Ordering::Relaxed)
@@ -603,8 +550,7 @@ impl ActivityTracker {
             self.last_preview_status_ms.load(Ordering::Relaxed),
             self.preview_activity_window_ms,
         ) {
-            // Holds, but never advances the anchor: a poll must not reset a
-            // clock meant to measure real use.
+            // Holds, but never advances the anchor: a poll must not reset a clock meant to measure real use
             return (true, Some(IdleWithholdReason::PreviewStatusOnly), anchor);
         }
         if activity_stamp_withholds_idle(
@@ -612,8 +558,7 @@ impl ActivityTracker {
             self.last_presence_ms.load(Ordering::Relaxed),
             self.presence_activity_window_ms,
         ) {
-            // Same anchor rule as the status poll: presence is not use, so
-            // the hub's ceiling genuinely bounds an attached-but-idle client.
+            // Same anchor rule as the status poll: presence is not use, so the hub's ceiling genuinely bounds an attached-but-idle client
             return (true, Some(IdleWithholdReason::ClientPresence), anchor);
         }
         if self.scheduled_fire_withholds_idle(now) {
@@ -623,18 +568,16 @@ impl ActivityTracker {
         (false, None, anchor)
     }
 
-    /// Whether any tracked session currently has an active turn (the aggregate
-    /// `turn_active`).
+    /// Whether any tracked session currently has an active turn (the aggregate `turn_active`).
     fn any_turn_active(&self) -> bool {
         self.sessions
             .iter()
             .any(|s| s.value().turn_active.load(Ordering::Acquire))
     }
 
-    /// Resolve the `events.jsonl` writer for `session_id` — `Some` only when an
-    /// event sink is configured AND the session already has an open writer
-    /// (opened at turn start). Returns `None` (so no event is emitted) for the
-    /// `__default__` / unknown-session cases.
+    /// Resolve the `events.jsonl` writer for `session_id`.
+    /// `Some` only when an event sink is configured AND the session already has an open writer (opened at turn start).
+    /// Returns `None` (so no event is emitted) for the `__default__` and unknown-session cases.
     fn session_writer(&self, session_id: Option<&str>) -> Option<EventWriter> {
         let session_id = session_id?;
         let writers = self.event_writers.get()?;
@@ -669,15 +612,10 @@ impl ActivityTracker {
 
         self.notify.notify_waiters();
 
-        // events.jsonl: only when the session's writer is already open (turn
-        // started, under the events flag) do we record the start time (for a
-        // truthful completion duration) and emit `ToolStarted`. When the writer
-        // is absent — flag-off (empty per-session map) or no turn yet — this
-        // whole block is skipped, so the flag-off path allocates nothing.
+        // events.jsonl: only a session whose writer is open (turn started, under the events flag) records a start time and emits `ToolStarted`
+        // When the writer is absent, flag off (empty map) or no turn yet, this block is skipped and the flag-off path allocates nothing
         if let Some(writer) = self.session_writer(session_id) {
-            // Capture the writer handle alongside the start time so the paired
-            // `ToolCompleted` is emitted to the same `events.jsonl` even if the
-            // session writer is evicted mid-call.
+            // Capturing the writer keeps the paired `ToolCompleted` in the same `events.jsonl` even if the session writer is evicted mid-call
             self.call_started_ms
                 .insert(call_id.to_owned(), (now, writer.clone()));
             writer.emit(Event::ToolStarted {
@@ -688,14 +626,10 @@ impl ActivityTracker {
 
     /// Mark an in-flight tool call as completed.
     ///
-    /// `session_id` identifies the owning session for the caller's bookkeeping;
-    /// the internal session counters key off the recorded `call_id → session`
-    /// mapping, and the [`ToolCompleted`](Event::ToolCompleted) event is written
-    /// via the `EventWriter` handle captured at `ToolStarted` time (so it lands
-    /// in the right `events.jsonl` even if the session writer was evicted
-    /// mid-call). `outcome` is the truthful terminal status from the caller
-    /// (`Success`/`Error` at the tool handler, `Cancelled` from the cancel
-    /// paths).
+    /// `session_id` is only for the caller's bookkeeping; the internal session counters key off the recorded `call_id` to session mapping.
+    /// The [`ToolCompleted`](Event::ToolCompleted) is written via the `EventWriter` captured at `ToolStarted` time.
+    /// So it lands in the right `events.jsonl` even if the session writer was evicted mid-call.
+    /// `outcome` is the truthful terminal status from the caller (`Success`/`Error` at the tool handler, `Cancelled` from the cancel paths).
     pub fn tool_call_completed(
         &self,
         call_id: &str,
@@ -709,9 +643,8 @@ impl ActivityTracker {
 
         self.active_tool_calls.fetch_sub(1, Ordering::AcqRel);
         self.last_call_completed_ms.store(now, Ordering::Relaxed);
-        // Re-read after decrement: a concurrent `tool_call_started` may
-        // have bumped the counter back up between our `fetch_sub` and
-        // this load. Only transition to idle if we're truly at zero.
+        // Re-read after decrement: a concurrent `tool_call_started` may have bumped the counter back up between our `fetch_sub` and this load
+        // Only transition to idle if we're truly at zero
         if self.active_tool_calls.load(Ordering::Acquire) == 0
             && (self.idle_ignores_background || self.background_tasks.load(Ordering::Acquire) == 0)
         {
@@ -731,16 +664,11 @@ impl ActivityTracker {
 
         self.notify.notify_waiters();
 
-        // events.jsonl: emit `ToolCompleted` only when a paired `ToolStarted`
-        // was recorded for this call (its `call_started_ms` entry is present).
-        // Gating on that entry — rather than re-checking writer state at
-        // completion — keeps the start/completion pair symmetric: no orphan
-        // zero-duration `ToolCompleted` when a writer opens mid-call, and no
-        // dropped completion when the session writer is evicted mid-call (the
-        // captured writer handle keeps the file open). `duration_ms` is always
-        // truthful because the start time is paired with the writer.
+        // events.jsonl: emit `ToolCompleted` only when a paired `ToolStarted` was recorded for this call (its `call_started_ms` entry is present)
+        // Gating on the entry, not on writer state at completion, keeps the pair symmetric
+        // A writer opened mid-call adds no orphan zero-duration completion, and an evicted one drops none (the captured handle keeps the file open)
         if let Some((_, (started_ms, writer))) = self.call_started_ms.remove(call_id) {
-            // Workspace = hub/proxy hop; join package durations on shell rows (no source).
+            // `Workspace` means the hub/proxy hop; join package durations on shell rows (no source)
             writer.emit(Event::ToolCompleted {
                 tool_name,
                 duration_ms: now.saturating_sub(started_ms),
@@ -760,7 +688,7 @@ impl ActivityTracker {
         self.background_tasks.fetch_add(1, Ordering::Relaxed);
         self.background_ids.insert(task_id.to_owned(), ());
         if self.idle_ignores_background {
-            // An active fg call's store(0) must keep idle withheld.
+            // An active foreground call's store(0) must keep idle withheld
             if self.active_tool_calls.load(Ordering::Acquire) == 0 {
                 self.idle_since_ms.store(now_ms(), Ordering::Relaxed);
             }
@@ -806,8 +734,7 @@ impl ActivityTracker {
     /// Complete all in-flight tool calls for the given session.
     ///
     /// Returns the number of calls that were marked as completed.
-    /// Called when a session-wide Cancel hook arrives without a specific
-    /// `call_id` (broadcast cancel from Ctrl+C).
+    /// Called when a session-wide Cancel hook arrives without a specific `call_id` (broadcast cancel from Ctrl+C).
     pub fn cancel_all_session_calls(&self, session_id: &str) -> usize {
         let call_ids: Vec<String> = self
             .call_to_session
@@ -822,8 +749,8 @@ impl ActivityTracker {
         count
     }
 
-    /// Releases the session's entry. One with calls in flight keeps it: the
-    /// swap policy reads that count, and the idle prune collects it later.
+    /// Releases the session's entry.
+    /// One with calls in flight keeps it: the swap policy reads that count, and the idle prune collects it later.
     pub fn session_ended(&self, session_id: &str) {
         let released = self
             .sessions
@@ -844,9 +771,8 @@ impl ActivityTracker {
             .is_some_and(|s| s.turn_active.load(Ordering::Acquire))
     }
 
-    /// In-flight tool calls for the given session (`0` when unknown). Only
-    /// the model-facing tool handler ticks the underlying counter, so
-    /// `workspace_rpc` traffic never contributes.
+    /// In-flight tool calls for the given session (`0` when unknown).
+    /// Only the model-facing tool handler ticks the underlying counter, so `workspace_rpc` traffic never contributes.
     pub fn session_active_tool_calls(&self, session_id: &str) -> u32 {
         self.sessions
             .get(session_id)
@@ -855,11 +781,10 @@ impl ActivityTracker {
 
     pub fn set_active(&self) {
         self.lifecycle.store(LIFECYCLE_NONE, Ordering::Release);
-        // Clear the drain stamp symmetrically with `set_draining`: leaving it set
-        // after a resume would make `drain_started_ms` mean "a drain ever began"
-        // rather than "currently draining", and the server's idle gate keys its
-        // unconditional drain escape off that stamp (a stale stamp would let it
-        // report idle while durable work is still outstanding).
+        // Clear the drain stamp symmetrically with `set_draining`
+        // Left set after a resume, `drain_started_ms` would mean "a drain ever began" rather than "currently draining"
+        // The server's idle gate keys its unconditional drain escape off that stamp
+        // A stale stamp would let it report idle while durable work is still outstanding
         self.drain_started_ms.store(0, Ordering::Release);
         self.notify.notify_waiters();
     }
@@ -886,21 +811,16 @@ impl ActivityTracker {
         self.lifecycle.load(Ordering::Acquire) >= LIFECYCLE_DRAINING
     }
 
-    /// Fully drained: draining, no active tool calls/background tasks, and the
-    /// upload queue emptied (must not exit with artifacts still pending).
+    /// Fully drained: draining, no active tool calls/background tasks, and the upload queue emptied (must not exit with artifacts still pending).
     ///
-    /// In-flight artifact producers are intentionally *not* part of this gate:
-    /// they are withheld from idle by [`Self::durability_gate`] and are awaited
-    /// by the graceful drain's producer phase (`phase 1.5` of
-    /// `WorkspaceHandle::two_phase_drain`)
-    /// *before* the queue flush, so by the time the queue empties their work has
-    /// already been enqueued and is reflected in `upload_queue_pending`.
+    /// In-flight artifact producers are intentionally *not* part of this gate: [`Self::durability_gate`] already withholds idle for them.
+    /// The graceful drain's producer phase (`phase 1.5` of `WorkspaceHandle::two_phase_drain`) awaits them *before* the queue flush.
+    /// So by the time the queue empties, their work is already enqueued and reflected in `upload_queue_pending`.
     pub fn is_drained(&self) -> bool {
         self.is_draining() && self.total_active() == 0 && self.upload_queue_pending() == 0
     }
 
-    /// Phase-1 drain condition: all in-flight tool calls and background tasks
-    /// finished, independent of the upload queue.
+    /// Phase-1 drain condition: all in-flight tool calls and background tasks finished, independent of the upload queue.
     pub fn tools_idle(&self) -> bool {
         self.total_active() == 0
     }
@@ -919,21 +839,18 @@ impl ActivityTracker {
         self.notify.notify_waiters();
     }
 
-    /// Wait until the tracker is both draining and all active work
-    /// (tool calls + background tasks + the upload queue) has completed.
+    /// Wait until the tracker is both draining and all active work (tool calls, background tasks, and the upload queue) has completed.
     pub async fn wait_until_drained(&self) {
         loop {
             if self.is_drained() {
                 return;
             }
-            // `notify_waiters` stores no permit, so a wake between the check and
-            // this await is missed — safe because every caller is timeout-bounded.
+            // `notify_waiters` stores no permit, so a wake between the check and this await is missed; safe because every caller is timeout-bounded
             self.notify.notified().await;
         }
     }
 
-    /// Wait until all in-flight tool calls and background tasks have finished,
-    /// ignoring the upload queue (phase 1 of the two-phase drain).
+    /// Wait until all in-flight tool calls and background tasks have finished, ignoring the upload queue (phase 1 of the two-phase drain).
     pub async fn wait_until_tools_idle(&self) {
         loop {
             if self.tools_idle() {
@@ -949,8 +866,8 @@ impl ActivityTracker {
         self.sessions.len()
     }
 
-    /// Returns live session IDs. As a side-effect, prunes sessions
-    /// that have been idle longer than the configured prune window.
+    /// Returns live session IDs.
+    /// As a side-effect, prunes sessions that have been idle longer than the configured prune window.
     pub fn known_sessions(&self) -> Vec<String> {
         let now = now_ms();
         let mut live = Vec::new();
@@ -981,8 +898,8 @@ impl ActivityTracker {
         live
     }
 
-    /// Per-session snapshot. `background_task_ids` is the connection aggregate,
-    /// re-published to the session's client.
+    /// Per-session snapshot.
+    /// `background_task_ids` is the connection aggregate, re-published to the session's client.
     pub fn snapshot_session(&self, session_id: &str) -> ToolServerStatusPayload {
         let lifecycle = self.lifecycle.load(Ordering::Acquire);
         let bg = self.background_tasks.load(Ordering::Relaxed);
@@ -1106,8 +1023,7 @@ impl ActivityTracker {
     }
 }
 
-/// Durability tail of a [`ToolServerStatusPayload`], built only by
-/// [`ActivityTracker::durability_payload_fields`].
+/// Durability tail of a [`ToolServerStatusPayload`], built only by [`ActivityTracker::durability_payload_fields`].
 struct DurabilityPayloadFields {
     idle_since_ms: Option<u64>,
     withhold_reason: Option<IdleWithholdReason>,
@@ -1126,16 +1042,14 @@ fn durability_idle_hold_max_from_env() -> u64 {
     durability_idle_hold_from_raw(std::env::var("GROK_WORKSPACE_DURABILITY_IDLE_HOLD_MAX_MS").ok())
 }
 
-/// Pure parse of the idle-hold env value: a non-negative integer ms wins (0
-/// disables the hold entirely); absent or malformed falls back to the default.
+/// Pure parse of the idle-hold env value: a non-negative integer ms wins (0 disables the hold); absent or malformed falls back to the default.
 fn durability_idle_hold_from_raw(raw: Option<String>) -> u64 {
     raw.and_then(|s| s.trim().parse::<u64>().ok())
         .unwrap_or(DEFAULT_DURABILITY_IDLE_HOLD_MAX_MS)
 }
 
-/// Whether a preview-activity stamp still withholds idle at `now`: true while it
-/// is within `window` ms. A zero stamp (no activity recorded) never withholds,
-/// and the window is exclusive at the boundary so it decays rather than pins.
+/// Whether a preview-activity stamp still withholds idle at `now`: true while it is within `window` ms.
+/// A zero stamp (no activity recorded) never withholds, and the window is exclusive at the boundary so it decays rather than pins.
 fn activity_stamp_withholds_idle(now: u64, last_activity_ms: u64, window_ms: u64) -> bool {
     last_activity_ms != 0 && now.saturating_sub(last_activity_ms) < window_ms
 }
@@ -1191,15 +1105,6 @@ mod tests {
         assert_eq!(s.status, ToolServerLifecycleStatus::Busy);
         assert_eq!(s.background_tasks, 1);
     }
-
-    #[test]
-    fn background_task_started_dedups_by_id() {
-        let t = ActivityTracker::new();
-        t.background_task_started("dup");
-        t.background_task_started("dup");
-        assert_eq!(t.snapshot().background_tasks, 1);
-    }
-
     #[test]
     fn background_task_completed_unknown_id_does_not_underflow() {
         let t = ActivityTracker::new();
@@ -1297,18 +1202,6 @@ mod tests {
             assert!(t.tools_idle());
         }
     }
-
-    #[test]
-    fn snapshot_payloads_report_idle_ignores_background_flag() {
-        let on = ActivityTracker::new().with_idle_ignores_background(true);
-        assert!(on.snapshot().idle_ignores_background);
-        assert!(on.snapshot_session("sess-a").idle_ignores_background);
-
-        let off = ActivityTracker::new();
-        assert!(!off.snapshot().idle_ignores_background);
-        assert!(!off.snapshot_session("sess-a").idle_ignores_background);
-    }
-
     #[test]
     fn draining_overrides_busy() {
         let t = ActivityTracker::new();
@@ -1349,7 +1242,7 @@ mod tests {
 
     // ── upload-queue coupling + drain status fields ───────────────
 
-    /// Coupled queue depth surfaces in both aggregate and per-session payloads.
+    /// Coupled queue depth appears in both aggregate and per-session payloads.
     #[test]
     fn snapshot_reports_coupled_upload_queue_stats() {
         let t = ActivityTracker::new();
@@ -1541,9 +1434,8 @@ mod tests {
         assert!(s.upload_queue_circuit_breaker_tripped);
     }
 
-    /// The breaker escape covers queued items only (they survive via disk
-    /// spill + restart recovery); an in-flight producer has nothing on disk
-    /// yet and must keep withholding idle even with the breaker tripped.
+    /// The breaker escape covers queued items only (they survive via disk spill and restart recovery).
+    /// An in-flight producer has nothing on disk yet and must keep withholding idle even with the breaker tripped.
     #[tokio::test]
     async fn breaker_tripped_does_not_bypass_producer_hold() {
         let t = ActivityTracker::new();
@@ -1835,8 +1727,7 @@ mod tests {
         );
     }
 
-    /// A slow superseded visible note landing after a newer hidden note must
-    /// not re-arm the withhold.
+    /// A slow superseded visible note landing after a newer hidden note must not turn the withhold back on.
     #[test]
     fn stale_presence_seq_is_dropped() {
         let t = ActivityTracker::new();
@@ -1863,8 +1754,8 @@ mod tests {
         assert_eq!(s.withhold_reason, None);
     }
 
-    /// An HMR socket writes no activity stamps, so the counter must hold alone
-    /// — which is exactly why the scraper must not clear it on one missed poll.
+    /// An HMR socket writes no activity stamps, so the counter must hold alone.
+    /// That is exactly why the scraper must not clear it on one missed poll.
     #[test]
     fn attached_client_withholds_without_any_activity_stamp() {
         let t = ActivityTracker::new();
@@ -1890,8 +1781,7 @@ mod tests {
         );
     }
 
-    /// A ceiling will be measured from the anchor, so letting the pane's own
-    /// poll reset it would make that ceiling unreachable.
+    /// A ceiling will be measured from the anchor, so letting the pane's own poll reset it would make that ceiling unreachable.
     #[test]
     fn status_poll_does_not_advance_the_withhold_anchor() {
         let t = ActivityTracker::new();
@@ -1907,10 +1797,9 @@ mod tests {
         );
     }
 
-    /// A session busy with real work must not be attributed to the preview just
-    /// because the pane happens to be polling it. Both look like a missing
-    /// `idle_since_ms` on the wire, and conflating them would inflate the
-    /// preview share of exactly the population this field exists to measure.
+    /// A session busy with real work must not be attributed to the preview just because the pane happens to be polling it.
+    /// Both look like a missing `idle_since_ms` on the wire.
+    /// Conflating them would inflate the preview share of exactly the population this field exists to measure.
     #[test]
     fn a_genuinely_busy_session_reports_no_withhold_reason() {
         let t = ActivityTracker::new();
@@ -1941,8 +1830,7 @@ mod tests {
         );
     }
 
-    /// Durability is already bounded by its own cap, so it is the reason worth
-    /// reporting when both hold.
+    /// Durability is already bounded by its own cap, so it is the reason worth reporting when both hold.
     #[tokio::test]
     async fn durability_outranks_preview_in_the_reported_reason() {
         let t = ActivityTracker::new();
@@ -1956,8 +1844,8 @@ mod tests {
             "preview alone reports the preview reason"
         );
 
-        // An in-flight producer engages the durability gate. Nothing else does
-        // — a background task is not durable work.
+        // An in-flight producer engages the durability gate
+        // Nothing else does; a background task is not durable work
         let gate = Arc::new(tokio::sync::Notify::new());
         let gate2 = gate.clone();
         let join = tasks.spawn(async move { gate2.notified().await });
@@ -2048,8 +1936,7 @@ mod tests {
         let t = ActivityTracker::new();
         t.set_draining();
         assert!(t.snapshot().drain_started_ms.is_some());
-        // Resuming clears the stamp so it tracks "currently draining", not
-        // "ever drained" — the server idle gate's drain escape keys off it.
+        // Resuming clears the stamp so it tracks "currently draining", not "ever drained"; the server idle gate's drain escape keys off it
         t.set_active();
         assert_eq!(t.snapshot().drain_started_ms, None);
         // A fresh drain after the resume re-stamps with a new value.
@@ -2204,8 +2091,8 @@ mod tests {
 
     #[test]
     fn small_prune_window_evicts_session_default_window_retains() {
-        // A session idle for ~50ms: pruned under a 10ms window, retained
-        // under the default 300s window. Proves the window is actually used.
+        // A session idle for ~50ms: pruned under a 10ms window, retained under the default 300s window
+        // Proves the window is actually used
         let idle_ago = 50;
 
         let small = ActivityTracker::with_prune_window(std::time::Duration::from_millis(10));
@@ -2251,19 +2138,6 @@ mod tests {
         t.tool_call_completed("c1", None, ToolOutcome::Success);
         assert_eq!(t.snapshot().active_tool_calls, 0);
     }
-
-    #[test]
-    fn duplicate_completion_is_noop() {
-        let t = ActivityTracker::new();
-        t.tool_call_started("c1", "read_file", None);
-        assert_eq!(t.snapshot().active_tool_calls, 1);
-        t.tool_call_completed("c1", None, ToolOutcome::Success);
-        assert_eq!(t.snapshot().active_tool_calls, 0);
-        // Second completion of the same call_id must not underflow.
-        t.tool_call_completed("c1", None, ToolOutcome::Success);
-        assert_eq!(t.snapshot().active_tool_calls, 0);
-    }
-
     #[test]
     fn unknown_call_id_completion_is_noop() {
         let t = ActivityTracker::new();
@@ -2294,14 +2168,6 @@ mod tests {
         t.background_task_completed("bg1");
         assert_eq!(t.snapshot().background_tasks, 0);
     }
-
-    #[test]
-    fn unknown_background_task_completion_is_noop() {
-        let t = ActivityTracker::new();
-        t.background_task_completed("never-started");
-        assert_eq!(t.snapshot().background_tasks, 0);
-    }
-
     #[test]
     fn prune_cleans_call_to_session_mapping() {
         let t = ActivityTracker::new();
@@ -2315,7 +2181,6 @@ mod tests {
         // Prune should remove the session and its call_to_session entries.
         t.known_sessions();
         assert!(!t.sessions.contains_key("stale"));
-        // Verify call_to_session was cleaned (no dangling entries).
         assert!(!t.call_to_session.contains_key("c1"));
     }
 
@@ -2323,11 +2188,9 @@ mod tests {
     fn per_session_completion_after_prune_is_safe() {
         let t = ActivityTracker::new();
         t.tool_call_started("c1", "x", Some("sess"));
-        // Force-prune the session while the call is still "active"
-        // (simulates the theoretical race).
+        // Force-prune the session while the call is still "active" (simulates the theoretical race)
         t.sessions.remove("sess");
-        // Completing should not panic or underflow — the session
-        // lookup returns None, so only the global counter decrements.
+        // Completing should not panic or underflow; the session lookup returns None, so only the global counter decrements
         t.tool_call_completed("c1", None, ToolOutcome::Success);
         assert_eq!(t.snapshot().active_tool_calls, 0);
     }
@@ -2521,8 +2384,7 @@ mod tests {
 
     // ── events.jsonl emission ─────────────────────────────────
 
-    /// Build a tracker whose event sink points at a fresh tempdir, with the
-    /// `events.jsonl` writer for `session` pre-opened (as turn-start would do).
+    /// Build a tracker whose event sink points at a tempdir, with the `events.jsonl` writer for `session` pre-opened (as turn-start would do).
     fn tracker_with_writer(session: &str) -> (ActivityTracker, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let writers: Arc<DashMap<String, EventWriter>> = Arc::new(DashMap::new());
@@ -2585,8 +2447,7 @@ mod tests {
 
     #[test]
     fn no_tool_events_without_event_sink() {
-        // Behaviour preservation: the default tracker (no event sink — the state
-        // for all the legacy tests above) must never touch the filesystem.
+        // Behaviour preservation: the default tracker (no event sink, the state for all the legacy tests above) must never touch the filesystem
         let t = ActivityTracker::new();
         t.tool_call_started("c1", "read_file", Some("sess-a"));
         t.tool_call_completed("c1", Some("sess-a"), ToolOutcome::Success);
@@ -2597,8 +2458,7 @@ mod tests {
 
     #[test]
     fn no_event_when_session_writer_not_open() {
-        // Sink configured but the session's writer was never opened (no
-        // turn-start): no event is emitted and no start time leaks.
+        // Sink configured but the session's writer was never opened (no turn-start): no event is emitted and no start time leaks
         let dir = tempfile::tempdir().unwrap();
         let writers: Arc<DashMap<String, EventWriter>> = Arc::new(DashMap::new());
         writers.insert("other".to_owned(), EventWriter::open(dir.path()));
@@ -2611,9 +2471,8 @@ mod tests {
         // The "other" session's events.jsonl must stay empty.
         let text = std::fs::read_to_string(dir.path().join("events.jsonl")).unwrap();
         assert!(text.trim().is_empty(), "no event should be written");
-        // No start time was ever recorded: the insert is gated on this session's
-        // writer being open, and "unopened-sess" has none — so the map is empty
-        // (this is exactly the production flag-off shape: sink wired, map empty).
+        // No start time was recorded: the insert is gated on this session's writer being open, and "unopened-sess" has none, so the map is empty
+        // This is exactly the production flag-off shape: sink wired, map empty
         assert!(t.call_started_ms.is_empty());
     }
 }

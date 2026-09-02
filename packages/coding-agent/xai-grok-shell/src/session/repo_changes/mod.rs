@@ -1,7 +1,6 @@
-//! Serialize local repository changes (local commits + uncommitted worktree/index changes).
+//! Serialize local repository changes (local commits and uncommitted worktree/index changes).
 //!
-//! This module provides high-level async functions for serializing repository changes
-//! to a local archive or an in-memory reference structure.
+//! This module provides high-level async functions for serializing repository changes to a local archive or an in-memory reference structure.
 pub use xai_file_utils::BlobCompression;
 pub use xai_file_utils::{
     ARCHIVE_SCHEMA_VERSION, ARCHIVE_SCHEMA_VERSION_V3, DEDUP_BLOB_SUBDIR, DEDUP_GCS_PREFIX,

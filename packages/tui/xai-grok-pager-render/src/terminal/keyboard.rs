@@ -1,32 +1,24 @@
 //! Per-terminal keyboard input capabilities.
 //!
-//! Classifies keyboard delivery semantics so input-handling code can consume one struct
-//! instead of branching on brand. The classification depends on the
-//! host OS — today only macOS rows are populated. Extend
-//! [`KeyboardCapabilities`] with new fields (paste
-//! protocol, focus reporting, custom escapes) instead of adding more
-//! `match self.brand` sites scattered through the pager.
+//! Input-handling code reads one [`KeyboardCapabilities`] struct instead of branching on brand.
+//! The classification depends on the host OS; today only macOS rows are populated.
+//! Extend [`KeyboardCapabilities`] with new fields (paste protocol, focus reporting, custom escapes) rather than adding `match self.brand` sites.
 
 use super::TerminalName;
 use crate::host::HostOs;
-/// What happens to a single modifier (Cmd, Opt, etc.) on its way from
-/// the keyboard to the program.
+/// What happens to a single modifier (Cmd, Opt, etc.) on its way from the keyboard to the program.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, strum::Display)]
 #[strum(serialize_all = "snake_case")]
 #[non_exhaustive]
 pub enum ModifierFate {
-    /// Terminal delivers the modifier in the `KeyEvent` (KKP) or as a
-    /// readline-equivalent byte sequence the textarea already handles
-    /// (`^U`, `ESC ^?`).
+    /// Terminal delivers the modifier in the `KeyEvent` (KKP) or as a readline-equivalent byte sequence the textarea already handles (`^U`, `ESC ^?`).
     Native,
-    /// Terminal drops the modifier; the OS-level rescue can recover it
-    /// (CoreGraphics on macOS).
+    /// Terminal drops the modifier; the OS-level rescue can recover it (CoreGraphics on macOS).
     Dropped,
-    /// Chord captured before reaching the PTY (Apple Terminal Cmd+Bsp).
+    /// The chord is captured before reaching the PTY (Apple Terminal Cmd+Bsp).
     /// No event arrives; not even an OS rescue helps.
     Unrecoverable,
-    /// Behavior unclassified — treated as no-rescue to avoid false
-    /// positives on unknown brands.
+    /// Behavior is unclassified; treated as no-rescue to avoid false positives on unknown brands.
     #[default]
     Unknown,
 }
@@ -46,9 +38,7 @@ pub struct ModifierDelivery {
 }
 
 impl ModifierDelivery {
-    /// Construct a delivery from explicit fates. `#[non_exhaustive]` blocks
-    /// struct-literal construction from other crates, so downstream test
-    /// builds use this constructor.
+    /// `#[non_exhaustive]` blocks struct-literal construction from other crates, so downstream test builds use this constructor.
     #[cfg(any(test, feature = "test-support"))]
     pub fn new_for_test(cmd: ModifierFate, opt: ModifierFate) -> Self {
         Self { cmd, opt }
@@ -63,15 +53,12 @@ impl ModifierDelivery {
     }
 }
 
-/// Per-terminal keyboard capabilities. Extend with new fields as more
-/// per-terminal input behaviors get classified.
 #[derive(Debug, Clone, Copy, Default)]
 #[non_exhaustive]
 pub struct KeyboardCapabilities {
     pub modifier_delivery: ModifierDelivery,
-    /// Fate of Shift/Opt/Cmd when modifying `Enter`. Apple Terminal
-    /// drops these and we recover them via the same OS poll used for
-    /// Backspace/Delete.
+    /// Fate of Shift/Opt/Cmd when modifying `Enter`.
+    /// Apple Terminal drops these and we recover them via the same OS poll used for Backspace/Delete.
     pub enter_modifier: ModifierFate,
 }
 
@@ -81,16 +68,13 @@ impl KeyboardCapabilities {
     }
 }
 
-/// Classify keyboard capabilities for the current host.
-///
-/// Today the table is populated only for macOS; other OSes return the
-/// default (all-`Unknown`). When a Linux/Windows probe lands, add a
-/// per-OS arm here rather than forking the function.
+/// Today the table is populated only for macOS; other OSes return the default (all-`Unknown`).
+/// When a Linux/Windows probe lands, add a per-OS arm here rather than forking the function.
 pub fn keyboard_capabilities(brand: TerminalName) -> KeyboardCapabilities {
     keyboard_capabilities_for_host(brand, HostOs::current())
 }
 
-/// Classify keyboard capabilities for explicit host evidence.
+/// Classify keyboard capabilities for an explicitly supplied host OS.
 pub fn keyboard_capabilities_for_host(brand: TerminalName, host: HostOs) -> KeyboardCapabilities {
     match host {
         HostOs::Macos => macos_capabilities(brand),
@@ -104,32 +88,25 @@ fn macos_capabilities(brand: TerminalName) -> KeyboardCapabilities {
         TerminalName::Ghostty | TerminalName::Kitty | TerminalName::Foot => {
             (Native, Native, Native)
         }
-        // iTerm2/VS Code translate Cmd+Bsp → ^U and Opt+Bsp → ESC ^?,
-        // both of which the textarea already handles natively. VS Code-family
-        // embeds and Zed inherit the same keymap behavior as VS Code
-        // capabilities at runtime (no TERM_FEATURES, XTVERSION leaks).
-        // (including the Cmd+Bsp → ^U translation).
+        // iTerm2/VS Code translate Cmd+Bsp to ^U and Opt+Bsp to ESC ^?, both of which the textarea already handles natively
+        // VS Code-family embeds and Zed inherit the same keymap behavior as VS Code (including the Cmd+Bsp to ^U translation)
         TerminalName::Iterm2
         | TerminalName::VsCode
         | TerminalName::Cursor
         | TerminalName::Windsurf
         | TerminalName::Zed => (Native, Native, Native),
         TerminalName::WezTerm => (Dropped, Native, Native),
-        // Alacritty's macOS keymap binds Cmd+Bsp → ^U (native readline);
-        // Opt+Bsp is a bare ^? without `option_as_alt` set.
+        // Alacritty's macOS keymap binds Cmd+Bsp to ^U (native readline); Opt+Bsp is a bare ^? without `option_as_alt` set
         TerminalName::Alacritty | TerminalName::Rio => (Native, Dropped, Native),
         TerminalName::WarpTerminal => (Dropped, Dropped, Native),
-        // Apple Terminal: Cmd+Bsp captured by the window manager.
+        // Apple Terminal: Cmd+Bsp is captured by the window manager
         // Opt+Bsp and modified Enter are dropped; CG can rescue both.
         TerminalName::AppleTerminal => (Unrecoverable, Dropped, Dropped),
         TerminalName::GrokDesktop => (Unknown, Unknown, Unknown),
-        // VTE-based terminals (incl. Terminator) on macOS are unusual;
-        // classify when we have evidence rather than guessing.
+        // VTE-based terminals (incl. Terminator) on macOS are unusual; classify when we have evidence rather than guessing.
         TerminalName::Vte | TerminalName::Terminator => (Unknown, Unknown, Unknown),
-        // JetBrains JediTerm: no KKP, no CG rescue. No way to probe
-        // Mouse reporting has known SGR bugs in Classic engine (IJPL-232482);
-        // Mouse reporting has known SGR bugs in Classic engine (IJPL-232482);
-        // Reworked 2025 engine is better but indistinguishable via env vars.
+        // JetBrains JediTerm: no KKP, no CG rescue, and no way to probe capabilities at runtime (no TERM_FEATURES, XTVERSION leaks)
+        // Mouse reporting has known SGR bugs in the Classic engine (IJPL-232482); the reworked 2025 engine is better but indistinguishable via env vars
         TerminalName::JetBrains => (Unknown, Unknown, Unknown),
         TerminalName::WindowsTerminal | TerminalName::Otty | TerminalName::Unknown => {
             (Unknown, Unknown, Unknown)
@@ -141,9 +118,8 @@ fn macos_capabilities(brand: TerminalName) -> KeyboardCapabilities {
     }
 }
 
-// Tests verify the macOS classification table; they only mean
-// something on a macOS host. Cross-OS verification will need a test
-// harness that overrides `HostOs::current()`; see the module doc.
+// Tests verify the macOS classification table; they only mean something on a macOS host
+// Cross-OS verification will need a test harness that overrides `HostOs::current()`; see the module doc
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;

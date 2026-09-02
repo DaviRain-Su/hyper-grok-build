@@ -1,7 +1,6 @@
-//! Detect file reads/writes inside a shell command so a managed `Read`/`Edit`
-//! deny/ask can't be bypassed via a shell reader/writer/redirect.
+//! Detect file reads/writes inside a shell command so a managed `Read`/`Edit` deny/ask can't be bypassed via a shell reader/writer/redirect.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use tree_sitter::Node;
 
@@ -10,22 +9,21 @@ use crate::permission::bash_command_splitting::{
     try_parse_shell, unwrap_wrappers,
 };
 use crate::permission::policy::{
-    CompiledPolicy, GateDecision, InlineShellScript, ShellWord, combine_gate_decisions,
+    CompiledPolicy, GateDecision, InlineShellScript, ShellWord, SymlinkFollow,
+    combine_gate_decisions, follow_absolute_symlink, resolve_following_symlinks,
     shell_dash_c_script,
 };
 use crate::permission::types::{AccessKind, Decision};
 
 impl CompiledPolicy {
-    /// Escalate (never auto-allow) a shell reader/writer/redirect touching a
-    /// restricted path; unpinnable operands return `Ask`.
+    /// Escalate (never auto-allow) a shell reader/writer/redirect touching a restricted path; unpinnable operands return `Ask`.
     pub fn evaluate_shell_file_access(&self, cmd: &str, cwd: &Path) -> Option<Decision> {
         self.evaluate_shell_file_access_gate(cmd, cwd)
             .map(GateDecision::into_decision)
     }
 
-    /// [`Self::evaluate_shell_file_access`] with `Ask` provenance kept: a
-    /// rule-match Ask stays binding while the manager may defer a fail-closed
-    /// Ask to the auto-mode classifier.
+    /// [`Self::evaluate_shell_file_access`] with `Ask` provenance kept.
+    /// A rule-match Ask stays binding while the manager may defer a fail-closed Ask to the auto-mode classifier.
     pub(crate) fn evaluate_shell_file_access_gate(
         &self,
         cmd: &str,
@@ -56,9 +54,8 @@ impl CompiledPolicy {
 
         let invocations = shell_command_invocations(root, cmd);
 
-        // We don't track cwd across `cd`/`pushd`/`env -C`; a relative operand after
-        // one is unpinnable → Ask. Managed denies are `**/` basename globs, so they
-        // still match — only exact-path rules are affected.
+        // We don't track cwd across `cd`/`pushd`/`env -C`; a relative operand after one is unpinnable and must Ask
+        // Managed denies are `**/` basename globs, so they still match; only exact-path rules are affected
         let cwd_changes = cwd_poison_positions(root, cmd);
 
         for redirect in shell_redirect_targets(root, cmd) {
@@ -107,8 +104,7 @@ impl CompiledPolicy {
                         );
                     }
                 }
-                // Potential -c (Untrusted) and unmodeled options without -c
-                // (Unrecognized) both fail closed; only Literal may recurse.
+                // Potential -c (Untrusted) and unmodeled options without -c (Unrecognized) both fail closed; only Literal may recurse
                 InlineShellScript::Untrusted | InlineShellScript::Unrecognized => {
                     forced_ask = true;
                 }
@@ -194,21 +190,19 @@ impl CompiledPolicy {
     ) -> Option<GateDecision> {
         let path = normalize_shell_path(token);
         let is_absolute = is_absolute_shell_path(&path);
-        // Cwd-aware rule match mirrors the direct Read/Edit tool gate, so a
-        // rooted rule like `Read(src/**)` also keys on the same file spelled
-        // absolutely. An unpinned cwd anchors nothing: relative operands then
-        // keep text-only matching (absolute operands are cwd-independent).
+        // Cwd-aware rule match mirrors the direct Read/Edit tool gate
+        // A rooted rule like `Read(src/**)` also keys on the same file spelled absolutely
+        // An unpinned cwd anchors nothing: relative operands then keep text-only matching (absolute operands are cwd-independent)
         let rule_cwd = (is_absolute || !cwd_unpinned).then_some(cwd);
         // Escalate only: drop Allow so a file allow-rule can't auto-approve here.
-        let escalate = |access: &AccessKind| match self.evaluate_with_cwd(access, rule_cwd) {
+        let escalate = |access: &AccessKind| match self.evaluate_lexical_with_cwd(access, rule_cwd)
+        {
             Some(Decision::Reject(reason)) => Some(GateDecision::Reject(reason)),
             Some(Decision::Ask) => Some(GateDecision::AskRuleMatch),
             _ => None,
         };
-        // Also re-check the resolved symlink target so a deny keyed on the real
-        // path can't be dodged via an in-workspace symlink (`ln -s /etc x`).
-        // Resolve the *uncollapsed* operand so a `..` after a link is applied
-        // physically, not erased textually before the link is followed.
+        // Also re-check the resolved symlink target so a deny keyed on the real path can't be dodged via an in-workspace symlink (`ln -s /etc x`)
+        // Resolve the *uncollapsed* operand so a `..` after a link is applied physically, not erased textually before the link is followed
         let raw = normalize_shell_path_raw(token);
         let raw_absolute = if is_absolute_shell_path(&raw) {
             Some(raw)
@@ -223,13 +217,10 @@ impl CompiledPolicy {
             } else {
                 normalize_shell_path(&cwd.join(&path).to_string_lossy())
             };
-            match resolve_symlink_target(&raw_absolute) {
-                Some(resolved) if resolved != absolute => escalate(&shell_access(mode, resolved)),
-                Some(_) => None,
-                // Unresolvable (depth/cycle/error): fail closed to Ask when any
-                // component of the operand is a symlink, rather than silently
-                // allowing it (covers mid-path chains, not just the leaf).
-                None => path_has_symlink(&raw_absolute).then_some(GateDecision::AskFailClosed),
+            match follow_absolute_symlink(&raw_absolute, &absolute) {
+                SymlinkFollow::Target(resolved) => escalate(&shell_access(mode, resolved)),
+                SymlinkFollow::Unresolvable => Some(GateDecision::AskFailClosed),
+                SymlinkFollow::None => None,
             }
         });
         let path_decision = escalate(&shell_access(mode, path.clone()));
@@ -252,10 +243,9 @@ impl CompiledPolicy {
     }
 }
 
-/// Write paths from a SINGLE already-split command's words (no redirects — the
-/// caller handles those at the tree level). Wrapper-aware. Reused both per parsed
-/// command and to re-check the inner command of a package-manager launcher
-/// (`uv run`, `npm exec`, ...) whose writes the outer program name would hide.
+/// Write paths from a SINGLE already-split command's words (no redirects; the caller handles those at the tree level).
+/// Reused both per parsed command and to re-check the inner command of a package-manager launcher (`uv run`, `npm exec`, ...).
+/// The outer program name would hide those inner writes.
 pub(crate) fn command_words_write_paths(words: &[String]) -> Vec<String> {
     let inner = unwrap_wrappers(words);
     let mut out = Vec::new();
@@ -270,8 +260,7 @@ pub(crate) fn command_words_write_paths(words: &[String]) -> Vec<String> {
             out.push(path);
         }
     }
-    // Path-moving destinations (`cp`/`mv`/`ln`/`install` dest; `rm`/`touch`/…;
-    // `uniq` output operand).
+    // Path-moving destinations (`cp`/`mv`/`ln`/`install` dest; `rm`/`touch`/…; `uniq` output operand)
     if let Some(operands) = shell_path_command_operands(&program, inner) {
         for (path, mode) in operands {
             if matches!(mode, ShellFileMode::Write) {
@@ -280,8 +269,7 @@ pub(crate) fn command_words_write_paths(words: &[String]) -> Vec<String> {
         }
         return out;
     }
-    // Named-argument writers (`tee`/`truncate`/...) and in-place `sed -i`, which
-    // rewrites each file operand.
+    // Named-argument writers (`tee`/`truncate`/...) and in-place `sed -i`, which rewrites each file operand
     let writes_operands = matches!(shell_file_mode(&program), Some(ShellFileMode::Write))
         || (program == "sed" && shell_sed_in_place(inner));
     if writes_operands {
@@ -292,11 +280,8 @@ pub(crate) fn command_words_write_paths(words: &[String]) -> Vec<String> {
     out
 }
 
-/// Every path a shell command WRITES, from an ALREADY-PARSED tree (so a caller
-/// that already parsed `src` shares the one parse): output redirects plus the
-/// per-command writers from [`command_words_write_paths`] (`dd of=`, `sort -o`,
-/// `git --output`, `cp`/`mv` dest, `tee`/`truncate`, in-place `sed`/`rustfmt`,
-/// `uniq` output, ...). No safe-sink filtering — the caller decides.
+/// Every path a shell command WRITES, from an ALREADY-PARSED tree so a caller that already parsed `src` shares the one parse.
+/// Output redirects plus the per-command writers from [`command_words_write_paths`]. No safe-sink filtering; the caller decides.
 pub(crate) fn command_write_paths_in_tree(root: Node<'_>, src: &str) -> Vec<String> {
     let split = command_write_paths_split(root, src);
     let mut out = split.redirect_paths;
@@ -304,10 +289,9 @@ pub(crate) fn command_write_paths_in_tree(root: Node<'_>, src: &str) -> Vec<Stri
     out
 }
 
-/// [`command_write_paths_in_tree`] split by provenance: redirect targets
-/// (`> f`, `>> f` — invisible to allow-rule word matching) vs command-word
-/// operands (`touch f`, `sed -i` — part of the words a rule matches). The
-/// distinction decides whether a narrow allow rule can vouch for the write.
+/// [`command_write_paths_in_tree`] split by provenance: redirect targets (`> f`, `>> f`) vs command-word operands (`touch f`, `sed -i`).
+/// Redirect targets are invisible to allow-rule word matching, while command words are what a rule matches.
+/// The distinction decides whether a narrow allow rule can vouch for the write.
 pub(crate) struct WritePathsSplit {
     pub(crate) redirect_paths: Vec<String>,
     /// A write redirect had no extractable target (`> $OUT`, `> "$(…)"`).
@@ -459,9 +443,9 @@ impl ProtectedEditPermission {
 
 /// Whether an already-resolved direct edit target needs confirmation, and why.
 ///
-/// The caller uses the edit tools' shared model-path resolver first. This helper
-/// preserves its uncollapsed components for physical symlink + `..` resolution,
-/// while checking a separate lexical normalization for traversal aliases.
+/// The caller uses the edit tools' shared model-path resolver first.
+/// This helper preserves its uncollapsed components for physical symlink and `..` resolution.
+/// It also checks a separate lexical normalization for traversal aliases.
 pub(crate) fn edit_target_protection(path: &Path) -> Option<ProtectedEditReason> {
     if !path.is_absolute() {
         return Some(ProtectedEditReason::Sensitive);
@@ -470,7 +454,7 @@ pub(crate) fn edit_target_protection(path: &Path) -> Option<ProtectedEditReason>
     if let Some(reason) = protected_edit_reason(&lexical) {
         return Some(reason);
     }
-    let Some(resolved) = resolve_following_symlinks(path, 0) else {
+    let Some(resolved) = resolve_following_symlinks(path) else {
         return Some(ProtectedEditReason::Sensitive);
     };
     if let Some(reason) = protected_edit_reason(&resolved) {
@@ -539,12 +523,9 @@ fn protected_edit_reason(path: &Path) -> Option<ProtectedEditReason> {
     None
 }
 
-/// Grok config files that alter permissions (`config.toml`, the
-/// `managed_config.toml` defaults tier, the user `requirements.toml` layer) or
-/// sandbox restrictions (`sandbox.toml`) in the running and later sessions; a
-/// silent edit would let the agent loosen its own guardrails. Matched directly
-/// inside any `.grok` dir (user-global default and workspace overlays) and
-/// directly under a custom `$GROK_HOME`, which the component match cannot see.
+/// Grok config files that alter permissions or sandbox restrictions; a silent edit would let the agent loosen its own guardrails.
+/// Matched directly inside any `.grok` dir (user-global default and workspace overlays) and directly under a custom `$GROK_HOME`.
+/// A custom home has no `.grok` component, so the component match alone cannot see it.
 fn protected_grok_config_file(path: &Path, components: &[&str]) -> Option<ProtectedEditReason> {
     protected_grok_config_file_with_home(
         path,
@@ -572,16 +553,14 @@ fn protected_grok_config_file_with_home(
     (in_dot_grok || in_grok_home()).then_some(reason)
 }
 
-/// True when `pred` holds for the user grok home in either its lexical or
-/// physically-resolved form. Both forms are checked because callers hold a
-/// lexical and a resolved candidate path, and the home itself may sit behind a
-/// symlink. The comparison is byte-exact (no case folding), like every other
-/// resolved-path check in this module.
+/// True when `pred` holds for the user grok home in either its lexical or physically-resolved form.
+/// Both forms are checked because callers hold a lexical and a resolved candidate path, and the home itself may sit behind a symlink.
+/// The comparison is byte-exact (no case folding), like every other resolved-path check in this module.
 fn grok_home_matches(home: Option<&Path>, pred: impl Fn(&Path) -> bool) -> bool {
     home.is_some_and(|home| {
         let lexical = xai_grok_paths::normalize_lexically(home);
         pred(&lexical)
-            || resolve_following_symlinks(&lexical, 0).is_some_and(|resolved| pred(&resolved))
+            || resolve_following_symlinks(&lexical).is_some_and(|resolved| pred(&resolved))
     })
 }
 
@@ -609,11 +588,10 @@ fn protected_git_hooks_path(components: &[&str]) -> bool {
         })
 }
 
-/// `resolved_path` is already physical; resolve `root` so platform aliases such
-/// as macOS `/etc -> /private/etc` compare in the same namespace. Resolution
-/// failure is conservative: the caller then requires confirmation.
+/// `resolved_path` is already physical; resolve `root` so platform aliases such as macOS `/etc -> /private/etc` compare in the same namespace.
+/// Resolution failure is conservative: the caller then requires confirmation.
 fn resolved_path_is_within_root(resolved_path: &Path, root: &Path) -> bool {
-    resolve_following_symlinks(root, 0)
+    resolve_following_symlinks(root)
         .map(|resolved_root| resolved_path.starts_with(resolved_root))
         .unwrap_or(true)
 }
@@ -626,8 +604,8 @@ pub(crate) enum ShellFileMode {
     Create,
 }
 
-/// Tools that read/write a file named as an argument. Not exhaustive — redirects
-/// are the robust catch-all (caught via the AST for any program).
+/// Tools that read/write a file named as an argument.
+/// Not exhaustive; redirects are the robust catch-all (caught via the AST for any program).
 fn shell_file_mode(program: &str) -> Option<ShellFileMode> {
     match program {
         "cat" | "tac" | "nl" | "head" | "tail" | "grep" | "egrep" | "fgrep" | "rg" | "sed"
@@ -751,8 +729,7 @@ fn cwd_unpinned_before(positions: &[CwdPoison], at: usize, scope: ExecutionScope
         .any(|poison| poison.at < at && (poison.scope == scope || poison.scope.contains(scope)))
 }
 
-/// A command operand or redirect destination extracted from the AST, with
-/// escape/quote folding already applied to literals.
+/// A command operand or redirect destination extracted from the AST, with escape/quote folding already applied to literals.
 #[derive(Clone)]
 enum InvocationWord {
     Literal(String),
@@ -826,8 +803,7 @@ enum ArgText {
     Ambiguous,
 }
 
-/// True if any descendant expands at runtime (e.g. `$X` in `.e"$X"`), so the text
-/// isn't a literal path.
+/// True if any descendant expands at runtime (e.g. `$X` in `.e"$X"`), so the text isn't a literal path.
 fn node_has_expansion(node: Node<'_>) -> bool {
     let mut stack = vec![node];
     while let Some(n) = stack.pop() {
@@ -859,7 +835,7 @@ fn is_windows_path_like(raw: &str) -> bool {
             && raw.as_bytes().get(1) == Some(&b':'))
 }
 
-/// Fold unquoted shell backslash escapes (`b\ash` → `bash`, `\-c` → `-c`).
+/// Fold unquoted shell backslash escapes (`b\ash` becomes `bash`, `\-c` becomes `-c`).
 fn decode_unquoted_word(raw: &str) -> Option<String> {
     if !raw.contains('\\') {
         return Some(raw.to_owned());
@@ -995,10 +971,8 @@ fn shell_command_invocations(root: Node<'_>, src: &str) -> Vec<ShellInvocation> 
     found
 }
 
-/// Auto-mode opaque-shell floor: a (potential) `-c` string reinterpretation
-/// (`bash|sh|dash|zsh|ksh -c …`) or a literal `eval` head. The one classifier
-/// shared by the decomposable segment loop and the undecomposable tree walk so
-/// the two can't drift.
+/// Auto-mode opaque-shell floor: a (potential) `-c` string reinterpretation (`bash|sh|dash|zsh|ksh -c …`) or a literal `eval` head.
+/// The one classifier shared by the decomposable segment loop and the undecomposable tree walk so the two can't drift.
 pub(crate) fn words_are_opaque_shell(words: &[ShellWord<'_>]) -> bool {
     shell_dash_c_script(words).is_potential_inline()
         || matches!(
@@ -1007,8 +981,7 @@ pub(crate) fn words_are_opaque_shell(words: &[ShellWord<'_>]) -> bool {
         )
 }
 
-/// Undecomposable-path opaque-shell floor: word-only decomposition failed, so
-/// apply the canonical word predicate to each parsed invocation directly.
+/// Undecomposable-path opaque-shell floor: word-only decomposition failed, so apply the canonical word predicate to each parsed invocation directly.
 pub(crate) fn tree_has_opaque_shell(root: Node<'_>, src: &str) -> bool {
     shell_command_invocations(root, src)
         .iter()
@@ -1083,7 +1056,7 @@ fn shell_sed_in_place(words: &[String]) -> bool {
     words.iter().skip(1).any(|word| {
         word == "--in-place"
             || word.starts_with("--in-place=")
-            // `i` is sed's only short flag with that letter → any `-…i…` is in-place.
+            // `i` is sed's only short flag with that letter, so any `-…i…` is in-place
             || (word.starts_with('-') && !word.starts_with("--") && word.contains('i'))
     })
 }
@@ -1101,9 +1074,8 @@ fn shell_output_flag_values(words: &[String]) -> impl Iterator<Item = &str> {
     })
 }
 
-/// Values of a value-taking flag written as `flag=v`, `flag v`, or — for short
-/// flags only — glued `flagv` (e.g. `-ov`). Long (`--`) flags match `--flag=v` /
-/// `--flag v` only (no glued form).
+/// Values of a value-taking flag written as `flag=v`, `flag v`, or (short flags only) glued `flagv` (e.g. `-ov`).
+/// Long (`--`) flags match `--flag=v` / `--flag v` only (no glued form).
 fn value_flag_values<'a>(words: &'a [String], flag: &str) -> Vec<&'a str> {
     let eq_prefix = format!("{flag}=");
     words
@@ -1123,9 +1095,7 @@ fn value_flag_values<'a>(words: &'a [String], flag: &str) -> Vec<&'a str> {
         .collect()
 }
 
-/// Flag-named file operands (not positionals): `dd`'s `if=`/`of=` (read/write),
-/// `sort`/`go`'s `-o`/`--output` build output, `git`'s `--output`/`-o`/`-O`, and
-/// `rustfmt`'s file operands (rewritten in place). Empty for other programs.
+/// Flag-named file operands (not positionals). Empty for other programs.
 fn special_file_operands(program: &str, words: &[String]) -> Vec<(String, ShellFileMode)> {
     match program {
         "dd" => words
@@ -1142,8 +1112,8 @@ fn special_file_operands(program: &str, words: &[String]) -> Vec<(String, ShellF
                     })
             })
             .collect(),
-        // `--output`/`-o` write the output file. (`git`'s `-O` is a READ
-        // order-file, NOT a write, so it is intentionally excluded.)
+        // `--output`/`-o` write the output file
+        // (`git`'s `-O` is a READ order-file, NOT a write, so it is intentionally excluded.)
         "sort" | "go" | "git" => shell_output_flag_values(words)
             .map(|output| (output.to_owned(), ShellFileMode::Write))
             .collect(),
@@ -1152,8 +1122,7 @@ fn special_file_operands(program: &str, words: &[String]) -> Vec<(String, ShellF
             .chain(value_flag_values(words, "--out-dir"))
             .map(|output| (output.to_owned(), ShellFileMode::Write))
             .collect(),
-        // `rustfmt` rewrites each file operand in place (like an always-on
-        // `sed -i`), so its non-flag operands are writes.
+        // `rustfmt` rewrites each file operand in place (like an always-on `sed -i`), so its non-flag operands are writes
         "rustfmt" => shell_file_candidates(words)
             .into_iter()
             .map(|path| (path.to_owned(), ShellFileMode::Write))
@@ -1169,9 +1138,9 @@ fn shell_access(mode: ShellFileMode, path: String) -> AccessKind {
     }
 }
 
-/// Operands that may name a file. After a bare `--`, tokens are positional even if
-/// `-`-prefixed (`rm -- -/../.env`). `=`-names are kept (a real `VAR=value` is
-/// already dropped by the AST).
+/// Operands that may name a file.
+/// After a bare `--`, tokens are positional even if `-`-prefixed (`rm -- -/../.env`).
+/// `=`-names are kept (a real `VAR=value` is already dropped by the AST).
 fn shell_file_candidates(words: &[String]) -> Vec<&str> {
     let mut out = Vec::new();
     let mut end_of_options = false;
@@ -1187,9 +1156,9 @@ fn shell_file_candidates(words: &[String]) -> Vec<&str> {
     out
 }
 
-/// File operands implied by path-moving commands. `cp`/`mv`/`ln`/`install` read
-/// source(s) and write the destination; `rm`/`rmdir`/`mkdir`/`touch` write every
-/// operand; `None` otherwise. (`chmod`/`chown` touch metadata, not content.)
+/// File operands implied by path-moving commands.
+/// `cp`/`mv`/`ln`/`install` read source(s) and write the destination; `rm`/`rmdir`/`mkdir`/`touch` write every operand; `None` otherwise.
+/// (`chmod`/`chown` touch metadata, not content.)
 fn shell_path_command_operands<'a>(
     program: &str,
     words: &'a [String],
@@ -1197,8 +1166,7 @@ fn shell_path_command_operands<'a>(
     match program {
         "cp" | "mv" | "ln" | "install" => {
             // Last positional is the destination (Write), the rest sources (Read).
-            // The rare `-t DIR` reorder isn't parsed — bounded since denies match
-            // by basename.
+            // The rare `-t DIR` reorder isn't parsed; bounded since denies match by basename
             let operands = shell_file_candidates(words);
             let (dest, sources) = operands.split_last()?;
             Some(
@@ -1221,8 +1189,8 @@ fn shell_path_command_operands<'a>(
                 .map(|c| (c, ShellFileMode::Create))
                 .collect(),
         ),
-        // `uniq [INPUT [OUTPUT]]`: a 2nd positional is the output file (Write);
-        // the 1st is the input (Read). Fewer operands use stdin/stdout.
+        // `uniq [INPUT [OUTPUT]]`: a 2nd positional is the output file (Write); the 1st is the input (Read)
+        // Fewer operands use stdin/stdout
         "uniq" => match shell_file_candidates(words).as_slice() {
             [input, output, ..] => Some(vec![
                 (*input, ShellFileMode::Read),
@@ -1238,9 +1206,8 @@ fn shell_arg_is_ambiguous(token: &str) -> bool {
     token.contains('*') || token.contains('?') || token.contains('[')
 }
 
-/// A recursive directory search can't pin its operands → prompt. `rg`/`ag`/`ack`
-/// recurse given no path or a directory operand (`candidates[0]` is the pattern);
-/// grep only with `-r`/`-R`.
+/// A recursive directory search can't pin its operands, so it must prompt.
+/// `rg`/`ag`/`ack` recurse given no path or a directory operand (`candidates[0]` is the pattern); grep only with `-r`/`-R`.
 fn shell_reader_can_recurse(program: &str, words: &[String], candidates: &[&str]) -> bool {
     let grep_recursive = matches!(program, "grep" | "egrep" | "fgrep")
         && words.iter().any(|word| {
@@ -1270,9 +1237,8 @@ fn normalize_shell_path(path: &str) -> String {
     lexical_normalize(&normalize_shell_path_raw(path))
 }
 
-/// Quote/backslash/`/c/` normalization WITHOUT collapsing `.`/`..`, so symlink
-/// resolution can follow `..` *physically* (after the link) rather than have it
-/// erased textually before the link is ever seen.
+/// Quote/backslash/`/c/` normalization WITHOUT collapsing `.`/`..`.
+/// Symlink resolution can then follow `..` *physically* (after the link) rather than have it erased textually before the link is ever seen.
 fn normalize_shell_path_raw(path: &str) -> String {
     let p = path.trim_matches(['\"', '\'']).replace('\\', "/");
     match p.strip_prefix("/c/") {
@@ -1311,98 +1277,6 @@ fn lexical_normalize(path: &str) -> String {
         (true, true, false) => format!("/{body}"),
         (true, true, true) => "/".to_owned(),
         (true, false, _) => body,
-    }
-}
-
-/// Whether *any* existing component of `absolute` is a symlink — used to fail
-/// closed (Ask) when a linky operand can't be fully resolved, including a
-/// mid-path link (not just the leaf).
-fn path_has_symlink(absolute: &str) -> bool {
-    let path = Path::new(absolute);
-    if !path.is_absolute() {
-        return false;
-    }
-    let mut prefix = PathBuf::new();
-    for comp in path.components() {
-        prefix.push(comp);
-        if std::fs::symlink_metadata(&prefix)
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false)
-        {
-            return true;
-        }
-    }
-    false
-}
-
-/// Resolve a filesystem-absolute operand to its real symlink target. `None` for
-/// relative/unanchorable inputs. Input must be absolute so resolution anchors to
-/// the command's cwd, not the process cwd. Point-in-time (TOCTOU) only.
-fn resolve_symlink_target(absolute: &str) -> Option<String> {
-    let path = Path::new(absolute);
-    if !path.is_absolute() {
-        return None;
-    }
-    let resolved = resolve_following_symlinks(path, 0)?;
-    // `/`-normalize so the result matches rule text on Windows (backslash form).
-    Some(normalize_shell_path(&resolved.to_string_lossy()))
-}
-
-/// Resolve `path` following every symlink, including a *dangling* final link
-/// (which `canonicalize` alone rejects) and not-yet-existing trailing
-/// components. Depth-bounded against cycles; unexpected fs errors yield `None`.
-/// Blocking fs syscalls; runs for shell operands under file rules and direct edits.
-fn resolve_following_symlinks(path: &Path, depth: usize) -> Option<PathBuf> {
-    const MAX_SYMLINK_DEPTH: usize = 40;
-    if depth > MAX_SYMLINK_DEPTH {
-        return None;
-    }
-    // `dunce` avoids Windows `\\?\` verbatim paths (repo convention).
-    if let Ok(canonical) = dunce::canonicalize(path) {
-        return Some(canonical);
-    }
-    // Resolve the parent, then the final component, so a dangling/new leaf still follows.
-    // Missing components are valid new paths; other metadata errors fail closed.
-    let parent = path.parent()?;
-    let file_name = path.file_name()?;
-    let resolved_parent = resolve_following_symlinks(parent, depth + 1)?;
-    let candidate = resolved_parent.join(file_name);
-    let metadata = match std::fs::symlink_metadata(&candidate) {
-        Ok(metadata) => Some(metadata),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) => return None,
-    };
-    if metadata.is_some_and(|metadata| metadata.file_type().is_symlink()) {
-        // A symlink must be followed; if it can't be read, treat the whole path
-        // as unresolved (`None`) rather than returning the link's own path.
-        let target = std::fs::read_link(&candidate).ok()?;
-        let target = if target.is_absolute() {
-            target
-        } else {
-            resolved_parent.join(target)
-        };
-        return resolve_following_symlinks(&target, depth + 1);
-    }
-    Some(candidate)
-}
-
-fn decision_rank(decision: &Decision) -> u8 {
-    match decision {
-        Decision::Reject(_) | Decision::PolicyDeny(_) => 3,
-        Decision::Ask => 2,
-        Decision::Allow => 1,
-        _ => 0,
-    }
-}
-
-pub(crate) fn combine_decisions(a: Option<Decision>, b: Option<Decision>) -> Option<Decision> {
-    match (a, b) {
-        (None, other) | (other, None) => other,
-        (Some(a), Some(b)) => Some(if decision_rank(&a) >= decision_rank(&b) {
-            a
-        } else {
-            b
-        }),
     }
 }
 
@@ -1483,14 +1357,12 @@ mod tests {
             ToolFilter::Read,
             "src/**",
         )]);
-        // A rooted relative rule keys on the same file spelled absolutely,
-        // matching the direct Read tool gate (which evaluates with the cwd).
+        // A rooted relative rule keys on the same file spelled absolutely, matching the direct Read tool gate (which evaluates with the cwd)
         assert!(matches!(
             deny.evaluate_shell_file_access_gate("cat /work/src/secret.txt", cwd()),
             Some(GateDecision::Reject(_))
         ));
-        // An absolute operand is cwd-independent, so it stays covered even
-        // after a `cd` unpins the working directory.
+        // An absolute operand is cwd-independent, so it stays covered even after a `cd` unpins the working directory
         assert!(matches!(
             deny.evaluate_shell_file_access_gate("cd /tmp && cat /work/src/secret.txt", cwd()),
             Some(GateDecision::Reject(_))
@@ -1712,8 +1584,7 @@ mod tests {
         }
     }
 
-    /// A custom `$GROK_HOME` has no `.grok` path component, so the live
-    /// `config.toml` / `sandbox.toml` must be caught by the home-prefix branch.
+    /// A custom `$GROK_HOME` has no `.grok` path component, so the live `config.toml` / `sandbox.toml` must be caught by the home-prefix branch.
     #[test]
     fn grok_config_files_under_custom_grok_home_are_protected() {
         let home = tempfile::tempdir().unwrap();
@@ -1766,9 +1637,8 @@ mod tests {
         );
     }
 
-    /// The resolved-symlink arm of the grok-home match must decide: `$GROK_HOME`
-    /// points at a symlink while the edit targets the physical home directory,
-    /// so the lexical parent-equality arm cannot fire.
+    /// The resolved-symlink arm of the grok-home match must decide.
+    /// `$GROK_HOME` points at a symlink while the edit targets the physical home directory, so the lexical parent-equality arm cannot fire.
     #[test]
     #[cfg(unix)]
     fn grok_config_under_symlinked_grok_home_is_protected() {
@@ -1778,9 +1648,9 @@ mod tests {
         std::fs::create_dir(&real_home).unwrap();
         let link = tmp.path().join("home-link");
         symlink(&real_home, &link).unwrap();
-        // tempdir paths can themselves contain symlinks (macOS /var -> /private/var);
-        // compare against the physical home the production resolver will produce.
-        let physical_home = resolve_following_symlinks(&real_home, 0).unwrap();
+        // Tempdir paths can themselves contain symlinks (macOS `/var -> /private/var`)
+        // Compare against the physical home the production resolver will produce
+        let physical_home = resolve_following_symlinks(&real_home).unwrap();
         assert_eq!(
             protected_grok_config_file_with_home(
                 &physical_home.join(xai_grok_config::SANDBOX_CONFIG_FILENAME),
@@ -1791,9 +1661,8 @@ mod tests {
         );
     }
 
-    /// `protected_edit_reason` lowercases path components before matching, so
-    /// the canonical filename constants must stay lowercase or the const
-    /// patterns silently stop firing.
+    /// `protected_edit_reason` lowercases path components before matching.
+    /// The canonical filename constants must stay lowercase or the const patterns silently stop firing.
     #[test]
     fn protected_config_filename_constants_are_lowercase() {
         for name in [
@@ -1807,7 +1676,7 @@ mod tests {
 
     #[test]
     fn resolved_root_alias_matches_physical_destination() {
-        let resolved_root = resolve_following_symlinks(Path::new("/etc"), 0).unwrap();
+        let resolved_root = resolve_following_symlinks(Path::new("/etc")).unwrap();
         assert!(resolved_path_is_within_root(
             &resolved_root.join("grok-test"),
             Path::new("/etc")
@@ -1892,8 +1761,7 @@ mod tests {
         );
     }
 
-    /// `..` after a symlink must resolve physically: `link/../dir2/x` where
-    /// `link -> <zone>/dir` lands in `<zone>/dir2/x`, not `<cwd>/dir2/x`.
+    /// `..` after a symlink must resolve physically: `link/../dir2/x` where `link -> <zone>/dir` lands in `<zone>/dir2/x`, not `<cwd>/dir2/x`.
     #[test]
     #[cfg(unix)]
     fn resolved_symlink_dotdot_hits_read_deny() {
@@ -1918,8 +1786,7 @@ mod tests {
         );
     }
 
-    /// An unresolvable linky operand (symlink cycle) fails closed to Ask rather
-    /// than silently passing the gate.
+    /// An unresolvable operand (symlink cycle) fails closed to Ask rather than silently passing the gate.
     #[test]
     #[cfg(unix)]
     fn unresolvable_symlink_operand_asks() {
@@ -1940,14 +1807,13 @@ mod tests {
         );
     }
 
-    /// A *mid-path* symlink chain that can't be resolved (non-symlink leaf) must
-    /// still fail closed to Ask, not skip the check.
+    /// A *mid-path* symlink chain that can't be resolved (non-symlink leaf) must still fail closed to Ask, not skip the check.
     #[test]
     #[cfg(unix)]
     fn unresolvable_midpath_symlink_operand_asks() {
         use std::os::unix::fs::symlink;
         let ws = tempfile::tempdir().unwrap();
-        // Directory-component cycle: linkdir -> linkdir2 -> linkdir.
+        // Directory-component cycle: `linkdir -> linkdir2 -> linkdir`
         symlink(ws.path().join("linkdir2"), ws.path().join("linkdir")).unwrap();
         symlink(ws.path().join("linkdir"), ws.path().join("linkdir2")).unwrap();
 
@@ -2246,7 +2112,7 @@ mod tests {
             "dynamic non-inline program must stay inert"
         );
 
-        // Transparent exec/command/builtin prefixes (outer + in-script).
+        // Transparent exec/command/builtin prefixes (outer and in-script)
         for cmd in [
             "bash -c 'exec cat .env'",
             "bash -c 'command cat .env'",
@@ -2403,8 +2269,8 @@ mod tests {
         }
     }
 
-    /// A relative operand after any in-shell `cd`/`pushd`/`env -C` is unpinnable
-    /// → Ask. Only path-scoped rules are affected; basename denies still fire.
+    /// A relative operand after any in-shell `cd`/`pushd`/`env -C` is unpinnable and must Ask.
+    /// Only path-scoped rules are affected; basename denies still fire.
     #[test]
     fn shell_cwd_change_escalates_path_scoped_operands() {
         let policy = compiled(vec![file_rule(
@@ -2487,8 +2353,7 @@ mod tests {
         ));
     }
 
-    /// A `**/` basename deny matches regardless of cwd, so a `cd`/`env -C` can't
-    /// smuggle a denied read past the gate.
+    /// A `**/` basename deny matches regardless of cwd, so a `cd`/`env -C` can't smuggle a denied read past the gate.
     #[test]
     fn shell_basename_deny_survives_cwd_change() {
         let policy = compiled(vec![file_rule(
@@ -2512,8 +2377,8 @@ mod tests {
         }
     }
 
-    /// A `cd` in a pipeline/subshell/backgrounded `&` doesn't change a sibling's
-    /// cwd, so their reads resolve against the original cwd, not the `cd` target.
+    /// A `cd` in a pipeline/subshell/backgrounded `&` doesn't change a sibling's cwd.
+    /// Their reads resolve against the original cwd, not the `cd` target.
     #[test]
     fn shell_cd_does_not_scope_across_pipe_subshell_or_background() {
         // Deny is scoped to the original cwd (`/work`), where the reader runs.
@@ -2535,7 +2400,7 @@ mod tests {
                 "cd must not scope across boundary: {cmd}"
             );
         }
-        // A deny scoped to the cd target must not fire — the reader never runs there.
+        // A deny scoped to the cd target must not fire; the reader never runs there
         let elsewhere = compiled(vec![file_rule(
             RuleAction::Deny,
             ToolFilter::Read,
@@ -2549,8 +2414,8 @@ mod tests {
         );
     }
 
-    /// After `--`, tokens are positional even when they start with `-`, so a path
-    /// like `-/../.env` must still be deny-checked (not skipped as a flag).
+    /// After `--`, tokens are positional even when they start with `-`.
+    /// A path like `-/../.env` must still be deny-checked (not skipped as a flag).
     #[test]
     fn shell_double_dash_end_of_options_extracts_paths() {
         let read = compiled(vec![file_rule(
@@ -2573,8 +2438,7 @@ mod tests {
         ));
     }
 
-    /// `cp`/`mv`/`ln`/`install`/`rm`/`touch` move/destroy files: sources are reads
-    /// (exfil), destinations are writes.
+    /// `cp`/`mv`/`ln`/`install`/`rm`/`touch` move/destroy files: sources are reads (exfil), destinations are writes.
     #[test]
     fn shell_path_commands_hit_deny() {
         // Reading a denied source (exfil via copy/move) is caught by a Read deny.
@@ -2644,8 +2508,7 @@ mod tests {
         }
     }
 
-    /// A positional `=`-operand is a filename (deny-checked); only leading
-    /// `VAR=value` assignments are dropped by the AST.
+    /// A positional `=`-operand is a filename (deny-checked); only leading `VAR=value` assignments are dropped by the AST.
     #[test]
     fn shell_reader_checks_equals_containing_operand() {
         let policy = compiled(vec![file_rule(
@@ -2668,8 +2531,7 @@ mod tests {
         );
     }
 
-    /// An expansion nested in a quoted/concatenated operand (`.e"$X"`) is ambiguous
-    /// → prompt, not treated as a literal.
+    /// An expansion nested in a quoted/concatenated operand (`.e"$X"`) is ambiguous and prompts, not treated as a literal.
     #[test]
     fn shell_nested_expansion_operand_prompts() {
         let policy = compiled(vec![file_rule(
@@ -2688,8 +2550,8 @@ mod tests {
         }
     }
 
-    /// `rg`/`ag`/`ack` recurse a directory (no path, `.`, or `dir/`), so a Read deny
-    /// on a path they could reach must prompt; a single file operand scopes them.
+    /// `rg`/`ag`/`ack` recurse a directory (no path, `.`, or `dir/`), so a Read deny on a path they could reach must prompt.
+    /// A single file operand scopes them.
     #[test]
     fn shell_recursive_readers_prompt_for_directory_search() {
         let policy = compiled(vec![file_rule(
@@ -2739,8 +2601,8 @@ mod tests {
         }
     }
 
-    /// Representative enterprise deny/ask fixture for managed-policy tests
-    /// `[permission]` tier. Tool mapping: `Read`→Read, `Write`/`Edit`→Edit, `Bash`→Bash.
+    /// Representative enterprise deny/ask fixture for managed-policy tests `[permission]` tier.
+    /// Tool mapping: `Read` to Read, `Write`/`Edit` to Edit, `Bash` to Bash.
     fn enterprise_requirements_policy() -> CompiledPolicy {
         compiled(vec![
             // ── ask = [...] ──
@@ -2830,8 +2692,7 @@ mod tests {
         }
     }
 
-    /// fd-prefixed / glued WRITE redirects (truncate, append, stderr, both-streams)
-    /// must hit the Edit deny.
+    /// fd-prefixed / glued WRITE redirects (truncate, append, stderr, both-streams) must hit the Edit deny.
     #[test]
     fn adversarial_fd_and_glued_write_redirects_denied() {
         let policy = enterprise_requirements_policy();
@@ -2867,8 +2728,7 @@ mod tests {
         assert_eq!(parsed("cat payload > 3"), vec!["3"]);
     }
 
-    /// An outer reader fed a substitution can't pin its operand (Ask); an inner
-    /// literal read (incl. inside `<(…)`) is a hard deny.
+    /// An outer reader fed a substitution can't pin its operand (Ask); an inner literal read (incl. inside `<(…)`) is a hard deny.
     #[test]
     fn adversarial_substitution_readers_do_not_bypass() {
         let policy = enterprise_requirements_policy();
@@ -2903,8 +2763,7 @@ mod tests {
         }
     }
 
-    /// Enterprise-policy coverage beyond the single-rule tests: extra readers, non-.env
-    /// globs, wrappers, path normalization/traversal, chaining, case, ask-via-shell.
+    /// Enterprise-policy coverage beyond the single-rule tests.
     #[test]
     fn adversarial_enterprise_matrix_denies_and_asks() {
         let policy = enterprise_requirements_policy();
@@ -2927,10 +2786,10 @@ mod tests {
             "/bin/cat .env",
             "env FOO=1 cat .env",
             "timeout 5 cat .env",
-            // path normalization + `..` traversal
+            // path normalization and `..` traversal
             "cat ./.env",
             "cat subdir/../.env",
-            // chaining / pipeline — checked per segment
+            // chaining / pipeline, checked per segment
             "ls && cat .env",
             "cat README.md; cat .env",
             "cat .env | head -n1",
@@ -2945,7 +2804,7 @@ mod tests {
                 "must deny: {cmd}"
             );
         }
-        // Ask rules reached through the shell gate (Read + Edit on **/secrets/**).
+        // Ask rules reached through the shell gate (Read and Edit on **/secrets/**)
         for cmd in ["cat secrets/value.txt", "echo x > secrets/new.txt"] {
             assert!(
                 matches!(
@@ -2957,12 +2816,12 @@ mod tests {
         }
     }
 
-    /// Decision-level mirror of the managed-config e2e: asserts the `Decision` the
-    /// manager computes across all four entry points (read tool, write/edit tools,
-    /// bash rules, shell gate) on the real sentinel paths, no inference.
+    /// Decision-level mirror of the managed-config e2e.
+    /// Asserts the `Decision` the manager computes on the real sentinel paths, no inference.
+    /// Covers all four entry points: read tool, write/edit tools, bash rules, shell gate.
     #[test]
     fn live_enterprise_e2e_matrix_decision_parity() {
-        // What the model can do → the manager function that decides it.
+        // What the model can do and the manager function that decides it
         #[derive(Clone, Copy)]
         enum Vector {
             /// File-read tool / list_dir: `evaluate(AccessKind::Read(..))`.
@@ -2976,11 +2835,11 @@ mod tests {
         }
         #[derive(Clone, Copy)]
         enum Expect {
-            /// Managed deny → `Reject(_)` (the live SENTINEL must never leak).
+            /// Managed deny means `Reject(_)` (the live SENTINEL must never leak).
             Deny,
-            /// Managed ask → `Ask` (the live model is prompted).
+            /// Managed ask means `Ask` (the live model is prompted).
             Ask,
-            /// Not denied/asked → `None` (the live file stays readable / command runs).
+            /// Not denied/asked means `None` (the live file stays readable / command runs).
             Allowed,
         }
         use Expect::{Allowed, Ask, Deny};
@@ -3073,8 +2932,7 @@ mod tests {
                 EditTool("secrets/api_key.txt"),
                 Ask,
             ),
-            // Real-policy asymmetry: *.pfx/*.jks/*.keystore are Read-denied but
-            // have NO Write rule, so editing them is allowed (faithful to deploy).
+            // Real-policy asymmetry: *.pfx/*.jks/*.keystore are Read-denied but have NO Write rule, so editing them is allowed (faithful to deploy)
             ("edit *.pfx (no write rule)", EditTool("cert.pfx"), Allowed),
             ("edit README.md (neg)", EditTool("README.md"), Allowed),
             ("edit src/main.py (neg)", EditTool("src/main.py"), Allowed),
@@ -3232,8 +3090,8 @@ mod tests {
         );
     }
 
-    /// Local mirror of the grep tool's read-exclude derivation: `Deny` rules on
-    /// `Read`/`Any`. Proves a no-restriction policy derives zero read-excludes.
+    /// Local mirror of the grep tool's read-exclude derivation: `Deny` rules on `Read`/`Any`.
+    /// Proves a no-restriction policy derives zero read-excludes.
     fn read_deny_globs(config: &PermissionConfig) -> Vec<String> {
         config
             .rules
@@ -3245,8 +3103,7 @@ mod tests {
             .collect()
     }
 
-    /// Read/exfil vectors the shell gate classifies under a policy — reused to
-    /// prove a no-restriction policy gates none of them.
+    /// Read/exfil vectors the shell gate classifies under a policy; reused to prove a no-restriction policy gates none of them.
     const BYPASS_VECTORS: &[&str] = &[
         "cat .env",
         "grep FAKE .env",
@@ -3259,8 +3116,8 @@ mod tests {
         "sed -ni s/// .env",
     ];
 
-    /// No-restriction policies (empty / Bash-only / Allow-only-file) must be inert:
-    /// gate not armed, every bypass vector declined, zero read-excludes.
+    /// No-restriction policies (empty / Bash-only / Allow-only-file) must be inert.
+    /// The gate stays off, every bypass vector is declined, and the policy derives zero read-excludes.
     #[test]
     fn h1_no_restriction_policies_are_inert() {
         let policies: [(&str, Vec<PermissionRule>); 3] = [
@@ -3300,8 +3157,8 @@ mod tests {
         }
     }
 
-    /// The policy must not over-match legit look-alikes (direct read or shell gate):
-    /// it targets dotfile `.env`/`.env.<x>` and real cert globs, not any `env`/`pem`.
+    /// The policy must not over-match legit look-alikes (direct read or shell gate).
+    /// It targets dotfile `.env`/`.env.<x>` and real cert globs, not any `env`/`pem`.
     #[test]
     fn h2_enterprise_policy_does_not_over_match_legit_paths() {
         let policy = enterprise_requirements_policy();
@@ -3353,8 +3210,7 @@ mod tests {
         );
     }
 
-    /// The shell gate never hard-blocks legit reads; fail-closed cases (glob,
-    /// recursion, unpinnable substitution) `Ask`, not `Reject`.
+    /// The shell gate never hard-blocks legit reads; fail-closed cases (glob, recursion, unpinnable substitution) `Ask`, not `Reject`.
     #[test]
     fn h3_enterprise_gate_never_false_blocks_legit() {
         let policy = enterprise_requirements_policy();
@@ -3375,8 +3231,7 @@ mod tests {
         }
     }
 
-    /// A deployment that ships managed config with no `[permission]` rules must see
-    /// zero gating (no secrets embedded, only the empty rule set).
+    /// A deployment that ships managed config with no `[permission]` rules must see zero gating (no secrets embedded, only the empty rule set).
     #[test]
     fn unrestricted_enterprise_has_no_file_restrictions() {
         let policy = compiled(vec![]);

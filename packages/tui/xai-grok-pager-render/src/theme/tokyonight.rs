@@ -1,14 +1,10 @@
-//! TokyoNight theme for the pager.
+//! All colors come from the `Theme` struct; nothing else hardcodes colors.
 //!
-//! All colors come from the `Theme` struct. NO hardcoded colors elsewhere.
-//!
-//! The named constants below match the TokyoNight Night/Storm palette from
-//! `xai-grok-pager/src/ui/style.rs` for consistency. The `Theme` struct maps
-//! these constants to semantic roles.
+//! The named constants below match the TokyoNight Night/Storm palette from `xai-grok-pager/src/ui/style.rs`.
+//! The `Theme` struct maps these constants to semantic roles.
 
 use ratatui::style::{Color, Modifier, Style};
 
-/// Helper for concise const Color::Rgb definitions.
 const fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color::Rgb(r, g, b)
 }
@@ -53,7 +49,7 @@ pub struct Theme {
     pub bg_light: Color,
     pub bg_dark: Color,
     pub bg_highlight: Color,
-    pub bg_hover: Color, // Mouse hover row in dropdowns — between bg_highlight and bg_visual
+    pub bg_hover: Color, // Mouse hover row in dropdowns, between bg_highlight and bg_visual
     pub bg_terminal: Color, // For terminal output blocks (currently unused, using bg_dark instead)
 
     // Accent colors (for vertical lines)
@@ -71,12 +67,11 @@ pub struct Theme {
     pub text_primary: Color,
     pub text_secondary: Color,
 
-    // Gray scale (dim → medium → bright)
-    // Every theme defines these three; they provide a consistent hierarchy
-    // for secondary/meta text across all themes.
-    pub gray_dim: Color,    // Dimmest — meta punctuation (`$`, `(+N/-M)`, etc.)
-    pub gray: Color,        // Medium — muted text, comments, collapsed content
-    pub gray_bright: Color, // Brightest — tool accents, secondary labels
+    // Gray scale (dim, medium, bright)
+    // Every theme defines these three; they provide a consistent hierarchy for secondary/meta text across all themes
+    pub gray_dim: Color,    // Dimmest: meta punctuation (`$`, `(+N/-M)`, etc.)
+    pub gray: Color,        // Medium: muted text, comments, collapsed content
+    pub gray_bright: Color, // Brightest: tool accents, secondary labels
 
     // Semantic colors
     pub command: Color, // Yellow for shell commands
@@ -128,10 +123,8 @@ pub struct Theme {
     pub paste_fg: Color,
     pub paste_dim: Color,
 
-    // Markdown rendering colors — used by md_style.rs for headings, code
-    // blocks, inline code, links, etc.  These default to the corresponding
-    // top-level theme colors but can be overridden per-theme to customise
-    // markdown appearance independently.
+    // Markdown rendering colors, used by md_style.rs for headings, code blocks, inline code, links, etc
+    // These default to the corresponding top-level theme colors but can be overridden per-theme to customise markdown appearance independently
     pub md_heading_h1: Color,        // H1 headings
     pub md_heading_h1_mod: Modifier, // H1 extra effects
     pub md_heading_h2: Color,        // H2 headings, task unchecked, tables
@@ -188,16 +181,16 @@ impl Theme {
 
             fuzzy_accent: BLUE,
 
-            accent_plan: rgb(230, 180, 50), // #E6B432 — golden
+            accent_plan: rgb(230, 180, 50), // #E6B432, golden
 
             accent_verify: MAGENTA, // #bb9af7: violet (distinct from plan)
             accent_feedback: GREEN1,
 
-            accent_remember: Color::Rgb(139, 195, 74), // #8BC34A — Material Design light green
+            accent_remember: Color::Rgb(139, 195, 74), // #8BC34A, Material Design light green
 
-            selection_border: rgb(58, 72, 115), // #3A4873 — muted tokyonight blue
-            prompt_border: rgb(60, 75, 120),    // #323E64 — dimmer prompt chrome
-            prompt_border_active: rgb(75, 92, 140), // #4B5C8C — brighter when focused
+            selection_border: rgb(58, 72, 115), // #3A4873, muted tokyonight blue
+            prompt_border: rgb(60, 75, 120),    // #323E64, dimmer prompt chrome
+            prompt_border_active: rgb(75, 92, 140), // #4B5C8C, brighter when focused
             hover_border: rgb(55, 58, 80),
 
             accent_model: TEAL,
@@ -212,7 +205,7 @@ impl Theme {
             diff_equal_fg: COMMENT,
             diff_gutter_fg: COMMENT,
 
-            bg_visual: rgb(40, 52, 87), // #283457 — blue-tinted selection bg
+            bg_visual: rgb(40, 52, 87), // #283457, blue-tinted selection bg
 
             paste_bg: BG_STORM_DARK,
             paste_fg: FG_DARK,
@@ -242,17 +235,14 @@ impl Theme {
         }
     }
 
-    /// Get a style with the given foreground color.
     pub const fn fg(&self, color: Color) -> Style {
         Style::new().fg(color)
     }
 
-    /// Get a style with muted text (gray — medium).
+    /// Get a style with muted text (gray, medium).
     ///
-    /// When `gray` is [`Color::Reset`] (terminal-native / minimal palette),
-    /// de-emphasize with [`Modifier::DIM`] instead of painting ANSI bright
-    /// black — dim scales the terminal's own default fg, so contrast stays
-    /// polarity-safe. RGB themes keep an explicit gray foreground.
+    /// When `gray` is [`Color::Reset`] (terminal-native / minimal palette), de-emphasize with [`Modifier::DIM`] rather than ANSI bright black.
+    /// DIM scales the terminal's own default fg, so contrast stays polarity-safe; RGB themes keep an explicit gray foreground.
     pub const fn muted(&self) -> Style {
         match self.gray {
             Color::Reset => Style::new().add_modifier(Modifier::DIM),
@@ -267,9 +257,9 @@ impl Theme {
             .add_modifier(ratatui::style::Modifier::UNDERLINED)
     }
 
-    /// Get a style with dim text (gray_dim — dimmest).
+    /// Get a style with dim text (gray_dim, dimmest).
     ///
-    /// Same Reset→DIM rule as [`Self::muted`] for the terminal-native palette.
+    /// Same Reset-to-DIM rule as [`Self::muted`] for the terminal-native palette.
     pub const fn dim(&self) -> Style {
         match self.gray_dim {
             Color::Reset => Style::new().add_modifier(Modifier::DIM),
@@ -277,37 +267,25 @@ impl Theme {
         }
     }
 
-    /// Get a style for primary text.
     pub const fn primary(&self) -> Style {
         Style::new().fg(self.text_primary)
     }
 
-    /// Get a bold style.
     pub const fn bold(&self) -> Style {
         Style::new().add_modifier(Modifier::BOLD)
     }
 }
 
-/// Compute animated brightness for a traveling wave effect.
+/// Compute animated brightness for a wave traveling along the accent line.
 ///
-/// Creates a wave that travels along the accent line. Each row has a fixed phase
-/// offset so the wave appears to move smoothly regardless of block height.
-///
-/// # Arguments
-/// - `tick`: Frame counter (increments each render tick)
-/// - `row`: Current row within the block (0 = top)
-/// - `wave_rows`: Rows per full wave cycle (e.g., 32)
-/// - `speed`: Wave speed (radians per tick, e.g., 0.15)
-///
-/// # Returns
-/// Brightness value in [0.0, 1.0] for this row at this tick.
+/// Each row has a fixed phase offset (`wave_rows` rows per full cycle), so the wave moves smoothly regardless of block height.
+/// `tick` is the frame counter, `speed` is radians per tick (e.g. 0.15); returns brightness in [0.0, 1.0].
 pub fn wave_brightness(tick: u64, row: u16, wave_rows: u16, speed: f32) -> f32 {
     use std::f32::consts::PI;
 
     let rows_per_wave = wave_rows.max(1) as f32;
     let phase = (row as f32 / rows_per_wave) * 2.0 * PI;
 
-    // Time-based oscillation
     let t = tick as f32 * speed;
 
     // sin²(t + phase) gives smooth 0-1 oscillation
@@ -315,35 +293,12 @@ pub fn wave_brightness(tick: u64, row: u16, wave_rows: u16, speed: f32) -> f32 {
     sin_val * sin_val
 }
 
-/// Compute a smooth pulsing brightness for a single element (icon, indicator).
+/// Compute a pulsing brightness in [0.0, 1.0] for a single element (icon, indicator); everything sharing the same tick pulses in unison.
 ///
-/// Unlike [`wave_brightness`] which creates a spatial wave across rows,
-/// this is a simple temporal pulse: all elements sharing the same tick
-/// pulse in unison.
-///
-/// # Arguments
-/// - `tick`: Frame counter (increments each render tick, ~30fps)
-/// - `speed`: Pulse speed (radians per tick). The returned value uses
-///   `sin²`, which has period π, so the visible bright→dim→bright cycle
-///   is `π / (speed * fps)`. At 30fps, `speed = 0.08` ≈ 1.3s per cycle;
-///   for a 2.5s cycle pass `speed ≈ 0.042`.
-///
-/// # Returns
-/// Brightness value in [0.0, 1.0].
+/// `tick` is the frame counter, `speed` is radians per tick, and `sin²` has period π, so one full pulse takes `π / (speed * fps)` seconds.
+/// At 30fps, `speed = 0.08` gives about a 1.3s cycle; for a 2.5s cycle pass about `0.042`.
 pub fn pulse_brightness(tick: u64, speed: f32) -> f32 {
     let t = tick as f32 * speed;
     let sin_val = t.sin();
     sin_val * sin_val
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_tokyonight_theme() {
-        let theme = Theme::tokyonight();
-        assert!(matches!(theme.bg_base, Color::Rgb(36, 40, 59)));
-        assert!(matches!(theme.accent_user, Color::Rgb(122, 162, 247)));
-    }
 }

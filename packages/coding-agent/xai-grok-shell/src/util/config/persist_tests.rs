@@ -3,10 +3,9 @@ use super::super::mcp::{McpConfig, parse_mcp_config_with_oauth};
 use super::*;
 use toml::Value as TomlValue;
 use toml::map::Map as TomlMap;
-/// First-run `ensure` creates a 0-byte `$GROK_HOME/config.toml`. Empty and
-/// whitespace-only files must parse as an empty table so the first settings
-/// write is not "refusing to overwrite unparseable". Non-empty garbage still
-/// refuses.
+/// First-run `ensure` creates a 0-byte `$GROK_HOME/config.toml`.
+/// Empty and whitespace-only files must parse as an empty table so the first settings write is not "refusing to overwrite unparseable".
+/// Non-empty garbage still refuses.
 #[test]
 fn parse_existing_config_toml_blank_is_empty_table_not_unparseable() {
     for blank in ["", "   ", "\n", "\n\t  \n", " \r\n "] {
@@ -31,10 +30,9 @@ fn parse_existing_config_toml_blank_is_empty_table_not_unparseable() {
         "non-empty unparseable TOML must still be refused"
     );
 }
-/// The `[toolset.ask_user_question]` settings write merges only that
-/// sub-table: the toggled field lands, hand-written sibling keys survive,
-/// and no other `[toolset]` defaults (bash/web_search) are splatted into
-/// the user file. All-None leaves the file untouched.
+/// The `[toolset.ask_user_question]` settings write merges only that sub-table.
+/// The toggled field lands, hand-written sibling keys survive, and no other `[toolset]` defaults (bash/web_search) are splatted into the user file.
+/// All-None leaves the file untouched.
 #[test]
 fn ask_user_question_merge_writes_subtable_without_splatting_toolset() {
     let root_val: TomlValue =
@@ -85,8 +83,7 @@ fn ask_user_question_merge_writes_subtable_without_splatting_toolset() {
         "scalar [toolset] must be replaced so the write lands"
     );
 }
-/// The `[telemetry]` write merges only `trace_upload`: hand-written sibling
-/// telemetry keys survive, and an all-None config leaves the section alone.
+/// The `[telemetry]` write merges only `trace_upload`: hand-written sibling telemetry keys survive, and an all-None config leaves the section alone.
 #[test]
 fn telemetry_merge_writes_trace_upload_without_splatting_section() {
     let root_val: TomlValue =
@@ -126,9 +123,8 @@ fn telemetry_merge_writes_trace_upload_without_splatting_section() {
         "all-None must leave the existing section untouched"
     );
 }
-/// The `[features]` write merges only `feedback_trace_card`: hand-written
-/// sibling feature keys survive, and an all-None config leaves the section
-/// alone.
+/// The `[features]` write merges only `feedback_trace_card`.
+/// Hand-written sibling feature keys survive, and an all-None config leaves the section alone.
 #[test]
 fn features_merge_writes_feedback_trace_card_without_splatting_section() {
     let root_val: TomlValue = toml::from_str("[features]\nweb_fetch = true\n").unwrap();
@@ -207,10 +203,9 @@ fn parse_mcp_config_with_oauth_extracts_byo_client_id() {
     );
     assert!(!oauth.contains_key("plain"));
 }
-/// The merge recurses into nested tables and only ever inserts, so a key
-/// inside `[ui.status_line]` that this build does not model is not at risk
-/// from a settings write. The status-line parser relies on this: it reports
-/// an unknown key rather than refusing to persist the section over it.
+/// The merge recurses into nested tables and only ever inserts.
+/// A key inside `[ui.status_line]` that this build does not model is therefore not at risk from a settings write.
+/// The status-line parser relies on this: it reports an unknown key rather than refusing to persist the section over it.
 #[test]
 fn merge_section_preserves_unmodeled_fields_inside_a_nested_table() {
     let mut table = TomlMap::new();
@@ -348,21 +343,8 @@ fn merge_section_creates_new_section() {
     let ui = table.get("ui").unwrap().as_table().unwrap();
     assert_eq!(ui.get("yolo").and_then(|v| v.as_bool()), Some(true));
 }
-/// Regression test: pager-side commits of a
-/// [session] field (e.g., `auto_compact_threshold_percent`) must
-/// NOT inject `load_envrc` into the user's config when the user
-/// has never set it. Before the fix, `SessionConfig::load_envrc`
-/// was plain `bool` with default `true` and no
-/// `skip_serializing_if`, so EVERY pager save wrote
-/// `[session].load_envrc = true` to disk — silently overriding any
-/// managed-config `load_envrc = false` policy.
-///
-/// The fix widens `load_envrc` to `Option<bool>` with
-/// `skip_serializing_if = "Option::is_none"`. After the fix, a
-/// `SessionConfig::default()` (load_envrc: None,
-/// auto_compact_threshold_percent: None) merges into a
-/// pre-existing `[session]` table WITHOUT touching the user's
-/// `load_envrc` key.
+/// A default `SessionConfig` save must not write `load_envrc`; a stray `true` would override a managed-config `load_envrc = false`.
+/// `load_envrc` is `Option<bool>` with `skip_serializing_if`, so a field the user never set stays off disk.
 #[test]
 fn merge_section_session_default_does_not_leak_load_envrc() {
     let mut table = TomlMap::new();
@@ -383,11 +365,9 @@ fn merge_section_session_default_does_not_leak_load_envrc() {
         );
     }
 }
-/// Companion to the above: when the user explicitly commits a
-/// non-default `auto_compact_threshold_percent`, the field is
-/// serialized but `load_envrc` (still default None) is NOT.
-/// Pins the asymmetry — committing one [session] field does not
-/// "claim" the rest.
+/// Companion to the above: the user explicitly commits a non-default `auto_compact_threshold_percent`.
+/// The field is serialized but `load_envrc` (still default None) is NOT.
+/// Pins the asymmetry: committing one [session] field does not "claim" the rest.
 #[test]
 fn merge_section_session_explicit_value_does_not_drag_load_envrc() {
     let mut table = TomlMap::new();
@@ -412,11 +392,10 @@ fn merge_section_session_explicit_value_does_not_drag_load_envrc() {
         "pre-existing load_envrc must survive a partial settings save"
     );
 }
-/// Follow-on: when the user DOES explicitly set
-/// `load_envrc = false` via TOML, the value round-trips through
-/// `load_config_from_toml` → mutate → `merge_section` correctly.
-/// `None` means "absent on disk"; `Some(false)` means "user
-/// explicitly disabled". The distinction must survive a save.
+/// Follow-on: the user DOES explicitly set `load_envrc = false` via TOML.
+/// The value round-trips correctly through `load_config_from_toml`, a mutation, and `merge_section`.
+/// `None` means "absent on disk"; `Some(false)` means "user explicitly disabled".
+/// The distinction must survive a save.
 #[test]
 fn session_load_envrc_explicit_false_round_trips() {
     let raw_config: TomlValue = toml::from_str(
@@ -545,15 +524,11 @@ fn ui_config_serialization_behavior() {
         "theme=None should not appear in serialized output"
     );
 }
-/// The settings-modal helpers in the parent module are 3-line
-/// wrappers around `update_config(|cfg| cfg.ui.<field> = ...)`. To
-/// guard against future drift between the wrapper and the schema
-/// field, this test simulates each helper's closure against an
-/// in-memory `Config` and asserts the field was set correctly. We
-/// deliberately avoid disk I/O so the test stays hermetic.
+/// The settings-modal helpers in the parent module are 3-line wrappers around `update_config(|cfg| cfg.ui.<field> = ...)`.
+/// To guard against future drift between the wrapper and the schema field, this test simulates each helper's closure against an in-memory `Config`.
+/// We deliberately avoid disk I/O so the test stays hermetic.
 ///
-/// The pattern mirrors exactly what `update_config` does internally:
-/// `let mut cfg = load_config_from_toml(...); f(&mut cfg);`.
+/// The pattern mirrors exactly what `update_config` does internally: `let mut cfg = load_config_from_toml(...); f(&mut cfg);`.
 #[test]
 fn merge_section_full_save_config_simulation() {
     let original = r#"
@@ -654,9 +629,8 @@ fn models_config_serializes_only_some_fields() {
         panic!("expected table from serialization");
     }
 }
-/// Canonical list of every `Option<T>` field in [`CliConfig`].  Kept in one
-/// place so both serialization and merge-section tests automatically cover
-/// newly-added fields without copy-pasting assertion lists.
+/// Canonical list of every `Option<T>` field in [`CliConfig`].
+/// Kept in one place so both serialization and merge-section tests automatically cover newly-added fields without copy-pasting assertion lists.
 const CLI_CONFIG_OPTION_FIELDS: &[&str] = &[
     "auto_update",
     "dismissed_version",
@@ -672,8 +646,7 @@ const CLI_CONFIG_OPTION_FIELDS: &[&str] = &[
     "required_minimum_version",
     "required_maximum_version",
 ];
-/// Assert that every `CliConfig` `Option<T>` field NOT in `present` is
-/// absent from `table`.
+/// Assert that every `CliConfig` `Option<T>` field NOT in `present` is absent from `table`.
 fn assert_cli_option_fields_absent(table: &TomlMap<String, TomlValue>, present: &[&str]) {
     for field in CLI_CONFIG_OPTION_FIELDS {
         if !present.contains(field) {
@@ -859,8 +832,7 @@ fn merge_section_cli_use_leader_writes_under_cli_section() {
         "Some(true) must round-trip to `[cli].use_leader`"
     );
 }
-/// Verify `Option<bool>` + `skip_serializing_if` prevents one
-/// `[session]` field from dragging unrelated fields.
+/// Verify that `Option<bool>` with `skip_serializing_if` prevents one `[session]` field from dragging unrelated fields.
 #[test]
 fn merge_section_session_load_envrc_writes_under_session_section() {
     let mut table = TomlMap::new();
@@ -876,7 +848,6 @@ fn merge_section_session_load_envrc_writes_under_session_section() {
         "Some(false) must round-trip to `[session].load_envrc`"
     );
 }
-/// Committing `load_envrc` alone must not inject `auto_compact_threshold_percent`.
 #[test]
 fn merge_section_session_load_envrc_does_not_drag_auto_compact() {
     let mut table = TomlMap::new();
@@ -905,8 +876,8 @@ mod resolve_auto_compact {
     const OTHER_MODEL: &str = "grok-4.3";
     /// Serialize tests that mutate `GROK_AUTO_COMPACT_THRESHOLD_PERCENT`.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
-    /// Build a `Config` populated with optional per-source values for the
-    /// `TEST_MODEL`. Any `None` argument means "that source is unset".
+    /// Build a `Config` populated with optional per-source values for the `TEST_MODEL`.
+    /// Any `None` argument means "that source is unset".
     fn make_cfg(
         user_session: Option<u8>,
         user_per_model: Option<u8>,
@@ -937,14 +908,12 @@ mod resolve_auto_compact {
         info.auto_compact_threshold_percent = gb_per_model;
         info
     }
-    /// Run the resolver against the assembled inputs.
     fn resolve(cfg: &Config, gb_per_model: Option<u8>) -> u8 {
         let info = model_info(gb_per_model);
         resolve_auto_compact_threshold_percent(cfg, TEST_MODEL, Some(&info))
     }
-    /// RAII guard that swaps the env var for the duration of a test and
-    /// restores the previous value on drop. Acquires `ENV_LOCK` so two
-    /// env-var tests never run concurrently.
+    /// RAII guard that swaps the env var for the duration of a test and restores the previous value on drop.
+    /// Acquires `ENV_LOCK` so two env-var tests never run concurrently.
     struct EnvVarGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
         prev: Option<String>,
@@ -1178,8 +1147,6 @@ fn settings_helpers_target_correct_ui_fields() {
     let cfg = apply(|cfg| cfg.ui.screen_mode = Some("fullscreen".to_string()));
     assert_eq!(cfg.ui.screen_mode, Some("fullscreen".to_string()));
 }
-/// Theme merge round-trip: verifies the theme field is set and
-/// unmodeled fields survive. Same pattern as `set_compact_mode_round_trips`.
 #[test]
 fn set_theme_round_trips_through_merge() {
     let original = r#"
@@ -1216,7 +1183,6 @@ custom_user_key = "preserve-me"
         "unmodeled field must survive"
     );
 }
-/// Same as above but for `set_auto_dark_theme` and `set_auto_light_theme`.
 #[test]
 fn set_auto_dark_and_light_theme_round_trip_through_merge() {
     let original = r#"
@@ -1252,8 +1218,6 @@ custom_unknown_key = 42
         "unmodeled field must survive"
     );
 }
-/// Compact-mode merge round-trip: flipped field persists,
-/// unrelated modeled and unmodeled fields survive.
 #[test]
 fn set_compact_mode_round_trips_through_merge() {
     let original = r#"
@@ -1291,7 +1255,6 @@ custom_user_key = "preserve-me"
          this is the merge_section invariant the new helpers depend on"
     );
 }
-/// Same merge round-trip for `show_timestamps` and `simple_mode`.
 #[test]
 fn set_show_timestamps_and_simple_mode_round_trip_through_merge() {
     let original = r#"

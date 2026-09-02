@@ -1501,6 +1501,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
+
+[[package]]
 name = "base64-simd"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3058,12 +3064,12 @@ dependencies = [
 
 [[package]]
 name = "darling"
-version = "0.23.0"
+version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25ae13da2f202d56bd7f91c25fba009e7717a1e4a1cc98a76d844b65ae912e9d"
+checksum = "ed17f5901b6630b993ca003def43f2f8ef4014fc13b047b57aad617ff32bc2ec"
 dependencies = [
- "darling_core 0.23.0",
- "darling_macro 0.23.0",
+ "darling_core 0.24.1",
+ "darling_macro 0.24.1",
 ]
 
 [[package]]
@@ -3082,15 +3088,15 @@ dependencies = [
 
 [[package]]
 name = "darling_core"
-version = "0.23.0"
+version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9865a50f7c335f53564bb694ef660825eb8610e0a53d3e11bf1b0d3df31e03b0"
+checksum = "6837e2cf7485aaae18f86181d2f0e9a7ed297a025e220aeabf63fdebd3a2ddff"
 dependencies = [
  "ident_case",
  "proc-macro2",
  "quote",
  "strsim",
- "syn 2.0.117",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -3106,13 +3112,13 @@ dependencies = [
 
 [[package]]
 name = "darling_macro"
-version = "0.23.0"
+version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac3984ec7bd6cfa798e62b4a642426a5be0e68f9401cfc2a01e3fa9ea2fcdb8d"
+checksum = "2ac7135c3ef02b2f7833bbeb1be5ba7f966dcde8a87c6b87f65a778d71a02785"
 dependencies = [
- "darling_core 0.23.0",
+ "darling_core 0.24.1",
  "quote",
- "syn 2.0.117",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -10366,15 +10372,17 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "2.1.0"
+version = "3.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f00a32c3b81b7b254076a65abd5ab2551209146713ba38f73818657e865e9433"
+checksum = "42b6914fac0be956fe704a38239c3f44a9f841d1b06a5713d2f638065593f5b5"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
+ "bytes",
  "chrono",
  "futures",
  "http 1.4.0",
+ "indexmap",
  "oauth2",
  "pastey",
  "pin-project-lite",
@@ -10390,19 +10398,20 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]
 name = "rmcp-macros"
-version = "2.1.0"
+version = "3.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ee70afb7956da9f30d5348a2539b5eb90d9038f834463657ab717076ac3b1ad"
+checksum = "cdf1c49bd4d52014b94db0877410db273c2008f01628b0252a2e9460ad9b7fda"
 dependencies = [
- "darling 0.23.0",
+ "darling 0.24.1",
  "proc-macro2",
  "quote",
  "serde_json",
- "syn 2.0.117",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -11867,9 +11876,9 @@ dependencies = [
 
 [[package]]
 name = "sse-stream"
-version = "0.2.1"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb4dc4d33c68ec1f27d386b5610a351922656e1fdf5c05bbaad930cd1519479a"
+checksum = "c123f296ade4ec4b8b0f6162116e6629f5146922ca5ab40ca9d3c2e73ab4761e"
 dependencies = [
  "bytes",
  "futures-util",
@@ -16291,6 +16300,7 @@ dependencies = [
  "reqwest-middleware 0.4.2",
  "rustls",
  "serde_json",
+ "tokio",
  "tracing",
  "xai-grok-auth",
  "xai-grok-extra-ca",
@@ -16387,6 +16397,7 @@ dependencies = [
  "filetime",
  "flate2",
  "git2",
+ "libc",
  "nix 0.30.1",
  "notify",
  "reqwest 0.12.24",
@@ -16437,7 +16448,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-pager"
-version = "1.0.12-r2"
+version = "1.0.16"
 dependencies = [
  "agent-client-protocol",
  "ansi-to-tui",
@@ -16541,7 +16552,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-pager-bin"
-version = "1.0.12-r2"
+version = "1.0.16"
 dependencies = [
  "anyhow",
  "clap",
@@ -16744,10 +16755,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "strum 0.27.2",
  "token-source",
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "xai-grok-auth",
  "xai-grok-extra-ca",
@@ -16889,7 +16902,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-shell"
-version = "1.0.12-r2"
+version = "1.0.16"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -16919,6 +16932,7 @@ dependencies = [
  "git2",
  "glob",
  "globset",
+ "hmac 0.12.1",
  "ignore",
  "image",
  "indexmap",
@@ -17154,7 +17168,6 @@ dependencies = [
  "chrono",
  "ctor",
  "filetime",
- "futures-executor",
  "git2",
  "http 1.4.0",
  "mid",
@@ -17315,6 +17328,7 @@ dependencies = [
  "xai-tool-types",
  "xai-tty-utils",
  "zip",
+ "zstd",
 ]
 
 [[package]]
@@ -17367,7 +17381,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-version"
-version = "1.0.12-r2"
+version = "1.0.16"
 dependencies = [
  "semver",
 ]
@@ -17688,7 +17702,6 @@ name = "xai-ratatui-textarea"
 version = "0.1.0"
 dependencies = [
  "arboard",
- "chrono",
  "crossterm",
  "fuzzy-matcher",
  "ignore",

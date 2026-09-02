@@ -1,5 +1,4 @@
-//! Resolves and caches the author identity for feedback submissions
-//! ([`crate::agent::config::FeedbackUserConfig`]).
+//! Resolves and caches the author identity for feedback submissions ([`crate::agent::config::FeedbackUserConfig`]).
 
 use crate::agent::config::FeedbackUserConfig;
 use crate::util::subprocess::CommandLog;
@@ -56,8 +55,7 @@ struct IdentityCommandOutput {
     email: Option<String>,
 }
 
-/// Trims and bounds length ([`MAX_VALUE_LEN`]); the server handles
-/// character-level sanitization.
+/// Trims and bounds length ([`MAX_VALUE_LEN`]); the server handles character-level sanitization.
 fn normalize_value(s: impl AsRef<str>) -> Option<String> {
     let trimmed = s.as_ref().trim();
     if trimmed.is_empty() {
@@ -78,8 +76,8 @@ fn env_value(var: &str) -> Option<String> {
 }
 
 /// A literal source value (usually `$VAR` / `${VAR}` already expanded at load).
-/// A residual `$` is skipped as a likely-unset variable. This over-rejects a
-/// rare genuine `$` so an unset variable is never emitted.
+/// A residual `$` is skipped as a likely-unset variable.
+/// This over-rejects a rare genuine `$` so an unset variable is never emitted.
 fn literal_value(value: &str) -> Option<String> {
     let value = normalize_value(value)?;
     if value.contains('$') {
@@ -92,8 +90,7 @@ fn literal_value(value: &str) -> Option<String> {
 fn os_user() -> Option<String> {
     #[cfg(unix)]
     {
-        // SUDO_USER can appear in an ordinary shell; trust it only when the
-        // effective user ID is root.
+        // SUDO_USER can appear in an ordinary shell; trust it only when the effective user ID is root
         if nix::unistd::geteuid().is_root()
             && let Some(user) = env_value("SUDO_USER")
         {
@@ -110,10 +107,9 @@ fn os_user() -> Option<String> {
         .or_else(|| env_value("USERNAME"))
 }
 
-/// Runs `os_user` on a blocking thread with a timeout: the user lookup can
-/// block (a directory service) and runs under the cache lock, so a stall must
-/// not hold up feedback submissions. On timeout we stop waiting; the thread
-/// finishes in the background holding no lock, and the pool reclaims it.
+/// Runs `os_user` on a blocking thread with a timeout.
+/// The user lookup can block (a directory service) and runs under the cache lock, so a stall must not hold up feedback submissions.
+/// On timeout we stop waiting; the thread finishes in the background holding no lock, and the pool reclaims it.
 async fn resolve_os_user() -> Option<String> {
     match tokio::time::timeout(COMMAND_TIMEOUT, spawn_blocking(os_user)).await {
         Ok(Ok(name)) => name,
@@ -130,8 +126,7 @@ async fn resolve_os_user() -> Option<String> {
 
 async fn git_global_email() -> Option<String> {
     let mut cmd = Command::new(git_bin());
-    // `--global` only: a repo-local `.git/config` in a cloned repo could
-    // otherwise supply an attacker-controlled email.
+    // `--global` only: a repo-local `.git/config` in a cloned repo could otherwise supply an attacker-controlled email
     cmd.args(["config", "--global", "user.email"]);
     let output = run_detached_with_timeout(
         cmd,
@@ -186,8 +181,7 @@ async fn run_identity_command(command: &str) -> Option<ResolvedUserIdentity> {
 enum SourceToken {
     OsUser,
     GitEmail,
-    /// A literal value, usually produced by `$VAR` / `${VAR}` expansion at
-    /// config load; used as-is, subject to per-field validation.
+    /// A literal value, usually produced by `$VAR` / `${VAR}` expansion at config load; used as-is, subject to per-field validation.
     Literal(String),
 }
 
@@ -201,8 +195,7 @@ impl SourceToken {
         }
     }
 
-    /// A log-safe label: keyword tokens by name, literals redacted so a
-    /// configured literal value never reaches the logs.
+    /// A log-safe label: keyword tokens by name, literals redacted so a configured literal value never reaches the logs.
     fn label(&self) -> &'static str {
         match self {
             Self::OsUser => "os_user",
@@ -242,8 +235,6 @@ impl IdentityField {
         }
     }
 
-    /// Whether a resolved value is valid for this field. Emails must contain
-    /// `@`; names have no shape requirement.
     fn accepts(self, value: &str) -> bool {
         match self {
             Self::Name => true,
@@ -258,9 +249,8 @@ impl IdentityField {
         }
     }
 
-    /// Whether the config declares a source that could still fill this field
-    /// later. `email_domain` is excluded: a derived `<name>@<domain>` depends
-    /// only on the resolved name, so it won't change on retry.
+    /// Whether the config declares a source that could still fill this field later.
+    /// `email_domain` is excluded: a derived `<name>@<domain>` depends only on the resolved name, so it won't change on retry.
     fn can_produce(self, cfg: &FeedbackUserConfig) -> bool {
         !self.sources(cfg).is_empty() || cfg.command.is_some()
     }
@@ -284,8 +274,7 @@ async fn resolve_sources(entries: &[String], field: IdentityField) -> Option<Str
             continue;
         }
         if let Some(value) = token.resolve().await {
-            // Skip a value invalid for this field, such as a bare username in
-            // the email list.
+            // Skip a value invalid for this field, such as a bare username in the email list
             if !field.accepts(&value) {
                 warn!(
                     token = %token.label(),
@@ -310,8 +299,7 @@ fn derive_email(name: &str, email_domain: Option<&str>) -> Option<String> {
     let domain = domain.strip_prefix('@').unwrap_or(domain);
     if domain.is_empty()
         || domain.contains('@')
-        // Reject an unset `$VAR` left verbatim by config-load expansion (matches
-        // `literal_value`), so a derived address never embeds an unresolved var.
+        // Reject an unset `$VAR` left verbatim by config-load expansion (matches `literal_value`), so a derived address never embeds it
         || domain.contains('$')
         || domain.contains(char::is_whitespace)
     {
@@ -322,8 +310,8 @@ fn derive_email(name: &str, email_domain: Option<&str>) -> Option<String> {
 
 /// May run subprocesses; production callers go through [`cached_identity`].
 async fn resolve_identity(cfg: &FeedbackUserConfig) -> ResolvedUserIdentity {
-    // The command is admin-provided config: trimmed only, never length-checked,
-    // so long or multi-line commands still run. Its output is bounded below.
+    // The command is admin-provided config: trimmed only, never length-checked, so long or multi-line commands still run
+    // Its output is bounded below
     let mut identity = match cfg
         .command
         .as_deref()
@@ -355,18 +343,16 @@ struct CacheEntry {
 }
 
 impl CacheEntry {
-    /// Whether every field this config can populate has a value. Complete
-    /// entries never expire; incomplete ones are retried after
-    /// [`INCOMPLETE_RESULT_TTL`] so a source that wasn't ready (git, a slow
-    /// command) can fill in later.
+    /// Whether every field this config can populate has a value.
+    /// Complete entries never expire.
+    /// Incomplete ones are retried after [`INCOMPLETE_RESULT_TTL`] so a source that wasn't ready (git, a slow command) can fill in later.
     fn is_complete(&self) -> bool {
         IdentityField::iter()
             .all(|field| self.identity.slot(field).is_some() || !field.can_produce(&self.cfg))
     }
 }
 
-/// Single-slot cache keyed on the config; incomplete results expire after
-/// [`INCOMPLETE_RESULT_TTL`].
+/// Single-slot cache keyed on the config; incomplete results expire after [`INCOMPLETE_RESULT_TTL`].
 pub(crate) struct IdentityCache {
     slot: Mutex<Option<CacheEntry>>,
 }
@@ -378,10 +364,9 @@ impl IdentityCache {
         }
     }
 
-    /// Holds the lock across resolution so concurrent submissions run a slow
-    /// command once, not once each. The tradeoff: submissions serialize, and a
-    /// first-time resolution can take up to the combined source timeouts. The
-    /// pre-warm at session spawn keeps this off the interactive path.
+    /// Holds the lock across resolution so concurrent submissions run a slow command once, not once each.
+    /// The tradeoff: submissions serialize, and a first-time resolution can take up to the combined source timeouts.
+    /// The pre-warm at session spawn keeps this off the interactive path.
     pub(crate) async fn get(
         &self,
         cfg: Option<&FeedbackUserConfig>,
@@ -404,10 +389,8 @@ impl IdentityCache {
             return Some(entry.identity.clone());
         }
         let mut identity = resolve_identity(cfg).await;
-        // A same-config re-resolution is a retry to fill missing fields, not to
-        // drop resolved ones: keep any field a prior attempt resolved when this
-        // attempt's source transiently fails (an `os_user` stall, a flaky git
-        // or command).
+        // A same-config re-resolution is a retry to fill missing fields, not to drop resolved ones
+        // Keep any field a prior attempt resolved when this attempt's source transiently fails (an `os_user` stall, a flaky git or command)
         if let Some(prev) = slot.as_ref().filter(|entry| entry.cfg == *cfg) {
             for field in IdentityField::iter() {
                 if identity.slot(field).is_none()
@@ -449,8 +432,7 @@ mod tests {
         FeedbackUserConfig::default()
     }
 
-    /// Runs the async resolver on a throwaway current-thread runtime so unit
-    /// tests can stay synchronous.
+    /// Runs the async resolver on a throwaway current-thread runtime so unit tests can stay synchronous.
     fn resolve(cfg: FeedbackUserConfig) -> ResolvedUserIdentity {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -494,8 +476,7 @@ mod tests {
 
     #[test]
     fn first_resolvable_literal_wins() {
-        // Empty, unexpanded-`$`, and oversized entries are skipped; the first
-        // usable, trimmed value wins.
+        // Empty, unexpanded-`$`, and oversized entries are skipped; the first usable, trimmed value wins
         let resolved = resolve(FeedbackUserConfig {
             name: vec![
                 "".into(),
@@ -603,8 +584,7 @@ mod tests {
             assert_eq!(resolved.email, None, "name {bad_user:?}");
         }
 
-        // A domain with whitespace, a non-leading `@`, or an unresolved `$VAR`
-        // derives nothing.
+        // A domain with whitespace, a non-leading `@`, or an unresolved `$VAR` derives nothing
         for bad_domain in ["example com", "corp@example.com", "@@example.com", "$CORP"] {
             let resolved = resolve(FeedbackUserConfig {
                 name: vec!["carol".into()],
@@ -615,8 +595,7 @@ mod tests {
         }
     }
 
-    /// Multi-line and >[`MAX_VALUE_LEN`]-byte commands must reach the shell,
-    /// not be rejected for exceeding the length limit.
+    /// Multi-line commands and commands longer than [`MAX_VALUE_LEN`] bytes must reach the shell, not be rejected for exceeding the length limit.
     #[test]
     fn multi_line_and_long_commands_still_run() {
         let multi_line = "true\necho '{\"name\": \"multi-line\"}'";
@@ -655,8 +634,7 @@ mod tests {
         assert_eq!(resolved.name.as_deref(), Some("cmd-user"));
         assert_eq!(resolved.email.as_deref(), Some("fallback@example.com"));
 
-        // A command-emitted email without `@` is rejected like a literal one, so
-        // resolution falls back to the declarative email source.
+        // A command-emitted email without `@` is rejected like a literal one, so resolution falls back to the declarative email source
         let resolved = resolve(FeedbackUserConfig {
             email: vec!["fallback@example.com".into()],
             command: Some(r#"echo '{"name": "cmd-user", "email": "not-an-email"}'"#.into()),
@@ -726,8 +704,7 @@ mod tests {
         assert_eq!(runs.lines().count(), 2, "changed config must re-resolve");
     }
 
-    /// Command emitting `first_json` on its first run and `then_json` after,
-    /// appending one line per run to the returned counter file.
+    /// Command emitting `first_json` on its first run and `then_json` after, appending one line per run to the returned counter file.
     fn first_then_command(
         dir: &std::path::Path,
         first_json: &str,
@@ -805,8 +782,8 @@ mod tests {
 
     #[tokio::test]
     async fn cache_retry_keeps_a_previously_resolved_field() {
-        // First run resolves only the name; the post-TTL retry resolves only the
-        // email. The retry must not drop the name the first run already resolved.
+        // First run resolves only the name; the post-TTL retry resolves only the email
+        // The retry must not drop the name the first run already resolved
         let dir = tempfile::tempdir().unwrap();
         let (command, counter) = first_then_command(
             dir.path(),
@@ -842,8 +819,7 @@ mod tests {
 
     #[test]
     fn name_only_config_settles_but_pending_email_source_stays_incomplete() {
-        // A name-only config can never fill `email`, so a name-resolved entry is
-        // complete and won't be retried on TTL.
+        // A name-only config can never fill `email`, so a name-resolved entry is complete and won't be retried on TTL
         let complete = CacheEntry {
             cfg: FeedbackUserConfig {
                 name: vec!["carol".into()],
@@ -857,8 +833,7 @@ mod tests {
         };
         assert!(complete.is_complete());
 
-        // With an email source declared but unresolved, the entry stays
-        // incomplete and will be retried after the TTL.
+        // With an email source declared but unresolved, the entry stays incomplete and will be retried after the TTL
         let incomplete = CacheEntry {
             cfg: FeedbackUserConfig {
                 name: vec!["carol".into()],
@@ -876,9 +851,8 @@ mod tests {
 
     #[tokio::test]
     async fn cache_single_flights_concurrent_resolution() {
-        // Two concurrent submissions must run the slow command once, not once
-        // each: the cache holds its lock across resolution so the work isn't
-        // duplicated.
+        // Two concurrent submissions must run the slow command once, not once each
+        // The cache holds its lock across resolution so the work isn't duplicated
         let dir = tempfile::tempdir().unwrap();
         let counter = dir.path().join("runs");
         let command = format!(

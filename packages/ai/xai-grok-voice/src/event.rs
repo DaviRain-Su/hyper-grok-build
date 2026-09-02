@@ -11,7 +11,7 @@ pub enum VoiceEvent {
     Error {
         /// Short description for a one-line toast.
         message: String,
-        /// Optional longer fix steps, for surfaces that fit more than one line.
+        /// Optional longer fix steps, shown where more than one line fits.
         hint: Option<String>,
     },
 }

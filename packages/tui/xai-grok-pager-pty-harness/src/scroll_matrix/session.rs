@@ -1,21 +1,16 @@
-//! Marker-session preambles: spawn the pager into the primed state a matrix
-//! cell's gesture assumes, ported from the pager's `tests/pty_e2e/scroll.rs`
-//! (`spawn_bottom_pinned_marker_scrollback[_with_env]` /
-//! `spawn_streaming_marker_turn`) onto this crate's public API so the A13
-//! runner — which lives here, not in the pager's test tree — can reuse the
-//! proven construction.
+//! Marker-session preambles: spawn the pager into the primed state a matrix cell's gesture assumes.
+//! They port `spawn_bottom_pinned_marker_scrollback[_with_env]` and `spawn_streaming_marker_turn` from the pager's `tests/pty_e2e/scroll.rs`.
+//! The A13 runner lives here, not in the pager's test tree, so the port lets it reuse the proven construction.
 //!
 //! ## Controller-drop footgun (kept from the originals)
 //!
-//! Destructure the returned controller into a LIVE binding (`content` /
-//! `_content`), never `_` — a `_` binding drops it immediately, killing the
-//! mock server mid-session and surfacing as a confusing 60s stream timeout
-//! instead of an obvious failure.
+//! Destructure the returned controller into a LIVE binding (`content` / `_content`), never `_`.
+//! A `_` binding drops it immediately and kills the mock server mid-session, which shows up as a 60s stream timeout instead of an obvious failure.
 //!
 //! ## Streaming sessions
 //!
-//! [`spawn_streaming_marker_session`] returns a blocked turn expectation. The
-//! caller releases it after the gesture and before quitting.
+//! [`spawn_streaming_marker_session`] returns a blocked turn expectation.
+//! The caller releases it after the gesture and before quitting.
 
 use std::path::Path;
 use std::time::Duration;
@@ -28,31 +23,25 @@ use crate::content::{AgentTurnExpectation, ContentController};
 pub enum SessionKind {
     /// Response fully streamed, viewport bottom-pinned, scrollback focused.
     Settled,
-    /// Same preamble as [`SessionKind::Settled`] — the settle leaves the
-    /// viewport pinned to the bottom. A separate kind because the cell's
-    /// point is the pin itself (down-scroll must clamp: G7 / I-SCREEN),
-    /// not just "there is history above".
+    /// Same preamble as [`SessionKind::Settled`]; the settle leaves the viewport pinned to the bottom.
+    /// It is a separate kind because the cell's point is the pin itself (down-scroll must clamp: G7 / I-SCREEN), not just "there is history above".
     BottomPinned,
-    /// Turn still streaming (paced deltas + held completion gate) when the
-    /// gesture runs — mid-stream by construction (G8).
+    /// The turn is still streaming (paced deltas and a held completion gate) when the gesture runs: mid-stream by construction (G8).
     Streaming,
 }
 
-/// PTY geometry shared by every matrix session (the pager e2e default:
-/// large enough that the welcome screen never wraps).
+/// PTY geometry shared by every matrix session (the pager e2e default: large enough that the welcome screen never wraps).
 pub const SESSION_ROWS: u16 = 50;
 pub const SESSION_COLS: u16 = 120;
 
-/// Wheel-report position, 0-based (row, col): inside the scrollback pane at
-/// the [`SESSION_ROWS`]×[`SESSION_COLS`] PTY (wire encodes as SGR `40;12`).
+/// Wheel-report position, 0-based (row, col): inside the scrollback pane at the [`SESSION_ROWS`]×[`SESSION_COLS`] PTY (wire encodes as SGR `40;12`).
 pub const WHEEL_ROW: u16 = 11;
 pub const WHEEL_COL: u16 = 39;
 
-/// Welcome-screen sentinel: the menu label `Quit` (case-sensitive, so the
-/// lowercase authenticating hint can't match early).
+/// Welcome-screen sentinel: the menu label `Quit` (case-sensitive, so the lowercase authenticating hint can't match early).
 const WELCOME_SCREEN_SENTINEL: &str = "Quit";
 const WELCOME_TIMEOUT: Duration = Duration::from_secs(20);
-/// Prompt submitted to the agent — short enough never to wrap.
+/// Prompt submitted to the agent, short enough never to wrap.
 const PROMPT: &str = "go";
 /// First line inside the marker code block (the mock response sentinel).
 const MOCK_RESPONSE_SENTINEL: &str = "MOCKRESPONSE";
@@ -60,19 +49,16 @@ const MOCK_RESPONSE_SENTINEL: &str = "MOCKRESPONSE";
 /// Prefix shared by [`marker_line`] and the screen parses.
 const MARKER_PREFIX: &str = "MARKER-";
 
-/// End marker of a streaming session's tail: the final streamed word, kept
-/// off-screen while the tail is in flight (witness for "still streaming").
+/// End marker of a streaming session's tail: the final streamed word, kept off-screen while the tail is in flight (witness for "still streaming").
 pub const STREAM_END_SENTINEL: &str = "STREAMDONE";
 
-/// Unique numbered marker line (`MARKER-0042`), zero-padded so no marker is
-/// a substring of another within a [`marker_response`] transcript.
+/// Unique numbered marker line (`MARKER-0042`), zero-padded so no marker is a substring of another within a [`marker_response`] transcript.
 pub fn marker_line(n: usize) -> String {
     format!("{MARKER_PREFIX}{n:04}")
 }
 
-/// `count` numbered marker lines inside a fenced code block — markdown
-/// renders exactly one row per marker with no soft-wrap reflow, so marker
-/// index deltas equal row deltas.
+/// `count` numbered marker lines inside a fenced code block.
+/// Markdown renders exactly one row per marker with no soft-wrap reflow, so marker index deltas equal row deltas.
 pub fn marker_response(count: usize) -> String {
     let mut s = String::with_capacity(count * 16 + 64);
     s.push_str("```\n");
@@ -95,9 +81,8 @@ pub fn marker_screen_row(harness: &PtyHarness, marker: &str) -> Option<u16> {
         .map(|row| row as u16)
 }
 
-/// Index of the topmost marker on screen (`None` when none visible;
-/// malformed hits skipped). Scrolling UP strictly decreases it by the rows
-/// scrolled — the "viewport moved by K rows" primitive (I-SCREEN's input).
+/// Index of the topmost marker on screen (`None` when none visible; malformed hits skipped).
+/// Scrolling UP strictly decreases it by the rows scrolled, the "viewport moved by K rows" primitive (I-SCREEN's input).
 pub fn topmost_visible_marker(harness: &PtyHarness) -> Option<usize> {
     topmost_marker_in(&harness.screen_contents())
 }
@@ -109,20 +94,16 @@ fn topmost_marker_in(screen: &str) -> Option<usize> {
     })
 }
 
-/// Streaming-session defaults: the marker block rides the FIRST delta; a
-/// 240-word tail at 30ms per SSE event then streams for ≥7s — wider than
-/// any gesture table (G9b, the longest, spans ~0.4s) plus its finalize
-/// wait, so the gesture provably overlaps the stream. Values proven by the
-/// pager's `wheel_*_mid_stream` e2e tests.
+/// Streaming-session defaults: the marker block rides the FIRST delta; a 240-word tail at 30ms per SSE event then streams for at least 7s.
+/// That is wider than any gesture table (G9b, the longest, spans ~0.4s) plus its finalize wait, so the gesture provably overlaps the stream.
+/// The values are proven by the pager's `wheel_*_mid_stream` e2e tests.
 pub const STREAMING_TAIL_WORDS: usize = 240;
 pub const STREAMING_CHUNK_DELAY: Duration = Duration::from_millis(30);
 
-/// Spawn `binary` (the pager under test — the matrix runner plumbs its
-/// `--binary` override here; tests pass `env::pager_binary()`) for `kind`
-/// over a `marker_count`-marker transcript with `extra_env` appended to the
-/// mock's pager env (terminal-class markers, `GROK_SCROLL_*`,
-/// `GROK_SCROLL_LOG` — the PTY spawn strips host-terminal identity first,
-/// so injected markers always win).
+/// Spawn `binary` for `kind` over a `marker_count`-marker transcript, with `extra_env` appended to the mock's pager env.
+/// `binary` is the pager under test: the matrix runner passes its `--binary` override here, tests pass `env::pager_binary()`.
+/// `extra_env` carries terminal-class markers, `GROK_SCROLL_*`, and `GROK_SCROLL_LOG`.
+/// The PTY spawn strips host-terminal identity first, so the injected markers always win.
 ///
 /// `blocked_turn` is present only for a streaming session.
 pub async fn spawn_marker_session(
@@ -155,8 +136,8 @@ pub async fn spawn_marker_session(
     }
 }
 
-/// Shared spawn: mock content up, pager in a [`SESSION_ROWS`]×
-/// [`SESSION_COLS`] PTY with content env + `extra_env`, welcome waited.
+/// Shared spawn, with the mock content already up: the pager runs in a [`SESSION_ROWS`]×[`SESSION_COLS`] PTY with the content env plus `extra_env`.
+/// Waits for the welcome screen and submits the prompt.
 fn spawn_pager(
     binary: &Path,
     content: &ContentController,
@@ -181,9 +162,9 @@ fn spawn_pager(
     harness
 }
 
-/// Panic (with the screen) unless the transcript overflows the viewport:
-/// marker 0 off-screen-top and some later marker visible — otherwise the
-/// gesture has nothing to scroll into view. Returns the movement baseline.
+/// Panic (with the screen) unless the transcript overflows the viewport: marker 0 must be off-screen at the top and some later marker visible.
+/// Otherwise the gesture has nothing to scroll into view.
+/// Returns the movement baseline.
 fn assert_scrollable_baseline(harness: &PtyHarness, context: &str) -> usize {
     assert!(
         marker_screen_row(harness, &marker_line(0)).is_none(),
@@ -199,12 +180,10 @@ fn assert_scrollable_baseline(harness: &PtyHarness, context: &str) -> usize {
     })
 }
 
-/// [`SessionKind::Settled`]/[`SessionKind::BottomPinned`] preamble: stream
-/// the whole marker transcript, land bottom-pinned in follow mode, focus
-/// the scrollback via Tab (Esc would silently arm the rewind picker, whose
-/// ~800ms expiry redraw pollutes frame captures; wheel reports are
-/// position-routed regardless of focus), quiesce, reset the frame-timing
-/// watermark — counted frames then come only from the caller's gesture.
+/// [`SessionKind::Settled`]/[`SessionKind::BottomPinned`] preamble: stream the whole marker transcript and land bottom-pinned in follow mode.
+/// Tab focuses the scrollback; Esc would silently start the rewind picker, whose ~800ms expiry redraw pollutes frame captures.
+/// Wheel reports are position-routed regardless of focus.
+/// After settling, the frame-timing watermark is reset so counted frames come only from the caller's gesture.
 pub async fn spawn_settled_marker_session(
     binary: &Path,
     marker_count: usize,
@@ -214,7 +193,7 @@ pub async fn spawn_settled_marker_session(
     content.set_response(marker_response(marker_count));
     let mut harness = spawn_pager(binary, &content, extra_env);
 
-    // The LAST marker is the last thing streamed → the whole transcript is in.
+    // The LAST marker is the last thing streamed, so the whole transcript is in
     harness
         .wait_for_text(&marker_line(marker_count - 1), Duration::from_secs(60))
         .expect("response finished streaming");
@@ -233,12 +212,11 @@ pub async fn spawn_settled_marker_session(
     (harness, content, baseline)
 }
 
-/// [`SessionKind::Streaming`] preamble: the whole fenced marker block rides
-/// the first delta (the mock splits deltas on single spaces and the block
-/// contains none), the space-separated tail streams word-by-word at
-/// `chunk_delay`, and the matched expectation prevents terminal completion
-/// until the caller releases it. Setup guards: transcript overflows the
-/// viewport and [`STREAM_END_SENTINEL`] is not on screen.
+/// [`SessionKind::Streaming`] preamble: the whole fenced marker block rides the first delta.
+/// The mock splits deltas on single spaces and the block contains none.
+/// The space-separated tail streams word-by-word at `chunk_delay`.
+/// The matched expectation prevents terminal completion until the caller releases it.
+/// Setup guards: the transcript overflows the viewport and [`STREAM_END_SENTINEL`] is not on screen.
 pub async fn spawn_streaming_marker_session(
     binary: &Path,
     marker_count: usize,
@@ -261,8 +239,7 @@ pub async fn spawn_streaming_marker_session(
     let turn = content.expect_agent_turn_blocked("streaming marker turn", turn);
 
     let mut harness = spawn_pager(binary, &content, extra_env);
-    // The last marker rides the first delta, so this waits only for the
-    // stream to START; the tail is still in flight afterwards.
+    // The last marker rides the first delta, so this waits only for the stream to START; the tail is still in flight afterwards
     harness
         .wait_for_text(&marker_line(marker_count - 1), Duration::from_secs(30))
         .expect("marker block streamed");
@@ -299,9 +276,8 @@ mod tests {
         assert_eq!(topmost_marker_in("no markers here"), None);
     }
 
-    /// The streaming defaults must dwarf the longest gesture: every step
-    /// table finishes (delays summed) well inside the paced tail's window,
-    /// or the "still streaming" guard could race the gesture.
+    /// The streaming defaults must dwarf the longest gesture: every step table finishes (delays summed) well inside the paced tail's window.
+    /// Otherwise the "still streaming" guard could race the gesture.
     #[test]
     fn streaming_window_covers_every_gesture_table() {
         use super::super::gestures::{GestureId, STREAM_GAP_MS};
@@ -309,7 +285,7 @@ mod tests {
         for gesture in GestureId::ALL {
             for ept in [1u16, 3] {
                 let span: u64 = gesture.steps(ept).iter().map(|s| s.pre_delay_ms).sum();
-                // Gesture + every stream's finalize gap, ×4 headroom.
+                // The gesture span plus every stream's finalize gap, with 4x headroom
                 let with_finalize = (span + gesture.expected_streams() as u64 * STREAM_GAP_MS) * 4;
                 assert!(
                     with_finalize < tail_ms,

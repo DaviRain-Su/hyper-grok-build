@@ -22,8 +22,7 @@ pub(crate) const WORKFLOW_MAX_AGENT_RUNS: u32 =
     (xai_workflow::MAX_AGENT_BUDGET as u32) * (SCHEMA_CONTRACT_RETRIES + 1);
 pub(crate) const DEFAULT_WORKFLOW_MAX_CONCURRENT_AGENTS: usize = 32;
 
-/// The configured cap clamped to the machine's parallelism, so small hosts
-/// run fewer agents at once.
+/// The configured cap clamped to the machine's parallelism, so small hosts run fewer agents at once.
 pub(crate) fn workflow_max_concurrent_agents(configured: usize) -> usize {
     workflow_max_concurrent_agents_from(
         configured,
@@ -36,8 +35,7 @@ pub(crate) fn workflow_max_concurrent_agents(configured: usize) -> usize {
 fn workflow_max_concurrent_agents_from(configured: usize, parallelism: usize) -> usize {
     let clamp = parallelism.max(2);
     let requested = configured.max(1);
-    // Logged for the default too: a small host silently running fewer than
-    // the default agents per run would otherwise be invisible to operators.
+    // Logged for the default too: a small host silently running fewer than the default agents per run would otherwise be invisible to operators
     if requested > clamp {
         tracing::info!(
             requested,
@@ -180,7 +178,7 @@ impl FinishOnce<'_> {
             return;
         }
         if state == "failed" {
-            // The roster is capped and survives resume; count here instead.
+            // The roster is capped and survives resume, so failed rows cannot be counted from it; count here
             self.host
                 .params
                 .stats
@@ -387,7 +385,7 @@ impl HostService {
                 Err(HostError::Cancelled)
             }
             Err(tokio::sync::TryAcquireError::NoPermits) => {
-                // Do not count teardown storms as queue pressure.
+                // During cancellation many spawns hit NoPermits at once; do not log that as queue pressure
                 if self.params.cancel.is_cancelled() {
                     return Err(HostError::Cancelled);
                 }
@@ -396,7 +394,7 @@ impl HostService {
                         self.params.parent_session_id.clone(),
                         self.params.run_id.clone(),
                         self.params.max_concurrent_agents as u64,
-                        // Slots in use, not the racy post-setup running count.
+                        // Slots in use; the active_agents counter lags spawn setup and is racy here
                         (self
                             .params
                             .max_concurrent_agents
@@ -515,8 +513,7 @@ impl HostService {
             Some(schema) => contract_prompt(&opts.prompt, schema),
         };
 
-        // Acquire before the roster row so a waiting agent is not shown as
-        // running.
+        // Acquire before the roster row so a waiting agent is not shown as running
         let _agent_slot = self.acquire_agent_slot().await?;
 
         let description = self.params.tracker.lock().agent_started(
@@ -612,7 +609,7 @@ impl HostService {
             self.tick();
 
             let backend = ChannelBackend::new(self.params.subagent_event_tx.clone());
-            let result_fut = backend.spawn(request);
+            let result_fut = backend.spawn(request, None);
             tokio::pin!(result_fut);
             let result = tokio::select! {
                 result = &mut result_fut => result,
@@ -983,8 +980,7 @@ mod tests {
     use crate::session::workflow::store::WorkflowRunStore;
     use crate::session::workflow::tracker::WorkflowTracker;
 
-    /// Everything but the per-test tracker and subagent channel; the returned
-    /// receiver keeps the persistence channel open for the test's lifetime.
+    /// The returned receiver keeps the persistence channel open for the test's lifetime.
     fn test_host_params(
         run_id: &str,
         max_concurrent_agents: usize,
@@ -1222,8 +1218,7 @@ mod tests {
         };
         succeed(queued);
 
-        // Slot acquisition order between the two dispatched requests is
-        // unspecified, so assert both replies only after both agents ran.
+        // Slot acquisition order between the two dispatched requests is unspecified, so assert both replies only after both agents ran
         assert!(
             first
                 .await

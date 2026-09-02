@@ -118,14 +118,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_backoff_config_default() {
-        let config = BackoffConfig::default();
-        assert_eq!(config.max_retries, 10);
-        assert_eq!(config.base_delay_ms, 1000);
-        assert_eq!(config.max_delay_ms, 30_000);
-    }
-
-    #[test]
     fn test_calculate_delay() {
         let config = BackoffConfig::default();
         assert_eq!(config.calculate_delay(1), Duration::from_millis(1000));

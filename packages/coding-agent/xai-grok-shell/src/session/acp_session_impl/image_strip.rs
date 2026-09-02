@@ -1,15 +1,11 @@
-//! Shell policy for sampler image strips: which strips may rewrite stored
-//! history, when, and what the user is told.
+//! Shell policy for sampler image strips: which strips may rewrite stored history, when, and what the user is told.
 //!
-//! - Only `ServerRejected` with unambiguous blame (exactly one unique URL
-//!   in the rejected request) may touch history; the server's verdict
-//!   names the request, not an image.
-//! - The rewrite is deferred until that request's `Completed` proves the
-//!   strip helped; `Failed` drops the buffer.
-//! - The write is backup-gated and disk-acknowledged ([`StripOutcome`]);
-//!   only `Applied` claims the stored conversation changed.
-//! - Scope: `chat_history.jsonl` only. A rebuild replaying `updates.jsonl`
-//!   (e.g. a remote pull) restores the image and pays one more strip cycle.
+//! - Only `ServerRejected` with unambiguous blame (exactly one unique URL in the rejected request) may touch history.
+//!   The server's verdict names the request, not an image.
+//! - The rewrite is deferred until that request's `Completed` proves the strip helped; `Failed` drops the buffer.
+//! - The write is gated on a backup and acknowledged from disk ([`StripOutcome`]); only `Applied` claims the stored conversation changed.
+//! - Scope: `chat_history.jsonl` only.
+//!   A rebuild replaying `updates.jsonl` (e.g. a remote pull) restores the image and pays one more strip cycle.
 
 use xai_chat_state::StripOutcome;
 use xai_grok_sampler::{RequestId, StripReason};
@@ -82,8 +78,7 @@ impl SessionActor {
                 .all(|url| url.as_ref() == first.as_ref())
     }
 
-    /// Drop abandoned strips at a turn boundary while retaining timed-out
-    /// requests whose terminal event still owes one request-scoped side effect.
+    /// Drop abandoned strips at a turn boundary while retaining timed-out requests whose terminal event still owes one request-scoped side effect.
     pub(crate) fn retain_timed_out_image_strips_for_new_turn(&self) {
         let ownership = self.turn_stream_drained.lock();
         let mut pending = self.pending_image_strip.lock();
@@ -111,8 +106,7 @@ impl SessionActor {
     }
 
     /// Drop the ordering waiter while retaining request-scoped strip ownership.
-    /// The placeholder admits a queued `ImagesStripped` event even if cancel
-    /// clears ordinary stream ownership before the event drainer reaches it.
+    /// The placeholder admits a queued `ImagesStripped` event even if cancel clears ordinary stream ownership before the event drainer reaches it.
     pub(crate) fn mark_stream_drain_timed_out(&self, request_id: &RequestId) {
         let mut ownership = self.turn_stream_drained.lock();
         let Some(waiter) = ownership.get_mut(request_id) else {
@@ -131,9 +125,8 @@ impl SessionActor {
         enforce_pending_image_strip_bound(&mut pending, Some(request_id));
     }
 
-    /// Relinquish normal stream ownership immediately when cancellation claims
-    /// a turn. Retain only timeout-owned work from older turns; late events for
-    /// the cancelled request are otherwise stale.
+    /// Relinquish normal stream ownership immediately when cancellation claims a turn.
+    /// Retain only work still owned by a timeout from older turns; late events for the cancelled request are otherwise stale.
     pub(crate) fn cancel_active_sampling_requests(&self) {
         self.turn_stream_drained.lock().clear();
         self.pending_image_strip
@@ -153,9 +146,8 @@ impl SessionActor {
         self.image_strip_rewrite_barrier.lock_rewind().await
     }
 
-    /// Handle `SamplingEvent::ImagesStripped`: buffer a persistable strip
-    /// for [`Self::apply_pending_image_strip`], or notify immediately for a
-    /// request-local one.
+    /// Handle `SamplingEvent::ImagesStripped`: buffer a persistable strip for [`Self::apply_pending_image_strip`].
+    /// A request-local strip instead notifies the user immediately.
     pub(crate) async fn handle_images_stripped(
         &self,
         request_id: RequestId,
@@ -163,8 +155,8 @@ impl SessionActor {
         reason: StripReason,
     ) {
         let stripped = stripped_urls.len();
-        // Blame is judged on unique URLs: the same image attached twice is
-        // still one suspect. Distinct images are ambiguous: request-local.
+        // Blame is judged on unique URLs: the same image attached twice is still one suspect
+        // Distinct images are ambiguous, so the strip stays request-local
         let persist_deferred = Self::should_defer_image_strip(&stripped_urls, &reason);
         let mut unique = stripped_urls;
         unique.sort();
@@ -195,8 +187,7 @@ impl SessionActor {
             })),
         );
         if !persist_deferred {
-            // Request-local only: tell the user now, on the same channel as
-            // load-time image drops, rendered as a system scrollback note.
+            // Request-local only: tell the user now, on the same channel as load-time image drops, rendered as a system scrollback note
             self.send_xai_notification(XaiSessionUpdate::ImageDropped {
                 notes: vec![format!(
                     "This request failed over its images (or was too large); \
@@ -207,12 +198,11 @@ impl SessionActor {
         }
     }
 
-    /// On `Completed`: the stripped retry succeeded, so the buffered strip
-    /// is now blamed with evidence: persist it and tell the user once the
-    /// disk write is acknowledged.
+    /// On `Completed`: the stripped retry succeeded, so the buffered strip is now blamed with evidence.
+    /// Persist it and tell the user once the disk write is acknowledged.
     pub(crate) async fn apply_pending_image_strip(&self, request_id: &RequestId) {
-        // Acquire rewrite ownership before claiming URLs. Rewind either clears
-        // queued work first, or waits until this proven strip finishes.
+        // Acquire rewrite ownership before claiming URLs
+        // Rewind either clears queued work first, or waits until this proven strip finishes
         let _rewrite_guard = self.image_strip_rewrite_barrier.lock_strip().await;
         let urls = {
             let mut pending = self.pending_image_strip.lock();
@@ -252,9 +242,8 @@ impl SessionActor {
                 "persisted": persisted,
             })),
         );
-        // Every outcome answered without the user's image, so every outcome
-        // says so; only `Applied` may also claim the stored conversation
-        // changed (a failed or missed write leaves the image on disk).
+        // Every outcome answered without the user's image, so every outcome says so
+        // Only `Applied` may also claim the stored conversation changed (a failed or missed write leaves the image on disk)
         let notes = match outcome {
             StripOutcome::Applied { .. } => vec![
                 "The server could not process an image, so it was removed from \
@@ -273,9 +262,8 @@ impl SessionActor {
             .await;
     }
 
-    /// On `Failed`: the stripped retry did not rescue the turn, so the
-    /// buffered strip proves nothing, so drop it. Stored history keeps its
-    /// images; the next turn starts fresh.
+    /// On `Failed`: the stripped retry did not rescue the turn, so the buffered strip proves nothing and is dropped.
+    /// Stored history keeps its images; the next turn starts fresh.
     pub(crate) fn drop_pending_image_strip(&self, request_id: &RequestId) {
         if self.pending_image_strip.lock().remove(request_id).is_some() {
             tracing::debug!(

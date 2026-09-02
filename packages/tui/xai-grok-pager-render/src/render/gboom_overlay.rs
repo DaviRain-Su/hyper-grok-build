@@ -1,7 +1,6 @@
 //! `/gboom` easter-egg overlay chrome (border, title, HUD bar).
 //!
-//! The game frame itself is rendered via post-flush kitty escape sequences
-//! by the caller, matching the image/video viewer pattern.
+//! The game frame itself is rendered via post-flush kitty escape sequences by the caller, matching the image/video viewer pattern.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -13,8 +12,8 @@ use xai_grok_gboom::GboomHud;
 
 use crate::render::safe_buf::SafeBuf;
 
-/// Render the GBOOM popup chrome. Returns the popup `Rect`,
-/// or `None` if the area is too small to play in.
+/// Render the GBOOM popup chrome.
+/// Returns the popup `Rect`, or `None` if the area is too small to play in.
 pub fn render_gboom_overlay(
     buf: &mut Buffer,
     area: Rect,
@@ -50,7 +49,7 @@ pub fn render_gboom_overlay(
         .style(Style::default().bg(bg))
         .render(popup_rect, buf);
 
-    // Title centered in the top border, in the iconic logo red.
+    // Title centered in the top border, in the logo red
     let title = " GBOOM ";
     let [r, g, b] = xai_grok_gboom::GBOOM_RED;
     let title_style = Style::default()
@@ -67,8 +66,7 @@ pub fn render_gboom_overlay(
     Some(popup_rect)
 }
 
-/// Render the HUD on the popup's bottom border row:
-/// `HP 100 · KILLS 0/8` left, controls hint right.
+/// Render the HUD on the popup's bottom border row: `HP 100 · KILLS 0/8` left, controls hint right.
 fn render_hud_bar(buf: &mut Buffer, popup_rect: Rect, hud: &GboomHud, dim_fg: Color, bg: Color) {
     let bar_y = popup_rect.y + popup_rect.height.saturating_sub(1);
     let inner_width = popup_rect.width.saturating_sub(2) as usize;
@@ -76,8 +74,7 @@ fn render_hud_bar(buf: &mut Buffer, popup_rect: Rect, hud: &GboomHud, dim_fg: Co
         return;
     }
 
-    // Health-bar semantics: green when comfortable, amber when hurting,
-    // GBOOM red when critical.
+    // Health bar color: green when comfortable, amber when hurting, GBOOM red when critical
     let hp_color = if hud.hp > 60 {
         Color::Rgb(126, 200, 96)
     } else if hud.hp > 30 {
@@ -90,8 +87,7 @@ fn render_hud_bar(buf: &mut Buffer, popup_rect: Rect, hud: &GboomHud, dim_fg: Co
         " HP {:<3} \u{00b7} KILLS {}/{} ",
         hud.hp, hud.kills, hud.total
     );
-    // `chars().count()` not `len()`: the separator is multi-byte UTF-8 but
-    // every char here is a single display cell.
+    // `chars().count()` not `len()`: the separator is multi-byte UTF-8 but every char here is a single display cell
     let stats_w = (stats.chars().count() as u16).min(inner_width as u16);
     let line = Line::from(vec![Span::styled(
         stats,

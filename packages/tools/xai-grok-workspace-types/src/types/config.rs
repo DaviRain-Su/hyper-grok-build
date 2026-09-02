@@ -1,5 +1,4 @@
-//! Configuration shapes referenced from session lifecycle requests and
-//! `OpsChunk::ProjectConfig` / `OpsChunk::Permissions`.
+//! Configuration shapes referenced from session lifecycle requests and `OpsChunk::ProjectConfig` / `OpsChunk::Permissions`.
 //!
 //! TODO(workspace): align with the canonical project / permission /
 //! agent-session config types in `xai-grok-config` and friends.
@@ -10,12 +9,8 @@ use serde::{Deserialize, Serialize};
 
 /// Filesystem isolation strategy for a forked session.
 ///
-/// `Default` returns [`IsolationMode::None`], which is appropriate for
-/// the root session (which shares the workspace's working tree). Note
-/// that subagent forks should explicitly opt into a more restrictive
-/// mode (e.g. `Worktree`); relying on `Default`
-/// for a subagent gives it shared-tree access, which is rarely the
-/// right default for an exploratory child agent.
+/// `Default` returns [`IsolationMode::None`], which is appropriate for the root session (it shares the workspace's working tree).
+/// Subagent forks should opt into a more restrictive mode (e.g. `Worktree`); relying on `Default` gives a subagent shared-tree access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IsolationMode {
@@ -30,12 +25,8 @@ pub enum IsolationMode {
 
 /// Capability mode applied to a forked session.
 ///
-/// `Default` returns [`CapabilityMode::ReadWrite`], which is
-/// appropriate for the root session. Subagents should explicitly opt
-/// into a more restrictive mode (typically
-/// `ReadOnly`); relying on `Default` for a subagent gives it
-/// read+write access, which is rarely the right default for an
-/// exploratory child agent.
+/// `Default` returns [`CapabilityMode::ReadWrite`], which is appropriate for the root session.
+/// Subagents should opt into a more restrictive mode (typically `ReadOnly`); relying on `Default` gives a subagent read and write access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityMode {
@@ -67,17 +58,10 @@ pub struct ToolServerConfig {
     pub args: BTreeMap<String, String>,
 }
 
-/// Configuration applied when forking a session via
-/// `SessionLifecycleRequest::Fork`.
+/// Configuration applied when forking a session via `SessionLifecycleRequest::Fork`.
 ///
-/// `Default` returns a config with `IsolationMode::None` and
-/// `CapabilityMode::ReadWrite`. **Be careful using `Default` to
-/// construct a subagent fork**: a subagent
-/// should typically be forked with `Worktree` isolation and a more
-/// restrictive capability mode -- the defaults here are oriented at
-/// the root session, not subagents. Construct subagent configs by
-/// fully-naming the relevant fields (or use a builder helper) rather
-/// than relying on `..Default::default()`.
+/// `Default` returns a config with `IsolationMode::None` and `CapabilityMode::ReadWrite`, oriented at the root session, not subagents.
+/// Construct subagent configs by fully-naming the relevant fields (or use a builder helper) rather than relying on `..Default::default()`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentSessionConfig {
     /// Agent identifier (e.g. `"subagent-explore"`).
@@ -91,7 +75,7 @@ pub struct AgentSessionConfig {
     /// Optional per-tool-server overrides.
     #[serde(default)]
     pub tool_config: Vec<ToolServerConfig>,
-    /// Maximum recursion depth for subagent nesting. 0 = no further nesting.
+    /// Maximum recursion depth for subagent nesting; 0 means no further nesting.
     #[serde(default)]
     pub max_depth: u32,
     /// Working directory override (relative to workspace root).

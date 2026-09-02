@@ -1,7 +1,6 @@
-//! Keeps `x.ai/task_completed` lines short enough for a client to read, both
-//! when this build sends one and when replay reaches one an earlier build
-//! wrote. Bounding the output field alone does not bound the line: the
-//! wrapper and the JSON encoding go on top of it.
+//! Keeps `x.ai/task_completed` lines short enough for a client to read.
+//! That holds both when this build sends one and when replay reaches one an earlier build wrote.
+//! Bounding the output field alone does not bound the line: the wrapper and the JSON encoding go on top of it.
 
 use serde_json::Value;
 use serde_json::value::RawValue;
@@ -9,8 +8,7 @@ use xai_grok_tools::types::TaskSnapshot;
 
 use crate::extensions::notification::{SessionNotification, SessionUpdate};
 
-/// Half the 64 KiB a Python `asyncio` stream reader allows, the limit that
-/// reported this bug ("Separator is not found, and chunk exceed the limit").
+/// Half the 64 KiB a Python `asyncio` stream reader allows, the limit that reported this bug ("Separator is not found, and chunk exceed the limit").
 pub(crate) const FRAME_MAX_BYTES: usize = 32 * 1024;
 
 /// The method the bridge sends; the budget is derived from it.
@@ -19,20 +17,19 @@ pub(crate) const METHOD: &str = "x.ai/task_completed";
 /// The JSON-RPC wrapper, the `_` an extension method carries, and the newline.
 const WRAPPER_BYTES: usize = r#"{"jsonrpc":"2.0","method":"_","params":}"#.len() + 1;
 
-/// Measured after JSON encoding.
+/// The cap is measured after JSON encoding.
 const FIELD_MAX_BYTES: usize = 1024;
 
-/// The replay copy of [`compact`]'s field list. The path to the log is
-/// missing on purpose: a truncated pointer is worse than less output, so it
-/// is cut only as a last resort.
+/// The replay copy of [`compact`]'s field list.
+/// The path to the log is missing on purpose: a truncated pointer is worse than less output, so it is cut only as a last resort.
 const COMPACTED_FIELDS: [&str; 4] = ["command", "display_command", "description", "cwd"];
 
 fn body_budget() -> usize {
     FRAME_MAX_BYTES.saturating_sub(WRAPPER_BYTES + METHOD.len())
 }
 
-/// A message body proven to fit the frame budget. [`within`] is the only
-/// constructor, so a return path that skips the measurement does not compile.
+/// A message body proven to fit the frame budget.
+/// [`within`] is the only constructor, so a return path that skips the measurement does not compile.
 pub(crate) struct FittedFrame(Box<RawValue>);
 
 impl FittedFrame {
@@ -49,10 +46,9 @@ impl std::ops::Deref for FittedFrame {
     }
 }
 
-/// Builds the message within [`FRAME_MAX_BYTES`], rewriting `notification` to
-/// match so the caller can persist what it sends. A message with no room for
-/// output still reports the task finished and points at the log. `None`
-/// means nothing fit, and sending anyway is what closes the connection.
+/// Builds the message within [`FRAME_MAX_BYTES`], rewriting `notification` to match so the caller can persist what it sends.
+/// A message with no room for output still reports the task finished and points at the log.
+/// `None` means nothing fit, and sending anyway is what closes the connection.
 pub(crate) fn encode(notification: &mut SessionNotification) -> Option<FittedFrame> {
     let budget = body_budget();
     let Some(snapshot) = task_snapshot(notification) else {
@@ -88,8 +84,7 @@ fn fit_into(
     output: &str,
     budget: usize,
 ) -> Option<FittedFrame> {
-    // The output is the field worth keeping, so when it does not fit, the
-    // other fields a task can grow give up their room to it first.
+    // The output is the field worth keeping, so when it does not fit, the other fields a task can grow give up their room to it first
     let mut room = room_for_output(notification, budget)?;
     if encoded_len(output) > room {
         compact(task_snapshot(notification)?);
@@ -113,8 +108,7 @@ fn room_for_output(notification: &SessionNotification, budget: usize) -> Option<
 }
 
 /// As much of `output` as fits `room` once encoded, then the path to the log.
-/// The flag reports what was left out; the length cannot, since the footer can
-/// make the result longer than the output it replaces.
+/// The flag reports what was left out; the length cannot, since the footer can make the result longer than the output it replaces.
 fn fit_output(output: &str, output_file: &std::path::Path, room: usize) -> (String, bool) {
     if encoded_len(output) <= room {
         return (output.to_string(), false);
@@ -131,8 +125,7 @@ fn fit_output(output: &str, output_file: &std::path::Path, room: usize) -> (Stri
     (format!("{kept}{footer}"), true)
 }
 
-/// Keep in step with [`COMPACTED_FIELDS`], the replay path's copy of this
-/// list.
+/// Keep in step with [`COMPACTED_FIELDS`], the replay path's copy of this list.
 fn compact(snapshot: &mut TaskSnapshot) {
     snapshot.command = prefix_within_encoded_len(&snapshot.command, FIELD_MAX_BYTES).to_string();
     snapshot.display_command = snapshot
@@ -189,17 +182,16 @@ fn encoded_char_len(character: char) -> usize {
     }
 }
 
-/// What to do with a recorded message on its way back out. `Unfittable` has to
-/// be dropped: sending it would close the connection.
+/// What to do with a recorded message on its way back out.
+/// `Unfittable` has to be dropped: sending it would close the connection.
 pub(crate) enum Refit {
     Unchanged,
     Fitted(FittedFrame),
     Unfittable,
 }
 
-/// Shrinks a recorded task completion that is too long to send. Edited in
-/// place because an earlier build may have written fields this one does not
-/// model, and replay must not drop them.
+/// Shrinks a recorded task completion that is too long to send.
+/// The record is edited in place because an earlier build may have written fields this one does not model, and replay must not drop them.
 pub(crate) fn refit_recorded(params: &RawValue) -> Refit {
     let budget = body_budget();
     if params.get().len() <= budget {

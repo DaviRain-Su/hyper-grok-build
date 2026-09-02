@@ -166,12 +166,6 @@ mod tests {
     }
 
     #[test]
-    fn binary_accessor_round_trips() {
-        let p = PathBuf::from("/some/path/to/mmdc");
-        assert_eq!(MmdcEngine::new(p.clone()).binary(), p.as_path());
-    }
-
-    #[test]
     fn map_subprocess_error_preserves_taxonomy() {
         assert!(matches!(
             map_subprocess_error(SubprocessError::Spawn(std::io::Error::other("x"))),

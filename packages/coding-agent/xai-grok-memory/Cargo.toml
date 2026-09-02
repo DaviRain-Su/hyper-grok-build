@@ -20,6 +20,7 @@ flate2 = { workspace = true }
 git2 = { version = "0.20", default-features = false, features = [
     "vendored-libgit2",
 ] }
+libc = { workspace = true }
 notify = { workspace = true }
 reqwest = { workspace = true }
 reqwest-middleware = { workspace = true }

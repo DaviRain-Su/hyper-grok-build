@@ -1,5 +1,3 @@
-//! Session-lifecycle chunks (`SessionChunk`).
-
 use serde::{Deserialize, Serialize};
 
 use crate::chunks::ChunkKind;
@@ -8,22 +6,19 @@ use crate::types::{AgentSessionInfo, RewindPoint, RewindResult};
 
 /// Streaming chunk for a session-lifecycle call.
 ///
-/// Most variants are unary; `SessionInfo` is streamed by
-/// `SessionLifecycleRequest::List` (one chunk per session).
+/// Most variants are unary; `SessionInfo` is streamed by `SessionLifecycleRequest::List` (one chunk per session).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum SessionChunk {
-    /// Response to `SessionLifecycleRequest::Fork` -- the new session id.
+    /// Response to `SessionLifecycleRequest::Fork`: the new session id.
     SessionId(SessionId),
-    /// One session metadata snapshot, streamed by
-    /// `SessionLifecycleRequest::List`.
+    /// One session metadata snapshot, streamed by `SessionLifecycleRequest::List`.
     SessionInfo(AgentSessionInfo),
     /// Response to `SessionLifecycleRequest::Rewind`.
     RewindResult(RewindResult),
     /// Response to `SessionLifecycleRequest::GetRewindPoints`.
     RewindPoints(Vec<RewindPoint>),
-    /// Acknowledgement for void session ops (`Destroy`,
-    /// `ApplyWorktree`, `BeginPrompt`, `EndPrompt`).
+    /// Acknowledgement for void session ops (`Destroy`, `ApplyWorktree`, `BeginPrompt`, `EndPrompt`).
     Ack,
 }
 
@@ -63,14 +58,5 @@ mod tests {
             samples().len(),
             "duplicate SessionChunk kind()"
         );
-    }
-
-    #[test]
-    fn round_trips_through_json() {
-        for chunk in samples() {
-            let json = serde_json::to_string(&chunk).unwrap();
-            let back: SessionChunk = serde_json::from_str(&json).unwrap();
-            assert_eq!(chunk, back);
-        }
     }
 }

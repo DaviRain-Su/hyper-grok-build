@@ -156,10 +156,9 @@ impl ApprovedRoot {
 
     fn relative_path(&self, path: &Path) -> Option<PathBuf> {
         let relative = if path.is_absolute() {
-            // `self.path` is always canonical. Prefer a pure strip so openat
-            // paths still resolve after the on-disk entry is replaced
-            // (symlink swap); fall back to canonicalize for non-canonical
-            // absolute inputs.
+            // `self.path` is always canonical
+            // Prefer a pure strip so openat paths still resolve after the on-disk entry is replaced (symlink swap)
+            // Fall back to canonicalize for non-canonical absolute inputs
             path.strip_prefix(&self.path)
                 .ok()
                 .map(|r| r.to_path_buf())
@@ -268,11 +267,11 @@ fn open_sqlite_transaction_with_journal_mode(
         JournalMode::Truncate => return None,
     }
     let opened = root.open_regular_file(path)?;
-    // These are same-user application stores. Canonical containment and a
-    // non-symlink final file are validated above; adversarial swap-and-restore
-    // races are outside this scanner's local-user threat model. Only local WAL
-    // reaches this direct read-only/query-only open; its native coordination may
-    // still update SHM read marks despite scanner SQL making no logical writes.
+    // These are same-user application stores
+    // Canonical containment and a non-symlink final file are validated above
+    // Adversarial swap-and-restore races are outside this scanner's local-user threat model
+    // Only local WAL reaches this direct read-only/query-only open
+    // Its native coordination may still update SHM read marks despite scanner SQL making no logical writes
     let connection = Connection::open_with_flags(
         &opened.path,
         OpenFlags::SQLITE_OPEN_READ_ONLY

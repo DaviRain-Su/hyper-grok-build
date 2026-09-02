@@ -7,7 +7,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::line_utils::truncate_str;
 
-/// Read/Edit tool-header path paint surface.
+/// How a Read/Edit tool header displays its path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolPathSurface {
     /// Basename only.
@@ -77,7 +77,7 @@ fn home_dir() -> Option<&'static Path> {
     HOME.get_or_init(xai_dirs::home_dir).as_deref()
 }
 
-/// Resolve the path-native target for OSC8 or background filesystem work.
+/// Resolve the path the OS should receive, for OSC8 links or background filesystem work.
 pub fn resolve_tool_path_target(path: &str, cwd: Option<&Path>) -> Option<PathBuf> {
     resolve_tool_path_target_with_home(Path::new(path), cwd, home_dir())
 }
@@ -120,8 +120,7 @@ fn path_for_expanded_header(path: &str, cwd: Option<&Path>) -> String {
         .unwrap_or_else(|| resolved.display_path.to_string_lossy().into_owned())
 }
 
-/// Shorten a file path to fit within `budget` display columns using fish-style
-/// component shortening.
+/// Shorten a file path to fit within `budget` display columns using fish-style component shortening.
 pub fn shorten_path(path: &str, budget: usize) -> String {
     if budget == 0 {
         return String::new();
@@ -183,7 +182,7 @@ pub fn path_basename(path: &str, budget: usize) -> String {
     truncate_str(name, budget)
 }
 
-/// Compatibility formatter: compact basename with `Some(width)`, else stored path.
+/// Compatibility formatter: `Some(width)` gives the compact basename, `None` gives the stored path.
 pub fn path_for_tool_header(path: &str, width: Option<usize>, reserved: usize) -> String {
     match width {
         Some(width) => path_basename(path, width.saturating_sub(reserved)),
@@ -191,7 +190,6 @@ pub fn path_for_tool_header(path: &str, width: Option<usize>, reserved: usize) -
     }
 }
 
-/// Path text for a Read/Edit tool-header surface.
 pub fn path_for_tool_surface(
     path: &str,
     surface: ToolPathSurface,

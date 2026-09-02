@@ -1,11 +1,9 @@
-//! Resume re-park of the `exit_plan_mode` approval + the mid-turn
-//! disconnect handling.
+//! Resume re-park of the `exit_plan_mode` approval and the mid-turn disconnect handling.
 //!
-//! On resume the shell re-issues the `x.ai/exit_plan_mode` reverse-request when
-//! `awaiting_plan_approval` was persisted, recreating a real live waiter so the
-//! pager's existing approve/revise/abandon path works unchanged. These tests
-//! pin the reverse-request shape, the awaiting-bit lifecycle, and the mid-turn
-//! disconnect path — a graceful client disconnect must NOT auto-approve.
+//! On resume the shell re-issues the `x.ai/exit_plan_mode` reverse-request when `awaiting_plan_approval` was persisted.
+//! That recreates a live waiter, so the pager's existing approve/revise/abandon path works unchanged.
+//! These tests pin the reverse-request shape, when the awaiting bit is set and cleared, and the mid-turn disconnect path.
+//! A graceful client disconnect must NOT auto-approve.
 
 use super::support::*;
 use super::*;
@@ -17,8 +15,7 @@ fn ext_response(outcome: &str) -> Arc<serde_json::value::RawValue> {
         .into()
 }
 
-/// Actor with both gateway and persistence receivers retained (the shared
-/// `build_actor` drops persistence).
+/// Actor with both gateway and persistence receivers retained (the shared `build_actor` drops persistence).
 async fn actor_with_channels() -> (
     std::sync::Arc<SessionActor>,
     tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpClientMessage>,
@@ -30,8 +27,7 @@ async fn actor_with_channels() -> (
     (std::sync::Arc::new(actor), gateway_rx, persistence_rx)
 }
 
-/// Latest persisted `awaiting_plan_approval` value, or `None` if plan-mode state
-/// was never persisted.
+/// Latest persisted `awaiting_plan_approval` value, or `None` if plan-mode state was never persisted.
 fn last_persisted_awaiting(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
 ) -> Option<bool> {
@@ -51,8 +47,7 @@ async fn request_plan_approval_issues_reverse_request_and_clears_flag() {
         .run_until(async {
             let (actor, mut gateway_rx) = build_actor().await;
 
-            // Stand in for the pager: answer the exit_plan_mode reverse-request
-            // with "approved"; ack the fire-and-forget pending broadcasts.
+            // Stand in for the pager: answer the exit_plan_mode reverse-request with "approved"; ack the fire-and-forget pending broadcasts
             let responder = tokio::task::spawn_local(async move {
                 let mut seen_method = None;
                 let mut seen_session = None;
@@ -141,8 +136,7 @@ async fn request_plan_approval_clears_flag_on_request_changes() {
         .await;
 }
 
-/// An unparseable approval response must fail CLOSED to `"cancelled"` (stay in
-/// plan mode), never fall open to `"approved"`.
+/// An unparseable approval response must fail CLOSED to `"cancelled"` (stay in plan mode), never fall open to `"approved"`.
 #[tokio::test(flavor = "current_thread")]
 async fn request_plan_approval_parse_fallback_fails_closed() {
     let local = tokio::task::LocalSet::new();
@@ -183,11 +177,9 @@ async fn request_plan_approval_parse_fallback_fails_closed() {
         .await;
 }
 
-/// REAL park (not seeded): drive a genuine `exit_plan_mode` tool call through
-/// `prepare_tool_call`, simulate the client disconnecting mid-approval, and
-/// assert the tool is NOT auto-executed, plan mode stays Active, and
-/// `awaiting_plan_approval=true` is PERSISTED (what would land in
-/// `plan_mode.json`) so a fresh resume re-parks.
+/// REAL park (not seeded): drive a genuine `exit_plan_mode` call through `prepare_tool_call` and simulate a client disconnect mid-approval.
+/// The tool must NOT auto-execute and plan mode stays Active.
+/// `awaiting_plan_approval=true` is PERSISTED (what would land in `plan_mode.json`) so a fresh resume re-parks.
 #[tokio::test(flavor = "current_thread")]
 async fn real_exit_plan_mode_disconnect_keeps_awaiting_persisted() {
     let local = tokio::task::LocalSet::new();
@@ -211,7 +203,7 @@ async fn real_exit_plan_mode_disconnect_keeps_awaiting_persisted() {
                 while let Some(msg) = gateway_rx.recv().await {
                     match msg {
                         xai_acp_lib::AcpClientMessage::ExtMethod(args) => {
-                            drop(args); // no response -> "unable to receive response"
+                            drop(args); // No response, so the waiter sees "unable to receive response"
                             break;
                         }
                         xai_acp_lib::AcpClientMessage::SessionNotification(args) => {
@@ -256,17 +248,15 @@ async fn real_exit_plan_mode_disconnect_keeps_awaiting_persisted() {
         .await;
 }
 
-/// Headless / no UI client wired: the reverse-request can't be delivered, so
-/// `exit_plan_mode` falls through and executes (original behavior) — verified by
-/// `prepare_tool_call` returning a prepared call rather than Cancelled.
+/// Headless, no UI client wired: the reverse-request can't be delivered, so `exit_plan_mode` falls through and executes (original behavior).
+/// The proof is `prepare_tool_call` returning a prepared call rather than Cancelled.
 #[tokio::test(flavor = "current_thread")]
 async fn real_exit_plan_mode_no_client_executes_tool() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
             let (actor, gateway_rx, _persistence_rx) = actor_with_channels().await;
-            // Drop the gateway receiver: the reverse-request enqueue fails
-            // ("unable to send"), the headless branch.
+            // Drop the gateway receiver: the reverse-request enqueue fails ("unable to send"), the headless branch
             drop(gateway_rx);
             *actor.agent.borrow_mut() = test_agent_with_plan_tools().await;
             let dir = tempfile::tempdir().unwrap();
@@ -297,9 +287,8 @@ async fn real_exit_plan_mode_no_client_executes_tool() {
         .await;
 }
 
-/// A quit-while-parked (disconnect) keeps `awaiting_plan_approval` set so the
-/// next resume re-parks the gate. Not seeded: `request_plan_approval` sets the
-/// bit itself.
+/// Quitting while the approval is parked (a disconnect) keeps `awaiting_plan_approval` set so the next resume re-parks the gate.
+/// Not seeded: `request_plan_approval` sets the bit itself.
 #[tokio::test(flavor = "current_thread")]
 async fn request_plan_approval_keeps_flag_when_client_disconnects() {
     let local = tokio::task::LocalSet::new();
@@ -311,7 +300,7 @@ async fn request_plan_approval_keeps_flag_when_client_disconnects() {
                 while let Some(msg) = gateway_rx.recv().await {
                     match msg {
                         xai_acp_lib::AcpClientMessage::ExtMethod(args) => {
-                            drop(args); // no response -> ext_method sees Err
+                            drop(args); // No response, so ext_method sees Err
                             break;
                         }
                         xai_acp_lib::AcpClientMessage::SessionNotification(args) => {
@@ -342,8 +331,7 @@ async fn request_plan_approval_keeps_flag_when_client_disconnects() {
         .await;
 }
 
-/// Dropping the `request_plan_approval` future mid-await (the turn-cancel path)
-/// must clear the awaiting bit via `AwaitingApprovalGuard`.
+/// Dropping the `request_plan_approval` future mid-await (the turn-cancel path) must clear the awaiting bit via `AwaitingApprovalGuard`.
 #[tokio::test(flavor = "current_thread")]
 async fn request_plan_approval_future_drop_clears_flag() {
     let local = tokio::task::LocalSet::new();
@@ -351,8 +339,7 @@ async fn request_plan_approval_future_drop_clears_flag() {
         .run_until(async {
             let (actor, mut gateway_rx) = build_actor().await;
 
-            // Pager receives the request but never answers (keeps the parked
-            // await pending) so we can drop the future while it is in flight.
+            // Pager receives the request but never answers (keeps the parked await pending) so we can drop the future while it is in flight
             let responder = tokio::task::spawn_local(async move {
                 while let Some(msg) = gateway_rx.recv().await {
                     match msg {
@@ -378,7 +365,7 @@ async fn request_plan_approval_future_drop_clears_flag() {
                 _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
             }
             assert!(actor.plan_mode.lock().is_awaiting_plan_approval());
-            drop(fut); // turn cancelled -> guard runs
+            drop(fut); // Turn cancelled, so the guard runs
 
             assert!(
                 !actor.plan_mode.lock().is_awaiting_plan_approval(),
@@ -389,15 +376,14 @@ async fn request_plan_approval_future_drop_clears_flag() {
         .await;
 }
 
-/// Resume with the flag set but no `plan.md` on disk: clear the bit and issue NO
-/// reverse-request.
+/// Resume with the flag set but no `plan.md` on disk: clear the bit and issue NO reverse-request.
 #[tokio::test(flavor = "current_thread")]
 async fn resume_no_plan_md_clears_flag_without_request() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
             let (actor, mut gateway_rx, _persistence_rx) = actor_with_channels().await;
-            // Point the tracker at an empty dir (no plan.md) and arm the flag.
+            // Point the tracker at an empty dir (no plan.md) and set the flag
             let dir = tempfile::tempdir().unwrap();
             {
                 let mut tracker = actor.plan_mode.lock();

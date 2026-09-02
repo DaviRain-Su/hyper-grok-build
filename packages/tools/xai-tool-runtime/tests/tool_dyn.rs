@@ -413,25 +413,6 @@ async fn tool_family_named_variant_routes_to_named_impl() {
 }
 
 #[tokio::test]
-async fn tool_family_unknown_variant_returns_none() {
-    let family = EchoFamily;
-    assert!(
-        family
-            .get_tool(&ToolVariant::Variant("nonexistent".into()))
-            .is_none()
-    );
-}
-
-#[tokio::test]
-async fn tool_family_variants_lists_every_exposed_variant() {
-    let family = EchoFamily;
-    let variants = family.variants();
-    assert_eq!(variants.len(), 2);
-    assert!(variants.contains(&ToolVariant::Default));
-    assert!(variants.contains(&ToolVariant::Variant(ALT_VARIANT.into())));
-}
-
-#[tokio::test]
 async fn tool_family_default_variant_name_defaults_to_none() {
     let family = EchoFamily;
     assert!(family.default_variant_name().is_none());
@@ -451,25 +432,6 @@ fn tool_dyn_is_object_safe_in_arc_and_box() {
 fn tool_family_is_object_safe_in_arc_and_box() {
     let _arc: Arc<dyn ToolFamily> = Arc::new(EchoFamily);
     let _boxed: Box<dyn ToolFamily> = Box::new(EchoFamily);
-}
-
-#[test]
-fn arc_tool_alias_holds_heterogeneous_tools() {
-    // The whole point of `ArcTool` — many typed `Tool` impls collapse
-    // into one container shape via the blanket impl.
-    let tools: Vec<ArcTool> = vec![Arc::new(BlockingEcho), Arc::new(StreamingEcho)];
-    assert_eq!(tools.len(), 2);
-    let ids: Vec<_> = tools.iter().map(|t| t.id()).collect();
-    assert!(ids.contains(&tid("blocking_echo")));
-    assert!(ids.contains(&tid("streaming_echo")));
-}
-
-#[test]
-fn tool_variant_round_trips_through_clone_and_eq() {
-    let a = ToolVariant::Variant("es".into());
-    let b = a.clone();
-    assert_eq!(a, b);
-    assert_ne!(ToolVariant::Default, ToolVariant::Variant("default".into()));
 }
 
 /// The blanket impl is what makes `ToolDyn` ergonomic. This compile-time

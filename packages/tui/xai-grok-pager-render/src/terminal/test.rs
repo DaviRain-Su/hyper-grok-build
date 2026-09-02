@@ -118,8 +118,7 @@ fn brand_iterm2_from_lc_terminal_over_ssh() {
 
 #[test]
 fn brand_not_iterm2_for_foreign_lc_terminal() {
-    // Value-exact gate: a non-iTerm2 LC_TERMINAL value must NOT match
-    // (matches on value, not bare presence).
+    // The LC_TERMINAL check matches on value, not bare presence
     let env = env_from(&[("LC_TERMINAL", "not-iterm2")]);
     assert_eq!(detect_terminal_brand_from_env(&env), TerminalName::Unknown);
 }
@@ -165,15 +164,13 @@ fn brand_foot_direct_from_term() {
 
 #[test]
 fn brand_not_foot_for_unrelated_term() {
-    // Over-match guard: a TERM merely containing "foot" is not foot.
     let env = env_from(&[("TERM", "xterm-footbar")]);
     assert_eq!(detect_terminal_brand_from_env(&env), TerminalName::Unknown);
 }
 
 #[test]
 fn brand_not_foot_for_foot_prefixed_out_of_set_term() {
-    // Inverse boundary: a `foot`-prefixed value outside the exact set
-    // stays Unknown (pins the exact-set decision over `starts_with`).
+    // Detection uses an exact set of foot TERM values, not `starts_with`
     let env = env_from(&[("TERM", "foot-extra-256color")]);
     assert_eq!(detect_terminal_brand_from_env(&env), TerminalName::Unknown);
 }
@@ -190,7 +187,7 @@ fn brand_terminator_from_term_program() {
     assert_eq!(
         detect_terminal_brand_from_env(&env),
         TerminalName::Terminator
-    ); // WHY: canonical per detect-terminal
+    );
 }
 
 #[test]
@@ -198,7 +195,7 @@ fn terminator_vte_version_interaction() {
     let env = env_from(&[("TERM_PROGRAM", "terminator"), ("VTE_VERSION", "8200")]);
     let ctx = build_terminal_context_from_env(&env);
     assert_eq!(ctx.brand, TerminalName::Terminator);
-    assert!(ctx.is_vte_based()); // WHY: helper covers version + brand
+    assert!(ctx.is_vte_based()); // WHY: the helper covers both version and brand
 }
 
 #[test]
@@ -224,7 +221,7 @@ fn terminator_focus_tracking() {
     assert!(!matches!(
         ctx.brand,
         TerminalName::AppleTerminal | TerminalName::Unknown
-    )); // supports focus like VTE
+    )); // Terminator supports focus tracking like VTE
     assert!(ctx.is_vte_based());
 }
 
@@ -267,9 +264,8 @@ fn env_brand_holds_raw_detection_independent_of_refinement() {
     assert_eq!(ctx.brand, TerminalName::Unknown);
     assert_eq!(ctx.env_brand, TerminalName::Unknown);
 
-    // The fallback refines only `brand`; `env_brand` stays raw so the glyphs
-    // legacy-console check and shift_enter_unavailable still treat a bare
-    // ConHost conservatively.
+    // The fallback refines only `brand`
+    // `env_brand` stays raw so the glyphs legacy-console check and shift_enter_unavailable still treat a bare ConHost conservatively
     let effective = refine_unknown_brand_for_host(ctx.brand, crate::host::HostOs::Windows);
     assert_eq!(effective, TerminalName::WindowsTerminal);
     assert_eq!(ctx.env_brand, TerminalName::Unknown);
@@ -283,8 +279,7 @@ fn mouse_reporting_leaks_only_for_jetbrains_on_windows() {
         TerminalName::JetBrains,
         HostOs::Windows
     ));
-    // JetBrains on macOS/Linux is fine — crossterm's unix parser decodes the
-    // reports, so we must NOT downgrade those to minimal.
+    // JetBrains on macOS/Linux is fine: crossterm's unix parser decodes the reports, so we must NOT downgrade those to minimal
     assert!(!mouse_reporting_leaks(
         TerminalName::JetBrains,
         HostOs::Macos
@@ -293,7 +288,7 @@ fn mouse_reporting_leaks_only_for_jetbrains_on_windows() {
         TerminalName::JetBrains,
         HostOs::Linux
     ));
-    // Other Windows terminals deliver native console mouse records — no leak.
+    // Other Windows terminals deliver native console mouse records, so nothing leaks
     assert!(!mouse_reporting_leaks(
         TerminalName::WindowsTerminal,
         HostOs::Windows
@@ -424,8 +419,8 @@ fn mux_herdr_from_herdr_env() {
 
 #[test]
 fn mux_tmux_nested_inside_herdr_wins() {
-    // tmux started inside a herdr pane, or a stale TMUX frozen into the pane by
-    // herdr's daemon — indistinguishable from the env, and tmux wins either way.
+    // tmux started inside a herdr pane and a stale TMUX frozen into the pane by herdr's daemon look the same from the env
+    // tmux wins either way
     let env = env_from(&[
         ("TMUX", "/tmp/tmux-501/default,12345,0"),
         ("HERDR_ENV", "1"),
@@ -448,14 +443,14 @@ fn mux_herdr_nested_inside_cmux_wins() {
 
 #[test]
 fn tmux_beats_zellij_when_both_set() {
-    // tmux pane launched from inside Zellij leaves inherited ZELLIJ var.
+    // A tmux pane launched from inside Zellij keeps the inherited ZELLIJ var
     let env = env_from(&[("TMUX", "/tmp/tmux-501/default,12345,0"), ("ZELLIJ", "0")]);
     assert_eq!(detect_multiplexer_from_env(&env), MultiplexerKind::Tmux);
 }
 
 #[test]
 fn byobu_screen_beats_tmux_marker() {
-    // BYOBU_BACKEND=screen with a stale TMUX var — Byobu backend wins.
+    // With BYOBU_BACKEND=screen and a stale TMUX var, the Byobu backend wins
     let env = env_from(&[
         ("BYOBU_BACKEND", "screen"),
         ("TMUX", "/tmp/tmux-old"),
@@ -466,7 +461,7 @@ fn byobu_screen_beats_tmux_marker() {
 
 #[test]
 fn byobu_tmux_explicit_with_sty_stays_tmux() {
-    // BYOBU_BACKEND=tmux + stale STY — Byobu backend wins.
+    // With BYOBU_BACKEND=tmux and a stale STY, the Byobu backend wins
     let env = env_from(&[
         ("BYOBU_BACKEND", "tmux"),
         ("STY", "old-screen"),
@@ -522,8 +517,7 @@ fn context_plain_terminal() {
 
 #[test]
 fn context_iterm2_lc_terminal_version_fallback_over_ssh() {
-    // Over SSH, TERM_PROGRAM_VERSION is stripped; version gating falls back to
-    // iTerm2's SSH-surviving LC_TERMINAL_VERSION.
+    // Over SSH, TERM_PROGRAM_VERSION is stripped; version gating falls back to iTerm2's SSH-surviving LC_TERMINAL_VERSION
     let env = env_from(&[("LC_TERMINAL", "iTerm2"), ("LC_TERMINAL_VERSION", "3.5.6")]);
     let ctx = build_terminal_context_from_env(&env);
     assert_eq!(ctx.brand, TerminalName::Iterm2);
@@ -600,7 +594,7 @@ fn context_zellij() {
 
 #[test]
 fn context_tmux_inside_zellij() {
-    // tmux launched from Zellij: TMUX is set, inherited ZELLIJ var remains.
+    // tmux launched from Zellij: TMUX is set and the inherited ZELLIJ var remains
     let env = env_from(&[("TMUX", "/tmp/tmux-501/default,12345,0"), ("ZELLIJ", "0")]);
     let ctx = build_terminal_context_from_env(&env);
     assert_eq!(ctx.multiplexer, MultiplexerKind::Tmux);
@@ -616,7 +610,7 @@ fn context_tmux_meta_not_populated_for_non_tmux() {
 
 #[test]
 fn context_ambiguous_byobu_screen_with_tmux() {
-    // BYOBU_BACKEND=screen + stale TMUX → screen wins via Byobu backend.
+    // With BYOBU_BACKEND=screen and a stale TMUX, screen wins via the Byobu backend
     let env = env_from(&[
         ("BYOBU_BACKEND", "screen"),
         ("TMUX", "/tmp/tmux-old"),
@@ -629,7 +623,6 @@ fn context_ambiguous_byobu_screen_with_tmux() {
 
 #[test]
 fn context_empty_env_values_ignored() {
-    // Empty string values should not trigger detection.
     let env = env_from(&[("TMUX", ""), ("ZELLIJ", ""), ("STY", "")]);
     let ctx = build_terminal_context_from_env(&env);
     assert_eq!(ctx.multiplexer, MultiplexerKind::Undetected);
@@ -1006,7 +999,6 @@ fn brand_apple_terminal_from_session_id() {
 
 #[test]
 fn brand_term_program_takes_precedence_over_other_vars() {
-    // TERM_PROGRAM should win even when other brand-specific vars are set.
     let env = env_from(&[
         ("TERM_PROGRAM", "Ghostty"),
         ("WEZTERM_VERSION", "20240203"),
@@ -1019,9 +1011,8 @@ fn brand_term_program_takes_precedence_over_other_vars() {
 
 #[test]
 fn brand_cursor_from_cursor_trace_id() {
-    // Cursor sets a unique CURSOR_TRACE_ID; it also sets TERM_PROGRAM=vscode
-    // (since it's a VS Code fork), so we must detect it before the
-    // TERM_PROGRAM lookup.
+    // Cursor sets a unique CURSOR_TRACE_ID
+    // It also sets TERM_PROGRAM=vscode (since it's a VS Code fork), so we must detect it before the TERM_PROGRAM lookup
     let env = env_from(&[
         ("CURSOR_TRACE_ID", "abcdef0123456789"),
         ("TERM_PROGRAM", "vscode"),
@@ -1044,7 +1035,7 @@ fn brand_cursor_from_askpass_main() {
 
 #[test]
 fn brand_windsurf_from_askpass_main() {
-    // Another VS Code fork; same askpass path substring pattern.
+    // Windsurf is another VS Code fork; the same askpass path substring detects it
     let env = env_from(&[
         (
             "VSCODE_GIT_ASKPASS_MAIN",
@@ -1063,16 +1054,14 @@ fn brand_zed_from_term_program() {
 
 #[test]
 fn brand_vscode_when_no_ide_markers() {
-    // Pure VS Code: TERM_PROGRAM=vscode and no CURSOR_TRACE_ID / matching
-    // askpass marker. Should remain VsCode, not collapse to anything else.
+    // Pure VS Code: TERM_PROGRAM=vscode with no CURSOR_TRACE_ID and no matching askpass marker
     let env = env_from(&[("TERM_PROGRAM", "vscode")]);
     assert_eq!(detect_terminal_brand_from_env(&env), TerminalName::VsCode);
 }
 
 #[test]
 fn brand_vscode_when_askpass_does_not_match_ide() {
-    // Pure VS Code askpass path (no "cursor"/"windsurf") — brand is VsCode
-    // even when TERM_PROGRAM is also set.
+    // Pure VS Code askpass path (no "cursor"/"windsurf"): brand is VsCode even when TERM_PROGRAM is also set
     let env = env_from(&[
         ("VSCODE_GIT_ASKPASS_MAIN", "/usr/local/bin/askpass-main.js"),
         ("TERM_PROGRAM", "vscode"),
@@ -1082,8 +1071,7 @@ fn brand_vscode_when_askpass_does_not_match_ide() {
 
 #[test]
 fn brand_vscode_from_askpass_without_term_program() {
-    // Remote SSH / tmux: TERM_PROGRAM missing or overwritten, but the VS Code
-    // remote agent still injects VSCODE_GIT_ASKPASS_MAIN into the pane env.
+    // Remote SSH / tmux: TERM_PROGRAM missing or overwritten, but the VS Code remote agent still injects VSCODE_GIT_ASKPASS_MAIN into the pane env
     let env = env_from(&[(
         "VSCODE_GIT_ASKPASS_MAIN",
         "/home/user/.vscode-server/bin/abc/askpass",
@@ -1141,8 +1129,7 @@ fn official_vscode_server_marker_without_ssh_is_not_remote() {
 
 #[test]
 fn mux_zellij_not_from_version_only() {
-    // ZELLIJ_VERSION alone does not trigger Zellij detection — it must be
-    // ZELLIJ or ZELLIJ_SESSION_NAME.
+    // ZELLIJ_VERSION alone does not trigger Zellij detection; it must be ZELLIJ or ZELLIJ_SESSION_NAME
     let env = env_from(&[("ZELLIJ_VERSION", "0.43.1")]);
     assert_eq!(
         detect_multiplexer_from_env(&env),
@@ -1169,7 +1156,7 @@ fn zellij_version_is_never_the_terminal_version() {
 
 #[test]
 fn byobu_unknown_backend_string_with_tmux() {
-    // Unknown BYOBU_BACKEND value falls through to mux-marker inference.
+    // An unknown BYOBU_BACKEND value falls through to mux-marker inference
     let env = env_from(&[("BYOBU_BACKEND", "unknown"), ("TMUX", "/tmp/tmux")]);
     assert_eq!(detect_byobu_from_env(&env), Some(ByobuBackend::Tmux));
 }
@@ -1202,7 +1189,6 @@ fn context_screen_does_not_populate_tmux_meta() {
     let env = env_from(&[("STY", "12345.pts-0.host"), ("TMUX_PANE", "%stale")]);
     let ctx = build_terminal_context_from_env(&env);
     assert_eq!(ctx.multiplexer, MultiplexerKind::Screen);
-    // tmux_meta should be default since multiplexer is not Tmux.
     assert_eq!(ctx.tmux_meta, TmuxClientMeta::default());
 }
 
@@ -1449,8 +1435,8 @@ fn kitty_allowed_tmux_4() {
 
 #[test]
 fn kitty_skip_unknown_terminal_no_multiplexer() {
-    // Unknown brand with no multiplexer = no positive evidence of KKP
-    // support. Catches VSCode-over-SSH, bare Docker containers, etc.
+    // An unknown brand with no multiplexer means no positive evidence of KKP support
+    // This catches VS Code over SSH, bare Docker containers, etc
     let ctx = TerminalContext::default();
     assert_eq!(ctx.kitty_skip_reason(), Some("unknown_no_multiplexer"));
 }
@@ -1466,7 +1452,7 @@ fn kitty_allowed_known_good_terminal() {
 
 #[test]
 fn kitty_allowed_foot_no_multiplexer() {
-    // Core fix: a bare foot window negotiates KKP (no skip reason).
+    // A bare foot window negotiates KKP
     let ctx = TerminalContext {
         brand: TerminalName::Foot,
         ..Default::default()
@@ -1546,8 +1532,8 @@ fn kitty_skip_vscode_over_tmux() {
 
 #[test]
 fn kitty_skip_vte_version() {
-    // VTE does not support Kitty keyboard protocol and crossterm's probe
-    // can false-positive on it. https://gitlab.gnome.org/GNOME/vte/-/issues/2601
+    // VTE does not support Kitty keyboard protocol and crossterm's probe can false-positive on it
+    // https://gitlab.gnome.org/GNOME/vte/-/issues/2601
     let ctx = TerminalContext {
         vte_version: Some("7402".to_owned()),
         ..Default::default()
@@ -1568,14 +1554,12 @@ fn kitty_skip_vte_brand() {
 // shift_enter_unavailable: VTE version gating for Shift+Enter
 // =====================================================================
 //
-// VTE 0.82.0 (= VTE_VERSION 8200) is the first release containing the
-// Kitty keyboard protocol; earlier versions cannot distinguish
-// Shift+Enter from bare Enter, so the UI should advertise Alt+Enter
-// for newline insertion instead.
+// VTE 0.82.0 (VTE_VERSION 8200) is the first release containing the Kitty keyboard protocol
+// Earlier versions cannot distinguish Shift+Enter from bare Enter, so the UI should advertise Alt+Enter for newline insertion instead
 
 #[test]
 fn shift_enter_unavailable_legacy_vte_version() {
-    // VTE 0.64.2 (real user report) — well below the KKP cutoff.
+    // VTE 0.64.2 (a real user report) is well below the KKP cutoff
     let ctx = TerminalContext {
         vte_version: Some("6402".to_owned()),
         ..Default::default()
@@ -1585,7 +1569,7 @@ fn shift_enter_unavailable_legacy_vte_version() {
 
 #[test]
 fn shift_enter_unavailable_just_below_cutoff() {
-    // VTE 0.81.99 — anything below 8200 must return true.
+    // VTE 0.81.99 is just below the 8200 cutoff
     let ctx = TerminalContext {
         vte_version: Some("8199".to_owned()),
         ..Default::default()
@@ -1595,7 +1579,7 @@ fn shift_enter_unavailable_just_below_cutoff() {
 
 #[test]
 fn shift_enter_available_modern_vte() {
-    // VTE 0.82.0 — first release with KKP.
+    // VTE 0.82.0 is the first release with KKP
     let ctx = TerminalContext {
         vte_version: Some("8200".to_owned()),
         ..Default::default()
@@ -1605,7 +1589,7 @@ fn shift_enter_available_modern_vte() {
 
 #[test]
 fn shift_enter_available_future_vte() {
-    // VTE 0.84.1 — well above the cutoff.
+    // VTE 0.84.1 is well above the cutoff
     let ctx = TerminalContext {
         vte_version: Some("8401".to_owned()),
         ..Default::default()
@@ -1615,7 +1599,7 @@ fn shift_enter_available_future_vte() {
 
 #[test]
 fn shift_enter_unavailable_vte_brand_no_version() {
-    // Brand detected as VTE but VTE_VERSION missing — conservative: old.
+    // The brand is VTE but VTE_VERSION is missing, so it is conservatively treated as old
     let ctx = TerminalContext {
         brand: TerminalName::Vte,
         vte_version: None,
@@ -1626,7 +1610,7 @@ fn shift_enter_unavailable_vte_brand_no_version() {
 
 #[test]
 fn shift_enter_unavailable_unparseable_version() {
-    // Garbage in VTE_VERSION — conservative: old.
+    // Garbage in VTE_VERSION is conservatively treated as old
     let ctx = TerminalContext {
         brand: TerminalName::Vte,
         vte_version: Some("not-a-number".to_owned()),
@@ -1637,9 +1621,8 @@ fn shift_enter_unavailable_unparseable_version() {
 
 #[test]
 fn shift_enter_available_kkp_terminals() {
-    // Terminals that negotiate the Kitty keyboard protocol (or, for Apple
-    // Terminal, recover the modifier via CoreGraphics) deliver a usable
-    // Shift+Enter and must never report it as unavailable.
+    // These terminals negotiate the Kitty keyboard protocol, or in Apple Terminal's case recover the modifier via CoreGraphics
+    // All deliver a usable Shift+Enter
     for brand in [
         TerminalName::Ghostty,
         TerminalName::Kitty,
@@ -1660,9 +1643,8 @@ fn shift_enter_available_kkp_terminals() {
 
 #[test]
 fn shift_enter_unavailable_vscode_family() {
-    // VS Code's xterm.js (and VS Code-family / xterm.js IDE forks) never
-    // negotiate KKP, so Shift+Enter arrives as a bare CR identical to
-    // Enter. The UI must advertise Alt+Enter instead.
+    // VS Code's xterm.js (and VS Code-family / xterm.js IDE forks) never negotiate KKP, so Shift+Enter arrives as a bare CR identical to Enter
+    // The UI must advertise Alt+Enter instead
     for brand in [
         TerminalName::VsCode,
         TerminalName::Cursor,
@@ -1682,9 +1664,8 @@ fn shift_enter_unavailable_vscode_family() {
 
 #[test]
 fn shift_enter_unavailable_unknown_no_multiplexer() {
-    // The common VS Code-over-SSH shape: TERM_PROGRAM isn't forwarded so
-    // the brand falls back to Unknown, and the pager skips KKP. Shift+Enter
-    // is indistinguishable from Enter — advertise Alt+Enter.
+    // The common VS Code over SSH case: TERM_PROGRAM isn't forwarded so the brand falls back to Unknown, and the pager skips KKP
+    // Shift+Enter is indistinguishable from Enter, so advertise Alt+Enter
     let ctx = TerminalContext::default();
     assert_eq!(ctx.brand, TerminalName::Unknown);
     assert_eq!(ctx.env_brand, TerminalName::Unknown);
@@ -1694,10 +1675,9 @@ fn shift_enter_unavailable_unknown_no_multiplexer() {
 
 #[test]
 fn shift_enter_unavailable_windows_refined_brand_stays_env_unknown() {
-    // Native Windows DefTerm / bare ConHost: `brand` is refined to WT for
-    // capabilities/label, but `env_brand` stays Unknown. KKP is skipped
-    // (WT is in the skip list; ConHost has no KKP either), so Shift+Enter
-    // is unreliable — advertise Alt+Enter, same as an unrefined Unknown.
+    // Native Windows DefTerm / bare ConHost: `brand` is refined to WT for capabilities/label, but `env_brand` stays Unknown
+    // KKP is skipped (WT is in the skip list; ConHost has no KKP either), so Shift+Enter is unreliable
+    // Advertise Alt+Enter, same as an unrefined Unknown
     let ctx = TerminalContext {
         brand: TerminalName::WindowsTerminal,
         env_brand: TerminalName::Unknown,
@@ -1710,8 +1690,7 @@ fn shift_enter_unavailable_windows_refined_brand_stays_env_unknown() {
 #[test]
 fn shift_enter_available_positively_detected_windows_terminal() {
     // WT detected via WT_SESSION/TERM_PROGRAM: both brand fields are WT.
-    // The Unknown gate must not fire; Shift+Enter follows the WT path
-    // (KKP is skipped for WT, but that is a separate, pre-existing choice).
+    // The Unknown gate must not fire; Shift+Enter follows the WT path (KKP is skipped for WT regardless)
     let ctx = TerminalContext {
         brand: TerminalName::WindowsTerminal,
         env_brand: TerminalName::WindowsTerminal,
@@ -1723,8 +1702,7 @@ fn shift_enter_available_positively_detected_windows_terminal() {
 
 #[test]
 fn shift_enter_available_unknown_with_multiplexer() {
-    // Unknown brand but inside modern tmux: KKP is negotiated through the
-    // multiplexer, so Shift+Enter works and must not be flagged.
+    // Unknown brand but inside modern tmux: KKP is negotiated through the multiplexer, so Shift+Enter works
     let ctx = TerminalContext {
         brand: TerminalName::Unknown,
         env_brand: TerminalName::Unknown,
@@ -1737,9 +1715,8 @@ fn shift_enter_available_unknown_with_multiplexer() {
 
 #[test]
 fn herdr_over_ssh_pane_does_not_skip_kitty_keyboard() {
-    // A real herdr pane reached over SSH: no TERM_PROGRAM, so the brand stays
-    // Unknown. HERDR_ENV is what keeps this out of the unknown-no-multiplexer
-    // skip, which would otherwise drop Shift+Enter (herdr speaks KKP).
+    // A real herdr pane reached over SSH: no TERM_PROGRAM, so the brand stays Unknown
+    // HERDR_ENV is what keeps this out of the unknown-no-multiplexer skip, which would otherwise drop Shift+Enter (herdr speaks KKP)
     let env = env_from(&[
         ("HERDR_ENV", "1"),
         ("HERDR_PANE_ID", "3"),
@@ -1786,10 +1763,8 @@ fn ctrl_dot_reliable_on_kitty() {
 
 #[test]
 fn ctrl_dot_unreliable_on_windows_terminal() {
-    // WT propagates WT_SESSION into WSL via WSLENV, so this also covers
-    // WSL-inside-WT — `Ctrl+.` can't survive WT's ConPTY pipeline either
-    // way. (Pure WSL with no WT_SESSION is caught by `is_wsl()` in the
-    // consumer, not here.)
+    // WT propagates WT_SESSION into WSL via WSLENV, so this also covers WSL inside WT; `Ctrl+.` can't survive WT's ConPTY pipeline either way
+    // (Pure WSL with no WT_SESSION is caught by `is_wsl()` in the consumer, not here.)
     let ctx = TerminalContext {
         brand: TerminalName::WindowsTerminal,
         ..Default::default()
@@ -1799,9 +1774,8 @@ fn ctrl_dot_unreliable_on_windows_terminal() {
 
 #[test]
 fn ctrl_dot_unreliable_on_vscode_forks() {
-    // VS Code's integrated terminal swallows `Ctrl+.` for its own command
-    // palette. VS Code-family forks and other xterm.js IDE embeds inherit
-    // the same behavior (forks share the keymap; others mirror it).
+    // VS Code's integrated terminal swallows `Ctrl+.` for its own command palette
+    // VS Code-family forks and other xterm.js IDE embeds inherit the same behavior (forks share the keymap; others mirror it)
     // Preference is keyed off `kitty_skip_reason` ("vscode").
     for brand in [
         TerminalName::VsCode,
@@ -1822,8 +1796,8 @@ fn ctrl_dot_unreliable_on_vscode_forks() {
 
 #[test]
 fn ctrl_dot_unreliable_when_tmux_extended_keys_off() {
-    // iTerm2+tmux still used to advertise Ctrl+. while KKP was
-    // skipped for `extended-keys off`. Preference must follow the skip.
+    // iTerm2 over tmux used to keep advertising Ctrl+. while KKP was skipped for `extended-keys off`.
+    // Preference must follow the skip
     let ctx = TerminalContext {
         brand: TerminalName::Iterm2,
         tmux_version: Some("tmux 3.6a".to_owned()),
@@ -1848,7 +1822,7 @@ fn ctrl_dot_reliable_on_iterm2_tmux_extended_keys_on() {
 
 #[test]
 fn ctrl_dot_unreliable_on_unknown_no_multiplexer() {
-    // Same KKP-skip path as VS Code SSH / unbranded hosts.
+    // This takes the same KKP-skip path as VS Code over SSH and unbranded hosts
     let ctx = TerminalContext {
         brand: TerminalName::Unknown,
         multiplexer: MultiplexerKind::Undetected,
@@ -1878,8 +1852,7 @@ fn kitty_skip_modern_tmux_extended_keys_off() {
 
 #[test]
 fn kitty_allowed_modern_tmux_extended_keys_non_off_values() {
-    // `on`/`always`/empty/uppercase/None must all NOT trigger the skip:
-    // the comparison against `"off"` is exact and case-sensitive.
+    // The comparison against `"off"` is exact and case-sensitive
     for val in [Some("on"), Some("always"), Some(""), Some("OFF"), None] {
         assert_eq!(
             extended_keys_ctx("tmux 3.4", val).kitty_skip_reason(),
@@ -1899,8 +1872,7 @@ fn kitty_skip_old_tmux_takes_precedence_over_extended_keys() {
 
 #[test]
 fn kitty_skip_vte_takes_precedence_over_tmux_extended_keys_off() {
-    // VTE strips kitty CSI-u so `/terminal-setup` should recommend
-    // switching terminal emulators rather than editing tmux.conf.
+    // VTE strips kitty CSI-u so `/terminal-setup` should recommend switching terminal emulators rather than editing tmux.conf
     let mut ctx = extended_keys_ctx("tmux 3.4", Some("off"));
     ctx.vte_version = Some("7402".to_owned());
     assert_eq!(ctx.kitty_skip_reason(), Some("vte"));
@@ -1947,8 +1919,7 @@ fn brand_jetbrains_case_insensitive() {
 
 #[test]
 fn brand_jetbrains_beats_term_session_id() {
-    // JediTerm on some platforms may set TERM_SESSION_ID, which would
-    // otherwise be detected as Apple Terminal. JetBrains must win.
+    // JediTerm on some platforms may set TERM_SESSION_ID, which would otherwise be detected as Apple Terminal
     let env = env_from(&[
         ("TERMINAL_EMULATOR", "JetBrains-JediTerm"),
         ("TERM_SESSION_ID", "w0t0p0:ABC123"),
@@ -2012,7 +1983,7 @@ fn repaints_pane_out_of_band_per_arm() {
         );
     }
 
-    // Plain terminal: no editor, no multiplexer -> no heal (no flicker regression).
+    // A plain terminal (no editor, no multiplexer) gets no heal, which avoids needless flicker
     let plain = TerminalContext {
         embedded_editor: None,
         multiplexer: MultiplexerKind::Undetected,

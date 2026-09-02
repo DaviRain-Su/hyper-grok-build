@@ -17,15 +17,13 @@ impl SessionActor {
         )))
     }
 
-    /// Model-facing catalog of launchable workflows, or `None` when
-    /// background workflows are disabled, this session is a subagent
-    /// (launches are top-level only), or none are registered.
+    /// Model-facing catalog of launchable workflows.
+    /// Returns `None` when background workflows are disabled, this session is a subagent (launches are top-level only), or none are registered.
     pub(crate) fn workflow_listing_for_prompt(&self) -> Option<String> {
         self.workflow_listing_snapshot().map(|(text, _)| text)
     }
 
-    /// Same catalog as [`Self::workflow_listing_for_prompt`], plus the
-    /// entry count used by `/context`.
+    /// Same catalog as [`Self::workflow_listing_for_prompt`], plus the entry count used by `/context`.
     pub(crate) fn workflow_listing_snapshot(&self) -> Option<(String, usize)> {
         if !self.background_workflows_enabled || self.startup_hints.is_subagent {
             return None;
@@ -314,8 +312,8 @@ impl SessionActor {
     }
 }
 
-/// User-facing `/workflow` (and `/workflow runs`) overview. Runs are keyed by
-/// display name only — run ids stay internal.
+/// User-facing `/workflow` (and `/workflow runs`) overview.
+/// Runs are keyed by display name only; run ids stay internal.
 fn format_workflow_runs_overview(
     mut runs: Vec<crate::session::workflow::tracker::WorkflowRunState>,
 ) -> String {
@@ -327,8 +325,7 @@ fn format_workflow_runs_overview(
                 browse with /workflows."
             .to_string();
     }
-    // Tracker order is start order; newest first within each group, live
-    // runs before terminal ones, and truly-active runs before paused ones.
+    // Tracker order is start order; newest first within each group, live runs before terminal ones, and truly-active runs before paused ones
     runs.reverse();
     runs.sort_by_key(|run| {
         (
@@ -408,9 +405,8 @@ impl ManageOp {
 }
 
 /// Bare `/workflow stop` (and pause/resume/save) must not pick a run.
-/// An empty selector used to match every name via `starts_with("")` and
-/// then auto-pick the only applicable one — that feels like stopping
-/// "the first" run.
+/// An empty selector used to match every name via `starts_with("")` and then auto-pick the only applicable one.
+/// That feels like stopping "the first" run.
 fn savable_definition_names(session_cwd: &std::path::Path) -> std::collections::HashSet<String> {
     crate::session::workflow::registry::list_workflows(Some(session_cwd))
         .into_iter()
@@ -460,8 +456,7 @@ type RunMatch = (
 
 fn narrow_run_matches(mut all: Vec<RunMatch>, selector: &str, op: ManageOp) -> Vec<RunMatch> {
     use crate::session::workflow::tracker::WorkflowRunStatus;
-    // Empty selector is handled by the caller so we never auto-pick "the
-    // only applicable run" for a bare `/workflow stop`.
+    // Empty selector is handled by the caller so we never auto-pick "the only applicable run" for a bare `/workflow stop`
     if selector.is_empty() {
         return all;
     }

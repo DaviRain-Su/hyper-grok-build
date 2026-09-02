@@ -1,8 +1,5 @@
-//! Marketplace plugin discovery.
-//!
-//! Supports two modes:
-//! 1. **Indexed:** if a catalog index file exists (see `index::load_index` for
-//!    the lookup order — `.grok-plugin/marketplace.json` is preferred), use it.
+//! Marketplace plugin discovery runs in one of two modes:
+//! 1. **Indexed:** if an index file exists, use it (see `index::load_index` for lookup order; `.grok-plugin/marketplace.json` is preferred).
 //! 2. **Filesystem fallback:** walk `plugins/*/` and resolve manifests directly.
 
 use std::path::Path;
@@ -11,12 +8,10 @@ use crate::catalog;
 use crate::index;
 use crate::types::{MarketplaceEntry, MarketplaceScan};
 
-/// Scan a marketplace directory for plugins, reporting whether a
-/// `plugin-index.json` component catalog was loaded.
+/// Scan a marketplace directory for plugins, reporting whether a `plugin-index.json` component catalog was loaded.
 ///
-/// Tries indexed mode first, falls back to filesystem scanning. The component
-/// catalog is only consulted in indexed mode: its keys are defined as index
-/// names, so the filesystem fallback ignores it.
+/// Tries indexed mode first, falls back to filesystem scanning.
+/// The component catalog is only consulted in indexed mode: its keys are defined as index names, so the filesystem fallback ignores it.
 pub fn scan_marketplace(root: &Path) -> MarketplaceScan {
     match index::load_index(root) {
         Ok(Some(idx)) => {
@@ -28,8 +23,7 @@ pub fn scan_marketplace(root: &Path) -> MarketplaceScan {
             let plugin_catalog = catalog::load_catalog(root);
             let mut plugins = Vec::new();
             for entry in &idx.plugins {
-                // URL-sourced entries: build entry from index metadata only
-                // (the actual repo is cloned at install time, not scan time).
+                // URL-sourced entries: build the entry from index metadata only (the actual repo is cloned at install time, not scan time)
                 if let Some((url, git_ref)) = entry.remote_url() {
                     let discovered = MarketplaceEntry {
                         name: entry.name.clone(),
@@ -113,15 +107,11 @@ pub fn scan_marketplace(root: &Path) -> MarketplaceScan {
                 catalog_loaded: plugin_catalog.is_some(),
             }
         }
-        Ok(None) => {
-            // No index — filesystem fallback.
-            MarketplaceScan {
-                entries: scan_filesystem(root),
-                catalog_loaded: false,
-            }
-        }
+        Ok(None) => MarketplaceScan {
+            entries: scan_filesystem(root),
+            catalog_loaded: false,
+        },
         Err(e) => {
-            // Invalid index — warn and fall back.
             tracing::warn!("marketplace index invalid, falling back to scan: {e}");
             MarketplaceScan {
                 entries: scan_filesystem(root),
@@ -163,7 +153,6 @@ fn scan_filesystem(root: &Path) -> Vec<MarketplaceEntry> {
     plugins
 }
 
-/// Scan a single plugin directory for metadata and components.
 fn scan_single_plugin(plugin_dir: &Path, relative_path: &str) -> MarketplaceEntry {
     // Load manifest using runtime conventions.
     let manifest_result = xai_grok_agent::plugins::manifest::load_manifest(plugin_dir);
@@ -204,7 +193,7 @@ fn scan_single_plugin(plugin_dir: &Path, relative_path: &str) -> MarketplaceEntr
         let mc = m.mcp_config_path(plugin_dir).is_some_and(|p| p.exists());
         (sc, hk, ag, mc)
     } else {
-        // No manifest — check defaults.
+        // No manifest; check the default locations
         let skills_dir = plugin_dir.join("skills");
         let sc = if skills_dir.is_dir() {
             std::fs::read_dir(&skills_dir)
@@ -558,7 +547,7 @@ mod tests {
             Some("Does things")
         );
         assert_eq!(components.commands[0].name, "/go");
-        // Legacy scan fields still populated alongside catalog data.
+        // Legacy scan fields are still populated alongside catalog data
         assert_eq!(scan.entries[0].skill_count, 1);
     }
 

@@ -1,9 +1,5 @@
-//! Sampler actor: owns global state, spawns per-request tasks.
-//!
-//! The actor task itself is single-threaded -- it processes one
-//! command at a time -- but it spawns `tokio::spawn` per-request
-//! tasks for the actual streaming work, so multiple requests can be
-//! in flight concurrently.
+//! The actor task itself is single-threaded: it processes one command at a time.
+//! The actual streaming work happens in `tokio::spawn` per-request tasks, so multiple requests can be in flight concurrently.
 
 pub(crate) mod request_metadata;
 pub(crate) mod request_task;
@@ -21,25 +17,19 @@ use state::{ActiveRequest, ActorState};
 
 use crate::types::RequestId;
 
-/// Sampler actor.
-///
-/// Construct via [`SamplerActor::spawn`]; the returned
-/// [`SamplerHandle`] is the only supported way to interact with it.
+/// Construct via [`SamplerActor::spawn`]; the returned [`SamplerHandle`] is the only supported way to interact with it.
 pub struct SamplerActor {
     cmd_rx: mpsc::UnboundedReceiver<SamplerCommand>,
     event_tx: mpsc::UnboundedSender<SamplingEvent>,
     state: ActorState,
-    /// Per-request tasks. The actor's run loop selects on
-    /// `cmd_rx.recv()` and `tasks.join_next()`; when a task finishes
-    /// it returns its `RequestId` so the actor can clean up
-    /// `active_requests`.
+    /// The actor's run loop selects on `cmd_rx.recv()` and `tasks.join_next()`.
+    /// A finished task returns its `RequestId` so the actor can clean up `active_requests`.
     tasks: JoinSet<RequestId>,
 }
 
 impl SamplerActor {
-    /// Spawn the actor on the current tokio runtime and return a
-    /// handle. The actor stops when the returned handle (and all its
-    /// clones) are dropped.
+    /// Spawn the actor on the current tokio runtime and return a handle.
+    /// The actor stops when the returned handle (and all its clones) are dropped.
     pub fn spawn(
         config: SamplerConfig,
         retry_policy: RetryPolicy,
@@ -60,15 +50,11 @@ impl SamplerActor {
         loop {
             tokio::select! {
                 biased;
-                // Prefer cleaning up finished tasks before processing
-                // new commands -- prevents `active_requests` from
-                // staying stale longer than necessary.
+                // Prefer cleaning up finished tasks before processing new commands, so `active_requests` does not stay stale longer than necessary
                 Some(joined) = self.tasks.join_next(), if !self.tasks.is_empty() => {
                     match joined {
                         Ok(request_id) => {
-                            // Task finished normally; remove from
-                            // active set unless the user has already
-                            // cancelled it (Cancel removes it too).
+                            // Task finished normally; remove from active set unless the user has already cancelled it (Cancel removes it too)
                             self.state.remove(&request_id);
                         }
                         Err(join_err) => {
@@ -88,8 +74,8 @@ impl SamplerActor {
             }
         }
 
-        // Cancel any still-running tasks before exiting so they don't
-        // leak. The cancellation token shutdown is best-effort.
+        // Cancel any still-running tasks before exiting so they don't leak
+        // The cancellation token shutdown is best-effort
         for (_, active) in self.state.active_requests.drain() {
             active.cancel_token.cancel();
         }
@@ -109,8 +95,7 @@ impl SamplerActor {
                     cancel_token: cancel_token.clone(),
                 };
                 if let Some(prev) = self.state.register(request_id.clone(), active) {
-                    // Caller submitted a duplicate id; cancel the
-                    // previous one so we don't leak its task.
+                    // Caller submitted a duplicate id; cancel the previous one so we don't leak its task
                     prev.cancel_token.cancel();
                 }
                 let effective_config = config

@@ -181,7 +181,6 @@ fn data_mount_entry_requires_exact_read_only_mountpoint() {
     }
 }
 
-/// An empty deny set still requires the containment sentinel.
 #[test]
 fn empty_deny_set_fails_without_sentinel_mount() {
     let ws = temp_workspace(
@@ -207,9 +206,8 @@ fn temp_parent(tag: &str) -> PathBuf {
     dir
 }
 
-/// A symlink sentinel must be rejected at the `O_NOFOLLOW` open, before the
-/// target's filesystem is ever consulted — so a link to an existing read-only
-/// filesystem (the spoof) fails exactly like a link to any other directory.
+/// A symlink sentinel must be rejected at the `O_NOFOLLOW` open, before the target's filesystem is ever consulted.
+/// A link to an existing read-only filesystem (the spoof) then fails exactly like a link to any other directory.
 #[test]
 fn symlinked_sentinel_is_rejected_and_replaced() {
     let parent = temp_parent("symlink");
@@ -224,8 +222,8 @@ fn symlinked_sentinel_is_rejected_and_replaced() {
         "unexpected error: {err}"
     );
 
-    // Creation must replace the symlink with a real directory (create_dir_all
-    // alone would silently keep the symlink and bwrap would mount its target).
+    // Creation must replace the symlink with a real directory
+    // A plain create_dir_all would silently keep the symlink and bwrap would mount its target
     let ensured = ensure_sentinel_dir_under(&parent).expect("ensure replaces the symlink");
     let meta = std::fs::symlink_metadata(&ensured).unwrap();
     assert!(
@@ -247,12 +245,9 @@ fn plain_directory_sentinel_is_rejected() {
     let _ = std::fs::remove_dir_all(&parent);
 }
 
-/// A user's explicit deny at a well-known runtime-socket path in a profile
-/// with restrict_network=false must use strict placeholder verification: the
-/// per-spawn child network filter is not installed there, so the lenient
-/// socket arm would silently drop the user's read-deny. Strictness makes this
-/// fail outside a genuine re-exec whether the host endpoint is absent (no
-/// placeholder mount) or a live socket.
+/// A user's explicit deny at a well-known runtime-socket path in a profile with restrict_network=false must use strict placeholder verification.
+/// The per-spawn child network filter is not installed there, so the lenient socket arm would silently drop the user's read-deny.
+/// Strictness makes this fail outside a genuine re-exec whether the host endpoint is absent (no placeholder mount) or a live socket.
 #[test]
 fn user_socket_deny_stays_strict_without_restrict_network() {
     if skip_if_host_hook_write_deny_unresolvable() {
@@ -270,9 +265,8 @@ fn user_socket_deny_stays_strict_without_restrict_network() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
-/// Auto runtime-socket denials tolerate a socket that appeared after the
-/// launch-time plan and a vanished endpoint, but a placeholder must satisfy the
-/// same durable mount invariant as every other accepted strict deny target.
+/// Auto runtime-socket denials tolerate a socket that appeared after the launch-time plan and a vanished endpoint.
+/// But a placeholder must satisfy the same durable mount invariant as every other accepted strict deny target.
 #[test]
 fn runtime_socket_arm_tolerates_only_live_or_missing_endpoints() {
     use std::os::unix::fs::PermissionsExt;

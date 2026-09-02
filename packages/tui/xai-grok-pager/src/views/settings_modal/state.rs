@@ -873,6 +873,7 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "contextual_hints.send_now" => Some(Action::SetContextualHintSendNow(new)),
         "contextual_hints.small_screen" => Some(Action::SetContextualHintSmallScreen(new)),
         "contextual_hints.word_select" => Some(Action::SetContextualHintWordSelect(new)),
+        "contextual_hints.export_copy" => Some(Action::SetContextualHintExportCopy(new)),
         "contextual_hints.ssh_wrap" => Some(Action::SetContextualHintSshWrap(new)),
         "multiline_mode" => Some(Action::SetMultilineMode(new)),
         "vim_mode" => Some(Action::SetVimMode(new)),

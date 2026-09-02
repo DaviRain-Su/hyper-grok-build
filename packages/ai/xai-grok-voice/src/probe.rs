@@ -1,5 +1,5 @@
-//! Voice diagnostics: input-device lookup, silent-mic fix text, and an
-//! end-to-end probe (mic → streaming STT → transcript).
+//! Voice diagnostics: input-device lookup, silent-mic fix text, and an end-to-end probe.
+//! The probe captures mic audio, streams it to STT, and reports the transcript.
 
 #[cfg(feature = "audio")]
 use std::sync::Arc;
@@ -116,7 +116,7 @@ pub async fn run_streaming_probe(opts: VoiceProbeOptions) -> Result<VoiceProbeRe
     })
 }
 
-/// Record mic only (no STT) — quick hardware check.
+/// Record mic only (no STT): a quick hardware check.
 #[cfg(feature = "audio")]
 pub fn run_mic_only_probe(sample_rate: u32, seconds: u32) -> Result<(usize, u32), VoiceError> {
     let (pcm, chunks) = crate::audio::capture_pcm_for_duration(sample_rate, seconds)?;
@@ -130,16 +130,15 @@ pub async fn run_streaming_probe(_opts: VoiceProbeOptions) -> Result<VoiceProbeR
     ))
 }
 
-/// Input device capture would use (cpal default, or Linux recorder name).
-/// Available without `audio` so `/terminal-setup` compiles in no-audio builds.
+/// The input device capture would use (cpal default, or the Linux recorder name).
+/// It stays available without `audio` so `/terminal-setup` compiles in no-audio builds.
 #[derive(Debug, Clone)]
 pub struct InputDeviceInfo {
     pub name: String,
     pub detail: String,
 }
 
-/// Look up the input device without opening a stream (does not trigger the
-/// macOS mic-permission prompt).
+/// Look up the input device without opening a stream (does not trigger the macOS mic-permission prompt).
 #[cfg(feature = "audio")]
 pub fn input_device_info() -> Result<InputDeviceInfo, VoiceError> {
     crate::audio::input_device_info()
@@ -152,8 +151,8 @@ pub fn input_device_info() -> Result<InputDeviceInfo, VoiceError> {
     ))
 }
 
-/// Platform-specific fix text for a mic that isn't being picked up. On macOS
-/// the grant is for the terminal app and only applies after that app restarts.
+/// Platform-specific fix text for a mic that isn't being picked up.
+/// On macOS the grant is for the terminal app and only applies after that app restarts.
 pub fn mic_fix_help() -> &'static str {
     if cfg!(target_os = "macos") {
         "Allow microphone access for your terminal in System Settings → Privacy & Security → \

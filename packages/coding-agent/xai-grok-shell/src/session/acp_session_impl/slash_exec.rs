@@ -14,24 +14,30 @@ impl SessionActor {
         });
         match action {
             BuiltinAction::Compact { user_context } => {
-                self.run_compact(user_context).await?;
+                box_turn_future(|| self.run_compact(user_context)).await?;
                 ok_end_turn(0, None)
             }
             BuiltinAction::SetYolo { enabled } => {
                 let was = self.permissions.is_yolo_mode();
                 self.permissions.set_yolo_mode(enabled);
-                // Report the ACTUAL state, not the request: the manager clamps a
-                // requested ON to OFF under the always-approve pin, so `enabled`
-                // would mis-report a turn-on (event, telemetry, and the log line)
-                // that never happened.
+                // Report the ACTUAL state: the manager clamps a requested ON to OFF under the always-approve pin
+                // Echoing `enabled` would report a turn-on (event, telemetry, and the log line) that never happened
                 let actual = self.permissions.is_yolo_mode();
                 if let Some(actual) = yolo_toggle_report(was, actual) {
                     self.emit_event(crate::session::events::Event::YoloToggled { enabled: actual });
+                    let from_mode = if self.plan_mode.lock().is_active() {
+                        "plan"
+                    } else if was {
+                        "bypass_permissions"
+                    } else {
+                        "default"
+                    };
                     xai_grok_telemetry::session_ctx::log_event(
                         xai_grok_telemetry::events::YoloToggled {
                             enabled: actual,
                             previous_state: was,
                             trigger: xai_grok_telemetry::events::YoloTrigger::SlashCommand,
+                            from_mode: Some(from_mode.to_owned()),
                         },
                     );
                     tracing::info_span!(
@@ -70,7 +76,7 @@ impl SessionActor {
                 ok_end_turn(0, None)
             }
             BuiltinAction::Dream => {
-                // No user-visible output — intentional, matches /flush behaviour.
+                // Intentionally no user-visible output, matching /flush behaviour
                 if self.memory.is_enabled() {
                     self.run_dream_slash_command().await;
                 } else {
@@ -299,7 +305,7 @@ impl SessionActor {
             BuiltinAction::PluginsReload => {
                 match &self.plugin_registry_handle {
                     Some(handle) => {
-                        // Explicit user reload: force a full local-install re-copy.
+                        // An explicit user reload forces a full re-copy of locally installed plugins
                         let msg = self.reload_plugins_impl(handle, true).await;
                         xai_grok_telemetry::session_ctx::log_event(
                             xai_grok_telemetry::events::PluginReloaded { success: true },
@@ -832,9 +838,8 @@ impl SessionActor {
                 self.refresh_goal_harness_enabled().await;
                 ok_end_turn(0, None)
             }
-            // GoalSet is handled directly in handle_prompt (before this
-            // function is called) so the turn flows through to model inference
-            // instead of ending immediately.
+            // GoalSet is handled directly in handle_prompt, before this function is called
+            // The turn then flows through to model inference instead of ending immediately
             BuiltinAction::GoalSet { .. } => {
                 unreachable!("GoalSet is intercepted in handle_prompt")
             }
@@ -1083,8 +1088,7 @@ impl SessionActor {
                 self.send_host_turn_slash_command_output(msg).await;
                 ok_end_turn(0, None)
             }
-            // GoalResume is intercepted in handle_prompt (like GoalSet) so a
-            // successful resume flows through to inference — see `resume_goal`.
+            // GoalResume is intercepted in handle_prompt (like GoalSet) so a successful resume flows through to inference; see `resume_goal`
             BuiltinAction::GoalResume => {
                 unreachable!("GoalResume is intercepted in handle_prompt")
             }

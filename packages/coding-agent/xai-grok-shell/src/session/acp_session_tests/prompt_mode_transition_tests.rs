@@ -1,10 +1,9 @@
 use super::support::*;
 use super::*;
 use crate::session::plan_mode::PlanModeState;
-/// An actor plus the `SessionEvent` rail its mode updates ride. Plan-mode
-/// changes deliberately queue behind the turn's streaming deltas rather than
-/// emitting straight to the client, so the assertions have to read that rail
-/// and not the gateway.
+/// An actor plus the `SessionEvent` channel that carries its mode updates.
+/// Plan-mode changes deliberately queue behind the turn's streaming deltas rather than emitting straight to the client.
+/// The assertions therefore read that channel and not the gateway.
 async fn actor_with_events() -> (
     SessionActor,
     tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
@@ -87,8 +86,7 @@ fn cursor_filter_is_noop_for_non_cursor_tools() {
     assert_eq!(names(&in_plan).len(), defs.len());
     assert_eq!(names(&out_of_plan).len(), defs.len());
 }
-/// Pins the `reconcile_plan_mode_with_prompt` transitions:
-/// Plan → Pending, idempotent, non-plan modes exit cleanly.
+/// Pins the `reconcile_plan_mode_with_prompt` transitions: Plan enters Pending, re-entry is idempotent, and non-plan modes exit cleanly.
 #[test]
 fn prompt_mode_plan_drives_tracker_into_pending_when_inactive() {
     use crate::session::plan_mode::PlanModeTracker;
@@ -127,11 +125,9 @@ fn session_mode_id_from_prompt_mode_inverts_the_parse() {
         assert_eq!(round_tripped.0.as_ref(), id);
     }
 }
-/// A prompt that declares `_meta.mode` is the client changing mode, and the
-/// client has to be told it took effect. Both arms used to persist the
-/// transition and inject the model's reminder but emit nothing — so a client
-/// that carries its mode on the prompt could enter or leave plan mode with no
-/// signal at all, and `updates.jsonl` carried no mode line for replay either.
+/// A prompt that declares `_meta.mode` is the client changing mode, and the client has to be told it took effect.
+/// Both arms used to persist the transition and inject the model's reminder but emit nothing.
+/// A client that carries its mode on the prompt could enter or leave plan mode with no signal, and `updates.jsonl` carried no mode line for replay.
 #[tokio::test]
 async fn a_declared_mode_change_is_published_to_the_client() {
     let local = tokio::task::LocalSet::new();
@@ -148,8 +144,7 @@ async fn a_declared_mode_change_is_published_to_the_client() {
         })
         .await;
 }
-/// `ask` is its own client-facing mode, so leaving plan for it must not report
-/// `default`.
+/// `ask` is its own client-facing mode, so leaving plan for it must not report `default`.
 #[tokio::test]
 async fn leaving_plan_for_ask_reports_ask() {
     let local = tokio::task::LocalSet::new();
@@ -165,9 +160,8 @@ async fn leaving_plan_for_ask_reports_ask() {
         })
         .await;
 }
-/// Re-declaring the mode already in effect is not a mode change. A client that
-/// mirrors the session's mode back onto every prompt would otherwise emit one
-/// `CurrentModeUpdate` per turn.
+/// Re-declaring the mode already in effect is not a mode change.
+/// A client that mirrors the session's mode back onto every prompt would otherwise emit one `CurrentModeUpdate` per turn.
 #[tokio::test]
 async fn redeclaring_the_mode_already_in_effect_publishes_nothing() {
     let local = tokio::task::LocalSet::new();
@@ -186,11 +180,9 @@ async fn redeclaring_the_mode_already_in_effect_publishes_nothing() {
         })
         .await;
 }
-/// A synthetic turn — a background task wake, a goal summary, a notification
-/// drain — declares no mode; it is constructed with a placeholder `Agent`.
-/// Treating that placeholder as a declaration ended plan mode just by waking
-/// the session, and silently: nothing was emitted, so the indicator stayed lit
-/// for the rest of the session while the agent was back in agent mode.
+/// A synthetic turn (a background task wake, a goal summary, a notification drain) declares no mode; it is constructed with a placeholder `Agent`.
+/// Treating that placeholder as a declaration ended plan mode just by waking the session.
+/// It ended silently: nothing was emitted, so the indicator stayed lit for the rest of the session while the agent was back in agent mode.
 #[tokio::test]
 async fn a_synthetic_turn_inherits_plan_mode_instead_of_ending_it() {
     let local = tokio::task::LocalSet::new();
@@ -230,8 +222,7 @@ async fn a_synthetic_turn_inherits_plan_mode_instead_of_ending_it() {
         })
         .await;
 }
-/// The other half of the same rule: a real user turn still applies what it
-/// declared, and the resolved mode is what it asked for.
+/// The other half of the same rule: a real user turn still applies what it declared, and the resolved mode is what it asked for.
 #[tokio::test]
 async fn a_user_turn_still_applies_its_declared_mode() {
     let local = tokio::task::LocalSet::new();

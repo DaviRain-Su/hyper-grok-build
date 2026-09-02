@@ -432,6 +432,8 @@ settings.contextual_hints.word_select.label: "단어 선택"
 settings.contextual_hints.word_select.description: "텍스트 선택이 접기/탐색 모드일 때 대화 텍스트를 더블클릭하면, 단어 선택이 설정에 있다고 알려줍니다."
 settings.contextual_hints.ssh_wrap.label: "SSH 래핑"
 settings.contextual_hints.ssh_wrap.description: "SSH로 세션을 로드할 때 클립보드 전달 및 터미널 복원을 위해 `grok wrap ssh`를 추천합니다."
+settings.contextual_hints.export_copy.label: "복사 및 내보내기"
+settings.contextual_hints.export_copy.description: "대화 텍스트를 가까운 위치에서 세 번 드래그 복사한 뒤 /copy와 /export가 있음을 알려줍니다."
 settings.fork_secondary_model.label: "포크 보조 모델"
 settings.fork_secondary_model.description: "포크할 때 보조 에이전트가 사용하는 모델입니다. \"(미설정)\"을 선택하여清除할 수 있습니다."
 

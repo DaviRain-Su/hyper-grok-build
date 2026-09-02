@@ -135,6 +135,13 @@ impl AgentView {
             running_wake_turn: None,
             finished_wake_prompts: HashSet::new(),
             active_pane: ActivePane::Prompt,
+            dock_cursor: 0,
+            dock_subagents_expanded: true,
+            dock_tasks_expanded: true,
+            dock_watchers_expanded: true,
+            dock_queued_expanded: true,
+            dock_on: false,
+            dock_shown: false,
             prompt_mode: PromptMode::Normal,
             prompt_input_mode: PromptInputMode::Normal,
             multiline_mode: false,
@@ -195,6 +202,8 @@ impl AgentView {
             deferred_text_press: None,
             persistent_text_selection: None,
             table_selection_geometry: None,
+            drag_table_geometry: None,
+            btw_selection_wrap_width: None,
             selection_created_at: None,
             last_drag_mouse: None,
             drag_autoscroll: None,
@@ -276,6 +285,7 @@ impl AgentView {
             inline_media_active: false,
             last_placed_ids: HashSet::new(),
             last_terminal_size: (0, 0),
+            last_resize_at: None,
             terminal_size_stale: false,
             inline_media_hits: InlineMediaHitAreas::default(),
             extensions_modal: None,
@@ -289,6 +299,7 @@ impl AgentView {
             ephemeral_tip: Default::default(),
             word_select_tip_prompt_snapshot: None,
             last_word_select_probe: None,
+            export_copy_detector: Default::default(),
             sticky_toast: None,
             mode_switch_banner: None,
             session_banner_active: false,
@@ -612,6 +623,13 @@ impl AgentView {
             .is_some_and(|id| Some(id) != starting_prompt_id)
         {
             self.expect_send_now_cancel = None;
+        }
+        if self
+            .follow_without_jump_prompt_id
+            .as_deref()
+            .is_some_and(|id| Some(id) != starting_prompt_id)
+        {
+            self.follow_without_jump_prompt_id = None;
         }
         self.front_message_committed = false;
         self.pending_cancel_resend = None;
@@ -1162,6 +1180,7 @@ impl AgentView {
             ActivePane::Prompt => ActivePaneSnapshot::Prompt,
             ActivePane::Tasks => ActivePaneSnapshot::Tasks,
             ActivePane::Catalog => ActivePaneSnapshot::Catalog,
+            ActivePane::Dock => ActivePaneSnapshot::Other,
         };
         let outcome_snap = match outcome {
             InputOutcome::Changed | InputOutcome::ArmPending { .. } => OutcomeSnapshot::Changed,

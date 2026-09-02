@@ -1,4 +1,4 @@
-//! Fresh-process pins; the assertions consume process-global state.
+//! This test runs in its own process because the assertions consume process-global state.
 
 #[test]
 fn prefetched_agent_id_resolves_and_persists() {

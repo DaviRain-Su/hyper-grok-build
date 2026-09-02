@@ -1,6 +1,5 @@
-//! Bash request-level execution risk: argv flags that spawn programs, and ambient
-//! local/worktree git config. Flag floors run inline; ambient git2 uses
-//! `spawn_blocking` from the permission actor.
+//! Bash request-level execution risk: argv flags that spawn programs, and ambient local/worktree git config.
+//! Flag floors run inline; ambient git2 uses `spawn_blocking` from the permission actor.
 
 use std::path::{Path, PathBuf};
 
@@ -114,7 +113,7 @@ fn is_git_config_env_flag(tok: &str) -> bool {
     is_accepted_long_option_prefix(flag, "--config-env", 4)
 }
 
-/// Presence fails closed — these retarget which config git reads.
+/// Presence fails closed: these retarget which config git reads.
 fn is_git_repo_retarget_flag(tok: &str) -> bool {
     if tok == "--git-dir"
         || tok.starts_with("--git-dir=")
@@ -226,11 +225,9 @@ pub(crate) fn segment_exec_facts(words: &[String]) -> SegmentExecFacts {
     }
 }
 
-/// Read-only git query verbs. SINGLE SOURCE for every git allow decision:
-/// [`git_words_are_read_only_query`] (the manager safe lists and the auto-mode
-/// routine heuristic both call it) and the `alias.<verb> = !cmd` shadowing
-/// check in the ambient config scan below. Add a new read-only verb here and
-/// every consumer inherits it — do not grow per-consumer prefix lists.
+/// Read-only git query verbs, the SINGLE SOURCE for every git allow decision.
+/// Both [`git_words_are_read_only_query`] and the `alias.<verb> = !cmd` shadowing check in the ambient config scan below read it.
+/// Add a new read-only verb here and every consumer inherits it; do not grow per-consumer prefix lists.
 pub(crate) const SAFE_GIT_SUBCOMMANDS: &[&str] = &[
     "status",
     "branch",
@@ -255,15 +252,11 @@ pub(crate) const SAFE_GIT_SUBCOMMANDS: &[&str] = &[
     "shortlog",
 ];
 
-/// Options that make an otherwise read-only git verb run repo-configured
-/// content drivers or write arbitrary paths — one table applied to EVERY
-/// [`SAFE_GIT_SUBCOMMANDS`] verb, so a new safe verb inherits the policy:
-/// `--filters`/`--textconv` run `filter.*.smudge` / `diff.*.textconv`
-/// (`filter.*.smudge` is outside the ambient local-config exec scan),
-/// `--ext-diff` runs the external diff driver, `--output` writes an arbitrary
-/// file, and `--open-files-in-pager` executes a pager command (`git grep`'s
-/// short-attached `-O<cmd>` form is guarded in
-/// [`git_words_have_unsafe_query_option`]).
+/// Options that make an otherwise read-only git verb run repo-configured content drivers or write arbitrary paths.
+/// One table applied to EVERY [`SAFE_GIT_SUBCOMMANDS`] verb, so a new safe verb inherits the policy.
+/// `--filters`/`--textconv` run `filter.*.smudge` / `diff.*.textconv` (`filter.*.smudge` is outside the ambient local-config exec scan).
+/// `--ext-diff` runs the external diff driver; `--output` writes an arbitrary file; `--open-files-in-pager` executes a pager command.
+/// `git grep`'s short-attached `-O<cmd>` form is guarded in [`git_words_have_unsafe_query_option`].
 const GIT_QUERY_UNSAFE_OPTIONS: &[&str] = &[
     "--filters",
     "--textconv",
@@ -272,10 +265,8 @@ const GIT_QUERY_UNSAFE_OPTIONS: &[&str] = &[
     "--open-files-in-pager",
 ];
 
-/// Git accepts uniquely-abbreviated long options, so any `--` word (pre-`=`,
-/// ≥3 chars) that prefixes a table entry fails closed — including
-/// abbreviations a specific verb would resolve to a benign sibling
-/// (`git grep --text` collides with `--textconv` and prompts).
+/// Git accepts uniquely-abbreviated long options, so any `--` word (pre-`=`, at least 3 chars) that prefixes a table entry fails closed.
+/// That includes abbreviations a specific verb would resolve to a benign sibling (`git grep --text` collides with `--textconv` and prompts).
 fn git_query_option_is_unsafe(word: &str) -> bool {
     let flag = word.split('=').next().unwrap_or(word);
     flag.len() > 2
@@ -284,12 +275,10 @@ fn git_query_option_is_unsafe(word: &str) -> bool {
             .any(|full| full.starts_with(flag))
 }
 
-/// Resolve the subcommand index, skipping only modeled-benign globals:
-/// `-C <path>` / `-C<path>` (the ambient config scan tracks the retargeted
-/// cwd) and `--no-pager` / `-P`. Every other pre-subcommand option fails
-/// closed (`None`) — `-c`, `--config-env`, `--git-dir`, `--work-tree`,
-/// `--exec-path`, `--paginate`, `--attr-source`, … can change what executes
-/// or which config a query reads.
+/// Resolve the subcommand index, skipping only the globals modeled as benign: `-C <path>` / `-C<path>` and `--no-pager` / `-P`.
+/// The ambient config scan tracks the cwd that `-C` retargets.
+/// Every other pre-subcommand option fails closed (`None`).
+/// `-c`, `--config-env`, `--git-dir`, `--exec-path`, `--paginate`, `--attr-source`, and more can change what executes or which config is read.
 fn git_safe_query_verb_index(words: &[String]) -> Option<usize> {
     let mut i = 1;
     loop {
@@ -312,11 +301,8 @@ fn git_safe_query_verb_index(words: &[String]) -> Option<usize> {
     }
 }
 
-/// True when a `git` invocation carries an option from the shared unsafe
-/// table ([`GIT_QUERY_UNSAFE_OPTIONS`], plus `git grep`'s short-attached
-/// `-O<cmd>`), whatever the verb. Used on its own to keep a session
-/// whitelist-prefix grant from riding over a driver/write flag, and by
-/// [`git_words_are_read_only_query`].
+/// True when a `git` invocation carries an option from [`GIT_QUERY_UNSAFE_OPTIONS`] or `git grep`'s short-attached `-O<cmd>`, whatever the verb.
+/// Used by [`git_words_are_read_only_query`] and on its own, so a session whitelist-prefix grant cannot override a driver/write flag.
 pub(crate) fn git_words_have_unsafe_query_option(words: &[String]) -> bool {
     if words.first().map(String::as_str) != Some("git") {
         return false;
@@ -324,25 +310,17 @@ pub(crate) fn git_words_have_unsafe_query_option(words: &[String]) -> bool {
     if words.iter().skip(1).any(|w| git_query_option_is_unsafe(w)) {
         return true;
     }
-    // `git grep -O<cmd>` / `-O <cmd>` executes <cmd>; the short-attached form
-    // is not a long-option abbreviation, so guard it verb-specifically.
+    // `git grep -O<cmd>` / `-O <cmd>` executes <cmd>; the short-attached form is not a long-option abbreviation, so guard it verb-specifically
     matches!(git_safe_query_verb_index(words), Some(i) if words[i] == "grep")
         && words.iter().skip(1).any(|w| w.starts_with("-O"))
 }
 
-/// Single decision point for auto-approvable read-only `git` queries, shared
-/// by the manager safe lists and the auto-mode routine heuristic so verb
-/// policy and flag policy live in one place:
-/// 1. resolve the subcommand via [`git_safe_query_verb_index`] (benign
-///    globals skipped, config/retarget/unknown globals fail closed — plus a
-///    redundant [`git_has_exec_risk_global`] belt for odd `-C` value shapes);
-/// 2. allow only [`SAFE_GIT_SUBCOMMANDS`] verbs;
-/// 3. reject the shared unsafe-option table
-///    ([`git_words_have_unsafe_query_option`]).
+/// Single decision point for auto-approvable read-only `git` queries, shared by the manager safe lists and the auto-mode routine heuristic.
+/// Verb policy and flag policy therefore live in one place.
+/// The [`git_has_exec_risk_global`] check is a redundant belt over [`git_safe_query_verb_index`] for odd `-C` value shapes.
 ///
-/// Callers pass wrapper-peeled words; `words[0]` must be literally `git`
-/// (path-qualified or case-variant "git" binaries fail closed — a different
-/// binary of the same basename must not ride the allowlist).
+/// Callers pass wrapper-peeled words, and `words[0]` must be literally `git`.
+/// Path-qualified or case-variant "git" binaries fail closed: a different binary with the same basename must not inherit the allowlist.
 pub(crate) fn git_words_are_read_only_query(words: &[String]) -> bool {
     if words.first().map(String::as_str) != Some("git") {
         return false;
@@ -487,7 +465,7 @@ fn apply_literal_chdir(cwd: &Path, words: &[String]) -> Option<PathBuf> {
     Some(join_cwd(cwd, target))
 }
 
-/// Pre-subcommand `git -C` / `-Cpath` chains. `None` if path unmodeled or retarget global.
+/// Pre-subcommand `git -C` / `-Cpath` chains. Returns `None` on an unmodeled path or a repo-retarget global.
 fn git_effective_cwd(words: &[String], start_cwd: &Path) -> Option<PathBuf> {
     let mut cwd = start_cwd.to_path_buf();
     let mut i = 1;
@@ -865,8 +843,7 @@ mod tests {
         }
 
         // includeIf.gitdir: exact absolute gitdir (no trailing slash).
-        // libgit2 appends `**` when the pattern ends with `/`, and wildmatch
-        // `dir/**` does not match `dir` itself — so trailing-slash patterns fail.
+        // libgit2 appends `**` when the pattern ends with `/`, and wildmatch `dir/**` does not match `dir` itself, so trailing-slash patterns fail
         // Use repo.path() as libgit2 reports it (not a re-canonicalized twin).
         {
             let tmp = tempfile::tempdir().unwrap();
@@ -895,7 +872,7 @@ mod tests {
             );
         }
 
-        // Config path is a directory (opens on Linux) → not a regular file → fail closed.
+        // A config path that is a directory opens on Linux but is not a regular file, so it fails closed
         {
             let tmp = tempfile::tempdir().unwrap();
             git2::Repository::init(tmp.path()).unwrap();
@@ -959,10 +936,9 @@ mod tests {
         let plan = ambient_scan_plan_from_cmd("cd evil && git status", &clean).unwrap();
         assert!(ambient_exec_risk_from_plan(&plan));
 
-        // `$HOME` expansion is rejected by word-only parse → ambient plan is
-        // unavailable (`None`). Production maps that to fail-closed via
-        // `unparseable_exec_risk` → `script_may_invoke_git` (do not invent a
-        // word-only plan that weakens the expansion boundary).
+        // `$HOME` expansion is rejected by word-only parse, so the ambient plan is unavailable (`None`)
+        // Production maps that to fail-closed via `unparseable_exec_risk`, which calls `script_may_invoke_git`
+        // Do not invent a word-only plan that weakens the expansion boundary
         let expansion = "cd \"$HOME\" && git status";
         assert!(
             ambient_scan_plan_from_cmd(expansion, &clean).is_none(),

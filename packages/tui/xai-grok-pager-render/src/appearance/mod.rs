@@ -3,15 +3,11 @@
 //! Two unrelated concerns live under this module name:
 //!
 //! - **`config` + `watcher`**: dev-only `~/.grok/pager.toml` RenderConfig
-//!   (200+ fields for terminal rendering tuning). Hot-reloaded in dev mode,
-//!   static defaults in prod.
-//! - **`cache`**: thread-local in-memory caches for the user-facing UI bool
-//!   settings (`compact_mode`, `show_timestamps`, `simple_mode`). Disk
-//!   writes happen in `xai_grok_shell::util::config::set_<field>()` via
-//!   `Effect::PersistSetting`, NOT here — this is a read-cache only.
-//! - **`permission_cursor`**: the `default_selected_permission` value type
-//!   plus the caches and resolution logic for which row a permission prompt
-//!   preselects.
+//!   (200+ fields for terminal rendering tuning).
+//!   Hot-reloaded in dev mode, static defaults in prod.
+//! - **`cache`**: thread-local in-memory caches for the user-facing UI bool settings (`compact_mode`, `show_timestamps`, `simple_mode`).
+//!   Disk writes happen in `xai_grok_shell::util::config::set_<field>()` via `Effect::PersistSetting`, NOT here; this is a read-cache only.
+//! - **`permission_cursor`**: the `default_selected_permission` value type plus the caches and logic for which row a permission prompt preselects.
 
 pub mod cache;
 mod config;
@@ -36,8 +32,7 @@ pub use watcher::ConfigWatcher;
 
 // -- Global tab_width --------------------------------------------------------
 //
-// Stored as an atomic so MarkdownContent can read the current value
-// without needing the AppearanceConfig threaded through its API.
+// Stored as an atomic so MarkdownContent can read the current value without needing the AppearanceConfig threaded through its API
 // Updated by the event loop whenever pager.toml is (re)loaded.
 
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -54,9 +49,9 @@ pub fn set_tab_width(w: u8) {
     TAB_WIDTH.store(w, Ordering::Relaxed);
 }
 
-/// Tabs as spaces at [`tab_width`]. Beside the width because every caller that
-/// paints a tab has to agree on it: ratatui drops a cluster holding a control
-/// character, so a tab left in the text is deleted rather than drawn.
+/// Replaces tabs with spaces at [`tab_width`].
+/// This sits beside the width because every caller that paints a tab has to agree on it.
+/// ratatui drops a cluster holding a control character, so a tab left in the text is deleted rather than drawn.
 pub fn expand_tabs(text: &str) -> std::borrow::Cow<'_, str> {
     let width = tab_width();
     if width == 0 || !text.contains('\t') {

@@ -1,25 +1,20 @@
-//! Shared construction of the blocking `reqwest` client used by the OTLP
-//! HTTP exporters (spans in `otel_layer`, logs/metrics in `external`).
+//! Shared construction of the blocking `reqwest` client used by the OTLP HTTP exporters (spans in `otel_layer`, logs/metrics in `external`).
 //!
-//! This uses the workspace `reqwest` 0.12 (`rustls-tls`, embedded webpki
-//! roots) rather than reqwest 0.13. reqwest 0.13's blocking client runs its
-//! rustls/aws-lc-rs handshake on the fixed-stack, un-sizable
-//! `reqwest-internal-sync-runtime` thread; that handshake overflows the stack
-//! on the first OTLP export and crashes the CLI a few seconds after launch
-//! (observed on Windows arm64; `RUST_MIN_STACK` does not help because reqwest
-//! owns that thread). reqwest 0.12 shares the known-good TLS stack the rest of
-//! the CLI already uses, and its embedded roots keep the exporter working on
-//! hosts with no system CA store. `opentelemetry-http` only ships an
-//! `HttpClient` impl for its pinned reqwest 0.13, so the 0.12 client is wrapped
-//! below (orphan rule). Construction returns an error for callers to degrade on
-//! (disable the exporter, keep the session alive) instead of panicking.
+//! This uses the workspace `reqwest` 0.12 (`rustls-tls`, embedded webpki roots) rather than reqwest 0.13.
+//! reqwest 0.13's blocking client runs its rustls/aws-lc-rs handshake on the fixed-stack, un-sizable `reqwest-internal-sync-runtime` thread.
+//! That handshake overflows the stack on the first OTLP export and crashes the CLI a few seconds after launch (observed on Windows arm64).
+//! `RUST_MIN_STACK` does not help because reqwest owns that thread.
+//! reqwest 0.12 shares the known-good TLS stack the rest of the CLI already uses.
+//! Its embedded roots keep the exporter working on hosts with no system CA store.
+//! `opentelemetry-http` only ships an `HttpClient` impl for its pinned reqwest 0.13, so the 0.12 client is wrapped below (orphan rule).
+//! Construction returns an error for callers to degrade on (disable the exporter, keep the session alive) instead of panicking.
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use opentelemetry_http::{HttpClient, HttpError};
 
-/// `opentelemetry_http::HttpClient` over the workspace reqwest 0.12 blocking
-/// client. Mirrors `opentelemetry-http`'s built-in reqwest 0.13 blocking impl.
+/// `opentelemetry_http::HttpClient` over the workspace reqwest 0.12 blocking client.
+/// Mirrors `opentelemetry-http`'s built-in reqwest 0.13 blocking impl.
 #[derive(Debug, Clone)]
 pub(crate) struct BlockingOtlpClient(reqwest::blocking::Client);
 
@@ -48,15 +43,13 @@ pub(crate) struct ClientIdentityPaths<'a> {
 
 /// Build the blocking OTLP HTTP client on a dedicated thread.
 ///
-/// The blocking client can't be built inside a Tokio runtime, and the batch
-/// processors drive exports from non-Tokio threads — building on a fresh
-/// thread avoids the "no reactor" panic for every caller.
+/// The blocking client can't be built inside a Tokio runtime, and the batch processors drive exports from non-Tokio threads.
+/// Building on a fresh thread avoids the "no reactor" panic for every caller.
 ///
-/// `extra_ca_pem_files` are PEM bundle paths whose certificates are added to
-/// the trusted roots (the external stream's `OTEL_EXPORTER_OTLP_CERTIFICATE`,
-/// for customer collectors behind a private CA). Errors reading or parsing a
-/// listed bundle fail construction — exporting without a CA the user
-/// explicitly configured would silently verify against the wrong trust set.
+/// `extra_ca_pem_files` are PEM bundle paths whose certificates are added to the trusted roots.
+/// They come from the external stream's `OTEL_EXPORTER_OTLP_CERTIFICATE`, for customer collectors behind a private CA.
+/// Errors reading or parsing a listed bundle fail construction.
+/// Exporting without a CA the user explicitly configured would silently verify against the wrong trust set.
 pub(crate) fn build_blocking_client(
     timeout: std::time::Duration,
     extra_ca_pem_files: &[&str],
@@ -75,9 +68,8 @@ pub(crate) fn build_blocking_client_with_identity(
             .map_err(|e| format!("reading OTEL_EXPORTER_OTLP_CERTIFICATE {path:?}: {e}"))?;
         let certs = reqwest::Certificate::from_pem_bundle(&pem)
             .map_err(|e| format!("parsing OTEL_EXPORTER_OTLP_CERTIFICATE {path:?}: {e}"))?;
-        // A readable but certificate-less bundle must fail closed too:
-        // building a client that verifies without the configured CA would
-        // silently use the wrong trust set.
+        // A readable but certificate-less bundle must fail closed too
+        // Building a client that verifies without the configured CA would silently use the wrong trust set
         if certs.is_empty() {
             return Err(format!(
                 "OTEL_EXPORTER_OTLP_CERTIFICATE {path:?} contains no certificates"
@@ -119,11 +111,9 @@ pub(crate) fn build_blocking_client_with_identity(
     std::thread::Builder::new()
         .name("otlp-client-build".into())
         .spawn(move || {
-            // Two additive trust sources on top of the embedded webpki
-            // roots: the process-wide `GROK_EXTRA_CA_BUNDLE` (fail-open,
-            // handled inside xai-grok-extra-ca) and the external stream's
-            // per-call `OTEL_EXPORTER_OTLP_CERTIFICATE` files (fail-closed,
-            // validated above).
+            // Two additive trust sources sit on top of the embedded webpki roots
+            // The process-wide `GROK_EXTRA_CA_BUNDLE` is fail-open, handled inside xai-grok-extra-ca
+            // The external stream's per-call `OTEL_EXPORTER_OTLP_CERTIFICATE` files are fail-closed, validated above
             let identity = match identity_pem {
                 Some(pem) => Some(reqwest::Identity::from_pem(&pem).map_err(|e| {
                     format!("parsing OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE/KEY: {e}")
@@ -162,18 +152,16 @@ pub(crate) fn build_blocking_client_with_identity(
 mod tests {
     use super::*;
 
-    /// The client must build without consulting the system CA store — reqwest
-    /// 0.12 `rustls-tls` trusts embedded webpki roots, so this holds on hosts
-    /// with no system CA store.
+    /// The client must build without consulting the system CA store.
+    /// reqwest 0.12 `rustls-tls` trusts embedded webpki roots, so this holds on hosts with no system CA store.
     #[test]
     fn blocking_otlp_client_builds_with_embedded_roots() {
         build_blocking_client(std::time::Duration::from_secs(5), &[])
             .expect("client with embedded webpki roots must build on any host");
     }
 
-    /// A configured-but-unreadable customer CA must fail construction (the
-    /// caller degrades by disabling the stream) instead of silently building
-    /// a client that verifies against the wrong trust set.
+    /// A configured-but-unreadable customer CA must fail construction (the caller degrades by disabling the stream).
+    /// The alternative is silently building a client that verifies against the wrong trust set.
     #[test]
     fn blocking_otlp_client_fails_closed_on_missing_ca_file() {
         let err = build_blocking_client(
@@ -184,8 +172,7 @@ mod tests {
         assert!(err.contains("OTEL_EXPORTER_OTLP_CERTIFICATE"));
     }
 
-    /// A readable but certificate-less bundle must also fail closed instead
-    /// of building a client that verifies against the default roots only.
+    /// A readable but certificate-less bundle must also fail closed instead of building a client that verifies against the default roots only.
     #[test]
     fn blocking_otlp_client_fails_closed_on_empty_ca_bundle() {
         let file = tempfile::NamedTempFile::new().expect("temp CA file");
@@ -215,8 +202,7 @@ mod tests {
 
     #[test]
     fn blocking_otlp_client_builds_with_generated_client_identity() {
-        // Dual-linked ring + aws-lc-rs: pin a process default before any TLS
-        // client construction (matches CLI startup + gRPC mTLS tests).
+        // Both ring and aws-lc-rs are linked, so pin a process default before any TLS client construction (matches CLI startup and gRPC mTLS tests)
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
         use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};

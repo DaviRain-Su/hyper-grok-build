@@ -1,8 +1,6 @@
-//! `scroll_stress` — inject rapid `j` keys against a large pre-rendered
-//! response, measure frame timing.
+//! Inject rapid `j` keys against a large pre-rendered response, measure frame timing.
 //!
-//! What it stresses: `render_scrolled_entries_with_scratch`, partial-entry
-//! clipping (ScratchBuffer cell copy), `Buffer::diff()`.
+//! What it stresses: `render_scrolled_entries_with_scratch`, partial-entry clipping (ScratchBuffer cell copy), `Buffer::diff()`.
 
 use std::time::{Duration, Instant};
 
@@ -27,8 +25,7 @@ pub async fn run(harness: &mut PtyHarness, content: &ContentController) -> Resul
     harness.inject_keys(b"go\r")?;
 
     // 4. Wait until the streamed response is on screen.
-    //    The response is `Lorem ipsum dolor ...` — look for a word we know
-    //    will appear after streaming starts.
+    //    The response is `Lorem ipsum dolor ...`; look for a word we know will appear after streaming starts
     harness.wait_for_text("Lorem", Duration::from_secs(30))?;
 
     // 5. Let the full response settle, then reset timing to start clean.
@@ -51,8 +48,8 @@ pub async fn run(harness: &mut PtyHarness, content: &ContentController) -> Resul
     Ok(harness.bench_results("scroll_stress", wall_time))
 }
 
-/// Generate `n` lines of predictable markdown. Used both as scenario
-/// payload and as a basic smoke test of the wrapping pipeline.
+/// Generate `n` lines of predictable markdown.
+/// Besides serving as the scenario payload, it exercises the pager's wrapping pipeline.
 fn long_markdown_response(n: usize) -> String {
     let mut out = String::with_capacity(n * 80);
     out.push_str("# Scroll stress response\n\n");

@@ -1,5 +1,4 @@
-//! Permission-policy config value types, extracted from xai-grok-shell
-//! (config dependency inversion).
+//! Permission-policy config value types, extracted from xai-grok-shell so crates the shell depends on can use them.
 
 use serde::{Deserialize, Serialize};
 
@@ -10,7 +9,6 @@ pub struct PermissionConfig {
     pub rules: Vec<PermissionRule>,
 }
 
-/// A single permission rule.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionRule {
     pub action: RuleAction,
@@ -30,11 +28,9 @@ pub enum PatternMode {
     Domain,
 }
 
-/// Action to take when rule matches.
+/// Action to take when a rule matches.
 ///
-/// CWE-1188: Default changed from Allow to Deny so that omitting the
-/// `action` field in a TOML permission rule does not silently create a
-/// catch-all allow rule.
+/// The default is Deny (CWE-1188): omitting the `action` field in a TOML permission rule must not silently create a catch-all allow rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum RuleAction {
@@ -44,7 +40,6 @@ pub enum RuleAction {
     Ask,
 }
 
-/// Tool filter for permission rules.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]

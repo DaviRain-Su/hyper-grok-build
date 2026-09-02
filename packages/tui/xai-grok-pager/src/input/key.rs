@@ -1,8 +1,5 @@
 //! Key shortcut types and the `key!()` macro.
 //!
-//! A focused subset for
-//! ergonomic key matching and test construction.
-//!
 //! ```
 //! use xai_grok_pager::input::key::key;
 //!
@@ -45,7 +42,7 @@ impl KeyShortcut {
         Self::new(code, KeyModifiers::CONTROL)
     }
 
-    /// Normalize Shift+lowercase ↔ uppercase.
+    /// Normalize so Shift+lowercase and plain uppercase are the same shortcut.
     fn normalize_case(mut self) -> Self {
         let c = match self.code {
             KeyCode::Char(c) => c,
@@ -59,9 +56,7 @@ impl KeyShortcut {
         self
     }
 
-    /// Check if a crossterm KeyEvent matches this shortcut.
-    /// Normalizes the event's case before comparing, so both
-    /// `Char('G') + NONE` and `Char('g') + SHIFT` match `key!('G')`.
+    /// Normalizes the event's case before comparing, so both `Char('G') + NONE` and `Char('g') + SHIFT` match `key!('G')`.
     pub fn matches(&self, event: &KeyEvent) -> bool {
         if event.kind == KeyEventKind::Release {
             return false;
@@ -76,19 +71,18 @@ impl KeyShortcut {
     }
 
     /// Display string for UI (shortcuts bar, etc.).
-    /// Delegates to `fmt::Display`.
     pub fn display(&self) -> String {
         self.to_string()
     }
 
-    /// Modifier prefix only (e.g. `"Ctrl+"`, `"Ctrl+Shift+"`), no key atom.
+    /// Modifier prefix only (e.g. `"Ctrl+"`, `"Ctrl+Shift+"`), no key name.
     pub fn modifiers_prefix(&self) -> String {
         let mut s = String::new();
         let _ = self.write_modifiers_prefix(&mut s);
         s
     }
 
-    /// Key-code atom only (e.g. `"c"`, `"Enter"`, `"/"`), no modifier prefix.
+    /// Key name only (e.g. `"c"`, `"Enter"`, `"/"`), no modifier prefix.
     pub fn code_display(&self) -> String {
         let mut s = String::new();
         let _ = self.write_code_display(&mut s);
@@ -144,9 +138,8 @@ impl KeyShortcut {
 
     /// Pretty display for the all-shortcuts cheatsheet modal.
     ///
-    /// Uses `Ctrl+Q` style instead of the compact `ctrl-q` / `C-q` bar
-    /// style. Shift is always shown explicitly (e.g. `Shift+G`,
-    /// `Ctrl+Shift+P`, `Shift+Tab`).
+    /// Uses `Ctrl+Q` style instead of the compact `ctrl-q` / `C-q` bar style.
+    /// Shift is always shown explicitly (e.g. `Shift+G`, `Ctrl+Shift+P`, `Shift+Tab`).
     pub fn display_pretty(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
         // SUPER first, spelled per-platform like Opt/Alt (Cmd on macOS).
@@ -177,8 +170,7 @@ impl KeyShortcut {
         if has_shift {
             parts.push("Shift".into());
         }
-        // BackTab is Shift+Tab but doesn't carry SHIFT in modifiers —
-        // inject "Shift" before the key name if not already present.
+        // BackTab is Shift+Tab but doesn't carry SHIFT in modifiers, so inject "Shift" before the key name if not already present
         if self.code == KeyCode::BackTab && !has_shift {
             parts.push("Shift".into());
         }
@@ -206,9 +198,8 @@ impl KeyShortcut {
 
     /// Platform-stable chord label for product telemetry.
     ///
-    /// Unlike [`Self::display_pretty`], this never localizes modifiers
-    /// (`Cmd`/`Opt` vs `Super`/`Alt`) and uses uppercase letters so analytics
-    /// filters can match exact strings (e.g. `Ctrl+L`).
+    /// Unlike [`Self::display_pretty`], this never localizes modifiers (`Cmd`/`Opt` vs `Super`/`Alt`).
+    /// It uses uppercase letters so analytics filters can match exact strings (e.g. `Ctrl+L`).
     pub fn display_telemetry(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
         if self.modifiers.contains(KeyModifiers::SUPER) {
@@ -249,10 +240,8 @@ impl KeyShortcut {
         parts.join("+")
     }
 
-    /// True iff this shortcut is a bare ASCII letter (no modifiers other
-    /// than SHIFT). Used by the vim-mode gate in `ActionRegistry::lookup_with_mode`
-    /// to decide whether a `When::ScrollbackFocused` binding should be
-    /// suppressed when vim mode is off.
+    /// True iff this shortcut is a bare ASCII letter (no modifiers other than SHIFT).
+    /// The vim-mode gate in `ActionRegistry::lookup_with_mode` uses this to suppress `When::ScrollbackFocused` bindings when vim mode is off.
     pub fn is_letter_or_shift_letter(&self) -> bool {
         let KeyCode::Char(c) = self.code else {
             return false;
@@ -269,13 +258,11 @@ pub fn is_paste_key(key: &KeyEvent) -> bool {
     if key!('v', CONTROL).matches(key) || key!('v', SUPER).matches(key) {
         return true;
     }
-    // Windows-only escape hatch: Windows Terminal's default Ctrl+V is a
-    // text-only `paste` action that silently drops image clipboards
-    // (Win+Shift+S, browser "Copy Image"). Alt+V is unbound in default
-    // WT profiles and reaches us as a normal keypress. macOS excluded
-    // (`Opt+V` types `√`); Linux excluded (no interceptor to escape).
-    // Doesn't collide with AltGr — AltGr arrives as `Ctrl+Alt`, not
-    // bare `Alt`, and `KeyShortcut::matches` is exact-modifier.
+    // Windows-only escape hatch: Windows Terminal's default Ctrl+V is a text-only `paste` action
+    // It silently drops image clipboards (Win+Shift+S, browser "Copy Image")
+    // Alt+V is unbound in default WT profiles and reaches us as a normal keypress
+    // macOS is excluded (`Opt+V` types `√`); Linux is excluded (no interceptor to escape)
+    // No AltGr collision: AltGr arrives as `Ctrl+Alt`, not bare `Alt`, and `KeyShortcut::matches` compares modifiers exactly
     #[cfg(target_os = "windows")]
     if key!('v', ALT).matches(key) {
         return true;
@@ -287,8 +274,8 @@ pub fn is_inline_paste_key(key: &KeyEvent) -> bool {
     key!('v', CONTROL | SHIFT).matches(key) || key!('v', SUPER | SHIFT).matches(key)
 }
 
-/// Ctrl+Z / Cmd+Z — the textarea's undo binding. Delegates to the owning
-/// crate's predicate so the chord can never desync from what the key does.
+/// Ctrl+Z / Cmd+Z, the textarea's undo binding.
+/// Delegates to the owning crate's predicate so the chord can never fall out of sync with what the key does.
 pub fn is_undo_key(key: &KeyEvent) -> bool {
     xai_ratatui_textarea::is_undo_input(key)
 }
@@ -306,10 +293,8 @@ pub fn is_altgr(_modifiers: KeyModifiers) -> bool {
     false
 }
 
-/// Canonical Shift+Tab encodings: `BackTab` (most xterm-likes),
-/// `BackTab+SHIFT` (some terminals), `Tab+SHIFT` (kitty protocol, some
-/// Windows terminals). Single source of truth for the `CycleMode` /
-/// `DashboardCycleMode` ActionDefs and [`is_shift_tab`].
+/// Shift+Tab encodings: `BackTab` (most xterm-likes), `BackTab+SHIFT` (some terminals), `Tab+SHIFT` (kitty protocol, some Windows terminals).
+/// The `CycleMode` / `DashboardCycleMode` ActionDefs and [`is_shift_tab`] all read from this list.
 pub fn shift_tab_keys() -> [KeyShortcut; 3] {
     [
         KeyShortcut::key(KeyCode::BackTab),
@@ -318,14 +303,13 @@ pub fn shift_tab_keys() -> [KeyShortcut; 3] {
     ]
 }
 
-/// True when the event is Shift+Tab in any encoding from
-/// [`shift_tab_keys`]. Release events never match.
+/// True when the event is Shift+Tab in any encoding from [`shift_tab_keys`].
+/// Release events never match.
 pub fn is_shift_tab(key: &KeyEvent) -> bool {
     shift_tab_keys().iter().any(|k| k.matches(key))
 }
 
-/// One step of the `Tab` / `Shift+Tab` walk through the rows of whichever
-/// surface owns the keyboard.
+/// One step of the `Tab` / `Shift+Tab` walk through the rows of whichever surface owns the keyboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowWalk {
     Forward,
@@ -333,10 +317,9 @@ pub enum RowWalk {
 }
 
 impl RowWalk {
-    /// `Tab` / `Shift+Tab` and nothing else: a modifier-bearing Tab belongs to
-    /// whoever binds it, not to the walk.
+    /// `Tab` / `Shift+Tab` and nothing else: a modifier-bearing Tab belongs to whoever binds it, not to the walk.
     pub fn from_key(key: &KeyEvent) -> Option<Self> {
-        // Shift+Tab first — one of its encodings *is* `Tab` + SHIFT.
+        // Shift+Tab first: one of its encodings *is* `Tab` + SHIFT
         if is_shift_tab(key) {
             Some(Self::Backward)
         } else if KeyShortcut::key(KeyCode::Tab).matches(key) {
@@ -346,8 +329,7 @@ impl RowWalk {
         }
     }
 
-    /// The row this step lands on, wrapping at both ends and clamping an
-    /// out-of-range cursor.
+    /// The row this step lands on, wrapping at both ends and clamping an out-of-range cursor.
     #[must_use]
     pub fn step(self, idx: usize, len: usize) -> usize {
         let Some(last) = len.checked_sub(1) else {
@@ -473,7 +455,6 @@ mod tests {
             KeyCode::Tab,
             KeyModifiers::SHIFT
         )));
-        // Plain Tab is NOT Shift+Tab.
         assert!(!is_shift_tab(&KeyEvent::new(
             KeyCode::Tab,
             KeyModifiers::NONE
@@ -590,8 +571,8 @@ mod tests {
     }
 
     /// Alt+V is the Windows-only escape hatch for WT's Ctrl+V interceptor.
-    /// Must NOT match elsewhere (collides with macOS `Opt+V` → `√`).
-    /// Must NOT match AltGr+V on Windows (AltGr = `Ctrl+Alt`, text-input).
+    /// It must NOT match elsewhere (macOS `Opt+V` types `√`).
+    /// It must NOT match AltGr+V on Windows (AltGr arrives as `Ctrl+Alt`, which is text input).
     #[test]
     fn is_paste_key_alt_v_windows_only() {
         let alt_v = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT);
@@ -636,8 +617,7 @@ mod tests {
         assert_eq!(key!('h', CONTROL | SHIFT).to_string(), "Ctrl+Shift+h");
         assert_eq!(key!('g', SHIFT).to_string(), "Shift+g");
 
-        // SUPER is spelled per-platform like Opt/Alt: Cmd on macOS, Super
-        // elsewhere — in both the compact and pretty forms.
+        // SUPER is spelled per-platform like Opt/Alt: Cmd on macOS, Super elsewhere, in both the compact and pretty forms
         if cfg!(target_os = "macos") {
             assert_eq!(key!(',', SUPER).to_string(), "Cmd+,");
             assert_eq!(key!(',', SUPER).display_pretty(), "Cmd+,");
@@ -646,7 +626,7 @@ mod tests {
             assert_eq!(key!(',', SUPER).display_pretty(), "Super+,");
         }
 
-        // Pretty (cheatsheet) also spells "Shift" + lowercase letter.
+        // Pretty (cheatsheet) also spells "Shift" with a lowercase letter
         assert_eq!(key!('n', CONTROL | SHIFT).display_pretty(), "Ctrl+Shift+n");
         assert_eq!(key!('h', CONTROL | SHIFT).display_pretty(), "Ctrl+Shift+h");
     }

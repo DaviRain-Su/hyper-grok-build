@@ -1,5 +1,3 @@
-//! Parsing for named workflow launch arguments.
-
 use xai_grok_sampling_types::{ReasoningEffort, ReasoningEffortOption};
 
 pub(crate) struct NamedWorkflowArgs {

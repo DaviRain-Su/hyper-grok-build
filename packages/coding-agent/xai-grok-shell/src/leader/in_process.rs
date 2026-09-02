@@ -17,9 +17,9 @@ use crate::agent::mvp_agent::MvpAgent;
 
 const SIMPLEX_BUF: usize = 8 * 1024 * 1024;
 
-/// Spawns an agent on the current `LocalSet`, reading requests from `to_agent`
-/// and writing responses to `from_agent`. Returns the task handles so a caller
-/// can end the agent. Panics if the ambient configuration cannot build one.
+/// Spawns an agent on the current `LocalSet`, reading requests from `to_agent` and writing responses to `from_agent`.
+/// Returns the task handles so a caller can end the agent.
+/// Panics if the ambient configuration cannot build one.
 pub fn spawn_agent(
     mut to_agent: UnboundedReceiver<String>,
     from_agent: UnboundedSender<String>,

@@ -1,4 +1,4 @@
-//! Jujutsu extension handlers — delegates to [`xai_grok_workspace::session::jj`].
+//! Jujutsu extension handlers; delegates to [`xai_grok_workspace::session::jj`].
 
 use agent_client_protocol as acp;
 
@@ -17,12 +17,11 @@ pub(crate) async fn try_handle(
     match method {
         "x.ai/git/status" => Some(to_ext_response(jj::status(git_root).await)),
         "x.ai/git/info" => Some(to_ext_response(jj::info(git_root).await)),
-        // git HEAD points at `@-` in a colocated repo; route to jj so we report
-        // the working-copy commit (`@`), consistent with `status`/`info`.
+        // git HEAD points at `@-` in a colocated repo; route to jj so we report the working-copy commit (`@`), consistent with `status`/`info`
         "x.ai/git/current_commit" => Some(to_ext_response(jj::current_commit(git_root).await)),
         "x.ai/git/branches" => Some(to_ext_response(jj::list_bookmarks(git_root).await)),
 
-        // jj has no staging area — stage/unstage are no-ops
+        // jj has no staging area: stage/unstage are no-ops
         "x.ai/git/stage" => Some(to_ext_response(Ok(StageData { paths: Vec::new() }))),
         "x.ai/git/stage/content" | "x.ai/git/unstage" => Some(to_ext_response(Ok(Empty {}))),
 

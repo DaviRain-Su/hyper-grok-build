@@ -1,7 +1,6 @@
 //! # xai-grok-hooks
 //!
-//! Runtime hook system for Grok — file-based discovery, command execution,
-//! and policy enforcement.
+//! Runtime hook system for Grok: file-based discovery, command execution, and policy enforcement.
 //!
 //! ## Overview
 //!
@@ -11,8 +10,7 @@
 //!
 //! ## Scope
 //!
-//! - Event types: `session_start`, `pre_tool_use`, `post_tool_use`,
-//!   `user_prompt_submit`, `stop`/`subagent_stop`, `notification`, `session_end`
+//! - Event types: `session_start`, `pre_tool_use`, `post_tool_use`, `user_prompt_submit`, `stop`/`subagent_stop`, `notification`, `session_end`
 //! - Both command-backed and HTTP hooks
 //! - `pre_tool_use` hooks can allow/ask/deny and rewrite tool input via `updatedInput`
 //! - Prompt and stop gates can block

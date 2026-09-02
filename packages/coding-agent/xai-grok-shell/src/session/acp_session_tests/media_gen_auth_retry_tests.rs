@@ -83,9 +83,8 @@ fn err(msg: &str) -> Result<ToolRunResult, xai_tool_runtime::ToolError> {
     ))
 }
 
-/// Production-shaped HTTP failure (image_gen / video_gen emit this on
-/// any non-success status). Use for retry tests that should exercise
-/// the structured status-code path rather than the string fallback.
+/// Build the HTTP failure shape that image_gen and video_gen emit on any non-success status.
+/// Use for retry tests that should exercise the structured status-code path rather than the string fallback.
 fn http_err(status: u16, msg: &str) -> Result<ToolRunResult, xai_tool_runtime::ToolError> {
     Err(
         xai_tool_runtime::ToolError::new(xai_tool_runtime::ToolErrorKind::Custom, msg.to_owned())
@@ -97,16 +96,14 @@ fn http_err(status: u16, msg: &str) -> Result<ToolRunResult, xai_tool_runtime::T
 
 // ── is_auth_tool_error ────────────────────────────────────────
 
-/// Single source of truth for which error strings/variants the helper
-/// must classify. Adding a new pattern is a one-line change here.
+/// Single source of truth for which error strings/variants the helper must classify.
+/// Adding a new pattern is a one-line change here.
 #[test]
 fn is_auth_tool_error_classification() {
-    // (expected, error) — covers every branch + a sample of negatives
-    // a careless edit could plausibly break.
+    // (expected, error) pairs: covers every branch and a sample of negatives a careless edit could plausibly break
     let cases: Vec<(bool, xai_tool_runtime::ToolError)> = vec![
-        // Primary path: image_gen / video_gen now surface 401s as
-        // structured custom errors with status in details; classifier
-        // matches the status code, not the rendered string.
+        // Primary path: image_gen and video_gen surface 401s as structured custom errors with the status in details
+        // The classifier matches the status code, not the rendered string
         (
             true,
             xai_tool_runtime::ToolError::new(
@@ -117,11 +114,10 @@ fn is_auth_tool_error_classification() {
                 serde_json::json!({"code": "http_failure", HTTP_STATUS_DETAILS_KEY: 401}),
             ),
         ),
-        // Negative: 403 Forbidden must NOT trigger a refresh. Mirrors
-        // the inference path's gate in xai-grok-sampling-types/src/error.rs:
-        // 403 means "authenticated but not permitted" (content safety,
-        // ZDR, remote settings gates) and refreshing the token is a no-op
-        // that surfaces as a spurious auth_required teardown.
+        // Negative: 403 Forbidden must NOT trigger a refresh
+        // This mirrors the inference path's gate in xai-grok-sampling-types/src/error.rs
+        // 403 means "authenticated but not permitted" (content safety, ZDR, remote settings gates)
+        // Refreshing the token is a no-op that surfaces as a spurious auth_required teardown
         (
             false,
             xai_tool_runtime::ToolError::new(
@@ -132,10 +128,8 @@ fn is_auth_tool_error_classification() {
                 serde_json::json!({"code": "http_failure", HTTP_STATUS_DETAILS_KEY: 403}),
             ),
         ),
-        // Regression guard: a 403 whose body happens to contain
-        // "unauthorized" must still be classified as not-auth. Without
-        // the structured-variant short-circuit in is_auth_tool_error,
-        // the keyword fallback would mis-fire here.
+        // Regression guard: a 403 whose body happens to contain "unauthorized" must still be classified as not-auth
+        // Without the structured-variant short-circuit in is_auth_tool_error, the keyword fallback would mis-fire here
         (
             false,
             xai_tool_runtime::ToolError::new(
@@ -157,21 +151,18 @@ fn is_auth_tool_error_classification() {
                 serde_json::json!({"code": "http_failure", HTTP_STATUS_DETAILS_KEY: 500}),
             ),
         ),
-        // Fallback path: BYOK / provider key validation arrives as a
-        // ValidationError without a status code. Classifier still
-        // catches it via the message-string fallback.
+        // Fallback path: BYOK or provider key validation arrives as a ValidationError without a status code
+        // The classifier still catches it via the message-string fallback
         (
             true,
             xai_tool_runtime::ToolError::invalid_arguments("response: invalid api key for project"),
         ),
-        // Fallback path: OAuth 2.0 `invalid_token` payload (RFC 6749)
-        // surfaced as raw JSON without a structured status code.
+        // Fallback path: an OAuth 2.0 `invalid_token` payload (RFC 6749) surfaced as raw JSON without a structured status code
         (
             true,
             xai_tool_runtime::ToolError::invalid_arguments(r#"{"error":"invalid_token"}"#),
         ),
-        // Fallback path: case-insensitive "unauthorized" anywhere in
-        // the message body.
+        // Fallback path: case-insensitive "unauthorized" anywhere in the message body
         (
             true,
             xai_tool_runtime::ToolError::invalid_arguments("UNAUTHORIZED"),
@@ -189,9 +180,8 @@ fn is_auth_tool_error_classification() {
                 "Tool not found: image_gen",
             ),
         ),
-        // Negative: bare digits embedded in a request id must not trigger
-        // a refresh (regression guard for any future bare-`401` substring
-        // match accidentally re-introduced into the fallback path).
+        // Negative: bare digits embedded in a request id must not trigger a refresh
+        // Regression guard for a bare-`401` substring match accidentally re-introduced into the fallback path
         (
             false,
             xai_tool_runtime::ToolError::invalid_arguments("request id req_401abc failed"),
@@ -293,9 +283,8 @@ async fn auth_error_without_refresher_returns_original_error() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
-/// Defensive bound: if the freshly-refreshed token also 401s
-/// (server-side revocation, clock skew, IdP/RP desync), give up
-/// after one retry rather than spinning.
+/// Defensive bound: if the freshly refreshed token also 401s, give up after one retry rather than spinning.
+/// That happens on server-side revocation, clock skew, or when the IdP and RP fall out of sync.
 #[tokio::test]
 async fn retry_is_bounded_at_one_even_if_retry_also_fails_with_auth() {
     let am = succeeding_am();

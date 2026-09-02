@@ -1,15 +1,14 @@
 //! Image preview overlay for prompt image chips.
 //!
-//! Renders a bordered popup when the cursor is on (or right after) an image
-//! chip, or when the chip is hovered. Content follows a pure 2×2 matrix:
+//! Renders a bordered popup when the cursor is on (or right after) an image chip, or when the chip is hovered.
+//! Content follows a 2×2 matrix:
 //!
 //! |                    | Has filepath              | No filepath                |
 //! |--------------------|---------------------------|----------------------------|
 //! | **Pixels available** | Image + path footer       | Image only                 |
 //! | **Pixels unavailable** | Metadata + path         | Metadata only              |
 //!
-//! The prompt bar chip itself is always path-free (`[Image #N]`); paths
-//! appear only here.
+//! The prompt bar chip itself never shows the path (`[Image #N]`); paths appear only here.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -66,7 +65,7 @@ fn render_image_overlay_inner(
     }
 
     let theme = crate::theme::Theme::current();
-    let protocol = terminal_image::detect_graphics_protocol();
+    let protocol = terminal_image::prompt_preview_graphics_protocol();
     let plan = plan_image_preview(image, protocol);
     let min_height = if plan.show_pixels {
         MIN_PIXEL_BOX_HEIGHT

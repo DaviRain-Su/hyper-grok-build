@@ -1,13 +1,10 @@
 //! Startup restart-recovery scan for the workspace upload queue.
 //!
-//! After a restart, not-yet-uploaded archives survive on disk as temp +
-//! `.meta.json` ([`QueueItemSidecar`]) pairs. The fresh [`UploadQueue`] worker
-//! only consumes its in-process channel — it never rescans the spill dir — so
-//! [`run_startup_recovery`] walks the sidecars once at startup, verifies each
-//! temp file against its recorded `sha256`, and re-enqueues survivors; corrupt,
-//! orphaned, and expired pairs are deleted. It runs before the workspace
-//! registers with the server, so prior-life items drain before any new turn hook
-//! can race against the queue.
+//! After a restart, not-yet-uploaded archives survive on disk as temp and `.meta.json` ([`QueueItemSidecar`]) pairs.
+//! The fresh [`UploadQueue`] worker only consumes its in-process channel and never rescans the spill dir.
+//! [`run_startup_recovery`] walks the sidecars once at startup, verifies each temp file against its recorded `sha256`, and re-enqueues survivors.
+//! Corrupt, orphaned, and expired pairs are deleted.
+//! It runs before the workspace registers with the server, so prior-life items drain before any new turn hook can race against the queue.
 
 use std::path::Path;
 use std::sync::LazyLock;
@@ -29,8 +26,7 @@ static ORPHAN_RECOVERED: LazyLock<IntCounterVec> = LazyLock::new(|| {
     .unwrap()
 });
 
-/// Pairs dropped without re-enqueue, labelled by reason
-/// (`missing_tmp` | `sha_mismatch` | `io_error` | `parse_error`).
+/// Pairs dropped without re-enqueue, labelled by reason (`missing_tmp` | `sha_mismatch` | `io_error` | `parse_error`).
 static ORPHAN_LOST: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
         "grok_workspace_orphan_lost_total",
@@ -73,8 +69,7 @@ pub(crate) fn init_metrics() {
     ORPHAN_EXPIRED.inc_by(0);
 }
 
-/// Summary of a single [`run_startup_recovery`] sweep, returned for structured
-/// logging; Prometheus counters are emitted inline per sidecar.
+/// Summary of a single [`run_startup_recovery`] sweep, returned for structured logging; Prometheus counters are emitted inline per sidecar.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RecoveryReport {
     /// Total `*.meta.json` sidecars examined.
@@ -85,25 +80,20 @@ pub struct RecoveryReport {
     pub lost: u32,
     /// Pairs dropped for exceeding [`DEFAULT_MAX_AGE`].
     pub expired: u32,
-    /// Re-enqueue attempts that failed (worker shut down); files are left in
-    /// place so a later startup can retry.
+    /// Re-enqueue attempts that failed (worker shut down); files are left in place so a later startup can retry.
     pub reenqueue_failures: u32,
 }
 
-/// Scan `<workspace_home>/upload_queue/*.meta.json`, verify each sidecar
-/// against its temp file, and re-enqueue the survivors in place via
-/// [`UploadQueue::enqueue_recovered`] — the original pair is handed to the
-/// worker unmodified, so its `enqueued_at` stays anchored to the first spill
-/// and repeated restarts cannot slide the max-age window. Corrupt, orphaned,
-/// and expired pairs are deleted with a labelled `lost`/`expired` metric. All
-/// errors are absorbed into the [`RecoveryReport`] rather than propagated: a
-/// partial recovery must never panic startup.
+/// Scan `<workspace_home>/upload_queue/*.meta.json` and verify each sidecar against its temp file.
+/// Survivors are re-enqueued in place via [`UploadQueue::enqueue_recovered`], handing the original pair to the worker unmodified.
+/// That keeps `enqueued_at` anchored to the first spill, so repeated restarts cannot slide the max-age window.
+/// Corrupt, orphaned, and expired pairs are deleted with a labelled `lost`/`expired` metric.
+/// All errors are absorbed into the [`RecoveryReport`] rather than propagated: a partial recovery must never panic startup.
 pub async fn run_startup_recovery(workspace_home: &Path, queue: &UploadQueue) -> RecoveryReport {
     let queue_dir = workspace_home.join("upload_queue");
     let mut report = RecoveryReport::default();
 
-    // Snapshot first: re-enqueueing writes new sidecars into this same dir, and
-    // we must never re-process one we just created.
+    // Snapshot first: re-enqueueing writes new sidecars into this same dir, and we must never re-process one we just created
     let sidecars: Vec<std::path::PathBuf> = match std::fs::read_dir(&queue_dir) {
         Ok(entries) => entries
             .flatten()
@@ -211,8 +201,7 @@ pub async fn run_startup_recovery(workspace_home: &Path, queue: &UploadQueue) ->
             continue;
         }
 
-        // The sidecar is on-disk JSON (a trust boundary): a crafted `.meta.json`
-        // must not smuggle path traversal into the temp filename or upload key.
+        // The sidecar comes from disk, so a crafted `.meta.json` must not smuggle path traversal into the temp filename or upload key
         if let Err(reason) = validate_recovered_sidecar(&sidecar) {
             tracing::warn!(
                 sidecar = %sidecar_path.display(),
@@ -231,8 +220,7 @@ pub async fn run_startup_recovery(workspace_home: &Path, queue: &UploadQueue) ->
             | EnqueueOutcome::FellBackToInline
             | EnqueueOutcome::Deduplicated
             | EnqueueOutcome::Skipped { .. } => {
-                // The worker owns the original pair from here: it deletes both
-                // files on every terminal outcome, same as a normal enqueue.
+                // The worker owns the original pair from here: it deletes both files on every terminal outcome, same as a normal enqueue
                 report.recovered += 1;
                 ORPHAN_RECOVERED
                     .with_label_values(&[sidecar.artifact_name.as_str()])
@@ -261,13 +249,12 @@ pub async fn run_startup_recovery(workspace_home: &Path, queue: &UploadQueue) ->
     report
 }
 
-/// Age of an orphan pair: prefer the sidecar's recorded `enqueued_at`; if it is
-/// unparseable, fall back to the temp file's mtime; if neither resolves, treat
-/// it as fresh (`Duration::ZERO`) so a parsing hiccup never deletes live data.
+/// Age of an orphan pair: prefer the sidecar's recorded `enqueued_at`; if it is unparseable, fall back to the temp file's mtime.
+/// If neither resolves, treat it as fresh (`Duration::ZERO`) so a parsing hiccup never deletes live data.
 fn sidecar_age(sidecar: &QueueItemSidecar, temp_path: &Path) -> Duration {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&sidecar.enqueued_at) {
         let enqueued: SystemTime = dt.with_timezone(&chrono::Utc).into();
-        // `Err` means `enqueued` is in the future (clock skew) → treat as fresh.
+        // `Err` means `enqueued` is in the future (clock skew), so treat it as fresh
         return SystemTime::now()
             .duration_since(enqueued)
             .unwrap_or(Duration::ZERO);
@@ -279,23 +266,21 @@ fn sidecar_age(sidecar: &QueueItemSidecar, temp_path: &Path) -> Duration {
         .unwrap_or(Duration::ZERO)
 }
 
-/// Record a `lost` outcome on the report and bump the labelled counter.
 fn record_lost(report: &mut RecoveryReport, reason: &str) {
     report.lost += 1;
     ORPHAN_LOST.with_label_values(&[reason]).inc();
 }
 
-/// Delete a sidecar and (optionally) its temp file, tolerating already-absent
-/// files. Returns `true` only when both are now gone, so callers can surface a
-/// leaked pair that would otherwise be re-processed on the next restart.
+/// Delete a sidecar and (optionally) its temp file, tolerating already-absent files.
+/// Returns `true` only when both are now gone, so callers can report a leaked pair that would otherwise be re-processed on the next restart.
 fn delete_pair(sidecar: &Path, temp: Option<&Path>) -> bool {
     let removed_sidecar = remove_if_present(sidecar);
     let removed_temp = temp.map(remove_if_present).unwrap_or(true);
     removed_sidecar && removed_temp
 }
 
-/// Remove `path`, treating an already-absent file as success. Returns `false`
-/// only on a real (non-`NotFound`) removal error.
+/// Remove `path`, treating an already-absent file as success.
+/// Returns `false` only on a real (non-`NotFound`) removal error.
 fn remove_if_present(path: &Path) -> bool {
     match std::fs::remove_file(path) {
         Ok(()) => true,
@@ -311,11 +296,10 @@ fn remove_if_present(path: &Path) -> bool {
     }
 }
 
-/// Reject manifest-derived fields that, fed back into `enqueue_bytes_blocking`,
-/// could escape the `upload_queue/` dir or the upload destination:
-/// `artifact_name`/`session_id` are interpolated into the temp filename (no
-/// separators, `..`, or NUL); `gcs_path` is the upload key (`/` allowed, `..`
-/// and NUL not). Returns `Err(reason)` — a stable metric label.
+/// Reject manifest-derived fields that, fed back into `enqueue_bytes_blocking`, could escape the `upload_queue/` dir or the upload destination.
+/// `artifact_name` and `session_id` are interpolated into the temp filename (no separators, `..`, or NUL).
+/// `gcs_path` is the upload key (`/` allowed, `..` and NUL not).
+/// Returns `Err(reason)`, a stable metric label.
 fn validate_recovered_sidecar(sidecar: &QueueItemSidecar) -> Result<(), &'static str> {
     fn is_filename_safe(s: &str) -> bool {
         !s.is_empty()
@@ -333,10 +317,9 @@ fn validate_recovered_sidecar(sidecar: &QueueItemSidecar) -> Result<(), &'static
     if sidecar.gcs_path.contains("..") || sidecar.gcs_path.contains('\0') {
         return Err("unsafe_gcs_path");
     }
-    // Session binding: every workspace artifact is keyed under its session
-    // prefix, so a sidecar whose `gcs_path` escapes `<session_id>/` is either
-    // corrupt or tampered with — without this check a manifest could keep a
-    // valid session_id while redirecting verified bytes to another prefix.
+    // Session binding: every workspace artifact is keyed under its session prefix
+    // A sidecar whose `gcs_path` escapes `<session_id>/` is either corrupt or tampered with
+    // Otherwise a manifest could keep a valid session_id while redirecting verified bytes to another prefix
     if !sidecar
         .gcs_path
         .strip_prefix(&sidecar.session_id)
@@ -347,11 +330,9 @@ fn validate_recovered_sidecar(sidecar: &QueueItemSidecar) -> Result<(), &'static
     Ok(())
 }
 
-/// Opt-out startup path: delete every spilled pair (and
-/// lone queue file) from a prior life instead of re-enqueueing it. A workspace
-/// launched opted out must neither upload nor retain bytes that
-/// a prior, differently-configured life left behind. Returns the number of
-/// files removed.
+/// Opt-out startup path: delete every spilled pair (and lone queue file) from a prior life instead of re-enqueueing it.
+/// A workspace launched opted out must neither upload nor retain bytes that a prior, differently-configured life left behind.
+/// Returns the number of files removed.
 pub fn purge_spilled_items(workspace_home: &Path) -> u32 {
     let queue_dir = workspace_home.join("upload_queue");
     let entries = match std::fs::read_dir(&queue_dir) {
@@ -374,19 +355,16 @@ pub fn purge_spilled_items(workspace_home: &Path) -> u32 {
     removed
 }
 
-/// Default maximum age for a per-session state directory before the
-/// [`cleanup_stale_sessions`] janitor reclaims it (7 days).
+/// Default maximum age for a per-session state directory before the [`cleanup_stale_sessions`] janitor reclaims it.
 pub const DEFAULT_SESSION_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-/// Remove per-session state directories under `<workspace_home>/sessions/`
-/// whose mtime is older than `max_age`, bounding the unbounded growth a
-/// long-lived workspace (or reused sandbox) would otherwise accumulate.
+/// Remove per-session state directories under `<workspace_home>/sessions/` whose mtime is older than `max_age`.
+/// This bounds the growth a long-lived workspace (or reused sandbox) would otherwise accumulate.
 ///
-/// A directory's mtime advances on every atomic-rename persistence write (the
-/// rename mutates the directory entry), so it tracks last activity closely
-/// enough for a best-effort reclaim. All errors are swallowed — a startup
-/// janitor must never fail boot. Only directories with a resolvable, expired
-/// mtime are removed; stray files and future-mtime entries are left untouched.
+/// A directory's mtime advances on every atomic-rename persistence write (the rename mutates the directory entry).
+/// That tracks last activity closely enough for a best-effort reclaim.
+/// All errors are swallowed: a startup janitor must never fail boot.
+/// Only directories with a resolvable, expired mtime are removed; stray files and future-mtime entries are left untouched.
 pub async fn cleanup_stale_sessions(workspace_home: &Path, max_age: Duration) {
     let sessions_dir = workspace_home.join("sessions");
     let Ok(mut entries) = tokio::fs::read_dir(&sessions_dir).await else {
@@ -445,8 +423,7 @@ mod tests {
     use xai_file_utils::queue::{TraceExportSource, UploadRetryPolicy, sidecar_path_for};
     use xai_file_utils::{TraceExportConfig, UploadMethod};
 
-    /// Resolver pointing at an unreachable proxy; these tests only assert on
-    /// the synchronous re-enqueue / file-deletion path, never upload completion.
+    /// Resolver pointing at an unreachable proxy; these tests only assert on the synchronous re-enqueue/file-deletion path, never upload completion.
     struct UnreachableResolver;
     impl TraceExportSource for UnreachableResolver {
         fn resolve(&self) -> TraceExportConfig {
@@ -468,8 +445,7 @@ mod tests {
         }
     }
 
-    /// Huge initial backoff so the worker never deletes a re-enqueued temp file
-    /// mid-test.
+    /// Huge initial backoff so the worker never deletes a re-enqueued temp file mid-test.
     fn slow_policy() -> UploadRetryPolicy {
         UploadRetryPolicy {
             initial_delay: Duration::from_secs(3600),
@@ -481,9 +457,8 @@ mod tests {
         UploadQueue::spawn(workspace_home, Arc::new(UnreachableResolver), slow_policy())
     }
 
-    /// Write an orphan pair as a prior workspace life would have left it;
-    /// `sha256` is computed over `content` so the pair passes the corruption
-    /// guard. Returns the (temp, sidecar) paths.
+    /// Write an orphan pair as a prior workspace life would have left it; `sha256` is computed over `content` so it passes the corruption guard.
+    /// Returns the (temp, sidecar) paths.
     fn write_orphan_pair(
         queue_dir: &Path,
         stem: &str,
@@ -531,8 +506,7 @@ mod tests {
         }
     }
 
-    /// Path traversal in any manifest-derived field is rejected with a stable
-    /// reason label.
+    /// Path traversal in any manifest-derived field is rejected with a stable reason label.
     #[test]
     fn validate_recovered_sidecar_rejects_traversal() {
         assert!(
@@ -615,7 +589,6 @@ mod tests {
         assert!(!lone.exists());
     }
 
-    /// Missing queue dir is a no-op purge.
     #[test]
     fn purge_spilled_items_missing_dir_is_noop() {
         let home = tempfile::TempDir::new().unwrap();
@@ -648,7 +621,7 @@ mod tests {
 
         let report = run_startup_recovery(home.path(), &queue).await;
 
-        // The re-enqueue really happened: report + queue stat + metric all moved.
+        // The re-enqueue really happened: report, queue stat, and metric all moved
         assert_eq!(report.recovered, 1, "one orphan re-enqueued");
         assert_eq!(report.lost, 0);
         assert_eq!(report.expired, 0);
@@ -669,9 +642,9 @@ mod tests {
             "recovered counter moved"
         );
 
-        // The ORIGINAL pair is handed to the worker unmodified — `enqueued_at`
-        // stays anchored to the first spill so restarts cannot slide the
-        // max-age window. The worker deletes the pair on its terminal outcome.
+        // The ORIGINAL pair is handed to the worker unmodified
+        // `enqueued_at` stays anchored to the first spill so restarts cannot slide the max-age window
+        // The worker deletes the pair on its terminal outcome
         assert!(temp.exists(), "original temp reused in place");
         assert!(sidecar.exists(), "original sidecar reused in place");
     }
@@ -726,7 +699,7 @@ mod tests {
         let queue_dir = home.path().join("upload_queue");
         std::fs::create_dir_all(&queue_dir).unwrap();
 
-        // enqueued 3h ago — older than DEFAULT_MAX_AGE (2h).
+        // Enqueued 3h ago, older than DEFAULT_MAX_AGE (2h)
         let (temp, sidecar) = write_orphan_pair(
             &queue_dir,
             "abcdef12_turn4_tool_state.json_333_0",
@@ -798,7 +771,6 @@ mod tests {
     // cleanup_stale_sessions
     // -----------------------------------------------------------------------
 
-    /// A session dir older than `max_age` is removed.
     #[tokio::test]
     async fn cleanup_removes_stale_session_dir() {
         let home = tempfile::TempDir::new().unwrap();
@@ -816,7 +788,6 @@ mod tests {
         );
     }
 
-    /// A session dir younger than `max_age` is kept.
     #[tokio::test]
     async fn cleanup_keeps_fresh_session_dir() {
         let home = tempfile::TempDir::new().unwrap();
@@ -844,7 +815,7 @@ mod tests {
         assert!(home.path().exists(), "home is left untouched");
     }
 
-    /// Stray files under `sessions/` are never removed — directories only.
+    /// Stray files under `sessions/` are never removed, only directories.
     #[tokio::test]
     async fn cleanup_ignores_non_dir_entries() {
         let home = tempfile::TempDir::new().unwrap();
@@ -869,8 +840,7 @@ mod tests {
         let sessions = home.path().join("sessions");
         let old = sessions.join("sess-old");
         std::fs::create_dir_all(&old).unwrap();
-        // Wide gap (100ms) vs a 50ms threshold so neither side is sensitive to
-        // scheduler jitter.
+        // Wide gap (100ms) vs a 50ms threshold so neither side is sensitive to scheduler jitter
         tokio::time::sleep(Duration::from_millis(100)).await;
         let max_age = Duration::from_millis(50);
         let fresh = sessions.join("sess-fresh");

@@ -41,8 +41,7 @@ impl HistoryProvider {
 }
 
 /// Rank history matches from three tiers of history sources.
-///
-/// Priority order: local grok bash history > shell history > cross-CWD history.
+/// Priority order: local grok bash history, then shell history, then cross-CWD history.
 fn rank_history_matches(
     prefix: &str,
     local: &[String],
@@ -180,7 +179,7 @@ struct ShellHistoryCache {
     updated_at: Instant,
 }
 
-/// Longer TTL for shell history — the file rarely changes during a session.
+/// Longer TTL for shell history; the file rarely changes during a session.
 const SHELL_HISTORY_CACHE_TTL: Duration = Duration::from_secs(300);
 
 static SHELL_HISTORY_CACHE: OnceLock<ArcSwap<ShellHistoryCache>> = OnceLock::new();
@@ -224,8 +223,7 @@ async fn get_or_refresh_shell_history_cache() -> Arc<ShellHistoryCache> {
 
 /// Detect the user's shell and load history from the appropriate file.
 ///
-/// Returns the most recent commands in reverse chronological order, capped
-/// at [`MAX_SHELL_HISTORY_ENTRIES`].
+/// Returns the most recent commands in reverse chronological order, capped at [`MAX_SHELL_HISTORY_ENTRIES`].
 fn load_shell_history() -> Vec<String> {
     let shell = std::env::var("SHELL").unwrap_or_default();
     let shell_name = std::path::Path::new(&shell)
@@ -259,8 +257,7 @@ fn home_dir() -> Option<PathBuf> {
     xai_dirs::home_dir()
 }
 
-/// Keep only the most recent `max` entries, reverse to most-recent-first, and
-/// deduplicate consecutive identical entries.
+/// Keep only the most recent `max` entries, reverse to most-recent-first, and deduplicate consecutive identical entries.
 fn trim_to_recent(commands: &mut Vec<String>, max: usize) {
     let start = commands.len().saturating_sub(max);
     commands.drain(..start);
@@ -297,12 +294,11 @@ fn load_bash_history(path: &std::path::Path) -> Vec<String> {
     commands
 }
 
-/// Load zsh history. Lines may be in extended format: `: timestamp:0;command`
-/// or plain format (one command per line).
+/// Load zsh history.
+/// Lines may be in extended format (`: timestamp:0;command`) or plain format (one command per line).
 ///
-/// TODO: zsh represents multiline commands with backslash-newline continuations
-/// in the history file. Currently each continuation line is treated as a
-/// separate command, yielding broken fragments for multiline entries.
+/// TODO: zsh represents multiline commands with backslash-newline continuations in the history file.
+/// Currently each continuation line is treated as a separate command, yielding broken fragments for multiline entries.
 fn load_zsh_history(path: &std::path::Path) -> Vec<String> {
     let data = match std::fs::read(path) {
         Ok(d) => d,
@@ -508,7 +504,7 @@ mod tests {
         assert_eq!(results[0].insert_text, "git push origin main");
         assert_eq!(results[1].insert_text, "git push origin staging");
         assert_eq!(results[2].insert_text, "git push origin dev");
-        // Priority decreases: local > shell > cross
+        // Priority decreases: local, then shell, then cross
         assert!(results[0].priority > results[1].priority);
         assert!(results[1].priority > results[2].priority);
     }
@@ -531,7 +527,7 @@ mod tests {
         writeln!(f, "cd /tmp").unwrap();
         writeln!(f, "echo hello").unwrap();
         let commands = load_bash_history(f.path());
-        // Reverse chrono order
+        // Commands come back in reverse chronological order
         assert_eq!(commands, &["echo hello", "cd /tmp", "ls -la"]);
     }
 
@@ -554,7 +550,7 @@ mod tests {
         }
         let commands = load_bash_history(f.path());
         assert_eq!(commands.len(), MAX_SHELL_HISTORY_ENTRIES);
-        // Most recent first
+        // The most recent command comes first
         assert_eq!(commands[0], "cmd_299");
     }
 
@@ -565,8 +561,7 @@ mod tests {
         writeln!(f, "pwd").unwrap();
         writeln!(f, "ls").unwrap();
         let commands = load_bash_history(f.path());
-        // After reverse + dedup: ["ls", "pwd", "ls"] -> reversed = ["ls", "pwd", "ls"]
-        // dedup removes consecutive dupes only. "ls", "pwd", "ls" has no consecutive dupes.
+        // Dedup removes only consecutive duplicates, and "ls", "pwd", "ls" has none, so all three survive
         assert_eq!(commands, &["ls", "pwd", "ls"]);
     }
 

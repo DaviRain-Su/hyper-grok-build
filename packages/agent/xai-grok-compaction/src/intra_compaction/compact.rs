@@ -680,7 +680,9 @@ fn build_prompt_for_target(
 /// sampler errors, incl. context-length overflow) lives in the shared loop, so
 /// intra and grok-build stay in lock-step. Outcome mapping:
 /// - exhausted empty/degenerate run → [`IntraCompactionError::EmptyResponse`];
-/// - deterministic sampler error (incl. context overflow) →
+/// - context overflow → [`IntraCompactionError::ContextOverflow`] (terminal;
+///   intra has no input ladder);
+/// - other deterministic sampler error →
 ///   [`IntraCompactionError::SamplerBuild`] (terminal);
 /// - transient sampler error that exhausts retries →
 ///   [`IntraCompactionError::SamplerStream`].
@@ -722,9 +724,12 @@ where
         Err(SampleRetryError::Failure {
             message,
             deterministic,
+            context_overflow,
             ..
         }) => {
-            if deterministic {
+            if context_overflow {
+                Err(IntraCompactionError::ContextOverflow(message))
+            } else if deterministic {
                 Err(IntraCompactionError::SamplerBuild(message))
             } else {
                 Err(IntraCompactionError::SamplerStream(message))
@@ -747,6 +752,7 @@ pub fn error_status_label(err: &IntraCompactionError) -> &'static str {
         IntraCompactionError::SamplerBuild(_) => "sampler_build",
         IntraCompactionError::SamplerStart(_) => "sampler_start",
         IntraCompactionError::SamplerStream(_) => "sampler_stream",
+        IntraCompactionError::ContextOverflow(_) => "context_overflow",
         IntraCompactionError::Apply(_) => "apply",
     }
 }
@@ -801,6 +807,7 @@ fn compaction_sample_error_to_intra(err: CompactionSampleError) -> IntraCompacti
         CompactionSampleError::Timeout { .. } => IntraCompactionError::Timeout,
         CompactionSampleError::Build(msg) => IntraCompactionError::SamplerBuild(msg),
         CompactionSampleError::Start(msg) => IntraCompactionError::SamplerStart(msg),
+        CompactionSampleError::ContextOverflow(msg) => IntraCompactionError::ContextOverflow(msg),
         CompactionSampleError::EmptyResponse => IntraCompactionError::EmptyResponse,
         CompactionSampleError::Other(e) => {
             let msg = e.to_string();
@@ -826,8 +833,6 @@ fn is_transient(err: &IntraCompactionError) -> bool {
             | IntraCompactionError::SamplerStream(_)
             | IntraCompactionError::SamplerStart(_)
     )
-    // Deterministic: SamplerBuild (config error), Unsupported, InvalidSplit,
-    // InsufficientReduction, NothingToCompact, Apply.
 }
 
 #[cfg(test)]
@@ -885,6 +890,10 @@ mod tests {
             (
                 IntraCompactionError::SamplerStream("x".into()),
                 "sampler_stream",
+            ),
+            (
+                IntraCompactionError::ContextOverflow("x".into()),
+                "context_overflow",
             ),
             (IntraCompactionError::Apply("x".into()), "apply"),
         ];
@@ -955,6 +964,12 @@ mod tests {
             compaction_sample_error_to_intra(CompactionSampleError::EmptyResponse),
             IntraCompactionError::EmptyResponse
         ));
+        assert!(matches!(
+            compaction_sample_error_to_intra(CompactionSampleError::ContextOverflow(
+                "too large".into()
+            )),
+            IntraCompactionError::ContextOverflow(_)
+        ));
     }
 
     #[test]
@@ -962,6 +977,9 @@ mod tests {
         // Build is deterministic (no retry); Start/EmptyResponse transient.
         assert!(!is_transient(&compaction_sample_error_to_intra(
             CompactionSampleError::Build("x".into())
+        )));
+        assert!(!is_transient(&compaction_sample_error_to_intra(
+            CompactionSampleError::ContextOverflow("too large".into())
         )));
         assert!(is_transient(&compaction_sample_error_to_intra(
             CompactionSampleError::Start("x".into())

@@ -1,4 +1,4 @@
-//! Process-isolated: configured garbage file → zero roots; client still builds.
+//! Process-isolated: a configured garbage file yields zero roots and the client still builds.
 
 #[test]
 fn configured_garbage_file_yields_zero_roots_and_builds() {

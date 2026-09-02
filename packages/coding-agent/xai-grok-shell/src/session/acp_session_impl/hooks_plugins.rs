@@ -3,8 +3,8 @@ use super::*;
 impl SessionActor {
     // ── Shared hook/plugin operation functions ────────────────────────
 
-    /// Trust the current project via the unified folder-trust store. Now an
-    /// alias of `--trust`: also allows repo-local MCP/LSP for this folder.
+    /// Trust the current project via the unified folder-trust store.
+    /// Same as `--trust`: also allows repo-local MCP/LSP for this folder.
     pub(super) fn do_hooks_trust_project(cwd: &str) -> Result<std::path::PathBuf, String> {
         let root =
             xai_grok_workspace::session::git::find_git_root_from_path(std::path::Path::new(cwd))
@@ -24,25 +24,16 @@ impl SessionActor {
         let root =
             xai_grok_workspace::session::git::find_git_root_from_path(std::path::Path::new(cwd))
                 .map_err(|_| "Not in a git repository.".to_string())?;
-        // revoke_folder_trust persists set_untrusted AND downgrades the decision
-        // cache so the untrust takes effect on the next reload, not just restart.
+        // revoke_folder_trust persists set_untrusted and downgrades the decision cache so the untrust applies at the next reload, not just restart
         let was_trusted = crate::agent::folder_trust::revoke_folder_trust(&root);
         Ok((root, was_trusted))
     }
 
-    /// Re-resolve the session-scoped MCP output cap (repo
-    /// `[mcp] max_output_bytes`) for this session's cwd and update the
-    /// toolset's `TruncationCfg` resource to match.
-    ///
-    /// Field-level update so any other `TruncationCfg` fields a host seeded
-    /// are preserved; clears the cap (restoring the process-global fallback)
-    /// when the project tier no longer wins — e.g. the key was removed, or
-    /// **folder trust was revoked** (`resolve_max_mcp_output_bytes_for_cwd`
-    /// is trust-gated, so calling this after a trust change keeps the seeded
-    /// cap in lockstep with the gate).
-    ///
-    /// Called from the `UpdateMcpServers` handler (project-config hot reload)
-    /// and from the hooks-modal Trust/Untrust actions.
+    /// Re-resolve the repo `[mcp] max_output_bytes` cap for this session's cwd and update the toolset's `TruncationCfg` resource to match.
+    /// Only that field changes, so any other `TruncationCfg` fields a host seeded are preserved.
+    /// Clears the cap (restoring the process-global fallback) when the project tier no longer wins: the key was removed, or folder trust was revoked.
+    /// `resolve_max_mcp_output_bytes_for_cwd` is trust-gated, so calling this after a trust change keeps the seeded cap matching the gate.
+    /// Called from the `UpdateMcpServers` handler (project-config hot reload) and from the hooks-modal Trust/Untrust actions.
     pub(super) async fn reseed_mcp_output_cap(&self) {
         let resolved = crate::util::config::resolve_max_mcp_output_bytes_for_cwd(
             std::path::Path::new(&self.session_info.cwd),
@@ -82,11 +73,9 @@ impl SessionActor {
         }
     }
 
-    /// Whether `name` resolves to a managed-policy (non-disableable) hook in
-    /// the live registry, keyed on the spec's typed `layer` — never on the name.
-    /// Fails open on a missing registry/name by design: a disable entry that
-    /// slips through is inert, because the dispatcher re-checks provenance at
-    /// run time — this modal check is UX, not the enforcement boundary.
+    /// Whether `name` resolves to a managed-policy (non-disableable) hook in the live registry, keyed on the spec's typed `layer`, never on the name.
+    /// Fails open on a missing registry or name: a disable entry that slips through is inert because the dispatcher re-checks provenance at run time.
+    /// This modal check is UX; the dispatcher is the enforcement boundary.
     pub(super) fn is_managed_policy_hook(&self, name: &str) -> bool {
         self.hook_registry
             .borrow()
@@ -126,9 +115,7 @@ impl SessionActor {
                 },
                 Ok(root) => {
                     let reload_msg = self.reload_hooks_impl().await;
-                    // Trust change flips the project-config gate: re-seed the
-                    // repo-level MCP output cap so it applies without waiting
-                    // for a config edit.
+                    // Trusting flips the project-config gate: re-seed the repo MCP output cap so it applies without waiting for a config edit
                     self.reseed_mcp_output_cap().await;
                     ActionOutcome {
                         status: OutcomeStatus::Success,
@@ -153,10 +140,8 @@ impl SessionActor {
                 },
                 Ok((root, true)) => {
                     let reload_msg = self.reload_hooks_impl().await;
-                    // Revoked trust must immediately drop a previously seeded
-                    // repo-level MCP output cap (the resolver is trust-gated,
-                    // so this clears it) — not linger until the next config
-                    // reload.
+                    // Revoking trust must drop a previously seeded repo MCP output cap right away, not at the next config reload
+                    // The resolver is trust-gated, so this call clears it
                     self.reseed_mcp_output_cap().await;
                     ActionOutcome {
                         status: OutcomeStatus::Success,
@@ -213,8 +198,7 @@ impl SessionActor {
                         requires_reload: false,
                         requires_restart: false,
                     },
-                    // Pathless copy: the selection already identifies
-                    // the source.
+                    // The message omits the path; the user's selection already identifies the source
                     Ok(false) => ActionOutcome {
                         status: OutcomeStatus::NotFound,
                         message: "Only user-added hook directories can be removed here.".to_owned(),
@@ -230,7 +214,7 @@ impl SessionActor {
                 }
             }
             HooksAction::Disable { hook_name } => {
-                // No internal spec names in user-facing copy.
+                // Internal spec names stay out of the user-facing message
                 if self.is_managed_policy_hook(&hook_name) {
                     return ActionOutcome {
                         status: OutcomeStatus::ValidationError,
@@ -284,8 +268,7 @@ impl SessionActor {
                 let mut toggled = 0usize;
                 let mut managed_skipped = 0usize;
                 for name in &hook_names {
-                    // Managed-policy hooks are exempt from bulk disable, same
-                    // rule as the per-hook Disable action.
+                    // Managed-policy hooks are exempt from bulk disable, same rule as the per-hook Disable action
                     if disable && self.is_managed_policy_hook(name) {
                         managed_skipped += 1;
                         continue;
@@ -293,7 +276,7 @@ impl SessionActor {
                     let ok = if disable {
                         xai_grok_hooks::trust::disable_hook(name).is_ok()
                     } else {
-                        // Only an actual removal counts (Ok(false) = wasn't disabled).
+                        // Only an actual removal counts (Ok(false) means it wasn't disabled)
                         xai_grok_hooks::trust::enable_hook(name) == Ok(true)
                     };
                     if ok {
@@ -327,7 +310,7 @@ impl SessionActor {
         match action {
             PluginsAction::Reload => match &self.plugin_registry_handle {
                 Some(handle) => {
-                    // Explicit user reload: force a full local-install re-copy.
+                    // An explicit user reload forces a full re-copy of local installs
                     let msg = self.reload_plugins_impl(handle, true).await;
                     ActionOutcome {
                         status: OutcomeStatus::Success,
@@ -424,7 +407,7 @@ impl SessionActor {
                         let plugin_names: Vec<String> = repo.plugins.keys().cloned().collect();
                         let count = plugin_names.len();
 
-                        // Check multi-plugin repo — return ConfirmationRequired.
+                        // A multi-plugin repo needs confirmation before removal
                         if count > 1 && !confirmed {
                             return ActionOutcome {
                                 status: OutcomeStatus::ConfirmationRequired,
@@ -669,22 +652,17 @@ impl SessionActor {
         }
     }
 
-    /// Reload hooks mid-session. Re-discovers global and project hooks,
-    /// re-evaluates project trust, and re-appends plugin-contributed hooks.
-    /// `pub(super)` so the `SessionCommand::ReloadHooks` arm in `run_session`
-    /// (the parent module) can invoke it after an interactive folder-trust
-    /// grant — same visibility as `apply_plugin_registry_snapshot` below.
+    /// Reload hooks mid-session: re-discovers global and project hooks, re-evaluates project trust, and re-appends plugin-contributed hooks.
+    /// `pub(super)` so the `SessionCommand::ReloadHooks` arm in `run_session` (parent module) can call it after an interactive folder-trust grant.
     pub(super) async fn reload_hooks_impl(self: &std::sync::Arc<Self>) -> String {
         let git_root = xai_grok_workspace::session::git::find_git_root_from_path(
             std::path::Path::new(&self.session_info.cwd),
         )
         .ok();
-        // Reconcile folder-trust so a mid-session /hooks-trust (or --trust) grant
-        // is honored on reload, then gate project hook sources on the verdict.
+        // Reconcile folder-trust so a mid-session /hooks-trust (or --trust) grant counts on reload, then gate project hook sources on the verdict
         let cwd = std::path::Path::new(&self.session_info.cwd);
         let is_trusted = crate::agent::folder_trust::resolve_and_record(cwd, None, false);
-        // Single load entry point so all vendors (compat and native) and custom
-        // hook-paths are handled consistently with the session-startup sites.
+        // discover_hooks is the single load entry point, so all vendors (compat and native) and custom hook-paths match the session-startup sites
         let (mut registry, errors) = crate::util::hooks::discover_hooks(
             git_root.as_deref(),
             &self.rebuild_spec.compat,
@@ -739,23 +717,11 @@ impl SessionActor {
         tracing::info!(hook_count, "hooks reloaded mid-session");
 
         // Notify pager about hooks change.
-        // Extract all RefCell borrows into locals before the .await so
-        // no Ref guard is alive across the suspension point.
+        // Extract all RefCell borrows into locals before the .await so no Ref guard is alive across the suspension point
         {
-            use crate::extensions::hooks::hook_spec_to_info_with;
-            let hooks = {
-                let disabled = xai_grok_hooks::trust::DisabledHooks::load();
-                let registered = crate::config::registered_hook_paths();
-                let reg = self.hook_registry.borrow();
-                match &*reg {
-                    Some(registry) => registry
-                        .all_hooks()
-                        .iter()
-                        .map(|s| hook_spec_to_info_with(s, &disabled, &registered))
-                        .collect(),
-                    None => Vec::new(),
-                }
-            };
+            let hooks = crate::extensions::hooks::current_hook_infos(
+                self.hook_registry.borrow().as_deref(),
+            );
             let load_errors = self.hook_load_errors.borrow().clone();
             let project_trusted = is_trusted;
             self.send_xai_notification(XaiSessionUpdate::HooksChanged {
@@ -768,13 +734,10 @@ impl SessionActor {
         format!("Hooks reloaded: {hook_count} hook(s) loaded.")
     }
 
-    /// Shared plugin reload logic used by enable/disable/add/remove and the
-    /// explicit `/plugins reload` command.
-    ///
-    /// Re-reads plugin config from disk, rebuilds the registry, reloads hooks,
-    /// and returns a human-readable status message. `force` is `true` only for the
-    /// explicit `/plugins reload` (full local-install re-copy); incidental toggles
-    /// pass `false` for the cheap skip-unchanged path.
+    /// Shared plugin reload logic used by enable/disable/add/remove and the explicit `/plugins reload` command.
+    /// Re-reads plugin config from disk, rebuilds the registry, reloads hooks, and returns a human-readable status message.
+    /// `force` is `true` only for the explicit `/plugins reload`, which forces a full re-copy of local installs.
+    /// Incidental toggles pass `false` for the cheap skip-unchanged path.
     pub(super) async fn reload_plugins_impl(
         self: &Arc<Self>,
         handle: &xai_grok_agent::plugins::SharedPluginRegistryHandle,
@@ -785,19 +748,16 @@ impl SessionActor {
         let sid = self.session_info.id.0.as_ref();
         xai_grok_telemetry::unified_log::info("reload_plugins_impl: start", Some(sid), None);
 
-        // Folder-trust gates repo-local project plugins (hooks/MCP). Resolve and
-        // record the verdict for this cwd BEFORE the plugins-config read below,
-        // whose project-paths merge reads the gate — same site ordering as
-        // commands/list and the fan-out, so no gate read ever precedes the
-        // site's own resolve. Pure verdict: the session-start hook load already
-        // printed the folder-untrusted notice, so don't print a second.
+        // Folder-trust gates repo-local project plugins (hooks/MCP)
+        // Resolve and record the verdict for this cwd before the plugins-config read below, whose project-paths merge reads the gate
+        // commands/list and the fan-out order these the same way, so no gate read ever precedes the site's own resolve
+        // The session-start hook load already printed the folder-untrusted notice, so this resolve stays quiet
         let project_trusted =
             crate::agent::folder_trust::resolve_and_record(session_cwd, None, false);
 
         let t0 = std::time::Instant::now();
-        // Resolve effective [plugins] config (global + ancestor project
-        // configs + compat merge). Shared with commands/list and the eager
-        // fan-out so all paths discover the same plugins for this cwd.
+        // Resolve the effective [plugins] config: global, ancestor project configs, and the compat merge
+        // Shared with commands/list and the eager fan-out so all paths discover the same plugins for this cwd
         let plugins_cfg = crate::config::resolve_effective_plugins_config(session_cwd);
         let config_read_ms = t0.elapsed().as_millis();
 
@@ -817,9 +777,8 @@ impl SessionActor {
             })),
         );
 
-        // Adopt the freshly-rebuilt snapshot into this session (hooks, MCP,
-        // skills, client slash-command catalog). Sessions with `_meta.pluginDirs`
-        // rebuild their own view instead — the shared snapshot never carries them.
+        // Adopt the freshly-rebuilt snapshot into this session (hooks, MCP, skills, client slash-command catalog)
+        // Sessions with `_meta.pluginDirs` rebuild their own view instead; the shared snapshot never carries them
         let session_dirs = self.session_plugin_dirs();
         let new_registry_snapshot = if session_dirs.is_empty() {
             handle.snapshot()
@@ -852,8 +811,7 @@ impl SessionActor {
         )
     }
 
-    /// This session's `_meta.pluginDirs`, recovered from the registry it was
-    /// built with; empty when the session has none.
+    /// This session's `_meta.pluginDirs`, recovered from the registry it was built with; empty when the session has none.
     pub(crate) fn session_plugin_dirs(&self) -> Vec<std::path::PathBuf> {
         self.plugin_registry
             .borrow()
@@ -862,8 +820,7 @@ impl SessionActor {
             .unwrap_or_default()
     }
 
-    /// Re-merge this session's `_meta.pluginDirs` into a registry rebuilt by a
-    /// process-wide fan-out (which knows nothing about per-session dirs).
+    /// Re-merge this session's `_meta.pluginDirs` into a registry rebuilt by a process-wide fan-out (which knows nothing about per-session dirs).
     pub(crate) fn preserve_session_plugin_dirs(
         &self,
         incoming: Option<std::sync::Arc<xai_grok_agent::plugins::PluginRegistry>>,
@@ -878,17 +835,14 @@ impl SessionActor {
         let session_cwd = std::path::Path::new(&self.session_info.cwd);
         let disk_cfg =
             crate::config::resolve_effective_plugins_config(session_cwd).to_discovery_config();
-        // Pure verdict read: the session's spawn resolve already recorded this
-        // cwd with the real remote.
+        // Reads the stored verdict only; the session's spawn resolve already recorded this cwd with the real remote
         let project_trusted = crate::agent::folder_trust::project_scope_allowed(session_cwd);
         handle.build_for_cwd(session_cwd, &disk_cfg, &dirs, project_trusted)
     }
 
-    /// Apply a pre-built plugin registry snapshot to this session: swap the
-    /// per-session registry, reload plugin hooks, re-merge plugin MCP servers,
-    /// re-scan skills, and notify the client. Shared by `reload_plugins_impl`
-    /// (the originating session) and the `ReloadPlugins` command (the agent's
-    /// eager fan-out to other live sessions when plugins change elsewhere).
+    /// Apply a pre-built plugin registry snapshot to this session.
+    /// Swaps the per-session registry, reloads plugin hooks, re-merges plugin MCP servers, re-scans skills, and notifies the client.
+    /// Called by `reload_plugins_impl` in the originating session and by the `ReloadPlugins` command when plugins change in another session.
     /// Returns `(hooks_reloaded, mcp_changed, skill_count)`.
     pub(super) async fn apply_plugin_registry_snapshot(
         self: &Arc<Self>,
@@ -897,7 +851,6 @@ impl SessionActor {
         let sid = self.session_info.id.0.as_ref();
         let session_cwd = std::path::Path::new(&self.session_info.cwd);
 
-        // Update session's plugin registry snapshot
         *self.plugin_registry.borrow_mut() = new_registry_snapshot.clone();
 
         // Rebuild WASM extension runtime with full lifecycle:
@@ -1072,9 +1025,8 @@ impl SessionActor {
                     hook_reg.remove_by_prefix("plugin/");
                     hook_reg.append_specs(new_specs);
                 } else if !new_specs.is_empty() {
-                    // No registry yet: bootstrap config-layer and file hooks (as
-                    // reload_hooks_impl does), not empty sources, so a plugin-first
-                    // snapshot doesn't drop config hooks.
+                    // No registry yet: bootstrap config-layer and file hooks the way reload_hooks_impl does
+                    // Starting from empty sources instead would let a plugin-first snapshot drop config hooks
                     let git_root =
                         xai_grok_workspace::session::git::find_git_root_from_path(session_cwd).ok();
                     let is_trusted =
@@ -1099,14 +1051,12 @@ impl SessionActor {
             })),
         );
 
-        // Always re-merge plugin-contributed MCP servers and apply via an
-        // order-insensitive diff: unchanged servers stay connected, and only
-        // added/changed/removed ones are re-initialized. Merging
-        // unconditionally (no "plugins have MCP" guard) lets a removed
-        // plugin's server tear down cleanly; the diff keeps it a no-op when
-        // the effective set is unchanged, avoiding the spurious full teardown
-        // the order-sensitive `update_configs` would cause (merge order is
-        // non-deterministic). Mirrors the `UpdateMcpServers` command handler.
+        // Always re-merge plugin-contributed MCP servers and apply them via an order-insensitive diff
+        // Unchanged servers stay connected; only added, changed, or removed ones are re-initialized
+        // Merging unconditionally (no "plugins have MCP" guard) lets a removed plugin's server tear down cleanly
+        // The diff keeps it a no-op when the effective set is unchanged
+        // The order-sensitive `update_configs` would tear everything down instead, because merge order is non-deterministic
+        // This mirrors the `UpdateMcpServers` command handler
         let t_mcp = std::time::Instant::now();
         let new_mcp_servers = crate::session::managed_mcp::merge_managed_mcp_servers(
             self.initial_client_mcp_servers.clone(),
@@ -1174,27 +1124,13 @@ impl SessionActor {
         );
 
         // Notify pager about registry changes so the modal auto-refreshes.
-        // Extract all RefCell borrows into locals before the .await so
-        // no Ref guard is alive across the suspension point (prevents
-        // BorrowMutError panics when send_xai_notification dispatches
-        // Notification hooks that also borrow these RefCells).
+        // Extract all RefCell borrows into locals before the .await so no Ref guard is alive across the suspension point
+        // Otherwise send_xai_notification's Notification hooks, which also borrow these RefCells, panic with BorrowMutError
         let t_notify = std::time::Instant::now();
         {
-            use crate::extensions::hooks::hook_spec_to_info_with;
-
-            let hooks = {
-                let disabled = xai_grok_hooks::trust::DisabledHooks::load();
-                let registered = crate::config::registered_hook_paths();
-                let reg = self.hook_registry.borrow();
-                match &*reg {
-                    Some(registry) => registry
-                        .all_hooks()
-                        .iter()
-                        .map(|s| hook_spec_to_info_with(s, &disabled, &registered))
-                        .collect(),
-                    None => Vec::new(),
-                }
-            };
+            let hooks = crate::extensions::hooks::current_hook_infos(
+                self.hook_registry.borrow().as_deref(),
+            );
             let load_errors = self.hook_load_errors.borrow().clone();
             // Report the folder-trust verdict so the flag matches the gated registry.
             let project_trusted = crate::agent::folder_trust::project_scope_allowed(

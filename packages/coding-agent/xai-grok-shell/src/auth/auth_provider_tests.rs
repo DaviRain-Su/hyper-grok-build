@@ -1,6 +1,5 @@
-// Slot names are process-global, so every test uses a unique name (no #[serial]
-// needed). No test mutates the process env: the scrub test sets its leak values
-// on the child command instead.
+// Slot names are process-global, so every test uses a unique name and needs no #[serial]
+// No test mutates the process env: the scrub test sets its leak values on the child command instead
 
 use super::test_counting_provider as counting_provider;
 use super::*;
@@ -192,8 +191,7 @@ async fn provider_401_recovery_reminted_under_edited_config() {
     );
 }
 
-/// Editing only `timeout_secs` keeps the token; it is not part of
-/// `token_identity`.
+/// Editing only `timeout_secs` keeps the token; it is not part of `token_identity`.
 #[tokio::test]
 async fn provider_timeout_edit_does_not_invalidate_token() {
     let dir = tempfile::tempdir().unwrap();
@@ -217,8 +215,7 @@ async fn provider_timeout_edit_does_not_invalidate_token() {
     );
 }
 
-/// `cwd` is part of `token_identity`, so editing it invalidates the cache: the
-/// same helper in a different directory can mint a different token.
+/// `cwd` is part of `token_identity`, so editing it invalidates the cache: the same helper in a different directory can mint a different token.
 #[tokio::test]
 async fn provider_cwd_edit_invalidates_cached_token() {
     let dir = tempfile::tempdir().unwrap();
@@ -259,8 +256,7 @@ async fn attach_trusted_config_lets_a_revived_ref_mint() {
     );
 }
 
-/// A ref revived from bytes never mutates the shared slot: a mutating
-/// call fails closed and leaves a resolved ref's token intact.
+/// A ref revived from bytes never mutates the shared slot: a mutating call fails closed and leaves a resolved ref's token intact.
 #[tokio::test]
 async fn deserialized_ref_never_drops_the_shared_token() {
     let dir = tempfile::tempdir().unwrap();
@@ -280,9 +276,8 @@ async fn deserialized_ref_never_drops_the_shared_token() {
     );
 }
 
-/// A ref serializes to its name only: the revived ref carries no command
-/// and fails closed until re-attached, while the shared slot still serves
-/// resolved refs of the same name.
+/// A ref serializes to its name only: the revived ref carries no command and fails closed until re-attached.
+/// The shared slot still serves resolved refs of the same name.
 #[tokio::test]
 async fn provider_ref_serializes_name_only_and_drops_config() {
     let dir = tempfile::tempdir().unwrap();
@@ -371,12 +366,11 @@ async fn provider_concurrent_mints_single_flight() {
     assert_eq!(runs, 1, "the command must run exactly once");
 }
 
-/// Proven by staleness: an expiry inside the 60s skew re-mints, a
-/// distant one serves from cache.
+/// The winning expiry source is proven by staleness: an expiry inside the 60s skew re-mints, a distant one serves from cache.
 #[tokio::test]
 async fn provider_expiry_source_precedence() {
     fn short_jwt() -> String {
-        // exp within the skew window: stale immediately if consumed.
+        // The exp lands inside the skew window, so the token is immediately stale if the claim is consumed
         jwt_with_exp(chrono::Utc::now().timestamp() + 30)
     }
     fn long_jwt() -> String {
@@ -417,7 +411,7 @@ async fn provider_expiry_source_precedence() {
 
     let dir = tempfile::tempdir().unwrap();
 
-    // expires_in=10 (stale) wins over token_ttl_secs=3600 (fresh): re-mints.
+    // expires_in=10 (stale) wins over token_ttl_secs=3600 (fresh), so the second call re-mints
     let c1 = dir.path().join("c1");
     let cmd1 = format!(
         "echo run >> {}; printf '{{\"access_token\":\"t1\",\"expires_in\":10}}'",
@@ -429,7 +423,7 @@ async fn provider_expiry_source_precedence() {
         "expires_in must win over token_ttl_secs"
     );
 
-    // token_ttl_secs=1 (stale) wins over a 2h JWT exp (fresh): re-mints.
+    // token_ttl_secs=1 (stale) wins over a 2h JWT exp (fresh), so the second call re-mints
     let c2 = dir.path().join("c2");
     let cmd2 = format!("echo run >> {}; printf '{}'", c2.display(), long_jwt());
     assert_eq!(
@@ -438,8 +432,7 @@ async fn provider_expiry_source_precedence() {
         "token_ttl_secs must win over the JWT exp claim"
     );
 
-    // JWT exp alone: a near-expiry claim (inside the skew) re-mints,
-    // proving the claim is consumed when nothing else is configured.
+    // With the JWT exp alone, a near-expiry claim (inside the skew) re-mints, proving the claim is consumed when nothing else is configured
     let c3 = dir.path().join("c3");
     let cmd3 = format!("echo run >> {}; printf '{}'", c3.display(), short_jwt());
     assert_eq!(
@@ -521,8 +514,7 @@ async fn provider_command_times_out() {
 
 #[tokio::test]
 async fn provider_zero_timeout_clamps_to_one_second() {
-    // `timeout_secs = 0` clamps up to the 1s floor, so an instant helper mints
-    // rather than failing immediately.
+    // `timeout_secs = 0` clamps up to the 1s floor, so an instant helper mints rather than failing immediately
     let fast = AuthProviderRef::new(
         "test-zero-timeout-fast".to_owned(),
         AuthProviderConfig {
@@ -538,8 +530,7 @@ async fn provider_zero_timeout_clamps_to_one_second() {
         Some("tok")
     );
 
-    // ...and clamps down from the 30s default: a helper that runs past 1s times
-    // out, proving the effective bound is the clamp, not the default.
+    // ...and clamps down from the 30s default: a helper that runs past 1s times out, proving the effective bound is the clamp, not the default
     let slow = AuthProviderRef::new(
         "test-zero-timeout-slow".to_owned(),
         AuthProviderConfig {
@@ -559,8 +550,7 @@ async fn provider_zero_timeout_clamps_to_one_second() {
     );
 }
 
-/// The distinct mint-failure modes (timeout, spawn failure, ran-but-no-token)
-/// surface distinct, greppable error messages so operators can triage them.
+/// Each mint-failure mode (timeout, spawn failure, ran but printed no token) produces a distinct, greppable error message so operators can triage.
 #[tokio::test]
 async fn mint_error_messages_distinguish_failure_modes() {
     let timed_out = AuthProviderRef::new(
@@ -612,9 +602,9 @@ async fn mint_error_messages_distinguish_failure_modes() {
     assert!(err.to_string().contains("no output"), "got: {err}");
 }
 
-/// On an in-session re-mint, the prior credential is handed back to the command
-/// via `GROK_AUTH_PROVIDER_*`, so a refresh-grant command can refresh instead of
-/// re-authenticating. Nothing is written to disk.
+/// On an in-session re-mint, the prior credential is handed back to the command via `GROK_AUTH_PROVIDER_*`.
+/// A command holding a refresh grant can then refresh instead of re-authenticating.
+/// Nothing is written to disk.
 #[tokio::test]
 async fn re_mint_hands_the_prior_token_back_to_the_command() {
     let provider = AuthProviderRef::new(
@@ -642,8 +632,7 @@ async fn re_mint_hands_the_prior_token_back_to_the_command() {
     );
 }
 
-/// A 401 whose re-mint fails invalidates the rejected token, so it is not
-/// re-served next turn (fail closed) even while still locally unexpired.
+/// A 401 whose re-mint fails invalidates the rejected token, so it is not re-served next turn (fail closed) even while still locally unexpired.
 #[tokio::test]
 async fn failed_401_remint_invalidates_the_cached_token() {
     let dir = tempfile::tempdir().unwrap();
@@ -681,9 +670,8 @@ async fn failed_401_remint_invalidates_the_cached_token() {
     );
 }
 
-/// A pre-turn re-mint that fails over a now-stale cached token leaves nothing
-/// servable: the stale token is never handed to the wire (mirror of the 401
-/// path, for the pre-turn path).
+/// A pre-turn re-mint that fails over a now-stale cached token leaves nothing servable: the stale token is never handed to the wire.
+/// This mirrors the 401 recovery path.
 #[tokio::test]
 async fn failed_pre_turn_mint_does_not_serve_the_stale_token() {
     let dir = tempfile::tempdir().unwrap();
@@ -719,8 +707,7 @@ async fn failed_pre_turn_mint_does_not_serve_the_stale_token() {
     );
 }
 
-/// A helper that writes past the stdout cap fails closed (permanent), so a
-/// runaway command can't exhaust memory or put a huge token on the wire.
+/// A helper that writes past the stdout cap fails closed (permanent), so a runaway command can't exhaust memory or put a huge token on the wire.
 #[tokio::test]
 async fn provider_output_over_cap_fails_closed() {
     let over = PROVIDER_STDOUT_CAP_BYTES + 4096;
@@ -748,22 +735,18 @@ async fn provider_output_over_cap_fails_closed() {
     );
 }
 
-/// Every first-party credential env var is scrubbed from the helper, so a BYOK
-/// helper never inherits the keys BYOK isolates on the wire.
+/// Every first-party credential env var is scrubbed from the helper, so a BYOK helper never inherits the keys BYOK isolates on the wire.
 ///
-/// The test drives its set/echo from an independent audited `EXPECTED` list, not
-/// from the scrub const, so it is not tautological: dropping an entry from
-/// `FIRST_PARTY_CREDENTIAL_ENV_VARS` alone leaves that var set on the command and
-/// trips the assert below, and removing one from both requires deliberately
-/// editing this audited list.
+/// The test sets and echoes vars from the independent audited `EXPECTED` list, not from the scrub const, so it is not tautological.
+/// Dropping an entry from `FIRST_PARTY_CREDENTIAL_ENV_VARS` alone leaves that var set on the command and trips the assert below.
+/// Removing one from both requires deliberately editing this audited list.
 ///
-/// The leak values are set on the child command, not the process env, so the
-/// test is hermetic: it needs no `#[serial]` and cannot race a sibling test that
-/// reads a first-party credential (e.g. the `auth::manager` session tests).
+/// The leak values are set on the child command, not the process env, so the test is hermetic.
+/// It needs no `#[serial]` and cannot race a sibling test that reads a first-party credential (e.g. the `auth::manager` session tests).
 #[tokio::test]
 async fn provider_helper_env_scrubs_first_party_credentials() {
-    // The credentials a BYOK helper must never inherit. Editing this list is the
-    // audit checkpoint: it must equal the production scrub const.
+    // The credentials a BYOK helper must never inherit
+    // Editing this list is the audit checkpoint: it must equal the production scrub const
     const EXPECTED: &[&str] = &[
         "XAI_API_KEY",
         "GROK_CODE_XAI_API_KEY",
@@ -782,9 +765,8 @@ async fn provider_helper_env_scrubs_first_party_credentials() {
          credential a BYOK helper must not inherit, then update EXPECTED"
     );
 
-    // Echo each expected var back; the scrub must leave every one empty. A
-    // scrub-const entry that EXPECTED still lists but production stopped removing
-    // stays at its leak value and surfaces here.
+    // Echo each expected var back; the scrub must leave every one empty
+    // A var that EXPECTED lists but production stopped scrubbing keeps its leak value and shows up here
     let echo = EXPECTED
         .iter()
         .map(|v| format!("${{{v}-}}"))
@@ -805,8 +787,7 @@ async fn provider_helper_env_scrubs_first_party_credentials() {
     );
 }
 
-/// `resolve_program` branches: bare name via `PATH`, absolute as-is, relative
-/// against `cwd`.
+/// `resolve_program` branches: a bare name resolves via `PATH`, an absolute path is used as-is, a relative one resolves against `cwd`.
 #[test]
 fn resolve_program_resolves_against_cwd() {
     let cwd = std::path::Path::new("/work");
@@ -834,8 +815,7 @@ fn resolve_program_resolves_against_cwd() {
     );
 }
 
-/// The `args` form (the portable, no-shell shape a desktop/Windows helper
-/// should use) resolves a relative program against the provider's `cwd`.
+/// The `args` form (the portable, no-shell shape a desktop or Windows helper should use) resolves a relative program against the provider's `cwd`.
 #[cfg(unix)]
 #[tokio::test]
 async fn provider_resolves_relative_program_against_cwd() {
@@ -863,8 +843,7 @@ async fn provider_resolves_relative_program_against_cwd() {
     );
 }
 
-/// `cwd` is the command's runtime directory: reading a file by relative name
-/// only succeeds if `current_dir` took effect (here via the shell form).
+/// `cwd` is the command's runtime directory: reading a file by relative name only succeeds if `current_dir` took effect (here via the shell form).
 #[cfg(unix)]
 #[tokio::test]
 async fn provider_command_runs_in_cwd() {

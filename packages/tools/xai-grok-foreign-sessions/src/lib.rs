@@ -6,9 +6,8 @@
     dead_code
 )]
 //! Bounded, metadata-only listing of foreign coding-agent sessions.
-//! Foreign SQLite stores are opened only when `xai_sqlite_journal::JournalMode`
-//! selects local WAL. The direct read-only/query-only transaction makes no
-//! logical writes, though WAL coordination may update shared-memory read marks.
+//! Foreign SQLite stores are opened only when `xai_sqlite_journal::JournalMode` selects local WAL.
+//! The direct read-only/query-only transaction makes no logical writes, though WAL coordination may update shared-memory read marks.
 //! Network filesystems fail soft before SQLite open, conversion, or writes.
 use std::cmp::Ordering;
 use std::collections::HashSet;

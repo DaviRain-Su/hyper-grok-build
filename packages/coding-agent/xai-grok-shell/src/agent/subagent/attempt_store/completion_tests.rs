@@ -162,8 +162,8 @@ fn strict_decoder_rejects_noncanonical_oversized_and_event_cap_rows() {
 
 #[test]
 fn exact_accounting_covers_decimal_boundary_maximum_and_overflow() {
-    // Exact Progress bills one-digit effects (0..=9) one byte under the two-digit-i
-    // row max; product/complete rows keep COMPLETION_ROW_BYTES exact widths.
+    // Exact accounting bills a Progress row with a one-digit effect (0..=9) one byte under the row max, which assumes a two-digit `i`
+    // ProductClaim and Complete rows bill at their exact COMPLETION_ROW_BYTES widths
     // Per two-digit generation: 10*147 + 3*148 + 8*116 + 110 = 2_952.
     // Per one-digit generation: 2_952 - 22 = 2_930.
     let expected = [

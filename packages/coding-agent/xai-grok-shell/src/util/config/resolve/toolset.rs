@@ -2,19 +2,14 @@ use crate::util::config::RemoteSettings;
 use toml::Value as TomlValue;
 use xai_grok_tools::implementations::grok_build::ask_user_question;
 
-/// Resolve whether the bash-harness `find`→`bfs` / `grep`→`ugrep` shadows are
-/// enabled. Precedence (highest first): `requirements.toml` (org policy, wins
-/// outright) > a truthy `DISABLE_EMBEDDED_SEARCH_TOOLS` master (forces off) > env
-/// > `config.toml` `[toolset.bash]` > `managed_config.toml` > default-on. Env uses the shared
-/// [`xai_grok_config::env_bool`] parser (`GROK_TOOLS_FIND_BFS` /
-/// `GROK_TOOLS_GREP_UGREP`, plus the `GROK_FIND_BFS` / `GROK_GREP_UGREP` aliases).
+/// Resolve whether the bash-harness shadows that swap `find` for `bfs` and `grep` for `ugrep` are enabled.
+/// Precedence (highest first): `requirements.toml` (org policy, wins outright) > a truthy `DISABLE_EMBEDDED_SEARCH_TOOLS` master (forces off)
+/// > env > `config.toml` `[toolset.bash]` > `managed_config.toml` > default-on.
 ///
 /// Pass the **merged** requirements ([`crate::config::load_merged_requirements`])
 /// so an org policy in any requirements layer — not only
 /// `~/.grok/requirements.toml` — is honored. Returns `(find_bfs, grep_ugrep)`,
-/// which the caller bakes into a
-/// [`xai_grok_tools::computer::local::SearchShadowConfig`] on the local terminal
-/// backend.
+/// which the caller bakes into a [`xai_grok_tools::computer::local::SearchShadowConfig`] on the local terminal backend.
 pub(crate) fn resolve_search_tools_enabled(
     requirements: Option<&TomlValue>,
     user: Option<&TomlValue>,
@@ -40,10 +35,9 @@ pub(crate) fn resolve_search_tools_enabled(
     )
 }
 
-/// Parse `[shell_environment_policy]` from the merged effective config, or `None`
-/// when unset or unparseable (the child then inherits the full environment). This
-/// is the authoritative parse; the `Config` field of the same name only feeds the
-/// unrecognized-key scan.
+/// Parse `[shell_environment_policy]` from the merged effective config, or `None` when unset or unparseable.
+/// On `None` the child inherits the full environment.
+/// This is the authoritative parse; the `Config` field of the same name only feeds the unrecognized-key scan.
 pub(crate) fn resolve_shell_env_policy(
     effective_cfg: Option<&TomlValue>,
 ) -> Option<xai_grok_tools::util::ShellEnvironmentPolicy> {
@@ -60,10 +54,7 @@ pub(crate) fn resolve_shell_env_policy(
     }
 }
 
-/// Pure precedence for [`resolve_search_tools_enabled`] (tiers injected so it is
-/// unit-testable without env/disk): requirement (org policy) wins outright — even
-/// over the user `DISABLE_*` master kill-switch — then the master forces off,
-/// then env > config > managed > default-on.
+/// Pure precedence for [`resolve_search_tools_enabled`].
 fn resolve_search_tool_enabled(
     disable: Option<bool>,
     requirement: Option<bool>,
@@ -71,8 +62,7 @@ fn resolve_search_tool_enabled(
     config: Option<bool>,
     managed: Option<bool>,
 ) -> bool {
-    // Org policy (requirements.toml) is authoritative, so a user env kill-switch
-    // can't override an admin-forced value.
+    // Org policy (requirements.toml) is authoritative, so a user env kill-switch can't override an admin-forced value
     if let Some(required) = requirement {
         return required;
     }
@@ -120,8 +110,7 @@ pub(crate) fn resolve_login_shell_capture(remote: Option<bool>) -> bool {
     })
 }
 
-/// Config layers for [`resolve_login_shell_capture_tiers`], one `Option` per
-/// tier so a positional `None` can't be misread as the wrong layer.
+/// Config layers for [`resolve_login_shell_capture_tiers`], one `Option` per tier so a positional `None` can't be misread as the wrong layer.
 #[derive(Default)]
 struct LoginShellCaptureTiers<'a> {
     requirements: Option<&'a TomlValue>,
@@ -132,13 +121,10 @@ struct LoginShellCaptureTiers<'a> {
     remote: Option<bool>,
 }
 
-/// Precedence (highest first): requirements/MDM (clamp, via
-/// [`crate::config::load_merged_requirements`]) > `GROK_LOGIN_ENV` env >
-/// `GROK_CONFIG` overlay > user `config.toml` > managed layers > remote >
-/// default `true`. `login_shell_capture` is a soft key, so the overlay is
-/// merged just above user config (mirroring its place in the disk merge: above
-/// user, below requirements), letting a `GROK_CONFIG` toggle reach it while
-/// requirements/MDM still clamp the value.
+/// Precedence (highest first): requirements/MDM (clamp, via [`crate::config::load_merged_requirements`]) > `GROK_LOGIN_ENV` env
+/// > `GROK_CONFIG` overlay > user `config.toml` > managed layers > remote > default `true`.
+/// `login_shell_capture` is a soft key, so the overlay is merged just above user config, mirroring its place in the disk merge.
+/// That lets a `GROK_CONFIG` toggle reach it while requirements/MDM still clamp the value.
 fn resolve_login_shell_capture_tiers(tiers: LoginShellCaptureTiers<'_>) -> bool {
     let LoginShellCaptureTiers {
         requirements,
@@ -248,7 +234,7 @@ mod login_shell_capture_tests {
     #[test]
     fn overlay_beats_user_and_default() {
         let _g = guard();
-        // (a) Overlay `false` is honored over a user-on config...
+        // Overlay `false` is honored over a user-on config...
         assert!(!resolve_login_shell_capture_tiers(LoginShellCaptureTiers {
             env_overlay: Some(&cfg(false)),
             user: Some(&cfg(true)),
@@ -264,7 +250,7 @@ mod login_shell_capture_tests {
     #[test]
     fn overlay_honored_in_both_directions_over_disk() {
         let _g = guard();
-        // (b) Overlay `true` beats a user-`false` disk config...
+        // Overlay `true` beats a user-`false` disk config...
         assert!(resolve_login_shell_capture_tiers(LoginShellCaptureTiers {
             env_overlay: Some(&cfg(true)),
             user: Some(&cfg(false)),
@@ -281,7 +267,7 @@ mod login_shell_capture_tests {
     #[test]
     fn requirements_clamp_the_overlay() {
         let _g = guard();
-        // (c) A requirements value clamps the overlay in both directions.
+        // A requirements value clamps the overlay in both directions
         assert!(!resolve_login_shell_capture_tiers(LoginShellCaptureTiers {
             requirements: Some(&cfg(false)),
             env_overlay: Some(&cfg(true)),
@@ -297,7 +283,7 @@ mod login_shell_capture_tests {
     #[test]
     fn env_beats_overlay() {
         let _g = guard();
-        // `GROK_LOGIN_ENV` outranks the overlay (env > overlay).
+        // `GROK_LOGIN_ENV` outranks the overlay
         unsafe { std::env::set_var(ENV_LOGIN_SHELL_CAPTURE, "1") };
         let on = resolve_login_shell_capture_tiers(LoginShellCaptureTiers {
             env_overlay: Some(&cfg(false)),
@@ -316,9 +302,8 @@ fn scheduler_background_loops_from_toml(v: Option<&TomlValue>) -> Option<bool> {
 
 /// Resolve whether scheduled task fires run in background loop subagents.
 ///
-/// Precedence: requirements > env (`GROK_SCHEDULER_BACKGROUND_LOOPS`) > user
-/// `config.toml` `[scheduler] background_loops` > managed layers > remote
-/// settings > default `true`.
+/// Precedence: requirements > env (`GROK_SCHEDULER_BACKGROUND_LOOPS`) > user `config.toml` `[scheduler] background_loops`
+/// > managed layers > remote settings > default `true`.
 pub fn resolve_scheduler_background_loops(remote: Option<bool>) -> bool {
     let requirements = crate::config::load_merged_requirements();
     let layers = match crate::config::ConfigLayers::load() {
@@ -444,12 +429,9 @@ mod scheduler_background_loops_tests {
     }
 }
 
-/// Env override for `[toolset.ask_user_question] timeout_enabled` (parsed by
-/// the shared [`xai_grok_config::env_bool`] via `BoolFlag`). The secs env var
-/// lives in the tools crate (`RESPONSE_TIMEOUT_ENV`), parsed once there.
+/// The secs env var lives in the tools crate (`RESPONSE_TIMEOUT_ENV`), parsed once there.
 const ENV_ASK_USER_QUESTION_TIMEOUT_ENABLED: &str = "GROK_ASK_USER_QUESTION_TIMEOUT_ENABLED";
 
-/// Extract `[toolset.ask_user_question] timeout_enabled` from one TOML layer.
 fn ask_user_question_timeout_enabled_from_toml(v: Option<&TomlValue>) -> Option<bool> {
     v?.get("toolset")?
         .get("ask_user_question")?
@@ -457,9 +439,7 @@ fn ask_user_question_timeout_enabled_from_toml(v: Option<&TomlValue>) -> Option<
         .as_bool()
 }
 
-/// Extract `[toolset.ask_user_question] timeout_secs` from one TOML layer.
-/// Non-positive values are warned and dropped so the layer falls through —
-/// `0` must never mean "wait forever"; that is `timeout_enabled = false`.
+/// Non-positive values are warned and dropped so the layer falls through: `0` must never mean "wait forever"; that is `timeout_enabled = false`.
 fn ask_user_question_timeout_secs_from_toml(v: Option<&TomlValue>) -> Option<u64> {
     let raw = v?
         .get("toolset")?
@@ -476,15 +456,8 @@ fn ask_user_question_timeout_secs_from_toml(v: Option<&TomlValue>) -> Option<u64
     valid
 }
 
-/// Resolve `[toolset.ask_user_question] timeout_enabled`.
-///
-/// Precedence: requirements > env (`GROK_ASK_USER_QUESTION_TIMEOUT_ENABLED`)
-/// > user `config.toml` > managed (user-level `managed_config.toml` over the
-/// system-managed layer, matching `effective_config()`'s merge order) >
-/// remote settings > default `true`. Returns [`Resolved`] so callers can
-/// log the winning source.
-///
-/// [`Resolved`]: crate::agent::config::Resolved
+/// Precedence: requirements > env (`GROK_ASK_USER_QUESTION_TIMEOUT_ENABLED`) > user `config.toml` > managed (user-level `managed_config.toml`
+/// over the system-managed layer, matching `effective_config()`'s merge order) > remote settings > default `true`.
 fn resolve_ask_user_question_timeout_enabled(
     requirements: Option<&TomlValue>,
     user: Option<&TomlValue>,
@@ -505,9 +478,7 @@ fn resolve_ask_user_question_timeout_enabled(
         .resolve()
 }
 
-/// Pure precedence for [`resolve_ask_user_question_timeout_secs`] (tiers
-/// injected so it is unit-testable without env/disk): requirements > env >
-/// config > managed > remote > default (the tool's 30-minute `RESPONSE_TIMEOUT`).
+/// Pure precedence for [`resolve_ask_user_question_timeout_secs`]; the default is the tool's 30-minute `RESPONSE_TIMEOUT`.
 fn resolve_ask_user_question_timeout_secs_from_tiers(
     requirement: Option<u64>,
     env: Option<u64>,
@@ -526,12 +497,8 @@ fn resolve_ask_user_question_timeout_secs_from_tiers(
         )
 }
 
-/// Resolve `[toolset.ask_user_question] timeout_secs` (positive seconds).
-///
-/// Precedence: requirements > env (`GROK_ASK_USER_QUESTION_TIMEOUT_SECS`,
-/// parsed by the tools crate's canonical parser) > user `config.toml` >
-/// managed (user-level over system-managed, matching `effective_config()`) >
-/// remote settings > default 1800 (30 minutes).
+/// Precedence: requirements > env (`GROK_ASK_USER_QUESTION_TIMEOUT_SECS`, parsed by the tools crate's canonical parser) > user `config.toml`
+/// > managed (user-level over system-managed, matching `effective_config()`) > remote settings > default 1800 (30 minutes).
 fn resolve_ask_user_question_timeout_secs(
     requirements: Option<&TomlValue>,
     user: Option<&TomlValue>,
@@ -550,14 +517,10 @@ fn resolve_ask_user_question_timeout_secs(
     )
 }
 
-/// Resolve the full `[toolset.ask_user_question]` params injected into the
-/// tool as `Params<AskUserQuestionParams>` at agent build/rebuild.
+/// Resolve the full `[toolset.ask_user_question]` params injected into the tool as `Params<AskUserQuestionParams>` at agent build/rebuild.
 ///
-/// Reads the raw requirements / user / managed / system-managed layers from
-/// disk (raw layers, not the effective merge, so a managed-only value stays
-/// below env in the precedence); `remote` is the live remote tier. Both
-/// fields resolve to concrete values, so the tool's legacy env fallback only
-/// runs for consumers that skip this resolver.
+/// Reads the raw requirements / user / managed / system-managed layers from disk, not the effective merge, so a managed-only value stays below env.
+/// Both fields resolve to concrete values, so the tool's legacy env fallback only runs for consumers that skip this resolver.
 pub(crate) fn resolve_ask_user_question_params_from_disk(
     remote: Option<&RemoteSettings>,
 ) -> xai_grok_tools::implementations::grok_build::ask_user_question::AskUserQuestionParams {
@@ -590,25 +553,22 @@ pub(crate) fn resolve_ask_user_question_params_from_disk(
             system_managed,
             remote.and_then(|r| r.ask_user_question_timeout_secs),
         )),
-        // Session state stamped by AgentBuilder (non-interactive spawn), not
-        // a config key — the resolver must leave it unset.
+        // AgentBuilder stamps this session state on a non-interactive spawn; it is not a config key, so the resolver must leave it unset
         non_interactive: None,
     }
 }
 
-/// `[toolset.web_search]` domain keys. Read here from the raw config layers, not
-/// through `ShellToolsetConfig::web_search` (a `SamplerConfig`, which has no such
-/// fields), so they must be exempt from the unrecognized-key scan.
+/// `[toolset.web_search]` domain keys.
+/// Read here from the raw config layers, not through `ShellToolsetConfig::web_search` (a `SamplerConfig`, which has no such fields).
+/// So they must be exempt from the unrecognized-key scan.
 pub const WEB_SEARCH_DOMAIN_CONFIG_PATHS: &[&str] = &[
     "toolset.web_search.allowed_domains",
     "toolset.web_search.excluded_domains",
 ];
 
-/// Read a `[toolset.web_search] <key>` string array from the already-merged
-/// section. Empty or absent yields `None` (unbounded). For a security-flavored
-/// setting a silent typo must not disable the policy, so a present-but-malformed
-/// value is warned (not just dropped): a non-array value yields `None` with a
-/// warning, and any non-string array entry is skipped with a warning.
+/// Read a `[toolset.web_search] <key>` string array from the already-merged section.
+/// Empty or absent yields `None` (unbounded).
+/// For a setting that affects security, a silent typo must not disable the policy, so a present-but-malformed value is warned (not just dropped).
 fn read_domain_array(section: &TomlValue, key: &str) -> Option<Vec<String>> {
     let value = section.get(key)?;
     let Some(arr) = value.as_array() else {
@@ -631,10 +591,8 @@ fn read_domain_array(section: &TomlValue, key: &str) -> Option<Vec<String>> {
     (!domains.is_empty()).then_some(domains)
 }
 
-/// Cap a config-sourced domain list to the web-search API's maximum, logging a
-/// warning on truncation. Config degrades rather than failing the session (the
-/// repo convention for `[toolset.*]`); authored inputs (frontmatter / per-turn)
-/// instead hard-error via `WebSearchOptions`'s deserialize validation.
+/// Config degrades rather than failing the session (the repo convention for `[toolset.*]`).
+/// Authored inputs (frontmatter / per-turn) instead hard-error via `WebSearchOptions`'s deserialize validation.
 fn cap_web_search_domains(list: Option<Vec<String>>, field: &str) -> Option<Vec<String>> {
     const MAX: usize = xai_grok_sampling_types::MAX_WEB_SEARCH_DOMAINS;
     list.map(|mut domains| {
@@ -653,16 +611,10 @@ fn cap_web_search_domains(list: Option<Vec<String>>, field: &str) -> Option<Vec<
     })
 }
 
-/// Resolve `[toolset.web_search]` domain filters into a [`WebSearchOptions`].
-///
-/// Layer precedence and the allow/exclude atomicity are handled **upstream** by
-/// `ConfigLayers` (per-layer normalization couples the two keys, then the normal
-/// `deep_merge_toml` picks the whole policy from the winning layer). So this just
-/// reads the already-merged `[toolset.web_search]` section and shapes it: caps
-/// each list to the API max, and defensively drops `excluded_domains` if a
-/// single layer set both (warns). Returns `None` when neither filter is set.
-///
-/// [`WebSearchOptions`]: xai_grok_sampling_types::WebSearchOptions
+/// Layer precedence and the allow/exclude atomicity are handled **upstream** by `ConfigLayers`:
+/// per-layer normalization couples the two keys, then the normal `deep_merge_toml` picks the whole policy from the winning layer.
+/// This only shapes the already-merged `[toolset.web_search]` section.
+/// Returns `None` when neither filter is set.
 pub(crate) fn resolve_web_search_domains_from_disk()
 -> Option<xai_grok_sampling_types::WebSearchOptions> {
     let effective = match crate::config::load_effective_config() {
@@ -676,8 +628,6 @@ pub(crate) fn resolve_web_search_domains_from_disk()
     web_search_options_from_section(section)
 }
 
-/// Shape a merged `[toolset.web_search]` section into [`WebSearchOptions`]
-/// (unit-testable core of [`resolve_web_search_domains_from_disk`]).
 fn web_search_options_from_section(
     section: &TomlValue,
 ) -> Option<xai_grok_sampling_types::WebSearchOptions> {
@@ -698,8 +648,8 @@ fn web_search_options_from_section(
     }
     match opts.validate() {
         Ok(()) => Some(opts),
-        // Defensive: normalization should make a both-set section impossible, but
-        // a single layer that set both survives the merge, so degrade here too.
+        // Defensive: normalization should make a both-set section impossible
+        // But a single layer that set both survives the merge, so degrade here too
         Err(e) => {
             tracing::warn!(
                 error = %e,
@@ -718,10 +668,8 @@ fn web_search_options_from_section(
 mod web_search_domains_tests {
     use super::*;
 
-    // Cross-layer precedence + allow/exclude atomicity live in ConfigLayers
-    // (see `xai_grok_config::loader` normalization tests). These cover only the
-    // section-shaping this module still owns: extraction, the max-5 cap, and the
-    // defensive both-set degrade.
+    // Cross-layer precedence and allow/exclude atomicity live in ConfigLayers (see `xai_grok_config::loader` normalization tests)
+    // These cover only the section-shaping this module still owns: extraction, the max-5 cap, and the defensive both-set degrade
     fn section(body: &str) -> TomlValue {
         let full: TomlValue = toml::from_str(&format!("[toolset.web_search]\n{body}\n")).unwrap();
         full.get("toolset")
@@ -774,8 +722,7 @@ mod web_search_domains_tests {
 
     #[test]
     fn both_set_degrades_to_allowlist() {
-        // Normalization prevents this across layers; this is the in-one-layer
-        // defensive path.
+        // Normalization prevents this across layers; this is the in-one-layer defensive path.
         let got = web_search_options_from_section(&section(
             "allowed_domains = [\"docs.x.ai\"]\nexcluded_domains = [\"reddit.com\"]",
         ))
@@ -791,8 +738,7 @@ mod ask_user_question_timeout_tests {
     use crate::agent::config::ConfigSource;
     use xai_grok_tools::implementations::grok_build::ask_user_question::RESPONSE_TIMEOUT_ENV;
 
-    // Both env vars are process-global (a dev exports the secs var for TUI
-    // repro); serialize and force them unset so these tests can't go flaky.
+    // Both env vars are process-global (a dev exports the secs var for TUI repro); serialize and force them unset so these tests can't go flaky
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     fn guard() -> std::sync::MutexGuard<'static, ()> {
         let g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -894,7 +840,7 @@ mod ask_user_question_timeout_tests {
             ),
             45
         );
-        // remote 0 is unset too → default.
+        // remote 0 is unset too, so the default wins
         assert_eq!(
             resolve_ask_user_question_timeout_secs(None, Some(&zero), None, None, Some(0)),
             d
@@ -954,7 +900,7 @@ mod tests {
     fn resolve_search_tool_enabled_precedence() {
         // args: disable, requirement, env, config, managed
         assert!(resolve_search_tool_enabled(None, None, None, None, None)); // default on
-        // Org requirement wins outright — even over the user DISABLE kill-switch.
+        // Org requirement wins outright, even over the user DISABLE kill-switch
         assert!(resolve_search_tool_enabled(
             Some(true),
             Some(true),
@@ -1019,7 +965,7 @@ mod shell_env_policy_tests {
 
     #[test]
     fn resolve_shell_env_policy_absent_parsed_typo_and_typed_error() {
-        // Absent table → None (child inherits the full environment).
+        // An absent table yields None (the child inherits the full environment)
         let empty: TomlValue = toml::from_str("").unwrap();
         assert!(resolve_shell_env_policy(Some(&empty)).is_none());
         assert!(resolve_shell_env_policy(None).is_none());
@@ -1035,16 +981,14 @@ mod shell_env_policy_tests {
             vec![EnvironmentVariablePattern::new_case_insensitive("FOO")]
         );
 
-        // An unknown sub-key is ignored; the known keys still apply (the
-        // load-time scan warns on the typo).
+        // An unknown sub-key is ignored; the known keys still apply (the load-time scan warns on the typo)
         let typo: TomlValue =
             toml::from_str("[shell_environment_policy]\ninherit = \"none\"\ninhert = \"core\"\n")
                 .unwrap();
         let policy = resolve_shell_env_policy(Some(&typo)).expect("known keys still parse");
         assert_eq!(policy.inherit, ShellEnvironmentPolicyInherit::None);
 
-        // A wrong-typed known key fails to parse → None (full environment,
-        // logged), not a spawn abort.
+        // A wrong-typed known key fails the parse, yielding None (full environment, logged), not a spawn abort
         let bad: TomlValue =
             toml::from_str("[shell_environment_policy]\nexclude = \"not-an-array\"\n").unwrap();
         assert!(resolve_shell_env_policy(Some(&bad)).is_none());

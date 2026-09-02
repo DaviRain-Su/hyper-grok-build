@@ -498,7 +498,7 @@ impl<'a> EntryRenderer<'a> {
     /// The rendered-row offset (from the entry's top, including any top vpad row) where the search index's `logical_line`-th line begins at `width`.
     ///
     /// EXACT for blocks whose searchable text mirrors their selectable rendered lines (plain source blocks, markdown/thinking bodies).
-    /// It is a best-effort estimate for field-joined source (Subagent/BgTask/CreditLimit), kept on screen by the caller's entry-height clamp.
+    /// It is a best-effort estimate for field-joined source (Subagent/BgTask), kept on screen by the caller's entry-height clamp.
     /// Past the last logical line, clamps to the final content row.
     pub fn rendered_row_of_logical_line(&self, width: u16, logical_line: usize) -> u16 {
         let (starts, last_content_row) = self.logical_line_start_rows(width);

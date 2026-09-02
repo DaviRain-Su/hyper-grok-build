@@ -1,24 +1,19 @@
 //! Layer 2a: Screen state tracking via `alacritty_terminal` (ptyctl).
 //!
-//! Parses raw PTY output through a headless terminal emulator and provides
-//! queries for what the user would see on screen.
+//! Parses raw PTY output through a headless terminal emulator and provides queries for what the user would see on screen.
 
 use ptyctl::styled::StyledLine;
 use ptyctl::term::{ScreenOpts, ScreenOutput, SessionListener, Terminal};
 
-/// Tracks the virtual terminal screen state by feeding raw PTY output
-/// through an `alacritty_terminal`-based headless terminal (via ptyctl).
+/// Tracks the virtual terminal screen state by feeding raw PTY output through an `alacritty_terminal`-based headless terminal (via ptyctl).
 pub struct ScreenTracker {
     terminal: Terminal,
-    /// Receives terminal-generated replies (cursor-position reports, device
-    /// attributes, color queries, …) the emulator emits while parsing input.
-    /// Drained by [`ScreenTracker::drain_responses`] so the harness can forward
-    /// them back to the child (real terminals answer these automatically).
+    /// Receives terminal-generated replies (cursor-position reports, device attributes, color queries, …) the emulator emits while parsing input.
+    /// Drained by [`ScreenTracker::drain_responses`] so the harness can forward them back to the child (real terminals answer these automatically).
     pty_write_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
 }
 
 impl ScreenTracker {
-    /// Create a new tracker for a terminal with the given dimensions.
     pub fn new(rows: u16, cols: u16) -> Self {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let listener = SessionListener::new(tx);
@@ -33,16 +28,10 @@ impl ScreenTracker {
         self.terminal.feed(bytes);
     }
 
-    /// Drain any terminal-generated replies queued while parsing fed input
-    /// (cursor-position reports answering `ESC[6n`, device attributes, color
-    /// queries, …), concatenated in order. Empty when nothing was queued.
-    ///
-    /// These MUST be written back to the PTY or programs that probe the
-    /// terminal will hang or time out — most relevant here, the inline
-    /// viewport's startup cursor-position query that minimal mode depends on
-    /// (a timeout there downgrades `--minimal` to full-screen inline). A real
-    /// terminal answers automatically; the harness forwards these in
-    /// [`crate::PtyHarness::update`] when response forwarding is enabled.
+    /// Drain the replies the emulator queued while parsing fed input (e.g. cursor-position reports answering `ESC[6n`), concatenated in order.
+    /// These MUST be written back to the PTY or programs that probe the terminal hang or time out; a real terminal answers automatically.
+    /// The harness forwards them in [`crate::PtyHarness::update`] when response forwarding is enabled.
+    /// The probe that matters here is the inline viewport's startup cursor-position query: a timeout downgrades `--minimal` to full-screen inline.
     pub fn drain_responses(&mut self) -> Vec<u8> {
         let mut out = Vec::new();
         while let Ok(bytes) = self.pty_write_rx.try_recv() {
@@ -61,13 +50,11 @@ impl ScreenTracker {
         self.output().lines.join("\n")
     }
 
-    /// Check whether the screen contains the given text substring.
     pub fn contains(&self, text: &str) -> bool {
         self.contents().contains(text)
     }
 
-    /// Return the current cursor position as `(row, col)` (0-indexed, matching
-    /// the original vt100 convention used by existing tests).
+    /// Return the current cursor position as `(row, col)` (0-indexed, matching the original vt100 convention used by existing tests).
     pub fn cursor_position(&self) -> (u16, u16) {
         let pos = self.terminal.cursor_position();
         // ptyctl cursor is 1-indexed; the harness API is 0-indexed.
@@ -77,7 +64,6 @@ impl ScreenTracker {
         )
     }
 
-    /// Resize the virtual terminal to new dimensions.
     pub fn resize(&mut self, rows: u16, cols: u16) {
         self.terminal.resize(cols, rows);
     }
@@ -87,20 +73,17 @@ impl ScreenTracker {
         self.terminal.screen_styled(&ScreenOpts::default())
     }
 
-    /// Render the current screen as an HTML document.
     pub fn html(&self) -> String {
         self.terminal.screen_html(&ScreenOpts::default())
     }
 
-    /// Access the underlying ptyctl `Terminal` for advanced queries
-    /// (styled output, scrollback, terminal modes, etc.).
+    /// Access the underlying ptyctl `Terminal` for advanced queries (styled output, scrollback, terminal modes, etc.).
     pub fn terminal(&self) -> &Terminal {
         &self.terminal
     }
 
-    /// Number of lines in the terminal's scrollback history — content that has
-    /// scrolled *above* the visible screen. This is where minimal mode's
-    /// committed conversation blocks land (printed via `insert_before`).
+    /// Number of lines in the terminal's scrollback history: content that has scrolled *above* the visible screen.
+    /// This is where minimal mode's committed conversation blocks land (printed via `insert_before`).
     pub fn scrollback_count(&self) -> usize {
         self.terminal.scrollback_count()
     }
@@ -116,10 +99,9 @@ impl ScreenTracker {
             .join("\n")
     }
 
-    /// Scrollback history plus the visible screen, joined oldest→newest:
-    /// everything a user could see by scrolling up. Minimal-mode committed
-    /// content may be in either region depending on how much has accumulated,
-    /// so assertions on committed output should use this.
+    /// Scrollback history plus the visible screen, joined oldest to newest: everything a user could see by scrolling up.
+    /// Minimal-mode committed content may be in either region depending on how much has accumulated.
+    /// Assertions on committed output should use this.
     pub fn full_text(&self) -> String {
         let sb = self.scrollback_text();
         let screen = self.contents();
@@ -130,7 +112,7 @@ impl ScreenTracker {
         }
     }
 
-    /// Whether scrollback + visible screen contains `text`.
+    /// Whether scrollback plus the visible screen contains `text`.
     pub fn full_contains(&self, text: &str) -> bool {
         self.full_text().contains(text)
     }
@@ -140,9 +122,8 @@ impl ScreenTracker {
 mod tests {
     use super::*;
 
-    /// Lines pushed above a small screen must be readable via the scrollback
-    /// helpers — the property minimal-mode e2e tests rely on to assert that a
-    /// committed block reached native scrollback.
+    /// Lines pushed above a small screen must be readable via the scrollback helpers.
+    /// Minimal-mode e2e tests rely on this to assert that a committed block reached native scrollback.
     #[test]
     fn scrolled_off_lines_are_captured_by_scrollback_helpers() {
         // 3-row screen; print 8 numbered lines so the first ones scroll off.
@@ -150,22 +131,19 @@ mod tests {
         for i in 1..=8 {
             s.feed(format!("line{i}\r\n").as_bytes());
         }
-        // The earliest lines are no longer on the visible screen…
         assert!(
             !s.contains("line1"),
             "line1 should have scrolled off-screen"
         );
-        // …but they are in scrollback, and full_text sees everything.
         assert!(s.scrollback_count() >= 5, "expected scrolled-off history");
         assert!(s.scrollback_text().contains("line1"));
         assert!(s.full_contains("line1"));
         assert!(s.full_contains("line8"));
     }
 
-    /// A DSR cursor-position query (`ESC[6n`) must produce a forwardable reply
-    /// (a CPR `ESC[<row>;<col>R`) — the mechanism minimal-mode tests rely on so
-    /// the inline viewport's startup cursor query completes. Without forwarding,
-    /// `--minimal` silently downgrades to full-screen inline.
+    /// A DSR cursor-position query (`ESC[6n`) must produce a forwardable reply (a CPR `ESC[<row>;<col>R`).
+    /// Minimal-mode tests rely on this so the inline viewport's startup cursor query completes.
+    /// Without forwarding, `--minimal` silently downgrades to full-screen inline.
     #[test]
     fn drain_responses_answers_cursor_position_query() {
         let mut s = ScreenTracker::new(24, 80);
@@ -180,7 +158,7 @@ mod tests {
             String::from_utf8_lossy(&reply)
         );
 
-        // Drained exactly once — no duplicate delivery on the next call.
+        // Drained exactly once; no duplicate delivery on the next call
         assert!(s.drain_responses().is_empty());
     }
 }

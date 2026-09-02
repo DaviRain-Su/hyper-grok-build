@@ -1,48 +1,37 @@
-//! Subscription check for paywall gate lift.
+//! Checks the live subscription tier so the paywall gate can lift.
 //!
-//! Provides `single_check()` which queries `GET /user?include=subscription`
-//! for the live subscription tier from the backend, independent of the JWT.
-//! If a qualifying tier is detected, does a best-effort JWT refresh and
-//! returns an `UnblockResult` so the agent can re-fetch settings and lift
-//! the gate through its own settings seam.
+//! `single_check()` queries `GET /user?include=subscription` on the backend for the live tier, independent of the JWT.
+//! On a qualifying tier it does a best-effort JWT refresh and returns an `UnblockResult`.
+//! The agent then re-fetches settings and lifts the gate itself.
 //!
-//! The pager drives the polling via `x.ai/auth/check_subscription`: the 5s
-//! paywall chain, the free-tier watch, the refocus check, and
-//! verify-before-paywall gate deferral (see the pager's `app::subscription`
-//! module).
+//! The pager drives the polling via `x.ai/auth/check_subscription`.
+//! The callers are the 5s paywall chain, the free-tier watch, the refocus check, and the gate deferral that verifies before showing the paywall.
+//! See the pager's `app::subscription` module.
 use crate::auth::AuthManager;
 use crate::auth::UserInfo;
 use crate::auth::manager::{BEST_EFFORT_REFRESH_TIMEOUT, BoundedRefresh, RefreshReason};
 use crate::auth::token_type::TokenType;
 use std::sync::Arc;
 use std::time::Duration;
-/// Whether a `/user?include=subscription` tier qualifies for Grok Build
-/// access. Any active subscription qualifies -- the proxy only returns a
-/// tier when an active subscription exists (`None` otherwise), and the
-/// access gate in remote settings controls which tiers are actually
-/// allowed. The `"Free"` guard is defense-in-depth should the proxy ever
-/// start stamping free users explicitly.
+/// Any active subscription qualifies: the proxy only returns a tier when an active subscription exists (`None` otherwise).
+/// The access gate in remote settings controls which tiers are actually allowed.
+/// The `"Free"` guard is defense-in-depth should the proxy ever start stamping free users explicitly.
 fn is_qualifying_tier(tier: &str) -> bool {
     !tier.is_empty() && tier != "Free"
 }
-/// Successful subscription check result: a confirmed qualifying tier.
+/// Returned only when the check confirmed a qualifying tier.
 pub(crate) struct UnblockResult {
     pub(crate) new_tier: String,
-    /// The proxy-canonical `userId` from the `/user` response that confirmed
-    /// the tier — resolved with the live bearer, so it names the same account
-    /// the check started with. The caller's identity guard accepts it
-    /// alongside the started user_id: the mint below spawns a `/user`
-    /// enrichment that can rewrite a seeded/stale user_id to this canonical
-    /// value mid-check, and that normalization is not an account switch.
+    /// The `userId` from the `/user` response that confirmed the tier, resolved with the live bearer so it names the account the check started with.
+    /// The caller's identity guard accepts it alongside the started user_id.
+    /// The mint below spawns a `/user` enrichment that can rewrite a seeded or stale user_id to this canonical value mid-check.
+    /// That rewrite is not an account switch.
     pub(crate) canonical_user_id: String,
-    /// True when the best-effort refresh below hit its bounded deadline with
-    /// the exchange still in flight (spawn-don't-drop). The caller must not
-    /// force a second mint then — it would only queue behind the detached
-    /// exchange for up to another full budget, holding the gate lift past the
-    /// documented single budget while the subscription is already confirmed.
+    /// True when the best-effort refresh below hit its bounded deadline with the exchange still running (detached, not dropped).
+    /// The caller must not force a second mint then: it would only queue behind the detached exchange for up to another full budget.
+    /// That would hold the gate lift past the single budget while the subscription is already confirmed.
     pub(crate) refresh_deadline_hit: bool,
 }
-/// Fetch `/user?include=subscription` and return the parsed `UserInfo`.
 async fn fetch_user_info(
     http_client: &reqwest::Client,
     url: &str,
@@ -73,13 +62,11 @@ async fn fetch_user_info(
         Err(_) => Err("transport"),
     }
 }
-/// Single-shot subscription check. Called by the pager every 5s while
-/// the paywall is shown (`x.ai/auth/check_subscription`).
+/// Called by the pager every 5s while the paywall is shown (`x.ai/auth/check_subscription`).
 ///
-/// Queries `/user?include=subscription` for the live tier. If a qualifying
-/// tier is found, does a best-effort JWT refresh and returns
-/// `Some(UnblockResult)`. Returns `None` if no qualifying subscription
-/// exists or the request fails.
+/// Queries `/user?include=subscription` for the live tier.
+/// On a qualifying tier it does a best-effort JWT refresh and returns `Some(UnblockResult)`.
+/// Returns `None` when no qualifying subscription exists or the request fails.
 #[tracing::instrument(name = "paywall_check", skip_all, fields(user_id = %user_id))]
 pub(crate) async fn single_check(
     auth_manager: Arc<AuthManager>,

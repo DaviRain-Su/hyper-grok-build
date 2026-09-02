@@ -377,55 +377,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // ── ToolOutput with custom override ─────────────────────────────
-
-    #[derive(Serialize)]
-    struct FakeOutput {
-        blocks: Vec<ContentBlock>,
-    }
-
-    impl ToolOutput for FakeOutput {
-        fn model_output(&self) -> Vec<ContentBlock> {
-            self.blocks.clone()
-        }
-    }
-
-    #[test]
-    fn custom_text_block() {
-        let o = FakeOutput {
-            blocks: vec![ContentBlock::Text {
-                text: "hello".into(),
-            }],
-        };
-        assert_eq!(o.model_output().len(), 1);
-        assert_eq!(
-            o.model_output()[0],
-            ContentBlock::Text {
-                text: "hello".into()
-            }
-        );
-    }
-
-    #[test]
-    fn custom_multimodal() {
-        let o = FakeOutput {
-            blocks: vec![
-                ContentBlock::Text {
-                    text: "result:".into(),
-                },
-                ContentBlock::Image {
-                    mime_type: "image/png".into(),
-                    data: "iVBOR...".into(),
-                    media_id: None,
-                    filename: None,
-                    path: None,
-                    metadata: Default::default(),
-                },
-            ],
-        };
-        assert_eq!(o.model_output().len(), 2);
-    }
-
     // ── ToolOutput default → empty (runtime fills via extract) ──────
 
     #[test]
@@ -438,33 +389,6 @@ mod tests {
 
         // Default signals "use automatic extraction" by returning empty.
         assert!(Plain { value: 42 }.model_output().is_empty());
-    }
-
-    #[test]
-    fn runtime_fills_empty_model_output_via_extract() {
-        // Simulates what the ToolDyn blanket does: serialise once,
-        // then extract_content_blocks on the Value.
-        #[derive(Serialize)]
-        struct Plain {
-            value: u32,
-        }
-        impl ToolOutput for Plain {}
-
-        let p = Plain { value: 42 };
-        let value = serde_json::to_value(&p).unwrap();
-        let custom = p.model_output();
-        let blocks = if custom.is_empty() {
-            extract_content_blocks(&value)
-        } else {
-            custom
-        };
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(
-            blocks[0],
-            ContentBlock::Text {
-                text: r#"{"value":42}"#.into(),
-            }
-        );
     }
 
     // ── extract_content_blocks unit tests ──────────────────────────

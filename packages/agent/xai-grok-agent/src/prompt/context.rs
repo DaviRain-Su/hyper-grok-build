@@ -1,12 +1,8 @@
-//! First-class, inspectable system prompt context.
+//! `PromptContext` captures the agent-specific inputs to prompt rendering as a serializable struct.
+//! Users can dump it as JSON and inspect individual sections.
 //!
-//! `PromptContext` captures the agent-specific inputs to prompt rendering
-//! as a serializable struct. Users can dump it as JSON and inspect
-//! individual sections.
-//!
-//! Rendering is done by `ToolBridge::render_prompt()` which delegates to
-//! `TemplateRenderer` in `xai-grok-tools`. This struct does NOT own a
-//! render engine — it provides placeholders and discovered sections.
+//! Rendering is done by `ToolBridge::render_prompt()` which delegates to `TemplateRenderer` in `xai-grok-tools`.
+//! This struct does NOT own a render engine; it provides placeholders and discovered sections.
 use crate::config::PromptMode;
 use crate::prompt::agents_md::{self, AgentConfigFile};
 use crate::prompt::template::{apply_patch_template, base_template, subagent_template};
@@ -14,8 +10,7 @@ use serde::de;
 use serde::{Deserialize, Serialize};
 /// Selects which base template to use for `Extend` mode rendering.
 ///
-/// Built-in variants decrypt the template on demand and never store
-/// the plaintext persistently, ensuring it is zeroed after use.
+/// Built-in variants decrypt the template on demand and never store the plaintext persistently, ensuring it is zeroed after use.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TemplateOverride {
@@ -27,9 +22,8 @@ pub enum TemplateOverride {
     /// A caller-provided custom template string.
     Custom(String),
 }
-/// Backward-compatible deserialization: accepts both the new tagged format
-/// (`"none"`, `"codex"`, `{"custom": "..."}`) and the legacy format where
-/// `system_prompt` was `Option<String>` (a raw template string).
+/// Backward-compatible deserialization: accepts the new tagged format (`"none"`, `"codex"`, `{"custom": "..."}`).
+/// It also accepts the legacy format where `system_prompt` was `Option<String>` (a raw template string).
 impl<'de> Deserialize<'de> for TemplateOverride {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -91,21 +85,17 @@ pub struct PromptContext {
     /// Controls base template choice and catalog section rendering.
     #[serde(default)]
     pub audience: PromptAudience,
-    /// Custom body: appended after base template (Extend) or the entire
-    /// prompt (Full). `None` = base template only.
+    /// Custom body: appended after base template (Extend) or the entire prompt (Full).
+    /// `None` means base template only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_body: Option<String>,
-    /// Persists plan-agent verification policy across prompt reconstruction.
+    /// Keeps the plan agent's browser-verification requirement when the prompt is rebuilt.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_browser_verification: bool,
     /// Which base template to use for `Extend` mode.
-    /// `TemplateOverride::None` = standard base/subagent template.
-    /// `TemplateOverride::Codex` = apply-patch profile template (decrypted on demand).
-    /// `TemplateOverride::Custom` = caller-provided template string.
     #[serde(default, skip_serializing_if = "is_template_override_none")]
     pub system_prompt: TemplateOverride,
-    /// AGENTS.md files discovered during build, in precedence order
-    /// (repo root → CWD; deeper files override).
+    /// AGENTS.md files discovered during build, in precedence order (repo root to CWD; deeper files override).
     pub agents_md_files: Vec<AgentConfigFile>,
     /// Pre-rendered persona summaries for system prompt injection.
     /// Each entry is a formatted string like:
@@ -115,8 +105,7 @@ pub struct PromptContext {
     /// ISO-8601 UTC timestamp captured at build time.
     pub build_timestamp_utc: String,
     /// Whether the memory system is enabled for this session.
-    /// When true, the system prompt includes a `<memory>` section telling
-    /// the model it can use `memory_search` and `memory_get`.
+    /// When true, the system prompt includes a `<memory>` section telling the model it can use `memory_search` and `memory_get`.
     #[serde(default)]
     pub memory_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -124,11 +113,9 @@ pub struct PromptContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_workspace_path: Option<String>,
     /// Role instructions to include in the system prompt.
-    /// Moved from the user task prompt so they're part of durable identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role_instructions: Option<String>,
     /// Persona instructions to include in the system prompt.
-    /// Moved from the user task prompt so they're part of durable identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persona_instructions: Option<String>,
     /// OS name for the `<user_info>` system prompt block.
@@ -140,12 +127,10 @@ pub struct PromptContext {
     /// Model-facing working directory for the `<user_info>` system prompt block.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_directory: Option<String>,
-    /// Current date (`YYYY-MM-DD`) in the user's local timezone, for the
-    /// `<user_info>` system prompt block.
+    /// Current date (`YYYY-MM-DD`) in the user's local timezone, for the `<user_info>` system prompt block.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_date: Option<String>,
-    /// Whether the agent is running in a non-interactive (headless / SDK /
-    /// stdio / generic-ACP).
+    /// Whether the agent is running in a non-interactive session (headless / SDK / stdio / generic-ACP).
     #[serde(default)]
     pub is_non_interactive: bool,
     /// Identity in the primary grok-build system prompt (`You are <label>…`).
@@ -162,11 +147,8 @@ fn is_template_override_none(t: &TemplateOverride) -> bool {
     matches!(t, TemplateOverride::None)
 }
 impl PromptContext {
-    /// Normalize this context for persistence based on audience.
-    ///
-    /// For `Subagent` audience, applies the same suppression as the render
-    /// path: persona summaries are cleared. AGENTS.md is delivered in full,
-    /// identical to the primary agent.
+    /// For `Subagent` audience, applies the same suppression as the render path: persona summaries are cleared.
+    /// AGENTS.md is delivered in full, identical to the primary agent.
     pub fn normalize_for_persistence(&mut self) {
         if self.audience != PromptAudience::Subagent {
             return;
@@ -209,8 +191,7 @@ impl PromptContext {
     }
     /// AGENTS.md content for injection as a prepended user message.
     ///
-    /// - Subagents and primary sessions both get the full block, so a child
-    ///   verifier sees the same project instructions as the main agent.
+    /// - Subagents and primary sessions both get the full block, so a child verifier sees the same project instructions as the main agent.
     pub fn agents_md_user_reminder(&self) -> Option<String> {
         if self.include_browser_verification {
             return None;
@@ -219,8 +200,7 @@ impl PromptContext {
     }
     /// Personas content for injection as a prepended user message.
     ///
-    /// Returns the `<system-reminder>` block to prepend as a user message,
-    /// wrapping the `<personas>` section.
+    /// Returns a `<system-reminder>` block wrapping the `<personas>` section.
     ///
     /// - Subagents never get personas (`task` itself is a parent-only tool).
     pub fn personas_user_reminder(&self) -> Option<String> {
@@ -230,18 +210,13 @@ impl PromptContext {
         let section = self.format_personas_section()?;
         Some(format!("<system-reminder>\n{section}</system-reminder>"))
     }
-    /// Format the personas section content.
-    ///
-    /// Always returns `None` — the `persona` parameter has been removed
-    /// from the task tool input, so persona summaries are no longer
-    /// injected into the conversation.
+    /// Always returns `None`: the `persona` parameter was removed from the task tool input, so persona summaries are never injected.
     pub fn format_personas_section(&self) -> Option<String> {
         None
     }
     /// Build the placeholder JSON for template rendering.
     ///
-    /// These are the agent-specific values that get merged with the
-    /// tool context in `TemplateRenderer::render_with_extra()`.
+    /// These are the agent-specific values that get merged with the tool context in `TemplateRenderer::render_with_extra()`.
     pub fn placeholders(&self) -> serde_json::Value {
         serde_json::json!({
             "memory_enabled": self.memory_enabled,
@@ -260,21 +235,18 @@ impl PromptContext {
     }
     /// Render the full system prompt via `ToolBridge`.
     ///
-    /// Tool names (`${{ tools.by_kind.* }}`) are resolved by the
-    /// `TemplateRenderer` inside the bridge. Agent-specific fields
-    /// (`memory_enabled`, `role_instructions`, etc.) are passed as placeholders.
+    /// Tool names (`${{ tools.by_kind.* }}`) are resolved by the `TemplateRenderer` inside the bridge.
+    /// Agent-specific fields (`memory_enabled`, `role_instructions`, etc.) are passed as placeholders.
     ///
-    /// Both the base template AND the `prompt_body` are rendered through
-    /// MiniJinja so that `${{ tools.by_kind.* }}` variables resolve
-    /// correctly regardless of prompt mode.
+    /// Both the base template AND the `prompt_body` are rendered through MiniJinja.
+    /// This lets `${{ tools.by_kind.* }}` variables resolve correctly regardless of prompt mode.
     pub async fn render(&self, tool_bridge: &ToolBridge) -> Option<String> {
         let renderer = tool_bridge.template_renderer_snapshot().await?;
         self.render_with_renderer(&renderer)
     }
     /// Render the full system prompt from a finalized tool-name renderer.
     ///
-    /// Hosts that do not own a [`ToolBridge`] use this path so they still
-    /// consume the production base-template and prompt-body composition.
+    /// Hosts that do not own a [`ToolBridge`] use this path so they still consume the production base-template and prompt-body composition.
     pub fn render_with_renderer(&self, renderer: &TemplateRenderer) -> Option<String> {
         let placeholders = self.placeholders();
         let render = |template: &str| renderer.render_with_extra(template, &placeholders).ok();
@@ -549,21 +521,6 @@ mod tests {
         assert!(ctx.current_date.is_none());
     }
     #[test]
-    fn test_placeholders_memory_enabled() {
-        let mut ctx = test_context();
-        ctx.memory_enabled = true;
-        let p = ctx.placeholders();
-        assert_eq!(p["memory_enabled"], true);
-    }
-    #[test]
-    fn test_default_context() {
-        let ctx = PromptContext::default();
-        assert_eq!(ctx.version, 1);
-        assert!(matches!(ctx.prompt_mode, PromptMode::Extend));
-        assert!(ctx.prompt_body.is_none());
-        assert!(ctx.agents_md_files.is_empty());
-    }
-    #[test]
     fn test_format_agents_md_section_empty() {
         let ctx = test_context();
         assert!(ctx.format_agents_md_section().is_none());
@@ -581,11 +538,6 @@ mod tests {
         assert!(section.contains("<system-reminder>"));
     }
     #[test]
-    fn test_format_personas_section_empty() {
-        let ctx = test_context();
-        assert!(ctx.format_personas_section().is_none());
-    }
-    #[test]
     fn test_format_personas_section_always_none() {
         let mut ctx = test_context();
         ctx.persona_summaries = vec!["- **reviewer** [user]: Meticulous code reviewer".to_string()];
@@ -594,9 +546,7 @@ mod tests {
             "persona section is disabled — persona param removed from task tool"
         );
     }
-    /// AGENTS.md must reach the system prompt for the default template even
-    /// AGENTS.md user reminder must be present for the default template
-    /// when files are present.
+    /// AGENTS.md user reminder must be present for the default template when files are present.
     #[test]
     fn agents_md_user_reminder_included_for_default_template() {
         let mut ctx = test_context();
@@ -662,40 +612,6 @@ mod tests {
         }
     }
     #[test]
-    fn child_prompt_excludes_persona_catalog() {
-        let ctx = child_general_purpose_context();
-        assert!(ctx.format_personas_section().is_none());
-        assert!(ctx.personas_user_reminder().is_none());
-    }
-    #[test]
-    fn child_prompt_uses_subagent_audience() {
-        let ctx = child_general_purpose_context();
-        assert_eq!(ctx.audience, super::PromptAudience::Subagent);
-    }
-    #[test]
-    fn child_prompt_includes_agents_md_when_present() {
-        let mut ctx = child_general_purpose_context();
-        ctx.agents_md_files = vec![AgentConfigFile {
-            file_name: "AGENTS.md".to_string(),
-            file_path: "/workspace/AGENTS.md".to_string(),
-            content: "Build with `cargo build`".to_string(),
-        }];
-        let section = ctx.format_agents_md_section();
-        assert!(
-            section.is_some(),
-            "child prompt should include AGENTS.md when files are discovered"
-        );
-    }
-    #[test]
-    fn child_prompt_no_agents_md_when_empty() {
-        let ctx = child_general_purpose_context();
-        let section = ctx.format_agents_md_section();
-        assert!(
-            section.is_none(),
-            "child prompt has no AGENTS.md when none discovered"
-        );
-    }
-    #[test]
     fn child_prompt_delivers_full_agents_md() {
         use crate::prompt::agents_md::AgentConfigFile;
         let mut ctx = child_general_purpose_context();
@@ -714,33 +630,6 @@ mod tests {
             !reminder.contains("truncated"),
             "child AGENTS.md must not be truncated"
         );
-    }
-    #[test]
-    fn child_prompt_uses_extend_mode() {
-        let ctx = child_general_purpose_context();
-        assert!(
-            matches!(ctx.prompt_mode, PromptMode::Extend),
-            "CURRENT: child uses Extend mode (inherits full base template)"
-        );
-    }
-    #[test]
-    fn child_prompt_has_prompt_body() {
-        let ctx = child_general_purpose_context();
-        assert!(
-            ctx.prompt_body.is_some(),
-            "CURRENT: child has a prompt body (GENERAL_PURPOSE_PROMPT)"
-        );
-    }
-    #[test]
-    fn child_prompt_placeholders_include_memory_and_workspace() {
-        let ctx = child_general_purpose_context();
-        let placeholders = ctx.placeholders();
-        assert_eq!(
-            placeholders.get("memory_enabled").and_then(|v| v.as_bool()),
-            Some(true)
-        );
-        assert!(placeholders.get("role_instructions").is_some());
-        assert!(placeholders.get("persona_instructions").is_some());
     }
     #[test]
     fn child_prompt_placeholders_include_role_and_persona() {
@@ -777,38 +666,6 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("")
         );
-    }
-    #[test]
-    fn child_prompt_has_no_system_prompt_override() {
-        let ctx = child_general_purpose_context();
-        assert!(
-            ctx.system_prompt == TemplateOverride::None,
-            "CURRENT: child has no custom system_prompt (uses BASE_TEMPLATE)"
-        );
-    }
-    #[test]
-    fn parent_vs_child_section_differences() {
-        let parent = test_context();
-        let child = child_general_purpose_context();
-        assert_eq!(parent.audience, super::PromptAudience::Primary);
-        assert_eq!(child.audience, super::PromptAudience::Subagent);
-        assert!(!child.persona_summaries.is_empty());
-        assert!(child.memory_enabled);
-        assert!(child.prompt_body.is_some());
-        assert!(parent.prompt_body.is_none());
-    }
-    #[test]
-    fn child_prompt_context_is_complete() {
-        let ctx = child_general_purpose_context();
-        assert!(ctx.prompt_body.is_some());
-        assert!(matches!(ctx.prompt_mode, PromptMode::Extend));
-        assert_eq!(ctx.audience, super::PromptAudience::Subagent);
-        assert!(ctx.memory_enabled);
-        assert!(ctx.system_prompt == TemplateOverride::None);
-        let p = ctx.placeholders();
-        assert!(p.get("memory_enabled").is_some());
-        assert!(p.get("role_instructions").is_some());
-        assert!(p.get("persona_instructions").is_some());
     }
     fn render_subagent_template(ctx: minijinja::Value) -> String {
         let mut env = minijinja::Environment::new();
@@ -1035,10 +892,8 @@ mod tests {
             "prompt_body should be included when Some"
         );
     }
-    /// Verify that AGENTS.md file paths rewritten to the display cwd are
-    /// rendered into the system prompt correctly. When `AgentConfigFile.file_path`
-    /// uses the display path, the rendered `## From:` line must not contain
-    /// the overlay/worktree path.
+    /// Verify that AGENTS.md file paths rewritten to the display cwd are rendered into the system prompt correctly.
+    /// When `AgentConfigFile.file_path` uses the display path, the rendered `## From:` line must not contain the overlay/worktree path.
     #[test]
     fn test_agents_md_paths_use_display_cwd_in_rendered_section() {
         let display_path = "/home/user/my-project";

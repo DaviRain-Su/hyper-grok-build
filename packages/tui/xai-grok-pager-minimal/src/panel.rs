@@ -1,28 +1,20 @@
-//! Minimal-mode below-prompt **list panels**: `/resume` (session picker) and
-//! `/mcps` (MCP server status), rendered as simple lists *below the input bar*
-//! instead of centered modal windows (design nit: "the mcps / resume lists
-//! should not be in a modal").
+//! Minimal-mode below-prompt list panels: `/resume` (session picker) and `/mcps` (MCP server status).
+//! Both render as simple lists below the input bar instead of centered modal windows.
 //!
 //! ## Why this is a render-only change
 //!
-//! Input routing is unchanged — the existing `handle_modal_key`
-//! (`ActiveModal::SessionPicker`) and `handle_extensions_modal_key`
-//! (`extensions_modal`) own navigation and close-on-Esc. Two different coupling
-//! contracts are honored here:
+//! Input routing is unchanged.
+//! `handle_modal_key` (`ActiveModal::SessionPicker`) and `handle_extensions_modal_key` (`extensions_modal`) own navigation and close-on-Esc.
+//! The two panels couple to their input handlers differently:
 //!
-//! * **Session picker** rebuilds its entry map from data on every keypress
-//!   (render-independent), so we just reuse the *same* builders
-//!   ([`build_grouped_picker_entries`]) — the rendered order then matches the
-//!   handler's `selected`.
-//! * **Extensions modal** reads render-stored state (`entry_data_indices`,
-//!   `entry_group_keys`, `entry_non_selectable*`). The MCP renderer repopulates
-//!   those exactly as the full modal does (via the shared
-//!   [`build_mcp_servers_picker_rows`]), so keyboard nav + section fold stay in
-//!   sync without touching the input handler.
+//! * **Session picker** rebuilds its entry map from data on every keypress (render-independent).
+//!   The panel reuses the same builders ([`build_grouped_picker_entries`]), so the rendered order matches the handler's `selected`.
+//! * **Extensions modal** reads render-stored state (`entry_data_indices`, `entry_group_keys`, `entry_non_selectable*`).
+//!   The MCP renderer repopulates those exactly as the full modal does (via the shared [`build_mcp_servers_picker_rows`]).
+//!   Keyboard nav and section fold then stay in sync without touching the input handler.
 //!
-//! Both reuse [`picker::render_picker_content`] for the rows, so row look +
-//! selection highlight match the full TUI; only the modal-window chrome (border,
-//! tabs, footer bar) is dropped.
+//! Both reuse [`picker::render_picker_content`] for the rows, so row look and selection highlight match the full TUI.
+//! Only the modal-window chrome (border, tabs, footer bar) is dropped.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -36,8 +28,7 @@ use xai_grok_pager::views::extensions_modal::{ExtensionsTab, TabDataState};
 use xai_grok_pager::views::modal::ActiveModal;
 use xai_grok_pager::views::picker::{self, PickerEntry, PickerField, PickerHitAreas, PickerRow};
 
-/// Rows of chrome around the scrolling list: title + subtitle/search + divider
-/// + footer.
+/// Rows of chrome around the scrolling list: title + subtitle/search + divider + footer.
 const CHROME_ROWS: u16 = 4;
 
 /// Which below-prompt list panel is active for the focused agent.
@@ -51,10 +42,8 @@ pub(super) enum ListPanel {
 
 /// Detect an active below-prompt list panel, or `None`.
 ///
-/// Only the session picker and the MCP-servers tab are hosted as simple lists;
-/// every other modal keeps its existing (centered) rendering. Callers must check
-/// this *before* `overlay::app_modal_active`, since `SessionPicker` is also an
-/// `active_modal`.
+/// Only the session picker and the MCP-servers tab are hosted as simple lists; every other modal keeps its existing (centered) rendering.
+/// Callers must check this *before* `overlay::app_modal_active`, since `SessionPicker` is also an `active_modal`.
 pub(super) fn active(agent: &AgentView) -> Option<ListPanel> {
     if matches!(agent.active_modal, Some(ActiveModal::SessionPicker { .. })) {
         return Some(ListPanel::Resume);
@@ -67,10 +56,9 @@ pub(super) fn active(agent: &AgentView) -> Option<ListPanel> {
     None
 }
 
-/// Target viewport height for the active list panel: chrome + the exact body
-/// height, clamped to `[CHROME_ROWS + 1, ceiling]`. Sizing to the exact content
-/// height keeps the footer directly under the last row (no blank band); when the
-/// body exceeds `ceiling` the list scrolls internally.
+/// Target viewport height for the active list panel: chrome + the exact body height, clamped to `[CHROME_ROWS + 1, ceiling]`.
+/// Sizing to the exact content height keeps the footer directly under the last row (no blank band).
+/// When the body exceeds `ceiling` the list scrolls internally.
 pub(super) fn panel_height(agent: &AgentView, kind: ListPanel, width: u16, ceiling: u16) -> u16 {
     let body = match kind {
         ListPanel::Resume => resume_body_rows(agent, width),
@@ -81,8 +69,8 @@ pub(super) fn panel_height(agent: &AgentView, kind: ListPanel, width: u16, ceili
         .clamp(CHROME_ROWS + 1, ceiling.max(CHROME_ROWS + 1))
 }
 
-/// Render the active list panel into `area` (the whole live region). Returns the
-/// text cursor for the panel's search bar when search is focused, else `None`.
+/// Render the active list panel into `area` (the whole live region).
+/// Returns the text cursor for the panel's search bar when search is focused, else `None`.
 pub(super) fn render(
     buf: &mut Buffer,
     area: Rect,
@@ -335,7 +323,7 @@ fn render_mcps(
     let (title_row, subtitle_row, divider_row, list_area, footer_row) = chrome_layout(area);
     render_title(buf, title_row, theme, "Manage MCP servers");
 
-    // Phase 1 (immutable): build the row mapping + owned per-row render data.
+    // Phase 1 (immutable): build the row mapping and owned per-row render data
     let labels: Vec<String>;
     let group_keys: Vec<Option<String>>;
     let data_indices: Vec<Option<usize>>;
@@ -465,7 +453,7 @@ fn render_mcps(
         }
     }
 
-    // Phase 3 (mutable picker_state): build PickerEntry from owned data + render.
+    // Phase 3 (mutable picker_state): build PickerEntry from owned data and render
     let s = minimal_api::extensions_modal_mut(agent)?;
     let selected = s.picker_state.selected;
     let search_active = s.picker_state.search_active;
@@ -517,10 +505,9 @@ fn render_mcps(
 
 // ─────────────────────────────── helpers ────────────────────────────────────
 
-/// Sum the display height of grouped picker entries: a header is one row (plus
-/// the blank spacer `render_picker_content` draws before non-first headers); a
-/// row is its label line plus its collapsed summary lines (what the picker
-/// draws when the row is not expanded).
+/// Sum the display height of grouped picker entries.
+/// A header is one row, plus the blank spacer `render_picker_content` draws before non-first headers.
+/// A row is its label line plus its collapsed summary lines (what the picker draws when the row is not expanded).
 fn measure_entries(entries: &[PickerEntry<'_>]) -> u16 {
     entries
         .iter()
@@ -684,9 +671,8 @@ mod tests {
             "MCP footer must not reuse resume confirm copy:\n{text}"
         );
 
-        // The input handler reads these render-stored fields; the panel must
-        // mirror them (section header + 2 servers = 3 rows) so keyboard nav and
-        // fold stay correct without touching the handler.
+        // The input handler reads these render-stored fields
+        // The panel must mirror them (section header + 2 servers = 3 rows) so keyboard nav and fold stay correct without touching the handler
         let s = minimal_api::extensions_modal(&a).unwrap();
         assert_eq!(s.entry_data_indices.len(), 3, "section + 2 servers");
         assert_eq!(

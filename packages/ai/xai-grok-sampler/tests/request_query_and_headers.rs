@@ -1,5 +1,4 @@
-//! Checks that provider `query_params` and `env_http_headers` reach the
-//! outgoing request.
+//! Checks that provider `query_params` and `env_http_headers` reach the outgoing request.
 
 mod support;
 
@@ -13,8 +12,7 @@ use xai_grok_sampler::SamplingClient;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn request_carries_query_params_and_env_http_headers() {
-    // A unique name avoids clashing with other tests that read the process
-    // environment; the surrounding whitespace exercises value trimming.
+    // A unique name avoids clashing with other tests that read the process environment; the surrounding whitespace exercises value trimming
     let env_var = "XAI_SAMPLER_TEST_TENANT_TOKEN";
     unsafe { std::env::set_var(env_var, "  tenant-secret\n") };
 
@@ -37,8 +35,7 @@ async fn request_carries_query_params_and_env_http_headers() {
         let _ = axum::serve(listener, app).await;
     });
 
-    // The base URL already carries `api-version`; a configured value must
-    // replace it (not duplicate), keep unrelated keys, and percent-encode.
+    // The base URL already carries `api-version`; a configured value must replace it (not duplicate), keep unrelated keys, and percent-encode
     let base_url = format!("http://{addr}/v1?api-version=old&keep=1");
     let mut cfg = support::test_config(&base_url, "test-key");
     cfg.query_params

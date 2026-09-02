@@ -1,23 +1,24 @@
 //! Filesystem path tables for sandbox profiles.
-//!
-//! Collects device files, temp directories, and essential writable paths.
 
 use std::path::{Path, PathBuf};
 
 // ── Grok state directory ────────────────────────────────────────────────────
 
-/// Grok state directory — always writable (`$GROK_HOME` or `~/.grok`).
+/// Grok state directory (`$GROK_HOME` or `~/.grok`).
 pub(crate) fn grok_home() -> PathBuf {
     xai_grok_config::grok_home()
+}
+
+/// On-disk JSONL audit log under the sessions directory.
+///
+/// Strict writes it via the sessions directory grant (not a file grant on the grok home parent, which would follow a planted symlink).
+pub(crate) fn sandbox_events_log_path() -> PathBuf {
+    grok_home().join("sessions").join("sandbox-events.jsonl")
 }
 
 // ── Device files & directories ──────────────────────────────────────────────
 
 /// Device files that need write access for normal tool operation.
-///
-/// Without write access to these, common programs (git, curl, ssh, compilers)
-/// break because they can't open `/dev/null` as an output sink, allocate PTYs,
-/// or seed RNGs.
 ///
 /// These are individual files (use `allow_file`, not `allow_path`).
 /// Directory nodes under `/dev` belong in [`DEVICE_DIRS`].
@@ -42,15 +43,11 @@ pub(crate) const DEVICE_DIRS: &[&str] = &[
 
 /// Temporary directories that need write access.
 ///
-/// On Linux, `/tmp` is the standard temp directory.
-/// On macOS, programs use both `/tmp` (symlink to `/private/tmp`) and
-/// `/private/var/folders/` (the real `TMPDIR` / `NSTemporaryDirectory()`).
-/// git, compilers, and other tools write temp files to `$TMPDIR` which
-/// resolves to `/private/var/folders/xx/.../T/` on macOS.
+/// On macOS, programs use both `/tmp` (symlink to `/private/tmp`) and `/private/var/folders/` (the real `TMPDIR` / `NSTemporaryDirectory()`).
 pub(crate) fn temp_writable_paths() -> Vec<PathBuf> {
     let mut paths = vec![PathBuf::from("/tmp"), PathBuf::from("/var/tmp")];
 
-    // macOS: /tmp → /private/tmp, but the real TMPDIR is under /private/var/folders.
+    // macOS: /tmp is a symlink to /private/tmp, but the real TMPDIR is under /private/var/folders
     // Also include /private/tmp since Seatbelt may resolve the symlink.
     if cfg!(target_os = "macos") {
         for p in ["/private/tmp", "/private/var/tmp", "/private/var/folders"] {
@@ -74,10 +71,20 @@ pub(crate) fn temp_writable_paths() -> Vec<PathBuf> {
 
 // ── Essential writable paths ────────────────────────────────────────────────
 
-/// Writable directory paths for profiles that allow workspace writes (workspace, devbox, strict).
+/// Writable directory paths for the workspace profile (full `grok_home()` and temp).
 /// Device files are handled separately via `allow_file` in `to_capability_set_with_config`.
 pub(crate) fn essential_writable_paths(workspace: &Path) -> Vec<PathBuf> {
     let mut paths = vec![workspace.to_path_buf(), grok_home()];
+    paths.extend(temp_writable_paths());
+    paths
+}
+
+/// Writable directory paths for the strict profile (workspace, sessions, and temp).
+///
+/// Strict may read `grok_home()` but must not write the parent.
+/// Events JSONL lives under `sessions/`.
+pub(crate) fn essential_writable_paths_strict(workspace: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![workspace.to_path_buf(), grok_home().join("sessions")];
     paths.extend(temp_writable_paths());
     paths
 }

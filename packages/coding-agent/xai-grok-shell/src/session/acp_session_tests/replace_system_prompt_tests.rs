@@ -1,8 +1,6 @@
-//! Actor-path coverage for `handle_replace_system_prompt` — the
-//! resident-reconnect `systemPromptOverride` sync. Head-swap semantics are
-//! unit-tested in `xai_chat_state` (`conversation_util` and the actor tests);
-//! these cover only what is unique to the `SessionActor` seam: the end-to-end
-//! swap and the `preserve_inherited_system` skip.
+//! Actor-path coverage for `handle_replace_system_prompt`, the resident-reconnect `systemPromptOverride` sync.
+//! The head swap itself is unit-tested in `xai_chat_state` (`conversation_util` and the actor tests).
+//! These tests cover only what is unique to the `SessionActor` path: the end-to-end swap and the `preserve_inherited_system` skip.
 
 use xai_grok_sampling_types::conversation::ConversationItem;
 

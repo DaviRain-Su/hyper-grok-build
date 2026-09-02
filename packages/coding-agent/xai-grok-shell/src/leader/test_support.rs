@@ -1,10 +1,8 @@
-//! In-crate fake leaders for exercising client-side handling of misbehaving
-//! leaders (hung, half-framed, wrong-versioned) — wire shapes the real
-//! `spawn_leader_server` can never produce.
+//! In-crate fake leaders for exercising how the client handles a misbehaving leader (hung, half-framed, wrong-versioned).
+//! These are wire shapes the real `spawn_leader_server` can never produce.
 //!
-//! All stalls are cancellation-based (`cancel.cancelled().await`), never
-//! timer-based, so `#[tokio::test(start_paused = true)]` auto-advance jumps
-//! the client-side timeouts under test without waking the fake.
+//! All stalls wait on `cancel.cancelled().await`, never on a timer.
+//! `#[tokio::test(start_paused = true)]` auto-advance can therefore jump the client-side timeouts under test without waking the fake.
 use super::protocol::{
     ClientMessage, LEADER_PROTOCOL_VERSION, LeaderCapabilities, ServerMessage, read_message,
     write_message,
@@ -19,8 +17,7 @@ pub(crate) struct FakeVersions {
     pub(crate) binary_version: Option<String>,
 }
 impl FakeVersions {
-    /// The versions a same-build real leader would report (`run_leader` stamps
-    /// `xai_grok_version::VERSION` into its metadata).
+    /// The versions a same-build real leader would report (`run_leader` stamps `xai_grok_version::VERSION` into its metadata).
     pub(crate) fn current() -> Self {
         Self {
             protocol_version: Some(LEADER_PROTOCOL_VERSION),
@@ -28,8 +25,7 @@ impl FakeVersions {
         }
     }
 }
-/// `LeaderCapabilities` has no `Default` (serde-only defaults), so fakes build
-/// their capability shape through this helper.
+/// `LeaderCapabilities` has no `Default` (serde-only defaults), so fakes build their capabilities through this helper.
 pub(crate) fn fake_caps(control_v1: bool, relaunch_v1: bool) -> LeaderCapabilities {
     LeaderCapabilities {
         control_v1,
@@ -41,10 +37,9 @@ pub(crate) fn fake_caps(control_v1: bool, relaunch_v1: bool) -> LeaderCapabiliti
 }
 /// Wire behavior of a [`spawn_fake_leader`] instance.
 pub(crate) enum FakeLeaderBehavior {
-    /// Well-formed: `Registered { ready: true }` with the given metadata, then
-    /// idle until cancelled. Backs the discovery and adopt/evict tests; also
-    /// the composition point for metadata skew (wrong protocol version, stale
-    /// binary version) via an explicit [`FakeVersions`] — no sugar variants.
+    /// Well-formed: `Registered { ready: true }` with the given metadata, then idle until cancelled.
+    /// Backs the discovery and adopt/evict tests.
+    /// Skewed metadata (wrong protocol version, stale binary version) comes from passing an explicit [`FakeVersions`]; there is no dedicated variant.
     Normal {
         versions: FakeVersions,
         caps: LeaderCapabilities,
@@ -60,8 +55,7 @@ pub(crate) enum FakeLeaderBehavior {
     /// Well-formed `Registered { ready: true }`, then closes the connection.
     CloseAfterRegister,
 }
-/// Handle for a running fake leader; cancelling stops the accept loop and any
-/// held-open connections, and removes the socket.
+/// Handle for a running fake leader; cancelling stops the accept loop and any held-open connections, and removes the socket.
 pub(crate) struct FakeLeaderHandle {
     cancel: CancellationToken,
 }
@@ -72,9 +66,8 @@ impl FakeLeaderHandle {
 }
 /// Bind a fake leader at `socket_path` behaving per `behavior`.
 ///
-/// Returns once the listener is bound (readiness signalled via oneshot, no
-/// fixed startup sleep), so callers can connect immediately. Serves clients
-/// sequentially: the point of a fake is wire shape, not concurrency.
+/// Returns once the listener is bound (readiness signalled via oneshot, no fixed startup sleep), so callers can connect immediately.
+/// Serves clients sequentially: the point of a fake is wire shape, not concurrency.
 pub(crate) async fn spawn_fake_leader(
     socket_path: PathBuf,
     behavior: FakeLeaderBehavior,

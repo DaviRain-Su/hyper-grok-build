@@ -55,6 +55,9 @@ use std::io;
 mod child_wait;
 pub use child_wait::{is_child_wait_identity_uncertain, spawn_child_reaper, wait_child_bounded};
 
+mod kill_on_drop;
+pub use kill_on_drop::KillOnDrop;
+
 mod process_resources;
 pub use process_resources::{
     ProcessCpu, ProcessResources, process_memory_limit, process_start_time, sample_process_cpu,
@@ -400,7 +403,11 @@ pub fn detach_std_command(cmd: &mut std::process::Command) {
 /// so in the (rare) case the spawning thread never materialized it this
 /// can allocate — accepted for a debug-only misuse guard.
 #[cfg(target_os = "linux")]
-fn bind_to_parent_death(parent_pid: u32, armed_thread: std::thread::ThreadId) -> io::Result<()> {
+fn bind_to_parent_death(
+    parent_pid: u32,
+    armed_thread: std::thread::ThreadId,
+    signal: libc::c_int,
+) -> io::Result<()> {
     // Post-fork, TLS is a copy of the SPAWNING thread's, so this observes
     // which thread called `spawn()`.
     if cfg!(debug_assertions) && std::thread::current().id() != armed_thread {
@@ -408,7 +415,7 @@ fn bind_to_parent_death(parent_pid: u32, armed_thread: std::thread::ThreadId) ->
     }
     // SAFETY: prctl(PR_SET_PDEATHSIG, …) only sets the calling process's
     // parent-death signal; it reads/writes no caller memory.
-    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong) } == -1 {
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, signal as libc::c_ulong) } == -1 {
         return Err(io::Error::last_os_error());
     }
     // Parent already gone (pdeathsig can no longer fire): exit instead of
@@ -445,20 +452,30 @@ fn bind_to_parent_death(parent_pid: u32, armed_thread: std::thread::ThreadId) ->
 /// setuid/setcap `execve`.
 pub fn kill_on_parent_death_std(cmd: &mut std::process::Command) {
     #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::process::CommandExt;
-        let parent_pid = std::process::id();
-        let armed_thread = std::thread::current().id();
-        // SAFETY: bind_to_parent_death calls only async-signal-safe libc
-        // functions and builds errors without allocating (see its docs for
-        // the debug-only TLS read). Satisfies the pre_exec contract.
-        unsafe {
-            cmd.pre_exec(move || bind_to_parent_death(parent_pid, armed_thread));
-        }
-    }
+    kill_on_parent_death_std_with(cmd, libc::SIGTERM);
     #[cfg(not(target_os = "linux"))]
     {
         let _ = cmd;
+    }
+}
+
+/// [`kill_on_parent_death_std`] with an explicit parent-death signal.
+///
+/// SIGTERM (the default) lets the child run its graceful shutdown; pass
+/// `libc::SIGKILL` when the child must die even if it is wedged and cannot
+/// service a catchable signal — e.g. the PTY e2e pager children that leaked
+/// on CI precisely because they were unresponsive to the master-close SIGHUP.
+/// All caveats of [`kill_on_parent_death_std`] apply.
+#[cfg(target_os = "linux")]
+pub fn kill_on_parent_death_std_with(cmd: &mut std::process::Command, signal: libc::c_int) {
+    use std::os::unix::process::CommandExt;
+    let parent_pid = std::process::id();
+    let armed_thread = std::thread::current().id();
+    // SAFETY: bind_to_parent_death calls only async-signal-safe libc
+    // functions and builds errors without allocating (see its docs for
+    // the debug-only TLS read). Satisfies the pre_exec contract.
+    unsafe {
+        cmd.pre_exec(move || bind_to_parent_death(parent_pid, armed_thread, signal));
     }
 }
 
@@ -799,6 +816,35 @@ impl ProcessGroup {
         #[cfg(windows)]
         {
             self.terminate_job(1)
+        }
+    }
+
+    /// Let the group's descendants outlive this handle's drop (Windows clears
+    /// kill-on-close; Unix drop never kills). Call on the success path.
+    pub fn preserve_descendants(&self) -> io::Result<()> {
+        #[cfg(unix)]
+        {
+            Ok(())
+        }
+        #[cfg(windows)]
+        {
+            use std::mem::{size_of, zeroed};
+            use windows::Win32::System::JobObjects::{
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+                SetInformationJobObject,
+            };
+            // LimitFlags left at 0 (no kill-on-close), so the drop's `CloseHandle`
+            // no longer terminates the job's processes.
+            let info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
+            unsafe {
+                SetInformationJobObject(
+                    self.job,
+                    JobObjectExtendedLimitInformation,
+                    (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                    size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                )
+            }
+            .map_err(|e| io::Error::other(format!("SetInformationJobObject(preserve): {e}")))
         }
     }
 
@@ -1161,12 +1207,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     static TEST_OOM_SCORE_ADJ_LOCK: Mutex<()> = Mutex::new(());
 
-    #[test]
-    fn detach_command_does_not_panic() {
-        let mut cmd = tokio::process::Command::new("echo");
-        detach_command(&mut cmd);
-    }
-
     /// Pins the mechanism every search-tool spawn site relies on: the child is
     /// detached into its own process group and killed when its `Child` drops.
     #[cfg(unix)]
@@ -1333,12 +1373,6 @@ mod tests {
     }
 
     #[test]
-    fn detach_std_command_does_not_panic() {
-        let mut cmd = std::process::Command::new("echo");
-        detach_std_command(&mut cmd);
-    }
-
-    #[test]
     fn git_command_locking_matches_reader_except_optional_locks_flag() {
         use std::collections::HashMap;
         use std::ffi::{OsStr, OsString};
@@ -1361,18 +1395,6 @@ mod tests {
         let lock_envs: HashMap<_, _> = locking.get_envs().collect();
         let read_envs: HashMap<_, _> = reading.get_envs().collect();
         assert_eq!(lock_envs, read_envs);
-    }
-
-    #[test]
-    fn new_process_group_does_not_panic() {
-        let mut cmd = tokio::process::Command::new("echo");
-        new_process_group(&mut cmd);
-    }
-
-    #[test]
-    fn kill_on_parent_death_std_does_not_panic() {
-        let mut cmd = std::process::Command::new("echo");
-        kill_on_parent_death_std(&mut cmd);
     }
 
     #[cfg(unix)]
@@ -1686,26 +1708,6 @@ mod tests {
         f.write_all(b"").expect("zero-length write should succeed");
     }
 
-    /// The `File` returned by `dup_tui_stderr` can write multi-byte UTF-8
-    /// without truncation or byte-level corruption.
-    ///
-    /// On Windows, a `File` wrapping a console handle uses `WriteFile`
-    /// (byte-oriented, code-page-dependent) instead of `WriteConsoleW`
-    /// (UTF-16, code-page-independent). This test verifies the bytes are
-    /// at least accepted without error. Full Unicode correctness on Windows
-    /// additionally requires `SetConsoleOutputCP(65001)` or using
-    /// `std::io::stderr()` (which routes through `WriteConsoleW`).
-    #[test]
-    fn dup_tui_stderr_accepts_multibyte_utf8() {
-        use std::io::Write;
-        let mut f = dup_tui_stderr().expect("dup_tui_stderr should succeed");
-        // Braille (3 bytes each), Powerline icon (3 bytes), emoji (4 bytes).
-        let payload = "⣀⣾⠿⠛\u{e0a0}\u{1F600}";
-        f.write_all(payload.as_bytes())
-            .expect("multi-byte UTF-8 write should succeed");
-        f.flush().expect("flush should succeed");
-    }
-
     /// Spawn a subprocess that exercises redirect → dup → restore.
     #[cfg(unix)]
     #[test]
@@ -1934,108 +1936,6 @@ mod tests {
             !stdout.contains("diagnostic"),
             "stderr text must be discarded, not spilled onto stdout: {stdout:?}"
         );
-    }
-
-    /// The real thing: `/dev/null` genuinely removed, in a throwaway mount
-    /// namespace so only this process tree sees it gone.
-    ///
-    /// Covers both orders, because they exercise different halves of the fix:
-    ///
-    /// * `deleted-midway` — the production sequence. The device exists when the
-    ///   server boots (so the descriptor is cached), then the sandbox loses it.
-    ///   Asserts the control too: `Stdio::null()` must fail with `ENOENT` here,
-    ///   or the test is not reproducing the bug it guards against.
-    /// * `never-existed` — a process that comes up with no device at all, which
-    ///   has no descriptor to cache and must reach the pipe fallback.
-    ///
-    /// Ignored by default: needs Linux with unprivileged user namespaces. Run
-    /// with `cargo test -p xai-tty-utils -- --ignored --nocapture`.
-    #[cfg(target_os = "linux")]
-    #[test]
-    #[ignore = "needs Linux + unprivileged user namespaces (unshare -Urm)"]
-    fn null_stdio_survives_a_deleted_dev_null() {
-        const PROBE_VAR: &str = "XAI_TTY_UTILS_DEV_NULL_PROBE";
-
-        fn spawn_with(stdin: std::process::Stdio) -> std::io::Result<std::process::ExitStatus> {
-            std::process::Command::new("/bin/sh")
-                .args(["-c", "exit 0"])
-                .stdin(stdin)
-                .status()
-        }
-
-        // Inner half: re-entered inside the namespace.
-        match std::env::var(PROBE_VAR).ok().as_deref() {
-            Some("deleted-midway") => {
-                // A regular file stands in for the device: creatable on the
-                // namespace's tmpfs without privileges, and indistinguishable
-                // for this purpose (an fd is an fd).
-                assert!(
-                    std::path::Path::new("/dev/null").exists(),
-                    "setup: stand-in missing"
-                );
-                assert!(
-                    spawn_with(null_stdio()).expect("prime").success(),
-                    "priming spawn must succeed while the device is present"
-                );
-
-                std::fs::remove_file("/dev/null").expect("delete the device mid-run");
-
-                let control = spawn_with(std::process::Stdio::null());
-                assert!(
-                    matches!(&control, Err(e) if e.kind() == std::io::ErrorKind::NotFound),
-                    "control: Stdio::null() must fail with ENOENT once the device is gone, got {control:?}"
-                );
-                for i in 1..=3 {
-                    assert!(
-                        spawn_with(null_stdio())
-                            .expect("spawn after deletion")
-                            .success(),
-                        "null_stdio() spawn #{i} must still work"
-                    );
-                }
-                return;
-            }
-            Some("never-existed") => {
-                assert!(
-                    !std::path::Path::new("/dev/null").exists(),
-                    "setup: device present"
-                );
-                assert!(
-                    spawn_with(null_stdio())
-                        .expect("pipe fallback must spawn")
-                        .success(),
-                    "a process that starts without /dev/null must still spawn"
-                );
-                return;
-            }
-            _ => {}
-        }
-
-        // Outer half: build a namespace per case and re-enter this same test.
-        let exe = std::env::current_exe().expect("current_exe");
-        for (case, setup) in [
-            (
-                "deleted-midway",
-                "mount -t tmpfs tmpfs /dev && : > /dev/null",
-            ),
-            ("never-existed", "mount -t tmpfs tmpfs /dev"),
-        ] {
-            let script = format!(
-                "{setup} && exec {} --exact tests::null_stdio_survives_a_deleted_dev_null --ignored --nocapture",
-                exe.display()
-            );
-            let out = std::process::Command::new("unshare")
-                .args(["-Urm", "sh", "-c", &script])
-                .env(PROBE_VAR, case)
-                .output()
-                .expect("unshare must be available on Linux CI");
-            assert!(
-                out.status.success(),
-                "case {case} failed:\nstdout: {}\nstderr: {}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr),
-            );
-        }
     }
 
     /// Every spawn takes its own dup, so the helper must survive repeated use

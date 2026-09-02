@@ -1,7 +1,6 @@
 //! Compile-time selection of the authority this build talks to.
 //!
-//! One implementation compiles, so the trait is a checklist: a backend that forgets a decision
-//! fails to build.
+//! One implementation compiles, so the trait is a checklist: a backend that forgets a decision fails to build.
 use crate::auth::flow::StderrCallback;
 use crate::auth::refresh::{DiagnosticUploader, TokenRefresher};
 use crate::auth::{AuthManager, AuthUrlInfo, GrokAuth, GrokComConfig, LoginTransportOverride};

@@ -126,10 +126,47 @@ impl ChatStateActor {
         });
     }
 
-    /// Repair dangling tool calls after a harness-initiated halt.
+    /// Repair dangling tool calls after a harness-initiated halt: the
+    /// shell's cancel teardown calls this eagerly so the on-disk tail is
+    /// clean even if the session ends there; the next push (see
+    /// [`Self::push_user_message_with_repair_reason`]) repairs the same way
+    /// lazily as a backstop.
     pub(super) fn repair_dangling_after_harness_halt(&mut self, class: &'static str) {
+        self.pop_stranded_continue_reminder();
         self.ensure_conversation_integrity_with_reason(DanglingToolCallReason::HarnessHalted {
             class,
+        });
+    }
+
+    /// Drop a trailing continue reminder whose continuation will never
+    /// sample. Only called where the turn is known dead (harness halt, or a
+    /// new real user prompt arriving) — a live reminder awaiting its
+    /// continuation must survive the per-build integrity repair.
+    /// `IntegrityRepair` leaves token totals untouched, so the reminder's
+    /// push-time estimate lingers until the next provider usage reseeds it —
+    /// a small, safe-direction overcount.
+    pub(super) fn pop_stranded_continue_reminder(&mut self) {
+        if !matches!(
+            self.state.conversation.last(),
+            Some(xai_grok_sampling_types::ConversationItem::User(u))
+                if u.synthetic_reason
+                    == Some(xai_grok_sampling_types::SyntheticReason::LengthContinue)
+        ) {
+            return;
+        }
+        self.rewrite_history(HistoryRewrite::IntegrityRepair, |conversation| {
+            let mut stranded = 0;
+            while matches!(
+                conversation.last(),
+                Some(xai_grok_sampling_types::ConversationItem::User(u))
+                    if u.synthetic_reason
+                        == Some(xai_grok_sampling_types::SyntheticReason::LengthContinue)
+            ) {
+                conversation.pop();
+                stranded += 1;
+            }
+            tracing::info!(stranded, "Dropped stranded length-continue reminder");
+            stranded
         });
     }
 
@@ -269,6 +306,34 @@ impl ChatStateActor {
         item: ConversationItem,
         reason: DanglingToolCallReason,
     ) {
+        // A turn-starting user item (same predicate as the trailing-report
+        // walk) or a mid-turn user input (recovery prompt, stop-hook
+        // feedback, goal directive, directory switch, drained interjection)
+        // landing on a trailing continue reminder means the continuation is
+        // dead — the stranded reminder must not sit before the new
+        // instruction, or be buried by it. A live reminder is never trailing
+        // at these pushes: its continuation is still in flight (interjection
+        // drains are deferred while one is).
+        {
+            use xai_grok_sampling_types::SyntheticReason as R;
+            if matches!(
+                &item,
+                ConversationItem::User(u)
+                    if u.synthetic_reason.as_ref().is_none_or(|r| r.starts_prompt_turn())
+                        || matches!(
+                            u.synthetic_reason,
+                            Some(
+                                R::AutoRecovery
+                                    | R::StopHookFeedback
+                                    | R::GoalSummary
+                                    | R::WorkingDirectorySwitch
+                                    | R::Interjection
+                            )
+                        )
+            ) {
+                self.pop_stranded_continue_reminder();
+            }
+        }
         self.ensure_conversation_integrity_with_reason(reason);
         let estimated_tokens = super::state::estimate_item_tokens(&item);
         self.state.estimated_tokens_since_model += estimated_tokens;

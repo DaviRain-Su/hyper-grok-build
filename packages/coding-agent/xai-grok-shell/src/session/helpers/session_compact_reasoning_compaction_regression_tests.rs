@@ -29,7 +29,7 @@ fn summary_stream() -> Vec<Event> {
     ]
 }
 
-/// SSE stream: a reasoning delta (no content), then a content delta + `stop`.
+/// SSE stream: a reasoning delta (no content), then a content delta and `stop`.
 fn reasoning_then_summary_stream() -> Vec<Event> {
     vec![
         Event::default().data(
@@ -64,8 +64,6 @@ fn reasoning_then_summary_stream() -> Vec<Event> {
     ]
 }
 
-/// A reasoning delta that precedes the content delta must not break
-/// summary extraction.
 #[tokio::test]
 async fn chat_completions_compaction_extracts_summary_after_reasoning_delta() {
     let app = Router::new().route(
@@ -118,8 +116,6 @@ async fn chat_completions_compaction_extracts_summary_after_reasoning_delta() {
     .await
     .unwrap_or_else(|_| panic!("compaction must succeed"));
 
-    // A reasoning delta arriving before the content delta must not break
-    // summary extraction — the content channel is returned as the summary.
     assert_eq!(output.content, "<summary>ok</summary>");
 
     let _ = shutdown_tx.send(());
@@ -211,7 +207,6 @@ fn test_config(base_url: &str) -> SamplerConfig {
 
 #[tokio::test]
 async fn chat_completions_compaction_does_not_panic_on_reasoning_sibling() {
-    // Mock ChatCompletions endpoint returning a tiny summary stream.
     let app = Router::new().route(
         "/v1/chat/completions",
         post(|| async {
@@ -338,7 +333,7 @@ async fn chat_completions_below_trigger_preserves_images_and_tools() {
     .await
     .unwrap_or_else(|_| panic!("compaction with tools must succeed"));
 
-    // Without tools: neither key present.
+    // Without tools, neither the `tools` nor the `tool_choice` key is sent
     let client = Client::new(config.clone()).unwrap();
     generate_session_compact(
         chat_history,
@@ -615,7 +610,11 @@ async fn stalled_compaction_stream_times_out_as_transient() {
                 "expected an idle-timeout transient failure, got: {data}"
             );
         }
-        Err(CompactFailure::Deterministic(_) | CompactFailure::Cancelled) => {
+        Err(
+            CompactFailure::Deterministic(_)
+            | CompactFailure::Overflow(_)
+            | CompactFailure::Cancelled,
+        ) => {
             panic!("a stalled stream must be retryable (Transient), not Deterministic/Cancelled")
         }
         Ok(_) => panic!("a stalled stream must not produce a summary"),
@@ -697,7 +696,11 @@ async fn completed_then_stalled_stream_errors_no_salvage() {
                 "expected an idle-timeout transient failure, got: {data}"
             );
         }
-        Err(CompactFailure::Deterministic(_) | CompactFailure::Cancelled) => {
+        Err(
+            CompactFailure::Deterministic(_)
+            | CompactFailure::Overflow(_)
+            | CompactFailure::Cancelled,
+        ) => {
             panic!("a stalled stream must be retryable (Transient), not Deterministic")
         }
         Ok(_) => panic!(
@@ -781,7 +784,11 @@ async fn substantial_partial_errors_no_salvage() {
                 "expected an idle-timeout transient failure, got: {data}"
             );
         }
-        Err(CompactFailure::Deterministic(_) | CompactFailure::Cancelled) => {
+        Err(
+            CompactFailure::Deterministic(_)
+            | CompactFailure::Overflow(_)
+            | CompactFailure::Cancelled,
+        ) => {
             panic!("a stalled stream must be retryable (Transient), not Deterministic")
         }
         Ok(_) => panic!("salvage removed: a substantial partial must error, not be returned"),

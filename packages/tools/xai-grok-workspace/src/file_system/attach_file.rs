@@ -1,5 +1,4 @@
-//! Contains utility functions to attach file content and render it according to the
-//! training format we have been using
+//! Attaches file content and renders it in the training format
 use agent_client_protocol::{BlobResourceContents, EmbeddedResource, EmbeddedResourceResource};
 use base64::{Engine as _, engine::general_purpose};
 use regex::Regex;
@@ -14,15 +13,12 @@ mod persistence {
         super::session_scratch_root()
     }
 }
-/// Maximum number of estimated tokens for a file to be included inline.
-/// Files exceeding this limit are represented as a metadata-only stub so the
-/// model knows the file exists without blowing up the context window.
+/// Files over this many estimated tokens become a metadata-only stub so the model knows they exist without blowing up the context window.
 const MAX_FILE_TOKENS: usize = 5_000;
-/// 8-char content hash for dedup + collision avoidance.
+/// 8-char content hash for dedup and collision avoidance.
 fn content_hash(content: &[u8]) -> String {
     format!("{:x}", Sha256::digest(content))[..8].to_string()
 }
-/// Parsed file reference with optional line range.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileReference {
     pub path: PathBuf,
@@ -46,14 +42,10 @@ impl FileReference {
         })
     }
 }
-/// Render file content from a `FileReference`.
-///
 /// When `is_cursor` is true, renders `<code_selection path="..." lines="X-Y">` format.
 /// When `is_cursor` is false, renders the original `<file_contents path="..." startLine/endLine/isFullFile>` format.
 ///
-/// If the rendered content exceeds [`MAX_FILE_TOKENS`] estimated tokens the
-/// full body is omitted and a metadata-only stub is returned instead so the
-/// model still knows the file exists.
+/// Content over [`MAX_FILE_TOKENS`] estimated tokens is replaced by a metadata-only stub so the model still knows the file exists.
 pub async fn render_file_reference(file_ref: FileReference, is_cursor: bool) -> Option<String> {
     let read_file = tokio::fs::read(&file_ref.path).await;
     let file_content = if let Ok(read_file_output) = read_file {
@@ -98,8 +90,6 @@ pub async fn render_file_reference(file_ref: FileReference, is_cursor: bool) -> 
         })
 }
 const FILE_REGEX: &str = r"^(?:file://)?([^#]+)(?:#L(\d+)-L?(\d+))?$";
-/// Render an ACP EmbeddedResource.
-///
 /// When `is_cursor` is true, renders `<code_selection>` tags. Otherwise uses `<file_contents>`.
 /// Parses URIs in the format: `file://[path]#L[start]-[end]` or `file://[path]#L[start]-L[end]`
 ///
@@ -167,8 +157,7 @@ async fn render_text_resource(
 }
 /// Render a diff citation as `<diff_contents>`.
 ///
-/// The text is passed through verbatim (no line-number rewriting) since it
-/// represents a change, not a file snapshot.
+/// The text is passed through verbatim (no line-number rewriting) since it represents a change, not a file snapshot.
 async fn render_diff_resource(
     text_resource: &agent_client_protocol::TextResourceContents,
 ) -> Option<String> {
@@ -232,15 +221,12 @@ async fn render_blob_attachment(blob: &BlobResourceContents) -> Option<String> {
         r#"<file_contents type="binary" path="{path}" mime_type="{mime}" size="{size}"/>"#
     ))
 }
-/// Base directory for Phase-1 session-scoped scratch files. Namespaced by PID so
-/// concurrent test processes (repeated or parallel CI test runs that share
-/// `/tmp`) never collide on identical content-hash paths and
-/// race each other's cleanup. The real session_dir lives in shell persistence.
+/// Base directory for Phase-1 session-scoped scratch files; the real session_dir lives in shell persistence.
+/// The PID suffix keeps concurrent test processes sharing `/tmp` from colliding on identical content-hash paths or racing each other's cleanup.
 fn session_scratch_root() -> PathBuf {
     std::env::temp_dir().join(format!("grok-test-sessions-{}", std::process::id()))
 }
-/// Write content to session subdir, return absolute path on success.
-/// Uses content hash prefix for dedup: identical content → same path, different content → unique path.
+/// The content-hash prefix in the filename dedups: identical content maps to the same path, different content to a unique path.
 async fn write_to_session_subdir(subdir: &str, filename: &str, content: &[u8]) -> Option<PathBuf> {
     let dir = session_scratch_root().join(subdir);
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {

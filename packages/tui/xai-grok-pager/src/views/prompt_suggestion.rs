@@ -20,11 +20,6 @@ pub const PROMPT_SUGGESTIONS_ENV: &str = "GROK_PROMPT_SUGGESTIONS";
 /// Env override for the model used by the suggestion call: `GROK_PROMPT_SUGGESTIONS_MODEL=<model-id>`.
 pub const PROMPT_SUGGESTIONS_MODEL_ENV: &str = "GROK_PROMPT_SUGGESTIONS_MODEL";
 
-/// Preferred model for suggestion calls when the server catalog offers it (cheap and fast).
-/// The session model is never used.
-/// When this is absent from the catalog the request carries no model hint and the shell resolves (or skips) it; see [`resolve_model`].
-pub const PREFERRED_SUGGESTION_MODEL: &str = "grok-4.6";
-
 /// Controller for the predicted-next-prompt ghost text.
 #[derive(Debug, Default)]
 pub struct PromptSuggestionController {
@@ -138,13 +133,11 @@ impl PromptSuggestionController {
     }
 }
 
-/// Resolve the enabled state: env override wins, then the persisted `prompt_suggestions` setting (default on).
-/// The env var is read once per process; the setting is a thread-local cache, so this is cheap enough for per-frame calls.
+/// Uses the shared shell resolver so pager and shell agree.
 pub fn resolve_enabled() -> bool {
-    static ENV_OVERRIDE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
-    ENV_OVERRIDE
-        .get_or_init(|| xai_grok_config::env_bool(PROMPT_SUGGESTIONS_ENV))
-        .unwrap_or_else(crate::appearance::cache::load_prompt_suggestions)
+    xai_grok_shell::util::config::prompt_suggestions_enabled_for_config(
+        crate::appearance::cache::load_prompt_suggestions_config(),
+    )
 }
 
 /// Content-free size metadata for acceptance-rate telemetry: `(chars, words)` of the full suggestion text.
@@ -153,23 +146,12 @@ pub fn suggestion_size(text: &str) -> (usize, usize) {
     (text.chars().count(), text.split_whitespace().count())
 }
 
-/// Resolve the client-side model hint sent with the suggestion request: env override > `grok-4.6` when the catalog offers it > `None`.
-///
-/// The hint is one tier of the shell-side resolution (env > config.toml > remote settings > this hint > `grok-4.6` default).
-/// The shell catalog-guards the effective model and skips the request entirely when it is not sampleable.
-/// The session model is never used for suggestion calls.
-pub fn resolve_model(models: &crate::acp::model_state::ModelState) -> Option<String> {
-    if let Ok(model) = std::env::var(PROMPT_SUGGESTIONS_MODEL_ENV)
-        && !model.trim().is_empty()
-    {
-        return Some(model);
-    }
-    let preferred =
-        agent_client_protocol::ModelId::new(std::sync::Arc::from(PREFERRED_SUGGESTION_MODEL));
-    models
-        .available
-        .contains_key(&preferred)
-        .then(|| PREFERRED_SUGGESTION_MODEL.to_owned())
+/// Reads the optional client model override.
+pub fn resolve_model() -> Option<String> {
+    std::env::var(PROMPT_SUGGESTIONS_MODEL_ENV)
+        .ok()
+        .map(|m| m.trim().to_owned())
+        .filter(|m| !m.is_empty())
 }
 
 #[cfg(test)]

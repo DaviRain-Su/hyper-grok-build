@@ -1,21 +1,18 @@
-//! grok.com product Skills catalog — the same REST sources grok-web uses:
-//! - `POST /rest/skills` — first-party bundled skills (docx, pdf, ffmpeg, …)
-//! - `GET  /rest/user-skills` — enabled user-uploaded skills
+//! grok.com product Skills catalog, served by the same REST sources grok-web uses:
+//! - `POST /rest/skills`: first-party bundled skills (docx, pdf, ffmpeg, …)
+//! - `GET  /rest/user-skills`: enabled user-uploaded skills
 //!
-//! Transport only. Chat `x.ai/commands/list` / ACP `available_commands_update`
-//! map this catalog to slash commands.
+//! Transport only.
+//! Chat `x.ai/commands/list` / ACP `available_commands_update` map this catalog to slash commands.
 //!
-//! Desktop/shell chat uses this REST path (not gateway
-//! `conversation.commands.updated`): one process-local source for ACU,
-//! list_commands, and slash resolve/expansion. Gateway command updates are
-//! the web product rail and are not bridged into ACP here.
+//! Desktop/shell chat uses this REST path, not gateway `conversation.commands.updated`.
+//! That keeps one process-local source for `available_commands_update`, list_commands, and slash resolve/expansion.
+//! Gateway command updates serve the web product and are not bridged into ACP here.
 //!
-//! **Bodies / expansion.** List endpoints return names/descriptions (and
-//! optional `skill_md_content` for user skills). Bundled rows are advertised
-//! with `body: None` and a synthetic `chat-product://` path — shell does not
-//! load a local SKILL.md for them. Chat turn expansion for those entries is
-//! product/gateway-side; shell only expands when a body is preloaded
-//! (user skills with `skill_md_content`).
+//! **Bodies / expansion.** List endpoints return names and descriptions (and optional `skill_md_content` for user skills).
+//! Bundled rows are advertised with `body: None` and a synthetic `chat-product://` path; shell does not load a local SKILL.md for them.
+//! Chat turn expansion for those entries happens on the product/gateway side.
+//! Shell only expands when a body is preloaded (user skills with `skill_md_content`).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,15 +26,14 @@ use crate::auth::AuthManager;
 
 const GROK_WEB_URL: &str = "https://grok.com";
 
-/// Marker stored on SkillInfo.metadata / AvailableCommand._meta so clients
-/// can tell product Skills from Build disk discovery without name allowlists.
+/// Marker stored on SkillInfo.metadata / AvailableCommand._meta so clients can tell product Skills from Build disk discovery without name allowlists.
 pub const CHAT_PRODUCT_META_VALUE: &str = "chat";
 pub const CHAT_PRODUCT_META_KEY: &str = "product";
 
 const LIST_CATALOG_ATTEMPTS: u32 = 3;
 const LIST_CATALOG_BACKOFF: Duration = Duration::from_millis(100);
-/// Per-request budget for product Skills REST. Shared client only sets a
-/// connect timeout; without this a hung grok.com stalls the session actor.
+/// Per-request budget for product Skills REST.
+/// The shared client only sets a connect timeout; without this a hung grok.com stalls the session actor.
 const LIST_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -94,17 +90,15 @@ pub struct ListUserSkillsResponse {
 pub struct ProductSkillsCatalog {
     pub bundled: Vec<BundledSkill>,
     pub user: Vec<UserSkill>,
-    /// True when `/rest/user-skills` failed after retries. Empty `user` is then
-    /// *not* an authoritative empty list — callers must not overwrite a prior
-    /// full catalog with this degraded result.
+    /// True when `/rest/user-skills` failed after retries.
+    /// Empty `user` is then *not* an authoritative empty list; callers must not overwrite a prior full catalog with this degraded result.
     pub user_list_failed: bool,
 }
 
 impl ProductSkillsCatalog {
     /// Map to agent SkillInfo rows for slash advertising.
     ///
-    /// Mirrors grok-web: enabled user skills first (and hide same-named
-    /// bundled entries they override), then remaining bundled skills.
+    /// Mirrors grok-web: enabled user skills first (and hide same-named bundled entries they override), then remaining bundled skills.
     pub(crate) fn to_skill_infos(&self) -> Vec<SkillInfo> {
         let enabled_user: Vec<(String, &UserSkill)> = self
             .user
@@ -122,8 +116,7 @@ impl ProductSkillsCatalog {
             .collect();
 
         let mut out = Vec::with_capacity(enabled_user.len() + self.bundled.len());
-        // Override/dedupe keys are slash command names (slugified), not raw
-        // display titles — user "Docx" must hide bundled "docx".
+        // Override/dedupe keys are slash command names (slugified), not raw display titles; user "Docx" must hide bundled "docx"
         let mut user_command_names = std::collections::HashSet::new();
 
         for (name, skill) in &enabled_user {
@@ -192,9 +185,8 @@ impl ProductSkillsCatalog {
     }
 }
 
-/// Slash-safe skill command name: lowercase alphanumerics (unicode kept),
-/// non-alnum runs → `-`, trim `-`. Empty results get a stable `skill-<hash>`
-/// fallback so non-ASCII-only titles still advertise.
+/// Slash-safe skill command name: lowercase alphanumerics (unicode kept), non-alnum runs collapse to `-`, trailing `-` trimmed.
+/// Empty results get a stable `skill-<hash>` fallback so non-ASCII-only titles still advertise.
 fn slugify_skill_command_name(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut prev_dash = false;
@@ -252,7 +244,7 @@ fn product_skill_info(
         license: None,
         compatibility: None,
         metadata: Some(metadata),
-        // Synthetic path — product skills are not disk SKILL.md discovery.
+        // Synthetic path: product skills never come from disk SKILL.md discovery
         // Prefer in-memory `body` (user skill_md_content) when present.
         path: format!("chat-product://{name}"),
         scope,
@@ -299,9 +291,8 @@ struct SkillsAuthCandidate {
     key: String,
     user_id: String,
     email: Option<String>,
-    /// Untagged same-user alt used when primary is tenant-tagged (OIDC 403
-    /// recovery). Catalog is still success-cached under the **primary**
-    /// team/org identity so the same team session can hit TTL.
+    /// Untagged same-user alt used when primary is tenant-tagged (OIDC 403 recovery).
+    /// The catalog is still cached on success under the **primary** team/org identity so the same team session can hit the TTL.
     untagged_recovery: bool,
 }
 
@@ -315,10 +306,8 @@ fn entry_is_untagged(auth: &crate::auth::GrokAuth) -> bool {
 
 /// Exact tenant equality for tagged credentials.
 ///
-/// When either side carries team and/or org, both `team_id` and
-/// `organization_id` must match (including both `None`). Prevents accepting
-/// an alt that is a strict superset of primary tags (e.g. primary team-only
-/// matching team+org).
+/// When either side carries a team and/or org, both `team_id` and `organization_id` must match (including both `None`).
+/// Prevents accepting an alt that is a strict superset of primary tags (e.g. a team-only primary matching a team and org alt).
 fn entry_matches_primary_tenant(
     primary: &crate::auth::GrokAuth,
     entry: &crate::auth::GrokAuth,
@@ -331,9 +320,8 @@ fn entry_matches_primary_tenant(
 
 /// Build ordered alt credentials for product Skills REST (after primary).
 ///
-/// - Prefer same-tagged alts when primary is tagged (exact team+org equality).
-/// - Allow untagged same-user alts as OIDC/team 403 recovery when primary is
-///   tagged (catalog still cached under primary identity).
+/// - Prefer same-tagged alts when primary is tagged (exact team and org equality).
+/// - Allow untagged same-user alts as OIDC/team 403 recovery when primary is tagged (catalog still cached under primary identity).
 /// - Untagged primary never accepts more-tagged (team/org) alts.
 fn skills_auth_alt_candidates<'a>(
     primary: &crate::auth::GrokAuth,
@@ -358,13 +346,11 @@ fn skills_auth_alt_candidates<'a>(
                 key: entry.key.clone(),
                 user_id: entry.user_id.clone(),
                 email: entry.email.clone(),
-                // Recovery only when primary is tenant-scoped; for personal
-                // primary this is a normal same-scope alt.
+                // Recovery only when primary is tenant-scoped; for personal primary this is a normal same-scope alt
                 untagged_recovery: primary_tagged,
             });
         }
-        // Drop: tagged alt that does not match primary (includes team-tagged
-        // alt when primary is personal, or extra org/team tags).
+        // Drop: tagged alt that does not match primary (includes team-tagged alt when primary is personal, or extra org/team tags)
     }
 
     let mut out = tagged_match;
@@ -432,8 +418,7 @@ impl SkillsClient {
         xai_file_utils::trace_context::inject_trace_context_into_request(builder)
     }
 
-    /// Grok.com product Skills require first-party session auth (same gate as
-    /// managed MCP / sibling grok.com clients — not plain BYOK API keys).
+    /// Grok.com product Skills require first-party session auth (the same gate as managed MCP and sibling grok.com clients), not plain BYOK API keys.
     async fn require_skills_auth(&self) -> Result<crate::auth::GrokAuth, SkillsError> {
         let auth = self.auth.auth().await.map_err(|_| SkillsError::NoAuth)?;
         if !auth.is_managed_mcp_eligible() {
@@ -444,9 +429,9 @@ impl SkillsClient {
 
     /// Credentials to try for grok.com product Skills REST.
     ///
-    /// Primary first. When primary is OIDC on the default grok.com host, also
-    /// try non-OIDC keys for the same user from this AuthManager's `auth.json`
-    /// (team OIDC is often rejected with `oauth2-auth-forbidden`).
+    /// Primary first.
+    /// When primary is OIDC on the default grok.com host, also try non-OIDC keys for the same user from this AuthManager's `auth.json`.
+    /// Team OIDC is often rejected with `oauth2-auth-forbidden`.
     ///
     /// Order / isolation (see [`skills_auth_alt_candidates`]):
     /// 1. same-tenant-tagged alts first when primary is tagged
@@ -525,8 +510,7 @@ impl SkillsClient {
         Ok(serde_json::from_slice(&bytes)?)
     }
 
-    /// Bundled first-party skills (`POST /rest/skills`), gated by backend
-    /// feature-flag allow-list (same as grok-web attach menu).
+    /// Bundled first-party skills (`POST /rest/skills`), gated by backend feature-flag allow-list (same as grok-web attach menu).
     ///
     /// Returns `(response, used_untagged_recovery)`.
     async fn list_bundled(
@@ -612,7 +596,7 @@ impl SkillsClient {
         let mut last_err = None;
         for attempt in 1..=LIST_CATALOG_ATTEMPTS {
             match self.list_bundled(locale).await {
-                // Empty 200 is authoritative — do not substitute a catalog.
+                // Empty 200 is authoritative; do not substitute a catalog
                 Ok((r, recovery)) => return Ok((r.skills, recovery)),
                 Err(err) if attempt < LIST_CATALOG_ATTEMPTS && err.is_retryable() => {
                     tracing::warn!(
@@ -649,19 +633,17 @@ impl SkillsClient {
         Err(last_err.unwrap_or(SkillsError::NoAuth))
     }
 
-    /// Full product catalog (bundled + user).
+    /// Full product catalog (bundled and user).
     ///
-    /// Empty REST 200 is authoritative (no embedded substitute). Transient
-    /// transport / 5xx failures retry a few times. Bundled REST failure after
-    /// retries is `Err` (callers must not invent a catalog). User REST failure
-    /// yields empty user skills with `user_list_failed: true` while keeping
-    /// bundled — callers must not treat that as an authoritative empty user
-    /// list (e.g. must not poison a last-success cache).
+    /// Empty REST 200 is authoritative (no embedded substitute).
+    /// Transient transport / 5xx failures retry a few times.
+    /// Bundled REST failure after retries is `Err` (callers must not invent a catalog).
+    /// User REST failure yields empty user skills with `user_list_failed: true` while keeping bundled.
+    /// Callers must not treat that as an authoritative empty user list (e.g. must not poison a last-success cache).
     ///
-    /// The bool is `used_untagged_recovery`: catalog loaded via an untagged
-    /// alt while primary is tenant-tagged. Callers still success-cache under
-    /// the **primary** identity (team/org of primary) so the same session
-    /// hits TTL; personal primaries cannot match that entry.
+    /// The bool is `used_untagged_recovery`: the catalog loaded via an untagged alt while primary is tenant-tagged.
+    /// Callers still cache success under the **primary** identity (team/org of primary) so the same session hits the TTL.
+    /// Personal primaries cannot match that entry.
     pub(crate) async fn try_list_catalog(
         &self,
         locale: &str,
@@ -697,9 +679,8 @@ impl SkillsClient {
         ))
     }
 
-    /// Like [`Self::try_list_catalog`], but maps bundled failure to an empty
-    /// catalog (still no embedded fallback names). Prefer `try_list_catalog`
-    /// when callers must distinguish empty-success from failure.
+    /// Like [`Self::try_list_catalog`], but maps bundled failure to an empty catalog (still no embedded fallback names).
+    /// Prefer `try_list_catalog` when callers must distinguish empty-success from failure.
     pub async fn list_catalog(&self, locale: &str) -> ProductSkillsCatalog {
         self.try_list_catalog(locale)
             .await
@@ -781,7 +762,7 @@ mod tests {
         };
         let infos = catalog.to_skill_infos();
         let names: Vec<_> = infos.iter().map(|s| s.name.as_str()).collect();
-        // user review + user docx override; bundled pdf; no disabled; no bundled docx
+        // user review and user docx override; bundled pdf; no disabled; no bundled docx
         assert_eq!(names, vec!["review", "docx", "pdf"]);
         assert_eq!(infos[0].scope, SkillScope::User);
         assert_eq!(infos[1].scope, SkillScope::User);
@@ -916,7 +897,7 @@ mod tests {
             .await
             .expect_err("bundled fail");
         assert!(matches!(err, SkillsError::Http { status: 503 }));
-        // list_catalog collapses failure to empty — still no docx/pdf/etc.
+        // list_catalog collapses failure to empty; still no docx/pdf/etc
         let collapsed = client.list_catalog("en").await;
         let names: Vec<_> = collapsed
             .to_skill_infos()

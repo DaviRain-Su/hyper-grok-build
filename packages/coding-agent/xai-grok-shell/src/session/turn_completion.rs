@@ -1,22 +1,16 @@
 //! Pure construction of the two turn-terminal signals.
 //!
-//! `TurnCompleted` is the persisted + replayed twin of the fire-and-forget
-//! `x.ai/session/prompt_complete` notification: it rides the
-//! `_x.ai/session/update` rail so a viewer that re-attaches mid-turn finalizes
-//! the turn from replay instead of stranding on "Waiting…". Both builders
-//! live here and derive their fields from
-//! [`crate::sampling::error::prompt_complete_fields`], so the two signals
-//! never disagree.
+//! `TurnCompleted` is the persisted and replayed twin of the fire-and-forget `x.ai/session/prompt_complete` notification.
+//! It rides the `_x.ai/session/update` rail so a viewer that re-attaches mid-turn finalizes the turn from replay instead of stranding on "Waiting…".
+//! Both builders live here and derive their fields from [`crate::sampling::error::prompt_complete_fields`], so the two signals never disagree.
 
 use crate::extensions::notification::SessionUpdate;
 use xai_grok_sampler::SamplingErrorKind;
 
-/// Build a `TurnCompleted` from a prompt id and the `(stop_reason, agent_result)`
-/// JSON pair produced by [`crate::sampling::error::prompt_complete_fields`].
+/// Build a `TurnCompleted` from a prompt id and the `(stop_reason, agent_result)` JSON pair from [`crate::sampling::error::prompt_complete_fields`].
 /// `stop_reason` is always a JSON string; `agent_result` is a string or null.
-/// Non-string inputs fall back to their JSON text so a terminal is never
-/// dropped for a shape mismatch. `error_kind` (a failed stop's typed kind)
-/// hits the wire as its stable `as_str` name.
+/// Non-string inputs fall back to their JSON text so a terminal is never dropped for a shape mismatch.
+/// `error_kind` (a failed stop's typed kind) hits the wire as its stable `as_str` name.
 pub(crate) fn build_turn_completed(
     prompt_id: String,
     stop_reason: serde_json::Value,
@@ -38,11 +32,9 @@ pub(crate) fn build_turn_completed(
     }
 }
 
-/// Base `x.ai/session/prompt_complete` payload shared by every producer
-/// (live prompt, chat bridge, gateway remote turn): the terminal fields from
-/// [`crate::sampling::error::prompt_complete_fields`] plus the optional typed
-/// `errorKind` stamp. Producers append their rail-specific fields (`turnId`,
-/// cancel meta).
+/// Base `x.ai/session/prompt_complete` payload shared by every producer (live prompt, chat bridge, gateway remote turn).
+/// It carries the terminal fields from [`crate::sampling::error::prompt_complete_fields`] plus the optional typed `errorKind` stamp.
+/// Producers append their rail-specific fields (`turnId`, cancel meta).
 pub(crate) fn prompt_complete_payload(
     session_id: &agent_client_protocol::SessionId,
     prompt_id: &str,
@@ -63,8 +55,6 @@ pub(crate) fn prompt_complete_payload(
     payload
 }
 
-/// A JSON string yields its inner text; any other shape falls back to its JSON
-/// serialization rather than being dropped.
 fn json_to_string(value: serde_json::Value) -> String {
     match value {
         serde_json::Value::String(s) => s,
@@ -145,8 +135,6 @@ mod tests {
 
     #[test]
     fn non_string_values_fall_back_to_json_text() {
-        // Defensive: a non-string stop_reason / object agent_result still
-        // produces a best-effort terminal rather than being dropped.
         let update = build_turn_completed(
             "p-4".into(),
             serde_json::json!(42),
@@ -203,8 +191,6 @@ mod tests {
         ));
     }
 
-    /// One payload builder feeds all three `prompt_complete` producers: the
-    /// typed kind is stamped for kinded failures and absent otherwise.
     #[test]
     fn prompt_complete_payload_stamps_error_kind_for_truncation_only() {
         use agent_client_protocol as acp;

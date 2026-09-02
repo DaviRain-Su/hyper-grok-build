@@ -58,6 +58,15 @@ pub enum ChatStateCommand {
     /// Push a user message into the conversation.
     PushUserMessage { item: ConversationItem },
 
+    /// Push an ordered batch of user messages into the conversation.
+    PushUserMessagesBatch { items: Vec<ConversationItem> },
+
+    /// Push an ordered batch and acknowledge once every message is processed.
+    PushUserMessagesBatchAndAck {
+        items: Vec<ConversationItem>,
+        reply: oneshot::Sender<()>,
+    },
+
     /// Push a user message and acknowledge once the chat-state actor has
     /// accepted and processed it.
     PushUserMessageAndAck {
@@ -216,6 +225,11 @@ pub enum ChatStateCommand {
     /// Repair dangling tool calls after a harness-initiated halt.
     RepairDanglingAfterHarnessHalt { class: &'static str },
 
+    /// Drop a trailing continue reminder whose continuation will never
+    /// sample (the turn is completing truncated after a failed
+    /// continuation), so the dead cue does not persist into later turns.
+    PopStrandedContinueReminder,
+
     // ═══ Queries (request/response via oneshot) ═══
     /// Build a ConversationRequest ready to send to the API.
     /// Clones the conversation, prunes old tool results, repairs dangling
@@ -337,10 +351,23 @@ pub enum ChatStateCommand {
         reply: oneshot::Sender<Option<String>>,
     },
 
+    /// Like `GetLastAssistantText`, but joins trailing assistant segments
+    /// separated only by `SyntheticReason::LengthContinue` user items (any
+    /// other user item is a hard boundary). `None` when no trailing text.
+    GetTrailingAssistantReport {
+        reply: oneshot::Sender<Option<String>>,
+    },
+
     /// Like `GetLastAssistantText`, but bounded to the current prompt turn:
     /// returns `None` when the turn produced no assistant text (the walk stops
     /// at the first turn-starting user item).
     GetLastAssistantTextInTurn {
+        reply: oneshot::Sender<Option<String>>,
+    },
+
+    /// Concatenate every non-empty assistant message in the current prompt
+    /// turn (`"\n"`-joined). Same turn boundary as `GetLastAssistantTextInTurn`.
+    GetAssistantTextInTurn {
         reply: oneshot::Sender<Option<String>>,
     },
 
@@ -395,6 +422,14 @@ mod tests {
         // Mutations
         let _ = ChatStateCommand::PushUserMessage {
             item: ConversationItem::user("hello"),
+        };
+        let _ = ChatStateCommand::PushUserMessagesBatch {
+            items: vec![ConversationItem::user("hello")],
+        };
+        let (tx, _rx) = oneshot::channel();
+        let _ = ChatStateCommand::PushUserMessagesBatchAndAck {
+            items: vec![ConversationItem::user("hello")],
+            reply: tx,
         };
         let (tx, _rx) = oneshot::channel();
         let _ = ChatStateCommand::PushUserMessageAndAck {
@@ -526,7 +561,13 @@ mod tests {
         let _ = ChatStateCommand::GetLastAssistantText { reply: tx };
 
         let (tx, _rx) = oneshot::channel();
+        let _ = ChatStateCommand::GetTrailingAssistantReport { reply: tx };
+
+        let (tx, _rx) = oneshot::channel();
         let _ = ChatStateCommand::GetLastAssistantTextInTurn { reply: tx };
+
+        let (tx, _rx) = oneshot::channel();
+        let _ = ChatStateCommand::GetAssistantTextInTurn { reply: tx };
 
         let (tx, _rx) = oneshot::channel();
         let _ = ChatStateCommand::GetFirstUserText { reply: tx };

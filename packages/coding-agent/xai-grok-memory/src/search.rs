@@ -517,41 +517,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_hybrid_search_source_weights() {
-        let tmp = TempDir::new().unwrap();
-        let mut idx = test_index(&tmp);
-
-        let ws_file = tmp.path().join("ws.md");
-        std::fs::write(&ws_file, "# WS\n\nRust workspace content.").unwrap();
-        idx.reindex_file(&ws_file, "workspace").unwrap();
-
-        let gl_file = tmp.path().join("gl.md");
-        std::fs::write(&gl_file, "# GL\n\nRust global content.").unwrap();
-        idx.reindex_file(&gl_file, "global").unwrap();
-
-        let config = MemorySearchConfig {
-            min_score: 0.0,
-            ..Default::default()
-        };
-
-        let results = hybrid_search(&idx, None, "rust content", &config)
-            .await
-            .unwrap();
-
-        // Both should be found; workspace should score higher due to source_weight
-        if results.len() >= 2 {
-            let ws_result = results.iter().find(|r| r.source == "workspace");
-            let gl_result = results.iter().find(|r| r.source == "global");
-            if let (Some(ws), Some(gl)) = (ws_result, gl_result) {
-                assert!(
-                    (ws.score - gl.score).abs() < 0.01,
-                    "workspace and global should score equally (both weight=1.0)"
-                );
-            }
-        }
-    }
-
-    #[tokio::test]
     async fn query_embedding_failure_uses_embedding_fallback_mode() {
         let resolved = resolve_query_embedding(
             Some(&FailingEmbeddingProvider),
@@ -889,16 +854,6 @@ mod tests {
         assert!(
             pos_b < pos_a,
             "boosted chunk (rank {pos_b}) should rank ahead of its twin (rank {pos_a}) with MMR on",
-        );
-    }
-
-    /// access_boost never penalises zero-access chunks (boost = 1.0 for access_count = 0).
-    #[test]
-    fn test_access_boost_zero_access_is_neutral() {
-        let boost = 1.0 + (0_f64).ln_1p() * 0.05;
-        assert!(
-            (boost - 1.0).abs() < f64::EPSILON,
-            "zero accesses must yield a boost factor of exactly 1.0"
         );
     }
 

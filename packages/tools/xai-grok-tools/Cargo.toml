@@ -91,6 +91,7 @@ futures-util = { workspace = true }
 xai-grok-sandbox = { path = "../xai-grok-sandbox", default-features = false }
 xai-file-utils = { path = "../../platform/xai-file-utils" }
 dhat = { workspace = true, optional = true }
+zstd = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 command-fds = { version = "0.3", features = ["tokio"] }
@@ -118,6 +119,7 @@ reqwest = { workspace = true, features = ["blocking", "rustls-tls"] }
 flate2 = { workspace = true }
 sha2 = { workspace = true }
 tar = { workspace = true }
+zstd = { workspace = true }
 
 [lints]
 workspace = true

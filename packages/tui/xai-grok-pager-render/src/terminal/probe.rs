@@ -1,13 +1,9 @@
-//! Shared startup terminal-probe primitive: write a query, and (OSC 11
-//! only) raw-fd poll/read stdin until a terminator or deadline.
-//! XTVERSION uses only `write_query`;
-//! its reply is handled by the event loop's response filter.
+//! Shared startup terminal-probe primitive: write a query, and (OSC 11 only) raw-fd poll/read stdin until a terminator or deadline.
+//! XTVERSION uses only `write_query`; its reply is handled by the event loop's response filter.
 //!
 //! Safety invariants (timed-read path):
-//! - Startup-only: must run before crossterm's `EventStream` exists (both
-//!   compete for stdin).
-//! - Keystrokes typed inside the read window are consumed and dropped — no
-//!   portable re-injection exists (TIOCSTI is blocked); accepted loss.
+//! - Startup-only: must run before crossterm's `EventStream` exists (both compete for stdin).
+//! - Keystrokes typed inside the read window are consumed and dropped; no portable re-injection exists (TIOCSTI is blocked), an accepted loss.
 
 use std::io::Write;
 #[cfg(unix)]
@@ -25,14 +21,12 @@ const LATE_REPLY_GRACE: Duration = Duration::from_millis(100);
 #[cfg(unix)]
 const LATE_REPLY_QUIET_MS: i32 = 25;
 
-/// Write a probe query via the shared stderr lock; `false` if the TUI fd is
-/// not a TTY or the write fails.
+/// Write a probe query via the shared stderr lock; `false` if the TUI fd is not a TTY or the write fails.
 pub(crate) fn write_query(query: &[u8]) -> bool {
     use std::io::IsTerminal;
 
     let write_result: std::io::Result<()> = xai_grok_shared::stderr::with_locked_stderr(|stderr| {
-        // fd 2 is /dev/null-redirected; the TTY check must run on the
-        // dup'd render fd inside the lock, not on std::io::stderr().
+        // fd 2 is /dev/null-redirected; the TTY check must run on the dup'd render fd inside the lock, not on std::io::stderr()
         if !stderr.is_terminal() {
             return Err(std::io::Error::other("TUI output is not a TTY"));
         }
@@ -44,9 +38,8 @@ pub(crate) fn write_query(query: &[u8]) -> bool {
 
 /// Read stdin until `is_terminated`, the size cap, or the deadline.
 ///
-/// Returns `Some(buf)` whenever bytes were consumed (even partial, so a
-/// half-read reply is never left for the EventStream); `None` when nothing
-/// arrived or stdin errored before any byte.
+/// Returns `Some(buf)` whenever bytes were consumed (even partial, so a half-read reply is never left for the EventStream).
+/// Returns `None` when nothing arrived or stdin errored before any byte.
 #[cfg(unix)]
 pub(crate) fn read_tty_reply(
     timeout: Duration,
@@ -79,10 +72,9 @@ pub(crate) fn read_tty_reply(
     }
 }
 
-/// Deadline expiry: an in-flight reply (ESC byte seen — replies are
-/// DCS/CSI/OSC, plain keystrokes aren't) is consumed until quiet so its
-/// tail can't reach the EventStream as typed garbage; otherwise return
-/// immediately to avoid eating keystrokes at a silent terminal.
+/// Deadline expiry: an in-flight reply (ESC byte seen; replies are DCS/CSI/OSC, plain keystrokes aren't) is consumed until quiet.
+/// That keeps its tail from reaching the EventStream as typed garbage.
+/// Otherwise return immediately to avoid eating keystrokes at a silent terminal.
 #[cfg(unix)]
 fn finish_after_deadline(
     fd: i32,

@@ -156,6 +156,10 @@ New-Item -ItemType Directory -Path $DownloadDir -Force | Out-Null
 New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
 
 $Channel = if ($env:GROK_CHANNEL) { $env:GROK_CHANNEL } else { 'stable' }
+if ($Channel -cnotmatch '^(stable|alpha|enterprise)$') {
+    Write-Error "Invalid GROK_CHANNEL: '$Channel' (expected stable, alpha, or enterprise)"
+    exit 1
+}
 
 # Pick a working BaseUrl: try Cloudflare-fronted x.ai first, fall back to
 # direct GCS if it's unreachable. The probe doubles as the channel-pointer
@@ -244,8 +248,10 @@ try {
 
 $ConfigFile = Join-Path $GrokDir 'config.toml'
 $cliLines = @('installer = "internal"')
-if ($Channel -ne 'stable') {
-    $cliLines += "channel = `"$Channel`""
+if ($Channel -ceq 'alpha') {
+    $cliLines += 'channel = "alpha"'
+} elseif ($Channel -ceq 'enterprise') {
+    $cliLines += 'channel = "enterprise"'
 }
 
 if (-not (Test-Path $ConfigFile)) {

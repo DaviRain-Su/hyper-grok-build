@@ -1,8 +1,3 @@
-//! Production `ChatPersistence` implementation backed by the existing persistence channel.
-//!
-//! Wraps an `mpsc::UnboundedSender<PersistenceMsg>` and translates
-//! `ChatPersistence` trait calls into the appropriate `PersistenceMsg` variants.
-
 use std::io;
 
 use tokio::sync::{mpsc, oneshot};
@@ -12,19 +7,11 @@ use xai_grok_sampling_types::ConversationItem;
 use super::persistence::PersistenceMsg;
 
 /// Production `ChatPersistence` that sends to the existing session persistence channel.
-///
-/// Translates:
-/// - `persist_message` → `PersistenceMsg::Chat`
-/// - `persist_working_directory_switch_and_ack` → `PersistenceMsg::AppendCwdSwitchAndAck`
-/// - `replace_history` → `PersistenceMsg::ReplaceChatHistory`
-/// - `replace_history_for_strip_and_ack` → `PersistenceMsg::ReplaceChatHistoryForStripAndAck`
-/// - `flush` → `PersistenceMsg::Flush`
 pub(crate) struct ChannelChatPersistence {
     tx: mpsc::UnboundedSender<PersistenceMsg>,
 }
 
 impl ChannelChatPersistence {
-    /// Create a new `ChannelChatPersistence` wrapping the given persistence channel.
     pub(crate) fn new(tx: mpsc::UnboundedSender<PersistenceMsg>) -> Self {
         Self { tx }
     }

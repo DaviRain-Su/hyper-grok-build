@@ -1,8 +1,7 @@
 //! Leader-mode (`grok agent --leader stdio`) test harness.
 //!
-//! The fixture owns only subprocess handles it created: one initial persistent
-//! leader and each returned stdio client. Lock-file PIDs are observations only;
-//! detached replacement generations are never adopted or signaled.
+//! The fixture owns only subprocess handles it created: one initial persistent leader and each returned stdio client.
+//! Lock-file PIDs are observations only; a detached replacement leader is never adopted or signaled.
 
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
@@ -19,12 +18,12 @@ use crate::mock_server::MockInferenceServer;
 use crate::process::{TestOutput, TestProcess, TestProcessConfig, TestProcessTree, TestStdin};
 use crate::sandbox::TestSandbox;
 
-/// Env var naming the binary that elects/hosts the leader in a two-binary
-/// (version-skew) test. Falls back to [`grok_binary`]'s resolution.
+/// Env var naming the binary that elects/hosts the leader in a two-binary (version-skew) test.
+/// Falls back to [`grok_binary`]'s resolution.
 pub const LEADER_BINARY_ENV: &str = "GROK_BINARY_LEADER";
 
-/// Env var naming the binary for the second (usually newer) client in a
-/// two-binary test. Falls back to [`grok_binary`]'s resolution.
+/// Env var naming the binary for the second (usually newer) client in a two-binary test.
+/// Falls back to [`grok_binary`]'s resolution.
 pub const CLIENT_BINARY_ENV: &str = "GROK_BINARY_CLIENT";
 
 fn role_binary(env_key: &str) -> PathBuf {
@@ -122,9 +121,8 @@ impl acp::Client for LeaderAcpClient {
 
 /// Owns the concrete initial persistent leader shared by a test's clients.
 ///
-/// Production-created replacement generations are outside this fixture's
-/// ownership. [`Self::wait_for_new_leader`] may observe one for assertions but
-/// never turns its lock-file PID into signal authority.
+/// A replacement leader spawned by the code under test is outside this fixture's ownership.
+/// [`Self::wait_for_new_leader`] may observe one for assertions but never signals the PID it reads.
 pub struct LeaderFixture {
     inner: Arc<Mutex<LeaderFixtureState>>,
 }
@@ -195,8 +193,7 @@ impl LeaderFixture {
         Self::start_with_binary_timeout(binary, server, cwd, sandbox, Duration::from_secs(30)).await
     }
 
-    /// Start a leader pointed at an arbitrary base URL; offline-startup tests
-    /// aim it at an unreachable endpoint to prove it boots from local data.
+    /// Start a leader pointed at an arbitrary base URL; offline-startup tests aim it at an unreachable endpoint to prove it boots from local data.
     pub async fn start_with_base_url(
         base_url: &str,
         cwd: &Path,
@@ -316,8 +313,7 @@ impl LeaderFixture {
             .await
     }
 
-    /// Spawn a relay client whose own endpoints point at an arbitrary base URL;
-    /// pairs with [`Self::start_with_base_url`] for a fully offline stack.
+    /// Spawn a relay client whose own endpoints point at an arbitrary base URL; pairs with [`Self::start_with_base_url`] for a fully offline stack.
     pub async fn spawn_client_with_base_url(
         &self,
         base_url: &str,
@@ -444,8 +440,7 @@ impl LeaderFixture {
         .map_err(|error| io::Error::other(format!("leader reap task: {error}")))?
     }
 
-    /// On failed test cleanup, hard-kill the concrete initial leader and leak
-    /// its already-signaled owner so unwind cannot run blocking Drop cleanup.
+    /// On failed test cleanup, hard-kill the concrete initial leader and leak its already-signaled owner so unwind cannot run blocking Drop cleanup.
     /// Lock-file and detached replacement PIDs are never consulted or signaled.
     pub fn contain_failed_cleanup_for_unwind(&self) {
         let leader = self
@@ -461,8 +456,8 @@ impl LeaderFixture {
         }
     }
 
-    /// Close the directly-owned clients first, then shut down the concrete
-    /// initial leader. Detached replacements are intentionally untouched.
+    /// Close the directly-owned clients first, then shut down the concrete initial leader.
+    /// Detached replacements are intentionally untouched.
     pub async fn close(&self) -> io::Result<()> {
         let state = self.inner.clone();
         tokio::task::spawn_blocking(move || {
@@ -570,9 +565,8 @@ fn reap_exited_persistent_leader(
             format!("persistent leader pid {} did not exit", leader.pid),
         ));
     }
-    // macOS may report EPERM when the group contains only the unreaped zombie
-    // leader. The direct child is already known exited; attempt descendant
-    // cleanup while its PGID is reserved, then revoke before consuming status.
+    // macOS may report EPERM when the group contains only the unreaped zombie leader
+    // The direct child is already known exited; attempt descendant cleanup while its PGID is reserved, then release before consuming status
     // Focused tests separately prove a live descendant is removed.
     let _ = leader.tree.kill();
     leader.tree.release();
@@ -705,8 +699,7 @@ impl LeaderStdioClient {
         self.process.start_kill();
     }
 
-    /// Request a nonblocking hard kill while retaining concrete process and
-    /// fixture-registration ownership for unwind containment.
+    /// Request a nonblocking hard kill while retaining concrete process and fixture-registration ownership for unwind containment.
     pub fn contain_failed_cleanup_for_unwind(&mut self) {
         self.process.start_kill();
     }

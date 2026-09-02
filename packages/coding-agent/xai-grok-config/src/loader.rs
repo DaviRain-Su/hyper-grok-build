@@ -1,7 +1,6 @@
 //! TOML loading, layered merging, and `$VAR` expansion.
 //!
-//! The merged result is the **default** config; requirements layers
-//! sit on top via [`crate::validation`].
+//! The merged result is the **default** config; requirements layers sit on top via [`crate::validation`].
 
 use std::path::Path;
 
@@ -16,9 +15,8 @@ fn read_toml_file(path: &Path) -> std::io::Result<toml::Value> {
         Ok(s) => match toml::from_str::<toml::Value>(&s) {
             Ok(v) => Ok(v),
             Err(e) => {
-                // Built from the span, never from Display — Display echoes the
-                // offending source line, which may carry a secret. Safe to log and
-                // to return to a client.
+                // The detail is built from the span, never from Display: Display echoes the offending source line, which may carry a secret
+                // Safe to log and to return to a client
                 let detail = toml_error_detail(&s, &e);
                 tracing::error!(file = %path.display(), "config toml has syntax errors: {detail}");
                 Err(std::io::Error::other(detail))
@@ -41,11 +39,9 @@ pub fn load_toml_file(path: &Path) -> std::io::Result<toml::Value> {
     Ok(v)
 }
 
-/// A snippet-free description of a TOML parse error: `"TOML parse error at line
-/// L, column C: <what>"` (or just the message when there's no span). Never
-/// includes the offending source line — `Display` echoes it and it may carry a
-/// secret — so this is safe to log or surface to a client. Shared with the trace
-/// `config_files` artifact so the redaction rule lives in one place.
+/// A snippet-free description of a TOML parse error: `"TOML parse error at line L, column C: <what>"` (or just the message when there's no span).
+/// Never includes the offending source line (`Display` echoes it and it may carry a secret), so this is safe to log or return to a client.
+/// Shared with the trace `config_files` artifact so the redaction rule lives in one place.
 pub fn toml_error_detail(src: &str, e: &toml::de::Error) -> String {
     match e.span() {
         Some(span) => {
@@ -77,8 +73,8 @@ fn line_col(src: &str, byte: usize) -> (usize, usize) {
     (line, col)
 }
 
-/// [`load_toml_file`] plus that layer's `[[version_overrides]]`. Use for
-/// grok config files; use [`load_toml_file`] directly for unrelated TOML.
+/// [`load_toml_file`] plus that layer's `[[version_overrides]]`.
+/// Use for grok config files; use [`load_toml_file`] directly for unrelated TOML.
 pub fn load_config_file(path: &Path) -> std::io::Result<toml::Value> {
     let mut v = load_toml_file(path)?;
     apply_version_overrides_with_registered(&mut v)?;
@@ -95,7 +91,7 @@ pub const USER_CONFIG_FILENAME: &str = "config.toml";
 /// Managed config filename, shared by the loaders in this module.
 pub const MANAGED_CONFIG_FILENAME: &str = "managed_config.toml";
 
-/// Requirements (cloud-cache) filename — the sibling server-synced artifact.
+/// Requirements (cloud-cache) filename, synced from the server alongside the managed config.
 pub const REQUIREMENTS_FILENAME: &str = "requirements.toml";
 
 /// Unsigned folder-trust store (`$GROK_HOME/trusted_folders.toml`).
@@ -115,10 +111,9 @@ pub fn load_managed_config() -> std::io::Result<toml::Value> {
     load_user_config_layer(user_grok_home().as_deref(), MANAGED_CONFIG_FILENAME)
 }
 
-/// Load a user-tier config layer from `<home>/<filename>`. With no resolvable
-/// user home, returns an empty table rather than reading a cwd-relative
-/// `.grok/<filename>` (the cwd-fallback would silently promote an untrusted
-/// project `.grok` to the user tier).
+/// Load a user-tier config layer from `<home>/<filename>`.
+/// With no resolvable user home, returns an empty table rather than reading a cwd-relative `.grok/<filename>`.
+/// The cwd fallback would silently promote an untrusted project `.grok` to the user tier.
 fn load_user_config_layer(home: Option<&Path>, filename: &str) -> std::io::Result<toml::Value> {
     match home {
         Some(g) => load_config_file(&g.join(filename)),
@@ -140,8 +135,7 @@ pub fn load_system_managed_config() -> std::io::Result<toml::Value> {
 pub struct ManagedConfigLayer {
     pub value: toml::Value,
     pub path: std::path::PathBuf,
-    /// `true` for the root-owned system layer (`/etc/grok`), derived from the
-    /// load directory.
+    /// `true` for the root-owned system layer (`/etc/grok`), derived from the load directory.
     pub is_system: bool,
 }
 
@@ -179,9 +173,9 @@ pub fn managed_config_layers_at(
     layers
 }
 
-/// A hook's origin (held by `xai_grok_hooks::HookSpec::layer`). Defined here, not
-/// in `xai-grok-hooks`, since the dep direction is `xai-grok-hooks -> xai-grok-config`;
-/// this crate sets the config tiers, `File`/`Plugin` are set downstream.
+/// A hook's origin (held by `xai_grok_hooks::HookSpec::layer`).
+/// Defined here, not in `xai-grok-hooks`, since the dep direction is `xai-grok-hooks -> xai-grok-config`.
+/// This crate sets the config tiers; `File`/`Plugin` are set downstream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookProvenance {
@@ -195,20 +189,17 @@ pub enum HookProvenance {
     UserRequirements,
     /// `$GROK_HOME/config.toml`.
     User,
-    /// A JSON hook file (the hooks directory, a vendor settings file, or a
-    /// configured hooks path).
+    /// A JSON hook file (the hooks directory, a vendor settings file, or a configured hooks path).
     File,
     /// A plugin-contributed hook.
     Plugin,
-    /// A tier this build doesn't recognize (e.g. a newer peer's provenance over
-    /// the wire). Forward-tolerant so an unknown value degrades to a
-    /// conservative origin instead of failing the whole `HookRegistry` decode.
+    /// A tier this build doesn't recognize (e.g. a newer peer's provenance over the wire).
+    /// Forward-tolerant so an unknown value degrades to a conservative origin instead of failing the whole `HookRegistry` decode.
     #[serde(other)]
     Unknown,
 }
 
-/// Defaults to `File` so pre-provenance wire records decode as the most
-/// conservative origin.
+/// Defaults to `File` so wire records written before provenance existed decode as the most conservative origin.
 impl Default for HookProvenance {
     fn default() -> Self {
         Self::File
@@ -216,25 +207,18 @@ impl Default for HookProvenance {
 }
 
 impl HookProvenance {
-    /// Root-owned admin policy tiers. Hooks from these tiers cannot be
-    /// disabled or skipped by the user; every disable path must consult this
-    /// predicate rather than re-derive the rule from names or paths.
-    /// `$GROK_HOME` tiers (`Managed`, `UserRequirements`) never qualify: the
-    /// user owns that directory and can rewrite or repoint it, so exempting
-    /// them would let any file the user edits grant itself the exemption.
+    /// Root-owned admin policy tiers; the user cannot disable or skip their hooks.
+    /// Every disable path must consult this predicate rather than re-derive the rule from names or paths.
+    /// `$GROK_HOME` tiers (`Managed`, `UserRequirements`) never qualify: the user owns that directory and can rewrite or repoint it.
+    /// Exempting them would let any file the user edits grant itself the exemption.
     pub fn is_managed_policy(self) -> bool {
         matches!(self, Self::SystemManaged | Self::Requirements)
     }
 
-    /// Authority rank for duplicate resolution: when byte-identical hooks
-    /// arrive from several tiers, the highest-ranked copy keeps its
-    /// provenance — and with it the no-disable rule and the pinned
-    /// timeout/env. Root-owned tiers outrank `$GROK_HOME` tiers.
-    ///
-    /// Deliberately NOT the config-merge precedence (where user overrides
-    /// managed): merge precedence answers "whose VALUE wins", this answers
-    /// "whose copy of one identical hook is authoritative" — ownership, not
-    /// recency.
+    /// Authority rank for duplicate resolution: when byte-identical hooks arrive from several tiers, the highest-ranked copy keeps its provenance.
+    /// The provenance carries the no-disable rule and the pinned timeout/env; root-owned tiers outrank `$GROK_HOME` tiers.
+    /// Deliberately NOT the config-merge precedence (where user overrides managed).
+    /// Merge precedence answers "whose VALUE wins"; this answers "whose copy of one identical hook is authoritative": ownership, not recency.
     pub fn authority_rank(self) -> u8 {
         match self {
             Self::SystemManaged => 6,
@@ -265,8 +249,8 @@ impl HookProvenance {
 impl std::str::FromStr for HookProvenance {
     type Err = std::convert::Infallible;
 
-    /// Inverse of [`HookProvenance::as_str`]. Unrecognized strings map to
-    /// [`HookProvenance::Unknown`] (forward-tolerant), so this never fails.
+    /// Inverse of [`HookProvenance::as_str`].
+    /// Unrecognized strings map to [`HookProvenance::Unknown`] (forward-tolerant), so this never fails.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(match s {
             "system_managed" => Self::SystemManaged,
@@ -281,8 +265,7 @@ impl std::str::FromStr for HookProvenance {
     }
 }
 
-/// One config layer's `hooks` subtree (read without `$VAR` expansion) plus its
-/// provenance.
+/// One config layer's `hooks` subtree (read without `$VAR` expansion) plus its provenance.
 #[derive(Debug, Clone)]
 pub struct HookConfigLayer {
     provenance: HookProvenance,
@@ -292,8 +275,8 @@ pub struct HookConfigLayer {
 }
 
 impl HookConfigLayer {
-    /// Construct a layer directly (in-memory config and tests); the synthesized
-    /// `path` mirrors `source_name`. The normal path is [`hook_config_layers`].
+    /// Construct a layer directly (in-memory config and tests); the synthesized `path` mirrors `source_name`.
+    /// Real layers come from [`hook_config_layers`].
     pub fn new(
         provenance: HookProvenance,
         source_name: impl Into<String>,
@@ -313,8 +296,7 @@ impl HookConfigLayer {
         self.provenance
     }
 
-    /// A stable label for this layer (e.g. `"managed"`, `"requirements/user"`),
-    /// used to prefix hook names for display and dedup.
+    /// A stable label for this layer (e.g. `"managed"`, `"requirements/user"`), used to prefix hook names for display and dedup.
     pub fn source_name(&self) -> &str {
         &self.source_name
     }
@@ -330,17 +312,15 @@ impl HookConfigLayer {
     }
 }
 
-/// All config-layer `hooks` blocks, highest authority first (matching
-/// [`effective_config_base`]). Read WITHOUT env-expansion and never merged (hooks
-/// combine additively downstream); absent/unparsable layers are skipped with a
-/// warning so one bad layer can't drop the others. macOS MDM is excluded (not a
-/// TOML file; MDM hooks belong to the enforcement work).
+/// All config-layer `hooks` blocks, highest authority first (matching [`effective_config_base`]).
+/// Read WITHOUT env-expansion and never merged (hooks combine additively downstream).
+/// Absent or unparsable layers are skipped with a warning so one bad layer can't drop the others.
+/// macOS MDM is excluded (not a TOML file).
 pub fn hook_config_layers() -> Vec<HookConfigLayer> {
     hook_config_layers_at(system_config_dir().as_deref(), user_grok_home().as_deref())
 }
 
-/// Warn when a policy-tier hooks file is a symlink or not root-owned — the
-/// no-disable exemption assumes admin ownership of the system dir.
+/// Warn when a policy-tier hooks file is a symlink or not root-owned; the no-disable exemption assumes admin ownership of the system dir.
 #[cfg(unix)]
 fn warn_unless_root_owned(path: &Path) {
     use std::os::unix::fs::MetadataExt;
@@ -354,8 +334,7 @@ fn warn_unless_root_owned(path: &Path) {
             uid = meta.uid(),
             "policy-tier hooks file is not root-owned; its hooks cannot be disabled — enforcement assumes admin ownership"
         ),
-        // Root-owned but group/world-writable is the sneakier misconfig:
-        // any local user can edit the "non-disableable" policy.
+        // Root-owned but group/world-writable is the sneakier misconfig: any local user can edit the "non-disableable" policy
         Ok(meta) if meta.mode() & 0o022 != 0 => tracing::warn!(
             path = %path.display(),
             mode = format!("{:o}", meta.mode() & 0o777),
@@ -373,8 +352,7 @@ pub fn hook_config_layers_at(
     system_dir: Option<&Path>,
     user_home: Option<&Path>,
 ) -> Vec<HookConfigLayer> {
-    /// One candidate config-hook layer: which directory + filename to read, and
-    /// the provenance/label to stamp on hooks found there.
+    /// One candidate config-hook layer: which directory and filename to read, and the provenance/label to stamp on hooks found there.
     struct LayerSpec<'a> {
         dir: Option<&'a Path>,
         filename: &'a str,
@@ -382,11 +360,9 @@ pub fn hook_config_layers_at(
         source_name: &'a str,
     }
 
-    // Highest config authority first, matching `effective_config_base` precedence
-    // (requirements > user > managed > system_managed; user overrides managed in
-    // this model). Byte-identical duplicates resolve by
-    // `HookProvenance::authority_rank` regardless of this order; every
-    // distinct hook runs regardless.
+    // Highest config authority first, matching `effective_config_base` precedence (requirements > user > managed > system_managed)
+    // User overrides managed in this model
+    // Byte-identical duplicates resolve by `HookProvenance::authority_rank` regardless of this order; every distinct hook runs regardless
     let specs = [
         LayerSpec {
             dir: system_dir,
@@ -434,15 +410,12 @@ pub fn hook_config_layers_at(
         if !path.is_file() {
             continue;
         }
-        // The no-disable exemption rests on OS ownership; a misconfigured
-        // system dir would silently mint non-disableable hooks, so make it
-        // loud. Classification is unchanged (a root-owned deployment is the
-        // documented requirement, not something we can verify portably).
+        // The no-disable exemption rests on OS ownership; a misconfigured system dir would silently create non-disableable hooks, so make it loud
+        // Classification is unchanged (a root-owned deployment is the documented requirement, not something we can verify portably)
         if provenance.is_managed_policy() {
             warn_unless_root_owned(&path);
         }
-        // No `$VAR` expansion: a literal `${VAR}` must reach the hook runner, which
-        // does the single expansion (expanding here would double-expand).
+        // No `$VAR` expansion: a literal `${VAR}` must reach the hook runner, which does the single expansion (expanding here would double-expand)
         let mut value = match read_toml_file(&path) {
             Ok(v) => v,
             Err(e) => {
@@ -450,8 +423,7 @@ pub fn hook_config_layers_at(
                 continue;
             }
         };
-        // Apply `[[version_overrides]]` (parity with `load_config_file`); deep-merge
-        // only, no `$VAR` expansion, so the raw-read invariant holds.
+        // Apply `[[version_overrides]]` (parity with `load_config_file`); deep-merge only, no `$VAR` expansion, so the layer stays unexpanded
         if let Err(e) = apply_version_overrides_with_registered(&mut value) {
             tracing::warn!(path = %path.display(), error = %e, "skipping config layer whose version_overrides failed to apply");
             continue;
@@ -473,10 +445,8 @@ pub fn hook_config_layers_at(
     layers
 }
 
-/// Applies matching `[[version_overrides]]` patches against the running
-/// CLI version; strips the section either way. If the installed version
-/// can't be parsed (broken `GROK_TEST_VERSION` in dev), silently strips
-/// without applying — keeps the CLI usable on a bad dev override.
+/// Applies matching `[[version_overrides]]` patches against the running CLI version; strips the section either way.
+/// If the installed version can't be parsed (broken `GROK_TEST_VERSION` in dev), it silently strips without applying, keeping the CLI usable.
 pub fn apply_version_overrides_with_registered(value: &mut toml::Value) -> std::io::Result<()> {
     match xai_grok_version::installed_semver() {
         Ok(version) => apply_version_overrides(value, &version)
@@ -490,17 +460,15 @@ pub fn apply_version_overrides_with_registered(value: &mut toml::Value) -> std::
     }
 }
 
-/// Normalize a single config layer in place, before it is merged with the others. Per-layer
-/// fix-ups that must run pre-merge live here.
+/// Normalize a single config layer in place, before it is merged with the others.
 ///
-/// Currently: couple `[toolset.web_search]`'s mutually-exclusive `allowed_domains` and
-/// `excluded_domains`. If exactly one is set (non-empty), clear the other to `[]`, so the two keys
-/// travel together and `deep_merge_toml` replaces the whole policy from the winning layer instead
-/// of mixing keys across layers. Both-set (a user error) and both-unset are left alone; the
-/// both-set case is handled downstream where the section is read.
+/// Currently: couple `[toolset.web_search]`'s mutually-exclusive `allowed_domains` and `excluded_domains`.
+/// If exactly one is set (non-empty), clear the other to `[]`, so the two keys travel together.
+/// `deep_merge_toml` then replaces the whole policy from the winning layer instead of mixing keys across layers.
+/// Both-set (a user error) and both-unset are left alone; the both-set case is handled downstream where the section is read.
 ///
-/// This runs on every input of the merge, not only the disk layers. Campaign and version-override
-/// patches overlay *after* the layer merge, so they are normalized too, in `apply_patches`.
+/// This runs on every input of the merge, not only the disk layers.
+/// Campaign and version-override patches overlay *after* the layer merge, so they are normalized too, in `apply_patches`.
 pub(crate) fn normalize_config_layer(layer: &mut toml::Value) {
     let Some(web_search) = layer
         .as_table_mut()
@@ -619,10 +587,8 @@ mod tests {
         assert_eq!(cmd, "${HOME}/u.sh");
     }
 
-    /// The security-critical half of the tier split: the user-writable
-    /// `$GROK_HOME/requirements.toml` stamps `UserRequirements` (never the
-    /// exempt `Requirements`), so a file the user owns cannot grant itself
-    /// the no-disable exemption.
+    /// The user-writable `$GROK_HOME/requirements.toml` stamps `UserRequirements`, never the exempt `Requirements`.
+    /// A file the user owns cannot grant itself the no-disable exemption.
     #[test]
     fn user_requirements_layer_is_not_managed_policy() {
         let user_home = tempfile::tempdir().unwrap();
@@ -640,7 +606,6 @@ mod tests {
 
     #[test]
     fn hook_config_layers_bad_user_layer_does_not_drop_managed() {
-        // A broken user config.toml must not drop the admin managed layer.
         let home = tempfile::tempdir().unwrap();
         write(home.path(), "config.toml", "this is = = not valid toml");
         write(
@@ -653,8 +618,7 @@ mod tests {
         assert_eq!(names, vec!["managed"]);
     }
 
-    /// Direct contract for `deep_merge_toml`: nested tables merge (siblings
-    /// preserved), arrays replace (not concatenate), missing keys insert.
+    /// Direct contract for `deep_merge_toml`: nested tables merge (siblings preserved), arrays replace (not concatenate), missing keys insert.
     #[test]
     fn deep_merge_toml_table_merge_array_replace_and_insert() {
         let mut base: toml::Value = toml::from_str(
@@ -756,8 +720,7 @@ mod tests {
         assert_eq!(ws_array(&none, "excluded_domains"), None);
     }
 
-    /// The regression: after per-layer normalization, a plain `deep_merge_toml`
-    /// lets a higher layer's blocklist beat a lower layer's allowlist atomically.
+    /// After per-layer normalization, a plain `deep_merge_toml` lets a higher layer's blocklist beat a lower layer's allowlist atomically.
     #[test]
     fn normalized_layers_deep_merge_atomically() {
         let mut lower = ws_layer(r#"allowed_domains = ["github.com"]"#);
@@ -780,9 +743,8 @@ mod tests {
         );
     }
 
-    /// Campaign and version-override patches overlay after the layer merge, so
-    /// they need the same normalization: a campaign that flips an allowlist to a
-    /// blocklist must replace the policy, not leave both keys set.
+    /// Campaign and version-override patches overlay after the layer merge, so they need the same normalization.
+    /// A campaign that flips an allowlist to a blocklist must replace the policy, not leave both keys set.
     #[test]
     fn overlay_patches_are_normalized_before_merge() {
         let mut merged = ws_layer(r#"allowed_domains = ["github.com"]"#);
@@ -837,8 +799,7 @@ mod tests {
 
     #[test]
     fn load_user_config_layer_is_empty_without_user_home() {
-        // No resolvable user home: no user layer, and crucially no
-        // cwd-relative .grok read.
+        // No resolvable user home: no user layer, and no cwd-relative .grok read
         let v = load_user_config_layer(None, "config.toml").unwrap();
         assert_eq!(v.as_table().map(|t| t.is_empty()), Some(true));
     }
@@ -867,8 +828,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The returned error keeps the parser's kind + location but never the source
-    /// snippet, which can carry a secret and would reach a client caller.
+    /// The returned error keeps the parser's kind and location but never the source snippet, which can carry a secret and would reach clients.
     #[test]
     fn parse_error_keeps_kind_but_not_snippet() {
         let dir = std::env::temp_dir().join(format!("grok-toml-leak-{}", std::process::id()));

@@ -1,5 +1,5 @@
-//! `x.ai/session/load_history`: fetch one older page of a gateway-backed
-//! conversation by client-owned cursor (`beforeId` → `nextBeforeId`).
+//! `x.ai/session/load_history` fetches one older page of a gateway-backed conversation.
+//! The client owns the cursor: it passes `beforeId` and receives `nextBeforeId` for the next page.
 use super::ExtResult;
 use crate::agent::MvpAgent;
 use agent_client_protocol as acp;

@@ -1,19 +1,14 @@
-//! E2E: a submitted prompt is durably recorded in the per-CWD
-//! `prompt_history.jsonl` and survives quitting the TUI — via a fast double
-//! Ctrl+C (the reported repro, recalled after a `--continue` resume) and via a
-//! real OS SIGINT routed through the same graceful quit.
+//! E2E: a submitted prompt is durably recorded in the per-CWD `prompt_history.jsonl` and survives quitting the TUI.
+//! One path quits via a fast double Ctrl+C (the reported repro, recalled after a `--continue` resume).
+//! The other delivers a real OS SIGINT routed through the same graceful quit.
 //!
-//! Drives the real pager binary through a PTY against the shared mock
-//! inference server (isolated `$HOME`), exercising the full
-//! pager -> shell -> queue_input -> append path plus the graceful-quit teardown.
+//! Drives the real pager binary through a PTY against the shared mock inference server (isolated `$HOME`).
+//! Exercises the full path from the pager through the shell and `queue_input` to the append, plus the graceful-quit teardown.
 //!
-//! Coverage note: both paths wait for the turn to land before quitting, so
-//! `queue_input` (and its now-awaited append) has already run. This is an
-//! end-to-end durability + recall check, not a probe of the old detached-append
-//! race — that race is closed structurally by awaiting the append in
-//! `queue_input` and is covered by the `prompt_history` unit test. The
-//! deterministic regression catch here is the SIGINT path exiting 0 (pre-fix it
-//! was `process::exit(130)`).
+//! Coverage note: both paths wait for the turn to land before quitting, so `queue_input` (and its awaited append) has already run.
+//! This is an end-to-end durability and recall check, not a probe of the old detached-append race.
+//! That race is closed structurally by awaiting the append in `queue_input` and is covered by the `prompt_history` unit test.
+//! The deterministic regression catch here is the SIGINT path exiting 0 (pre-fix it was `process::exit(130)`).
 //!
 //! ```bash
 //! cargo test -p xai-grok-pager-pty-harness --test prompt_history_durable_quit \
@@ -59,20 +54,19 @@ async fn run() -> Result<()> {
 
     let binary = pager_binary().context("resolve pager binary")?;
 
-    // 1) Submit a prompt and let the turn settle (proves the shell reached
-    //    queue_input, where the append happens), then quit with double Ctrl+C.
+    // 1) Submit a prompt and let the turn settle (proves the shell reached queue_input, where the append happens), then quit with double Ctrl+C
     let mut first = submit_and_settle(&binary, &content, project.path(), CANARY)
         .context("submit canary in first pager")?;
 
-    // Double Ctrl+C: first arms the quit confirmation on the empty prompt, the
-    // second confirms -> same graceful Action::Quit as `/exit`.
+    // Double Ctrl+C: the first opens the quit confirmation on the empty prompt, the second confirms
+    // That is the same graceful Action::Quit as `/exit`
     let pre = first.raw_output().len();
     first.inject_keys(keys::CTRL_C).context("ctrl-c arm")?;
     first.update(Duration::from_millis(250));
     first.inject_keys(keys::CTRL_C).context("ctrl-c confirm")?;
 
-    // Drain output until the child exits so the post-`pre` suffix holds the full
-    // graceful teardown (incl. the show-cursor restore) for the assertions below.
+    // Drain output until the child exits so the post-`pre` suffix holds the full graceful teardown for the assertions below
+    // The teardown includes the show-cursor restore
     first.update(Duration::from_secs(10));
 
     let exit = first
@@ -111,8 +105,7 @@ async fn run() -> Result<()> {
         resumed.screen_contents()
     );
 
-    // Up-arrow opens the history overlay; smoke-check it doesn't crash and the
-    // recalled prompt stays reachable.
+    // Up-arrow opens the history overlay; check it doesn't crash and the recalled prompt stays reachable
     resumed.inject_keys(keys::UP).context("press Up")?;
     resumed.update(Duration::from_millis(500));
     assert!(
@@ -147,17 +140,15 @@ async fn run_sigint() -> Result<()> {
     let mut first = submit_and_settle(&binary, &content, project.path(), SIGINT_CANARY)
         .context("submit canary before SIGINT")?;
 
-    // A real SIGINT, not an injected 0x03 key byte (raw mode delivers that as a
-    // key event — the double-Ctrl+C path above), drives the OS-signal path.
+    // A real SIGINT, not an injected 0x03 key byte (raw mode delivers that as a key event, the double-Ctrl+C path above), drives the OS-signal path
     let pre = first.raw_output().len();
     first.send_signal(libc::SIGINT).context("send SIGINT")?;
 
-    // Drain output until the child exits so the post-`pre` suffix holds the full
-    // graceful teardown (incl. the show-cursor restore) for the assertions below.
+    // Drain output until the child exits so the post-`pre` suffix holds the full graceful teardown for the assertions below
+    // The teardown includes the show-cursor restore
     first.update(Duration::from_secs(10));
 
-    // Pre-fix the SIGINT handler called std::process::exit(130); routing it
-    // through the graceful quit exits 0 — the deterministic Part-B regression catch.
+    // Pre-fix the SIGINT handler called std::process::exit(130); routing it through the graceful quit exits 0, the deterministic regression catch
     let exit = first
         .wait_exit_code(Duration::from_secs(10))
         .context("wait for SIGINT exit")?;
@@ -177,11 +168,9 @@ async fn run_sigint() -> Result<()> {
     Ok(())
 }
 
-/// Spawn the pager in `project`, submit `canary`, then wait for the turn to
-/// render + settle to idle. Waiting past `queue_input` is deliberate: it
-/// guarantees the prompt reached the shell (so the durability assertion is
-/// meaningful), at the cost of not reproducing the sub-millisecond
-/// detached-append race (closed by awaiting the append; see the unit test).
+/// Spawn the pager in `project`, submit `canary`, then wait for the turn to render and settle to idle.
+/// Waiting past `queue_input` is deliberate: it guarantees the prompt reached the shell, so the durability assertion is meaningful.
+/// The cost is not reproducing the sub-millisecond detached-append race (closed by awaiting the append; see the unit test).
 fn submit_and_settle(
     binary: &Path,
     content: &ContentController,
@@ -205,9 +194,8 @@ fn submit_and_settle(
     Ok(pager)
 }
 
-/// Whether the pager emitted the show-cursor restore (`ESC [ ?25h`) after byte
-/// offset `since`. Scanning only the post-quit suffix avoids matching the
-/// show-cursor that normal rendering emits mid-session.
+/// Whether the pager emitted the show-cursor restore (`ESC [ ?25h`) after byte offset `since`.
+/// Scanning only the post-quit suffix avoids matching the show-cursor that normal rendering emits mid-session.
 fn terminal_restored(h: &PtyHarness, since: usize) -> bool {
     const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
     let raw = h.raw_output();

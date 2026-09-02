@@ -1,5 +1,5 @@
-//! `[[campaigns]]` overlays. Priority (first id wins): requirements > remote >
-//! user > managed > system_managed. Applied after layer merge.
+//! `[[campaigns]]` overlays. Priority (first id wins): requirements > remote > user > managed > system_managed.
+//! They apply after the layer merge.
 
 use serde::{Deserialize, Serialize};
 
@@ -22,8 +22,8 @@ pub struct CampaignEntry {
     pub patch: toml::Table,
 }
 
-/// Disk campaigns grouped by source layer. Merged with the remote layer (by
-/// priority, first id wins) in [`crate::config_layers::ConfigLayers::resolve_campaigns`].
+/// Disk campaigns grouped by source layer.
+/// Merged with the remote layer (by priority, first id wins) in [`crate::config_layers::ConfigLayers::resolve_campaigns`].
 #[derive(Debug, Clone, Default)]
 pub struct CampaignOverrides {
     pub requirements: Vec<CampaignEntry>,
@@ -36,9 +36,8 @@ pub fn take_campaigns(config: &mut toml::Value) -> Vec<ConfigOverrideEntry<Campa
     match take_patch_array::<CampaignMeta>(config, CAMPAIGNS_KEY) {
         Ok(entries) => entries,
         Err(_) => {
-            // Category-only, never the raw error: a `toml::de::Error` Display
-            // echoes the offending value, so `campaigns = "sk-secret"` would
-            // leak into logs. Mirrors `VersionOverrideError::redacted`.
+            // Log only the category: a `toml::de::Error` Display echoes the offending value, so `campaigns = "sk-secret"` would leak into logs
+            // Mirrors `VersionOverrideError::redacted`
             tracing::warn!("campaigns: failed to deserialize (details omitted); ignoring entries");
             Vec::new()
         }
@@ -100,8 +99,7 @@ pub fn filter_active_campaigns(
         .collect()
 }
 
-/// Ids of `active` campaigns whose patch touches any of `paths` — used to dismiss
-/// campaigns when the user persists a value at one of those paths.
+/// Ids of `active` campaigns whose patch touches any of `paths`, used to dismiss campaigns when the user persists a value at one of those paths.
 pub fn ids_touching_paths(active: &[CampaignEntry], paths: &[PatchPath]) -> Vec<String> {
     active
         .iter()
@@ -110,8 +108,7 @@ pub fn ids_touching_paths(active: &[CampaignEntry], paths: &[PatchPath]) -> Vec<
         .collect()
 }
 
-/// `active` is highest-priority-first; patches apply lowest-first (`.rev()`) so the
-/// highest-priority source wins a leaf conflict.
+/// `active` is highest-priority-first; patches apply lowest-first (`.rev()`) so the highest-priority source wins a leaf conflict.
 pub fn apply_active_campaign_patches(effective: &mut toml::Value, active: &[CampaignEntry]) {
     apply_patches(
         effective,
@@ -196,8 +193,7 @@ mod tests {
             fn exit(&self, _: &tracing::span::Id) {}
         }
 
-        // A scalar where an array is expected: the raw toml error echoes the
-        // value, so `take_campaigns` must never log it verbatim.
+        // A scalar where an array is expected: the raw toml error echoes the value, so `take_campaigns` must never log it verbatim
         let secret = "sk-secret-token";
         let mut cfg = parse(&format!("campaigns = \"{secret}\"\n"));
 
@@ -251,8 +247,7 @@ mod tests {
 
     #[test]
     fn apply_highest_priority_wins_on_leaf_conflict() {
-        // Two *distinct* ids both set models.default; the higher-priority source
-        // (earlier in the merged list) must win the leaf.
+        // Two *distinct* ids both set models.default; the higher-priority source (earlier in the merged list) must win the leaf
         let req = [CampaignEntry {
             id: "req".into(),
             patch: models_default_patch("from-req"),
@@ -271,8 +266,7 @@ mod tests {
 
     #[test]
     fn build_campaign_entries_skips_missing_id() {
-        // A `None` id and a whitespace-only id are both dropped (with a warn);
-        // only the entry carrying a real id survives.
+        // A `None` id and a whitespace-only id are both dropped (with a warn); only the entry carrying a real id survives
         let taken = vec![
             ConfigOverrideEntry {
                 meta: CampaignMeta { id: None },
@@ -307,9 +301,8 @@ mod tests {
             let entries = take_campaign_entries(&mut layer, "user");
             assert_eq!(entries.len(), 1);
             assert_eq!(entries[0].id, "c1");
-            // The id key (either spelling) must be consumed by the meta, never
-            // land in the patch — a leaked key would deep-merge a junk top-level
-            // `id` into every effective config.
+            // The id key (either spelling) must be consumed by the meta, never land in the patch
+            // A leaked key would deep-merge a junk top-level `id` into every effective config
             assert!(
                 entries[0].patch.get("id").is_none()
                     && entries[0].patch.get("campaign_id").is_none(),
@@ -321,8 +314,8 @@ mod tests {
     #[test]
     fn requirements_win_over_campaign() {
         use crate::config_layers::ConfigLayers;
-        // A campaign (even from a lower layer) can't override a field the admin
-        // set in requirements: `apply_campaign_overrides` re-merges requirements on top.
+        // A campaign (even from a lower layer) can't override a field the admin set in requirements
+        // `apply_campaign_overrides` re-merges requirements on top
         let mut layers = ConfigLayers {
             user: parse("[models]\ndefault = \"user-old\"\n"),
             user_requirements: Some(parse("[models]\ndefault = \"pinned\"\n")),

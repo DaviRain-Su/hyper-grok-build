@@ -1,8 +1,7 @@
 //! Skill and command discovery for system prompt injection.
 //!
-//! Orchestrates priority-based discovery across local, repo, optional
-//! workspace-user, user, bundled, config-path, and plugin sources. Parsing primitives
-//! live in `xai_grok_tools::implementations::skills::discovery`.
+//! Discovers skills in priority order across local, repo, optional workspace-user, user, bundled, config-path, and plugin sources.
+//! Parsing primitives live in `xai_grok_tools::implementations::skills::discovery`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -10,8 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::plugins::discovery::PluginScope;
 use xai_grok_tools::implementations::skills::types::skill_name_from_path;
 pub use xai_grok_tools::implementations::skills::types::{SkillInfo, SkillScope};
-/// Re-export so agent-side discovery (and the shell) can name the resolved
-/// vendor-compat config without reaching into `xai_grok_tools` directly.
+/// Re-export so agent-side discovery (and the shell) can name the resolved vendor-compat config without reaching into `xai_grok_tools` directly.
 pub use xai_grok_tools::types::compat::CompatConfig;
 
 use xai_grok_tools::implementations::skills::discovery::{
@@ -21,27 +19,29 @@ use xai_grok_tools::implementations::skills::discovery::{
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct SkillsConfig {
-    /// Additional skill locations to load. Each entry is a `SKILL.md` file or a
-    /// directory walked recursively. Supports `~` expansion.
+    /// Additional skill locations to load.
+    /// Each entry is a `SKILL.md` file or a directory walked recursively.
+    /// Supports `~` expansion.
     #[serde(default)]
     pub paths: Vec<String>,
 
-    /// Path prefixes to exclude. Any skill whose resolved path starts with one of
-    /// these entries is filtered out. Supports `~` expansion.
+    /// Path prefixes to exclude.
+    /// Any skill whose resolved path starts with one of these entries is filtered out.
+    /// Supports `~` expansion.
     #[serde(default)]
     pub ignore: Vec<String>,
 
-    /// Skill names that are disabled. Disabled skills remain in the list
-    /// (unlike `ignore` which hides them entirely) but are excluded from
-    /// the system prompt and skill tool invocation.
+    /// Skill names that are disabled.
+    /// Disabled skills remain in the list (unlike `ignore` which hides them entirely).
+    /// They are excluded from the system prompt and skill tool invocation.
     #[serde(default)]
     pub disabled: Vec<String>,
 
-    /// Launcher-injected server-synced skill dirs (tagged `Server` scope).
+    /// Skill dirs the launcher injects after syncing from the server (tagged `Server` scope).
     #[serde(default)]
     pub server_skill_dirs: Vec<String>,
 
-    /// Launcher-injected platform bundled skill dirs (tagged `Bundled` scope).
+    /// Skill dirs the launcher injects for skills bundled with the platform (tagged `Bundled` scope).
     #[serde(default)]
     pub bundled_skill_dirs: Vec<String>,
 }
@@ -59,8 +59,8 @@ pub struct SkillsConfig {
 ///
 /// When `working_directory` is `None`, only User-scoped skills are returned.
 ///
-/// `compat` gates which vendor (`.claude`/`.cursor`) dirs are scanned; pass
-/// `CompatConfig::default()` to preserve the historical all-vendors behavior.
+/// `compat` gates which vendor (`.claude`/`.cursor`) dirs are scanned.
+/// Pass `CompatConfig::default()` to preserve the historical all-vendors behavior.
 pub async fn list_skills(
     working_directory: Option<&str>,
     config: &SkillsConfig,
@@ -71,11 +71,9 @@ pub async fn list_skills(
 
 /// List all discovered skills including plugin-provided skills.
 ///
-/// When `plugins` is `Some`, skills from enabled plugins are appended with
-/// `plugin_name: Some(...)` and `scope` set to the plugin's origin
-/// (e.g. `Repo` for `.grok/plugins/`). Native skills always win bare-name
-/// resolution, but qualified plugin entries (`my-plugin:hello`) are
-/// preserved even on collision.
+/// When `plugins` is `Some`, skills from enabled plugins are appended with `plugin_name: Some(...)`.
+/// Their `scope` is the plugin's origin (e.g. `Repo` for `.grok/plugins/`).
+/// Native skills always win bare-name resolution, but qualified plugin entries (`my-plugin:hello`) are preserved even on collision.
 pub async fn list_skills_with_plugins(
     working_directory: Option<&str>,
     config: &SkillsConfig,
@@ -120,9 +118,8 @@ pub async fn list_skills_with_plugins(
 
     let mut merged = merge_skills_with_plugins(skills, plugin_skills);
 
-    // Mark disabled skills. Disabled skills remain in the list (unlike
-    // `ignore` which hides them) but are excluded from the system prompt
-    // and skill tool invocation.
+    // Mark disabled skills
+    // Disabled skills remain in the list (unlike `ignore` which hides them) but are excluded from the system prompt and skill tool invocation
     if !config.disabled.is_empty() {
         let disabled_set: HashSet<&str> = config.disabled.iter().map(|s| s.as_str()).collect();
         for skill in &mut merged {
@@ -137,8 +134,7 @@ pub async fn list_skills_with_plugins(
 
 /// Canonical source of all config directories that may contain skills.
 ///
-/// Both skill discovery and the file watcher call this function so they
-/// agree on which directories matter.
+/// Both skill discovery and the file watcher call this function so they agree on which directories matter.
 pub fn collect_skill_config_dirs(
     cwd: Option<&Path>,
     workspace_user_dir: Option<&Path>,
@@ -167,9 +163,8 @@ pub fn collect_skill_config_dirs(
         }
     };
 
-    // Vendor dirs (`.claude`/`.cursor`) are gated by the resolved compat
-    // config; `.grok` and `.agents` are always present. When all cells are on
-    // this list equals the historical `[".grok", ".agents", ".claude", ".cursor"]`.
+    // Vendor dirs (`.claude`/`.cursor`) are gated by the resolved compat config; `.grok` and `.agents` are always present
+    // When all cells are on, this list equals the historical `[".grok", ".agents", ".claude", ".cursor"]`
     let config_dir_names = compat.skill_config_dirs();
 
     // Priority 1 & 2: Walk from cwd up to the git root.
@@ -199,9 +194,8 @@ pub fn collect_skill_config_dirs(
         }
     }
 
-    // Priority 3: Global user dirs. `.grok` comes from `grok_home` (which may
-    // be overridden), so it's handled separately; `.agents` is always added,
-    // while `.claude`/`.cursor` are gated by the skills compat cells.
+    // Priority 3: Global user dirs. `.grok` comes from `grok_home` (which may be overridden), so it's handled separately.
+    // `.agents` is always added, while `.claude`/`.cursor` are gated by the skills compat cells
     try_add(grok_home);
     if let Some(home) = xai_dirs::home_dir() {
         try_add(home.join(".agents"));
@@ -228,8 +222,7 @@ pub fn collect_skill_config_dirs(
     dirs
 }
 
-/// Determine the skill scope for a config directory based on its location
-/// relative to `cwd`, `git_root`, and the user's home directory.
+/// Determine the skill scope for a config directory based on its location relative to `cwd`, `git_root`, and the user's home directory.
 fn scope_for_config_dir(dir: &Path, cwd: Option<&Path>, git_root: Option<&Path>) -> SkillScope {
     // Home-level dirs (e.g. ~/.grok/, ~/.agents/, ~/.claude/) are User scope.
     if let Some(home) = xai_dirs::home_dir()
@@ -257,12 +250,10 @@ fn scope_for_config_dir(dir: &Path, cwd: Option<&Path>, git_root: Option<&Path>)
 
 /// Collect paths into `out`, deduplicating by canonical path.
 ///
-/// Skill/command discovery does **not** consult `.gitignore`. Auto-discovery
-/// only visits known config roots (`.grok`, `.agents`, `.claude`, `.cursor`),
-/// which teams often gitignore as local-only config while still expecting them
-/// to load. Hiding a skill uses `[skills] ignore` in config, not repo ignore
-/// rules. AGENTS.md discovery still honors gitignore — that is content, not
-/// skill roots.
+/// Skill/command discovery does **not** consult `.gitignore`.
+/// Auto-discovery only visits known config roots (`.grok`, `.agents`, `.claude`, `.cursor`), which teams often gitignore but still expect to load.
+/// Hiding a skill uses `[skills] ignore` in config, not repo ignore rules.
+/// AGENTS.md discovery still honors gitignore: that is content, not skill roots.
 fn collect_discovered_paths(
     paths: impl IntoIterator<Item = PathBuf>,
     scope: SkillScope,
@@ -278,9 +269,8 @@ fn collect_discovered_paths(
 }
 
 /// Discover skills and commands from config dirs, workspace, and bundled paths.
-/// Skills are collected before commands so they win name collisions via
-/// first-seen-wins dedup. Returns only global skills when `working_directory`
-/// is `None`.
+/// Skills are collected before commands so they win name collisions via first-seen-wins dedup.
+/// Returns only global skills when `working_directory` is `None`.
 async fn list_skills_with_options(
     working_directory: Option<&str>,
     workspace_user_dir: Option<&Path>,
@@ -343,8 +333,8 @@ fn expand_tilde(raw: &str) -> PathBuf {
 /// Collect and parse skills from `SkillsConfig.paths` entries.
 ///
 /// Each entry is either a direct SKILL.md file or a directory to walk recursively.
-/// `~` is expanded. Scope is `Repo` if the resolved path falls inside `git_root`,
-/// otherwise `User`.
+/// `~` is expanded.
+/// Scope is `Repo` if the resolved path falls inside `git_root`, otherwise `User`.
 fn collect_config_skills(config_paths: &[String], git_root: Option<&Path>) -> Vec<SkillInfo> {
     let mut skill_files: Vec<(PathBuf, SkillScope)> = Vec::new();
     let mut seen = HashSet::new();
@@ -375,8 +365,7 @@ fn collect_config_skills(config_paths: &[String], git_root: Option<&Path>) -> Ve
     }
 
     let mut skills = parse_skill_files(skill_files);
-    // Provenance metadata only (scope still drives precedence): lets inspect
-    // and UIs distinguish `[skills].paths` entries from plain user/repo skills.
+    // Provenance metadata only (scope still drives precedence): lets inspect and UIs tell `[skills].paths` entries from plain user/repo skills
     for skill in &mut skills {
         skill.config_source = Some(
             xai_grok_tools::types::config_source::ConfigSource::ConfigToml {
@@ -407,21 +396,17 @@ fn collect_injected_skills(dirs: &[String], scope: SkillScope) -> Vec<SkillInfo>
 /// Deduplicate skills while preserving first-seen priority order.
 ///
 /// Dedupes in two passes at once:
-/// - By canonical path (same file discovered via multiple sources; the kept
-///   entry inherits a dropped duplicate's `config_source` stamp)
+/// - By canonical path (same file discovered via multiple sources; the kept entry inherits a dropped duplicate's `config_source` stamp)
 /// - By skill name (a higher-priority source wins)
 ///
-/// A same-scope name loser whose directory basename differs from the
-/// contested name is re-identified under that basename when that identity
-/// is free (see [`rekey_to_dir_basename`]) — the same recovery
-/// `stamp_plugin_fields` applies to plugin siblings. A loser whose basename
-/// equals the contested name or is already claimed stays shadowed, and a
-/// frontmatter owner evicts a claimant that only holds its name via an
-/// earlier re-key. Cross-scope shadowing (a higher-priority source claiming
-/// a name) is an intentional override and is preserved as-is.
+/// [`rekey_to_dir_basename`] re-keys a same-scope name loser to its directory basename when that differs from the contested name and is free.
+/// `stamp_plugin_fields` applies the same recovery to plugin siblings.
+/// A loser whose basename equals the contested name or is already claimed stays shadowed.
+/// A frontmatter owner evicts a claimant that only holds its name via an earlier re-key.
+/// Cross-scope shadowing (a higher-priority source claiming a name) is an intentional override and is preserved as-is.
 fn dedupe_skills(skills: Vec<SkillInfo>) -> Vec<SkillInfo> {
     let mut seen_paths: HashMap<PathBuf, usize> = HashMap::new();
-    // Contested name → (claiming scope, index of the claimant in `deduped`).
+    // Maps a contested name to its claiming scope and the claimant's index in `deduped`
     let mut seen_names: HashMap<String, (SkillScope, usize)> = HashMap::new();
 
     let mut deduped: Vec<SkillInfo> = Vec::with_capacity(skills.len());
@@ -430,9 +415,9 @@ fn dedupe_skills(skills: Vec<SkillInfo>) -> Vec<SkillInfo> {
             dunce::canonicalize(&skill.path).unwrap_or_else(|_| PathBuf::from(&skill.path));
 
         if let Some(&kept_idx) = seen_paths.get(&canonical_path) {
-            // A file reached via both auto-discovery and `[skills].paths` is
-            // genuinely both; carry the provenance stamp onto the kept entry
-            // so the label isn't source-order-dependent. Scope is untouched.
+            // A file reached via both auto-discovery and `[skills].paths` is genuinely both
+            // Carry the provenance stamp onto the kept entry so the label doesn't depend on source order
+            // Scope is untouched
             let kept = &mut deduped[kept_idx];
             if kept.config_source.is_none() && skill.config_source.is_some() {
                 kept.config_source = skill.config_source;
@@ -443,12 +428,9 @@ fn dedupe_skills(skills: Vec<SkillInfo>) -> Vec<SkillInfo> {
             if winner_scope == skill.scope
                 && !matches!(skill.scope, SkillScope::Server | SkillScope::Bundled)
             {
-                // Same-scope siblings sharing a frontmatter name keep both:
-                // re-key the challenger to its dir basename; when the
-                // challenger IS the basename owner, re-key the earlier
-                // claimant and hand the name back. A challenger whose rekey
-                // failed for other reasons (dir taken/invalid) has no claim
-                // and falls through to the shadow-drop.
+                // Same-scope siblings sharing a frontmatter name keep both: re-key the challenger to its dir basename
+                // When the challenger IS the basename owner, re-key the earlier claimant instead and hand the name back
+                // A challenger whose rekey failed for other reasons (dir taken/invalid) has no claim and falls through to be shadowed below
                 if rekey_to_dir_basename(&mut skill, &mut seen_names, deduped.len()) {
                     seen_paths.insert(canonical_path, deduped.len());
                     deduped.push(skill);
@@ -466,10 +448,8 @@ fn dedupe_skills(skills: Vec<SkillInfo>) -> Vec<SkillInfo> {
                         continue;
                     }
                     if deduped[winner_idx].display_name.is_some() {
-                        // The incumbent holds this name only via an earlier
-                        // re-key and cannot move again; the frontmatter owner
-                        // evicts it (a stale copy must not shadow the skill
-                        // genuinely named after its own directory).
+                        // The incumbent holds this name only via an earlier re-key and cannot move again, so the frontmatter owner evicts it
+                        // A stale copy must not shadow the skill genuinely named after its own directory
                         let evicted = &deduped[winner_idx];
                         let evicted_path = dunce::canonicalize(&evicted.path)
                             .unwrap_or_else(|_| PathBuf::from(&evicted.path));
@@ -499,13 +479,11 @@ fn dedupe_skills(skills: Vec<SkillInfo>) -> Vec<SkillInfo> {
     deduped
 }
 
-/// Re-identify a name-collision party under its directory basename, keeping
-/// the frontmatter name as the display label — the copied-skill-dir case
-/// (`cp -r japandi japandi2` with `name: japandi` left in both files).
+/// Re-identify a name-collision party under its directory basename, keeping the frontmatter name as the display label.
+/// This covers a copied skill dir (`cp -r japandi japandi2` with `name: japandi` left in both files).
 ///
-/// Returns `false` — leaving the collision to the caller's shadowing path —
-/// when the basename is missing/invalid, equals the skill's current name
-/// (a true duplicate), or is itself already claimed.
+/// Returns `false` when the basename is missing/invalid, equals the skill's current name (a true duplicate), or is itself already claimed.
+/// A `false` return leaves the collision to the caller's shadowing path.
 fn rekey_to_dir_basename(
     skill: &mut SkillInfo,
     seen_names: &mut HashMap<String, (SkillScope, usize)>,
@@ -543,10 +521,8 @@ fn stamp_plugin_fields(skills: &mut [SkillInfo], plugin: &crate::plugins::Loaded
         skill.plugin_version = plugin.version.clone();
         skill.plugin_root = Some(plugin.root_str());
         skill.plugin_data = Some(plugin.data_dir_str());
-        // Identity is the directory basename (`plugin:<dir>`), keeping sibling
-        // skills collision-free; frontmatter `name` becomes the display label.
-        // Normalize the basename so the slash name is a valid slug, matching how
-        // frontmatter/fallback names are slugged at parse time.
+        // Identity is the directory basename (`plugin:<dir>`), keeping sibling skills collision-free; frontmatter `name` becomes the display label
+        // Normalize the basename so the slash name is a valid slug, matching how frontmatter/fallback names are slugged at parse time
         if let Some(dir) = skill_name_from_path(&skill.path) {
             let dir = normalize_skill_name(dir);
             if !dir.is_empty() && dir != skill.name {
@@ -637,7 +613,7 @@ pub fn filter_skills(skills: Vec<SkillInfo>, ignore_paths: &[String]) -> Vec<Ski
         .filter(|skill| {
             let canonical =
                 dunce::canonicalize(&skill.path).unwrap_or_else(|_| PathBuf::from(&skill.path));
-            // >MAX_PATH caveat (see workspace clippy.toml) — fail-open here: over-long ignored skills stay included.
+            // >MAX_PATH caveat (see workspace clippy.toml); fail-open here: over-long ignored skills stay included
             !expanded.iter().any(|ignore| canonical.starts_with(ignore))
         })
         .collect()
@@ -661,8 +637,7 @@ pub(crate) fn format_skills_for_injection(skills: &[SkillInfo]) -> String {
     if parts.is_empty() {
         return String::new();
     }
-    // Trailing blank line separates the last skill envelope from the
-    // agent's own prompt body, so `</skill>` doesn't run into the body.
+    // Trailing blank line separates the last skill envelope from the agent's own prompt body, so `</skill>` doesn't run into the body
     format!("\n\n{}\n\n", parts.join("\n\n"))
 }
 
@@ -674,7 +649,6 @@ pub(crate) async fn resolve_preloaded_skills(
     let mut result = Vec::new();
 
     for name in names {
-        // Find matching skill (case-insensitive name match, also try qualified name)
         let skill = discovered.iter().find(|s| {
             s.name.eq_ignore_ascii_case(name)
                 || xai_grok_tools::implementations::skills::skill::format_skill_name(s)
@@ -689,7 +663,6 @@ pub(crate) async fn resolve_preloaded_skills(
             continue;
         };
 
-        // Load the skill with body content
         match xai_grok_tools::implementations::skills::skill::load_skill_with_body(skill).await {
             Ok(loaded) => result.push(loaded),
             Err(e) => {
@@ -715,7 +688,6 @@ mod tests {
         is_valid_skill_name, normalize_skill_name, parse_skill_frontmatter,
     };
 
-    /// Helper: create a minimal valid SKILL.md with the given name.
     fn write_skill_md(dir: &Path, name: &str) {
         fs::create_dir_all(dir).unwrap();
         let content = format!(
@@ -860,7 +832,6 @@ mod tests {
 
     #[test]
     fn find_skill_paths_mixed_flat_and_nested() {
-        // Mix of flat and nested skills
         let tmp = tempfile::tempdir().unwrap();
         let grok_dir = tmp.path().join(".grok");
         let skills = grok_dir.join("skills");
@@ -878,13 +849,11 @@ mod tests {
 
     #[test]
     fn find_skill_paths_dir_without_skill_md_is_skipped() {
-        // A subdirectory exists but has no SKILL.md — should not appear
         let tmp = tempfile::tempdir().unwrap();
         let grok_dir = tmp.path().join(".grok");
         let skills = grok_dir.join("skills");
 
         write_skill_md(&skills.join("valid"), "valid");
-        // Create a dir with no SKILL.md
         fs::create_dir_all(skills.join("empty-dir")).unwrap();
         // Create a dir with a random file but no SKILL.md
         let other = skills.join("other");
@@ -920,7 +889,7 @@ mod tests {
         let skills_dir = tmp.path().join("skills");
 
         // Build a chain: skills/d0/d1/d2/d3/d4/d5/d6/deep-skill/SKILL.md
-        // depth 0=d0, 1=d1, ..., 5=d5 (at limit), 6=d6 (beyond limit)
+        // d5 sits at the depth limit and d6 is one past it
         let mut current = skills_dir.clone();
         for i in 0..=MAX_SKILL_WALK_DEPTH + 1 {
             current = current.join(format!("d{i}"));
@@ -933,14 +902,12 @@ mod tests {
         let mut paths = Vec::new();
         walk_for_skill_md(&skills_dir, &mut paths, 0);
 
-        // shallow should be found, deep-skill should not (too deep)
         assert_eq!(paths.len(), 1);
         assert!(paths[0].display().to_string().contains("shallow"));
     }
 
     #[test]
     fn find_skill_paths_parent_and_child_both_have_skill_md() {
-        // A directory has SKILL.md and also has subdirectories with SKILL.md
         let tmp = tempfile::tempdir().unwrap();
         let grok_dir = tmp.path().join(".grok");
         let skills = grok_dir.join("skills");
@@ -1002,50 +969,21 @@ mod tests {
     // ── UTF-8 safe body truncation ──────────────────────────────────
 
     #[test]
-    fn description_fallback_does_not_panic_on_multibyte_boundary() {
-        // Build a body longer than MAX_BODY_PEEK_BYTES (2048) with multibyte
-        // characters near the cutoff so the old &body[..2048] would land in
-        // the middle of a multi-byte char and panic.
-        //
-        // Strategy: fill with ASCII up to near the limit, then pack 4-byte
-        // emoji right at the boundary.
-        let prefix = "# Heading\n\n";
-        let filler_len = MAX_BODY_PEEK_BYTES - prefix.len() - 4; // leave room for emoji at boundary
-        let filler = "a".repeat(filler_len);
-        // Each emoji is 4 bytes. Place several so one straddles the 2048 mark.
-        let emoji_run = "\u{1F600}".repeat(10); // 40 bytes of emoji
-        let body = format!("{prefix}{filler}{emoji_run}");
-        assert!(body.len() > MAX_BODY_PEEK_BYTES, "body must exceed limit");
-
-        // This must not panic when truncated to MAX_BODY_PEEK_BYTES.
-        let mut end = MAX_BODY_PEEK_BYTES;
-        while end > 0 && !body.is_char_boundary(end) {
-            end -= 1;
-        }
-        let peek = &body[..end];
-        let result = extract_first_paragraph(peek);
-        // Should produce a paragraph (the long filler + some emoji).
-        assert!(result.is_some());
-    }
-
-    #[test]
     fn description_fallback_end_to_end_with_multibyte_skill_file() {
-        // End-to-end: a SKILL.md with no description in frontmatter falls
-        // back to body parsing. The body contains multibyte text that would
-        // cross the MAX_BODY_PEEK_BYTES boundary.
+        // End-to-end: a SKILL.md with no description in frontmatter falls back to body parsing
+        // The body contains multibyte text that would cross the MAX_BODY_PEEK_BYTES boundary
         let tmp = tempfile::tempdir().unwrap();
         let skill_dir = tmp.path().join("skills").join("emoji-skill");
         fs::create_dir_all(&skill_dir).unwrap();
 
-        // Body (after frontmatter): heading + paragraph with multibyte chars
-        // exceeding 2048 bytes.
+        // Body (after frontmatter): a heading and a paragraph with multibyte chars exceeding 2048 bytes
         let long_paragraph = "\u{00E9}".repeat(MAX_BODY_PEEK_BYTES); // 2-byte chars
         let content = format!("---\nname: emoji-skill\n---\n# Test\n\n{long_paragraph}\n");
         fs::write(skill_dir.join("SKILL.md"), &content).unwrap();
 
         let skills = parse_skill_files(vec![(skill_dir.join("SKILL.md"), SkillScope::Local)]);
 
-        // Must not panic and should produce a description.
+        // Must not panic
         assert_eq!(skills.len(), 1);
         assert!(
             !skills[0].description.is_empty(),
@@ -1248,7 +1186,7 @@ mod tests {
 
     #[test]
     fn parse_full_spec_plus_extensions() {
-        // Mixed agentskills.io spec fields + our extensions — all must parse.
+        // Mixed agentskills.io spec fields and our extensions; all must parse
         let content = "---\nname: my-skill\ndescription: A full skill\nlicense: MIT\ncompatibility: Python 3.12+\nmetadata:\n  author: test-org\n  version: \"2.0\"\nallowed-tools:\n  - bash\n  - read_file\nargument-hint: file path\nmodel: grok-3\neffort: high\nuser-invocable: true\ndisable-model-invocation: false\n---\nBody content.\n";
         let parsed = parse_skill_frontmatter(content, None).unwrap();
         assert_eq!(parsed.name, "my-skill");
@@ -1277,8 +1215,7 @@ mod tests {
 
     #[test]
     fn parse_frontmatter_special_chars_normalized() {
-        // Non-slug chars (e.g. `@`, `!`, `.`) normalize to hyphens so the skill
-        // is kept and slash-usable, rather than dropped.
+        // Non-slug chars (e.g. `@`, `!`, `.`) normalize to hyphens so the skill is kept and slash-usable, rather than dropped.
         let parsed =
             parse_skill_frontmatter("---\nname: inv@lid!name\ndescription: A\n---\n", None)
                 .unwrap();
@@ -1287,7 +1224,7 @@ mod tests {
 
     #[test]
     fn parse_frontmatter_all_symbol_name_rejected() {
-        // A name that normalizes to empty has nothing usable → still rejected.
+        // A name that normalizes to empty has nothing usable, so it is still rejected
         assert!(matches!(
             parse_skill_frontmatter("---\nname: \"@!#\"\ndescription: A\n---\n", None),
             Err(SkillParseError::InvalidName(_))
@@ -1315,7 +1252,7 @@ mod tests {
             "my-tool",
         );
 
-        // cwd = repo root (not inside user dir, so the walk won't find it)
+        // cwd is the repo root (not inside the user dir, so the walk won't find it)
         let skills = list_skills_with_options(
             Some(repo_root.to_str().unwrap()),
             Some(&user_dir),
@@ -1345,7 +1282,7 @@ mod tests {
             "dedup-skill",
         );
 
-        // cwd is inside the user dir — the upward walk will already find it
+        // cwd is inside the user dir; the upward walk will already find it
         let skills = list_skills_with_options(
             Some(user_dir.to_str().unwrap()),
             Some(&user_dir),
@@ -1354,7 +1291,6 @@ mod tests {
         )
         .await;
 
-        // Should appear exactly once (deduped by canonical path)
         let count = skills.iter().filter(|s| s.name == "dedup-skill").count();
         assert_eq!(count, 1, "Skill should appear exactly once, got {count}");
     }
@@ -1373,7 +1309,7 @@ mod tests {
             "ghost-skill",
         );
 
-        // Pass None — simulates env vars not set
+        // Pass None; simulates env vars not set
         let skills = list_skills_with_options(
             Some(repo_root.to_str().unwrap()),
             None,
@@ -1479,8 +1415,7 @@ mod tests {
 
     #[test]
     fn collect_config_skills_skill_md_at_root_of_config_path() {
-        // When the config path itself is a skill directory (contains SKILL.md),
-        // it should be discovered even though walk_for_skill_md only walks children.
+        // When the config path itself is a skill directory (contains SKILL.md), it is discovered even though walk_for_skill_md only walks children
         let tmp = tempfile::tempdir().unwrap();
         write_skill_md(tmp.path(), "root-skill");
 
@@ -1674,8 +1609,7 @@ mod tests {
 
     #[test]
     fn collect_plugin_skills_finds_root_level_skill_md() {
-        // Manifest style: "skills": ["skills/one", "skills/two"] — each entry
-        // IS a skill directory with SKILL.md at its root.
+        // Manifest style: "skills": ["skills/one", "skills/two"]; each entry IS a skill directory with SKILL.md at its root
         let tmp = tempfile::tempdir().unwrap();
         let one = tmp.path().join("skills").join("one");
         let two = tmp.path().join("skills").join("two");
@@ -1701,8 +1635,7 @@ mod tests {
 
     #[test]
     fn collect_plugin_skills_parent_dir_unchanged_and_no_double_count() {
-        // Convention style (parent dir) still works, and listing both the
-        // parent and a child dir does not yield duplicates after merge.
+        // Convention style (parent dir) still works, and listing both the parent and a child dir does not yield duplicates after merge
         let tmp = tempfile::tempdir().unwrap();
         let parent = tmp.path().join("skills");
         let child = parent.join("one");
@@ -1880,9 +1813,8 @@ mod tests {
         assert_eq!(count, 1, "dup-skill should only be loaded once");
     }
 
-    /// A skill reachable via auto-discovery AND `[skills].paths` is genuinely
-    /// both: the auto-discovered copy wins (scope unchanged) but inherits the
-    /// ConfigToml stamp, so the label doesn't depend on source order.
+    /// A skill reachable via auto-discovery AND `[skills].paths` is genuinely both.
+    /// The auto-discovered copy wins (scope unchanged) but inherits the ConfigToml stamp, so the label doesn't depend on source order.
     #[tokio::test]
     async fn list_skills_auto_and_config_overlap_keeps_config_toml_source() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1936,8 +1868,7 @@ mod tests {
         );
     }
 
-    /// Name-dedupe drops a *different* file that shares a name; its stamp must
-    /// not leak onto the winner (they are genuinely different skills).
+    /// Name-dedupe drops a *different* file that shares a name; its stamp must not leak onto the winner (they are genuinely different skills).
     #[test]
     fn dedupe_skills_name_collision_does_not_propagate_config_source() {
         let winner = make_skill("same-name", "/some/path/a/SKILL.md");
@@ -1950,8 +1881,7 @@ mod tests {
 
         let deduped = dedupe_skills(vec![winner, loser]);
 
-        // Same-scope siblings both survive (the collision loser is re-keyed
-        // to its dir basename); provenance must stay with its own file.
+        // Same-scope siblings both survive (the collision loser is re-keyed to its dir basename); provenance must stay with its own file
         assert_eq!(deduped.len(), 2);
         assert!(
             deduped[0].config_source.is_none(),
@@ -2013,10 +1943,6 @@ mod tests {
             same_skills[0].path
         );
     }
-
-    // discover_skills_for_paths and dedup_by_canonical_path tests removed --
-    // these functions now live in xai-grok-tools::implementations::skills::discovery
-    // and xai-grok-tools::types::skill_discovery_tracker, tested there.
 
     // ── Disabled skills marking ─────────────────────────────────────
 
@@ -2109,7 +2035,6 @@ mod tests {
         fs::create_dir_all(&repo_root).unwrap();
         init_git_repo(&repo_root);
 
-        // Place a skill under <home>/bundled/skills/commit/SKILL.md
         write_skill_md(
             &home.join("bundled").join("skills").join("commit"),
             "commit",
@@ -2190,10 +2115,8 @@ mod tests {
 
     // ── Command file discovery ────────────────────────────────────────
 
-    /// Regression: project `.claude/commands` often sits under a full `.claude/**`
-    /// gitignore with only `!.claude/skills/**` re-included (local-only vendor
-    /// config). User-scoped `~/.claude/commands` still loaded; project commands
-    /// did not — so `/frontend` never appeared for the large multi-package repo.
+    /// Regression: project `.claude/commands` often sits under a full `.claude/**` gitignore with only `!.claude/skills/**` re-included.
+    /// User-scoped `~/.claude/commands` still loaded; project commands did not, so `/frontend` never appeared for the large multi-package repo.
     #[tokio::test]
     async fn project_claude_commands_load_even_when_gitignored() {
         let tmp = tempfile::tempdir().expect("create tempdir");
@@ -2201,7 +2124,7 @@ mod tests {
         fs::create_dir_all(&repo_root).expect("create repo dir");
         init_git_repo(&repo_root);
 
-        // Mirror the multi-package-repo-style ignore: ignore all of .claude, re-include skills only.
+        // Mirror the ignore a large multi-package repo uses: ignore all of .claude, re-include skills only
         fs::write(
             repo_root.join(".gitignore"),
             "**/.claude\n**/.claude/**\n!.claude/\n!.claude/skills/\n!.claude/skills/**\n",
@@ -2449,20 +2372,20 @@ mod tests {
     fn collect_skill_config_dirs_gates_vendor_dirs() {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path();
-        // Not a git repo → falls to the cwd-only branch (no upward walk).
+        // Not a git repo, so it falls to the cwd-only branch (no upward walk)
         for name in [".grok", ".agents", ".claude", ".cursor"] {
             fs::create_dir_all(cwd.join(name)).unwrap();
         }
 
         let ends_with = |dirs: &[PathBuf], suffix: &str| dirs.iter().any(|d| d.ends_with(suffix));
 
-        // All on → both vendor dirs present (byte-for-byte legacy behavior).
+        // With all cells on, both vendor dirs are present (byte-for-byte legacy behavior)
         let all =
             collect_skill_config_dirs(Some(cwd), None, tmp.path(), &[], CompatConfig::default());
         assert!(ends_with(&all, ".claude"), "claude missing: {all:?}");
         assert!(ends_with(&all, ".cursor"), "cursor missing: {all:?}");
 
-        // cursor.skills off → .cursor dropped, .claude kept.
+        // With cursor.skills off, .cursor is dropped and .claude kept
         let mut compat = CompatConfig::default();
         compat.cursor.skills = false;
         let dirs = collect_skill_config_dirs(Some(cwd), None, tmp.path(), &[], compat);
@@ -2504,8 +2427,7 @@ mod tests {
 
     #[test]
     fn dedupe_hands_name_back_to_basename_owner() {
-        // The copy sorts before the original (`backup-japandi/`): the original
-        // keeps the bare name; the earlier claimant is re-keyed instead.
+        // The copy sorts before the original (`backup-japandi/`): the original keeps the bare name; the earlier claimant is re-keyed instead
         let out = dedupe_skills(vec![
             named_skill(
                 "japandi",
@@ -2533,9 +2455,8 @@ mod tests {
 
     #[test]
     fn dedupe_challenger_without_basename_claim_is_still_shadowed() {
-        // The contested basename is already claimed cross-scope: the
-        // challenger has no dir identity to fall back to and no claim to
-        // steal the bare name — first-seen keeps it.
+        // The contested basename is already claimed cross-scope: the challenger has no dir identity to fall back to
+        // It has no claim to steal the bare name, so first-seen keeps it
         let out = dedupe_skills(vec![
             named_skill("japandi2", "/l/skills/japandi2/SKILL.md", SkillScope::Local),
             named_skill(
@@ -2555,8 +2476,7 @@ mod tests {
 
     #[test]
     fn dedupe_rekeyed_name_shadows_lower_scope_claimant() {
-        // The re-keyed user copy owns `japandi2` before the server skill
-        // is seen: scope priority applies to re-keyed names too.
+        // The re-keyed user copy owns `japandi2` before the server skill is seen: scope priority applies to re-keyed names too
         let out = dedupe_skills(vec![
             named_skill("japandi", "/u/skills/japandi/SKILL.md", SkillScope::User),
             named_skill("japandi", "/u/skills/japandi2/SKILL.md", SkillScope::User),
@@ -2573,8 +2493,7 @@ mod tests {
 
     #[test]
     fn dedupe_same_scope_cross_harness_loser_resurfaces() {
-        // A `.claude` skill claiming a `.grok`-owned name (both User scope)
-        // was silently hidden before; it now re-keys to its dir basename.
+        // A `.claude` skill claiming a `.grok`-owned name (both User scope) re-keys to its dir basename instead of being silently hidden
         let out = dedupe_skills(vec![
             named_skill(
                 "review",
@@ -2593,8 +2512,7 @@ mod tests {
 
     #[test]
     fn dedupe_frontmatter_owner_evicts_rekeyed_squatter() {
-        // A stale copy re-keyed to `japandi2` must not shadow the skill whose
-        // frontmatter genuinely says `japandi2` — the owner evicts it.
+        // A stale copy re-keyed to `japandi2` must not shadow the skill whose frontmatter genuinely says `japandi2`; the owner evicts it
         let out = dedupe_skills(vec![
             named_skill(
                 "japandi",
@@ -2621,8 +2539,7 @@ mod tests {
 
     #[test]
     fn dedupe_cross_scope_shadowing_unchanged() {
-        // Cross-scope same-name is the documented override mechanism: the
-        // lower-priority skill stays hidden even when its dir basename differs.
+        // Cross-scope same-name is the documented override mechanism: the lower-priority skill stays hidden even when its dir basename differs
         let out = dedupe_skills(vec![
             named_skill(
                 "japandi",
@@ -2657,10 +2574,8 @@ mod tests {
 
     #[tokio::test]
     async fn copied_skill_dir_with_stale_frontmatter_name_surfaces_both() {
-        // Name-dedup runs in `list_skills` (via `merge_skills_with_plugins`),
-        // not in `list_skills_with_options`. Names are prefixed to be
-        // collision-proof against real user-scope skills (`list_skills`
-        // scans grok_home).
+        // Name-dedup runs in `list_skills` (via `merge_skills_with_plugins`), not in `list_skills_with_options`
+        // Names are prefixed to be collision-proof against real user-scope skills (`list_skills` scans grok_home)
         let tmp = tempfile::tempdir().unwrap();
         let repo_root = tmp.path().join("repo");
         fs::create_dir_all(&repo_root).unwrap();

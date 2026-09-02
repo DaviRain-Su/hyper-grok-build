@@ -61,6 +61,19 @@ impl ActiveAgentMessageRequest {
         })
     }
 
+    /// Moves the request out, leaving a dropped placeholder. Not a valid send.
+    pub(crate) fn take(&mut self) -> Self {
+        std::mem::replace(self, Self::placeholder())
+    }
+
+    fn placeholder() -> Self {
+        Self {
+            subagent_id: String::new(),
+            text: Arc::from(""),
+            operation: ActiveAgentMessageOperation::Queue,
+        }
+    }
+
     pub fn subagent_id(&self) -> &str {
         &self.subagent_id
     }

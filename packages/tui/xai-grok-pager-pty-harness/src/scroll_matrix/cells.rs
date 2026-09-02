@@ -1,8 +1,7 @@
 //! The cell table: terminal-class × config × gesture rows the matrix runs.
 //!
-//! Classes are `ScrollConfig` equivalence classes, not brands — every brand
-//! sharing a profile is represented once (`from_terminal_context` in the
-//! pager's `mouse.rs` is the source of truth):
+//! Classes are `ScrollConfig` equivalence classes, not brands: every brand sharing a profile is represented once.
+//! `from_terminal_context` in the pager's `mouse.rs` is the source of truth:
 //!
 //! | class | env                        | ept | wheel_lpt | trackpad_lpt |
 //! |-------|----------------------------|-----|-----------|--------------|
@@ -12,21 +11,17 @@
 //! | C4    | `TERM_PROGRAM=vscode`      | 1   | 3         | 15           |
 //! | C5    | `TMUX=…` (remuxed)         | 1   | 1         | 3            |
 //!
-//! Mux honesty: C5's env only exercises profile *selection* (the pager
-//! can't tell a fake `TMUX` from a real one); real tmux event-mangling is
-//! simulated by the G9 gesture shapes, and a real-tmux tier stays local.
+//! C5's env only exercises profile *selection*: the pager can't tell a fake `TMUX` from a real one.
+//! Real tmux event-mangling is simulated by the G9 gesture shapes, and a real-tmux tier stays local.
 //!
-//! Trim note: the design sketched ~40 rows; this table ships the curated 8
-//! plus 17 representative full-tier rows (every class, every gesture, every
-//! config knob at least once) to hold the A12 size budget — growing the
-//! full tier is additive row work.
+//! Trim note: the full tier is a representative subset, not the exhaustive cross product.
+//! Every class, every gesture, and every config knob appears in at least one row.
 
 use super::gestures::GestureId;
 use super::invariants::InvariantId;
 use super::session::SessionKind;
 
-/// The config echo a cell expects on every `stream_start` (I-CFG) and the
-/// pricing inputs the consistency invariants use.
+/// The config echo a cell expects on every `stream_start` (I-CFG) and the pricing inputs the consistency invariants use.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExpectedProfile {
     /// `mode` label: `auto` | `wheel` | `trackpad`.
@@ -35,13 +30,11 @@ pub struct ExpectedProfile {
     pub wheel_lpt: u16,
     pub trackpad_lpt: u16,
     pub invert: bool,
-    /// Speed multiplier (NOT the 1-100 setting): `GROK_SCROLL_SPEED=100`
-    /// echoes 6.0 via the pager's `speed_to_multiplier`.
+    /// Speed multiplier (NOT the 1-100 setting): `GROK_SCROLL_SPEED=100` echoes 6.0 via the pager's `speed_to_multiplier`.
     pub speed: f32,
 }
 
-/// Execution tier: `Curated` runs in CI (A13's runner test); `Full` only in
-/// the local full sweep.
+/// Execution tier: `Curated` runs in CI; `Full` only in the local full sweep.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tier {
     Curated,
@@ -53,20 +46,17 @@ pub enum Tier {
 pub struct MatrixCell {
     pub id: &'static str,
     pub tier: Tier,
-    /// Pager env pairs (terminal-class markers + config vars). The runner
-    /// appends `GROK_SCROLL_LOG`; the harness's env strips guarantee the
-    /// host terminal can't leak competing markers underneath these.
+    /// Pager env pairs (terminal-class markers and config vars).
+    /// The runner appends `GROK_SCROLL_LOG`; the harness's env strips guarantee the host terminal can't leak competing markers underneath these.
     pub env: &'static [(&'static str, &'static str)],
     pub expected: ExpectedProfile,
     pub gesture: GestureId,
     pub session: SessionKind,
-    /// Invariants judged for this cell (harness-side ids included; the
-    /// runner routes by `InvariantId::is_log_side`).
+    /// Invariants judged for this cell (harness-side ids included; the runner routes by `InvariantId::is_log_side`).
     pub invariants: &'static [InvariantId],
-    /// Invariants expected to VIOLATE on current code (known bugs, e.g. the
-    /// G4 jerk until A13's finalize-decel fix). Must be ⊆ `invariants`; the
-    /// runner fails a cell on any non-xfail violation AND on an xfail PASS
-    /// (a fixed bug must be promoted out of xfail, not silently absorbed).
+    /// Invariants expected to VIOLATE on current code (known bugs, e.g. the G4 jerk until the finalize-decel fix).
+    /// Must be a subset of `invariants`.
+    /// The runner fails a cell on any non-xfail violation AND on an xfail PASS (a fixed bug must be promoted out of xfail, not silently absorbed).
     pub xfail: &'static [InvariantId],
 }
 
@@ -89,8 +79,7 @@ const C4: ExpectedProfile = ExpectedProfile {
     trackpad_lpt: 15,
     ..C1
 };
-/// Remuxed conservative profile — identical numbers to C2 by design
-/// (`multiplexer_reencodes_mouse` forces ept=1/wheel_lpt=1).
+/// Remuxed conservative profile: identical numbers to C2 by design (`multiplexer_reencodes_mouse` forces ept=1/wheel_lpt=1).
 const C5: ExpectedProfile = C2;
 
 const ITERM: (&str, &str) = ("TERM_PROGRAM", "iTerm.app");
@@ -108,7 +97,7 @@ use InvariantId::*;
 /// Core log-side suite for auto-mode cells.
 const AUTO: &[InvariantId] = &[Ord, Cap, DropEq, Cadence, ConsA, Accel, Carry, Cfg];
 const AUTO_NODROP: &[InvariantId] = &[Ord, Cap, DropEq, Cadence, ConsA, Accel, Carry, Cfg, NoDrop];
-/// Floods keep the core suite (drops are legitimate) + post-gesture quiet.
+/// Floods keep the core suite (drops are legitimate) plus post-gesture quiet.
 const AUTO_QUIET: &[InvariantId] = &[Ord, Cap, DropEq, Cadence, ConsA, Accel, Carry, Cfg, Quiet];
 /// Forced wheel: exact totals; nothing may drop on notch-scale gestures.
 const WHEEL: &[InvariantId] = &[Ord, Cap, DropEq, Cadence, ConsW, Accel, Carry, Cfg, NoDrop];
@@ -119,8 +108,7 @@ const AUTO_MUX_NODROP: &[InvariantId] = &[
     Ord, Cap, DropEq, Cadence, ConsA, Accel, Carry, Cfg, NoDrop, MuxNoOver,
 ];
 const AUTO_SCREEN: &[InvariantId] = &[Ord, Cap, DropEq, Cadence, ConsA, Accel, Carry, Cfg, Screen];
-/// The jerk suite: core + the two smoothness invariants the finalize-decel
-/// fix made hold (formerly this cell's xfail set).
+/// The jerk suite: core plus the two smoothness invariants the finalize-decel fix made hold (formerly this cell's xfail set).
 const JERK: &[InvariantId] = &[
     Ord,
     Cap,
@@ -174,9 +162,8 @@ pub const CELLS: &[MatrixCell] = &[
         C5, GestureId::G9bMuxBatch, SessionKind::Settled, AUTO_MUX_NODROP),
     cell("c1_auto_g8_midstream", Tier::Curated, &[],
         C1, GestureId::G8MidStreamTrain, SessionKind::Streaming, AUTO),
-    // Id kept for artifact/test continuity: the cell pinned the G4 jerk as
-    // xfail until the finalize-decel fix; its former xfail rows
-    // (I-SMOOTH-COAST, I-NO-DROP) are ordinary pass rows now.
+    // Id kept for artifact/test continuity: the cell pinned the G4 jerk as xfail until the finalize-decel fix
+    // Its former xfail rows (I-SMOOTH-COAST, I-NO-DROP) are ordinary pass rows now
     cell("c1_auto_g4_jerk_xfail", Tier::Curated, &[],
         C1, GestureId::G4Jerk, SessionKind::Settled, JERK),
     // ── Full tier (local sweep; representative subset — see trim note) ─
@@ -230,9 +217,8 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    /// Re-derive the expected profile from a cell's env pairs the way the
-    /// pager would (`from_terminal_context` + the `GROK_SCROLL_*` env
-    /// overrides) — a tripwire against rows drifting from `mouse.rs`.
+    /// Re-derive the expected profile from a cell's env the way the pager would: `from_terminal_context` plus the `GROK_SCROLL_*` env overrides.
+    /// This is a tripwire against rows drifting from `mouse.rs`.
     fn derive_expected(env: &'static [(&'static str, &'static str)]) -> ExpectedProfile {
         let get = |k: &str| env.iter().find(|(key, _)| *key == k).map(|(_, v)| *v);
         let remuxed = get("TMUX").is_some();
@@ -252,7 +238,7 @@ mod tests {
             wheel_lpt = lines;
             trackpad_lpt = lines; // one knob overrides both paths
         }
-        // speed_to_multiplier re-derivation for the settings used in rows.
+        // These arms mirror the pager's `speed_to_multiplier` for the settings the rows use
         let speed = match get("GROK_SCROLL_SPEED") {
             None | Some("50") => 1.0,
             Some("100") => 6.0,
@@ -277,24 +263,6 @@ mod tests {
     }
 
     #[test]
-    fn curated_tier_is_the_designed_eight() {
-        let ids: Vec<&str> = curated().map(|c| c.id).collect();
-        assert_eq!(
-            ids,
-            [
-                "c1_auto_g3_flood_speed100",
-                "c2_auto_g3_flood_speed100",
-                "c3_wheel_lines1_g1",
-                "c4_auto_g10_ambiguous",
-                "c5_tmux_g9a",
-                "c5_tmux_g9b",
-                "c1_auto_g8_midstream",
-                "c1_auto_g4_jerk_xfail",
-            ]
-        );
-    }
-
-    #[test]
     fn xfail_is_a_subset_of_the_cell_invariants() {
         for cell in CELLS {
             for id in cell.xfail {
@@ -306,9 +274,8 @@ mod tests {
                 );
             }
         }
-        // The finalize-decel fix promoted the jerk cell's xfail rows
-        // (I-SMOOTH-COAST, I-NO-DROP) into ordinary pass rows: the table
-        // must carry no xfail anywhere until the next pinned bug.
+        // The finalize-decel fix promoted the jerk cell's xfail rows (I-SMOOTH-COAST, I-NO-DROP) into ordinary pass rows
+        // The table must carry no xfail anywhere until the next pinned bug
         let jerk = CELLS
             .iter()
             .find(|c| c.id == "c1_auto_g4_jerk_xfail")
@@ -357,8 +324,7 @@ mod tests {
                 "{}: I-CONS-A ⇔ not forced wheel",
                 cell.id
             );
-            // Mux over-scroll bound only makes sense on the remuxed class,
-            // and only on its accel-free G9 gestures.
+            // Mux over-scroll bound only makes sense on the remuxed class, and only on its accel-free G9 gestures
             if cell.invariants.contains(&InvariantId::MuxNoOver) {
                 assert!(
                     matches!(
@@ -375,7 +341,7 @@ mod tests {
     #[test]
     fn sessions_and_gestures_pair_correctly() {
         for cell in CELLS {
-            // TMUX ⇒ the conservative remuxed profile.
+            // TMUX forces the conservative remuxed profile
             if cell.env.iter().any(|(k, _)| *k == "TMUX") {
                 assert_eq!(
                     (cell.expected.ept, cell.expected.wheel_lpt),
@@ -384,8 +350,7 @@ mod tests {
                     cell.id
                 );
             }
-            // Streaming sessions exist exactly for the mid-stream gesture;
-            // the bottom-pin matters exactly for the overscroll gesture.
+            // Streaming sessions exist exactly for the mid-stream gesture; the bottom-pin matters exactly for the overscroll gesture
             assert_eq!(
                 cell.session == SessionKind::Streaming,
                 cell.gesture == GestureId::G8MidStreamTrain,

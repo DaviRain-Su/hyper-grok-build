@@ -1,6 +1,5 @@
-//! Pins `handle_sampling_failure`'s transient arm: eligible kinds retry
-//! while budget remains; exhaustion and the kill switch fall through;
-//! dedicated-recovery kinds are untouched.
+//! Pins `handle_sampling_failure`'s transient arm: eligible kinds retry while budget remains.
+//! Exhaustion and the kill switch fall through, and kinds with their own recovery path stay untouched.
 
 use super::support::*;
 use super::*;
@@ -34,8 +33,7 @@ async fn make_actor() -> (Arc<SessionActor>, mpsc::UnboundedReceiver<Persistence
     (Arc::new(actor), persistence_rx)
 }
 
-/// The eligibility classifier is a closed set: transient infrastructure
-/// kinds retry, everything with its own recovery/UX stays terminal.
+/// The eligibility classifier is a closed set: transient infrastructure kinds retry, everything with its own recovery or UX stays terminal.
 #[test]
 fn transient_retry_eligibility_truth_table() {
     use xai_grok_sampler::SamplingErrorKind as K;
@@ -52,8 +50,7 @@ fn transient_retry_eligibility_truth_table() {
         );
     }
 
-    // Parity with `is_retryable_api_status`: origin-TLS 52x, client errors
-    // (incl. 408/429), and status-less Api all fail closed.
+    // Matches `is_retryable_api_status`: origin-TLS 52x, client errors (including 408 and 429), and status-less Api all fail closed
     for status in [
         Some(525),
         Some(526),
@@ -85,8 +82,7 @@ fn transient_retry_eligibility_truth_table() {
     }
 }
 
-/// Vetoes mirror `is_retry_vetoed`: `x-should-retry: false` and
-/// context-window overflow, whatever status wrapped them.
+/// Vetoes mirror `is_retry_vetoed`: `x-should-retry: false` and context-window overflow, whatever status wrapped them.
 #[test]
 fn retry_vetoes_mirror_sampler_classifier() {
     use xai_grok_sampler::SamplingErrorKind as K;
@@ -112,7 +108,7 @@ fn retry_vetoes_mirror_sampler_classifier() {
     );
 }
 
-/// Backoff ladder indexed by attempts used, clamped at the last rung.
+/// The backoff ladder is indexed by attempts already used and clamps at the last rung.
 #[test]
 fn backoff_ladder_clamps_at_last_rung() {
     use std::time::Duration;
@@ -120,14 +116,13 @@ fn backoff_ladder_clamps_at_last_rung() {
     assert_eq!(transient_backoff_delay(1), Duration::from_secs(10));
     assert_eq!(transient_backoff_delay(2), Duration::from_secs(30));
     assert_eq!(transient_backoff_delay(9), Duration::from_secs(30));
-    // Raising a bound is a conscious decision: repin these literals with it.
+    // These literals pin the bounds so raising one forces a deliberate test edit
     assert_eq!(MAX_TRANSIENT_TURN_RETRIES, 3);
     assert_eq!(MAX_TRANSIENT_RETRIES_PER_PROMPT, 10);
     assert_eq!(MAX_TRANSIENT_RETRY_WINDOW, Duration::from_secs(600));
 }
 
-/// First idle-timeout failure of a step: back off and resubmit rather than
-/// killing the turn.
+/// The first idle-timeout failure of a step backs off and resubmits rather than killing the turn.
 #[tokio::test(flavor = "current_thread")]
 async fn idle_timeout_first_failure_requests_resubmit() {
     let local = tokio::task::LocalSet::new();
@@ -139,6 +134,7 @@ async fn idle_timeout_first_failure_requests_resubmit() {
                     error_of_kind(xai_grok_sampler::SamplingErrorKind::IdleTimeout, None),
                     0,
                     transient_state(0, true),
+                    false,
                 )
                 .await;
             match result {
@@ -152,8 +148,7 @@ async fn idle_timeout_first_failure_requests_resubmit() {
         .await;
 }
 
-/// A 503 that exhausted the sampler's internal retries gets the same
-/// turn-level resubmit.
+/// A 503 that exhausted the sampler's internal retries gets the same turn-level resubmit.
 #[tokio::test(flavor = "current_thread")]
 async fn server_error_first_failure_requests_resubmit() {
     let local = tokio::task::LocalSet::new();
@@ -165,6 +160,7 @@ async fn server_error_first_failure_requests_resubmit() {
                     error_of_kind(xai_grok_sampler::SamplingErrorKind::Api, Some(503)),
                     0,
                     transient_state(0, true),
+                    false,
                 )
                 .await;
             match result {
@@ -178,7 +174,6 @@ async fn server_error_first_failure_requests_resubmit() {
         .await;
 }
 
-/// A spent budget surfaces exactly as before the retry arm existed.
 #[tokio::test(flavor = "current_thread")]
 async fn exhausted_budget_falls_through_to_terminal() {
     let local = tokio::task::LocalSet::new();
@@ -190,6 +185,7 @@ async fn exhausted_budget_falls_through_to_terminal() {
                     error_of_kind(xai_grok_sampler::SamplingErrorKind::IdleTimeout, None),
                     0,
                     transient_state(MAX_TRANSIENT_TURN_RETRIES, true),
+                    false,
                 )
                 .await;
             assert!(
@@ -212,6 +208,7 @@ async fn kill_switch_disables_the_arm() {
                     error_of_kind(xai_grok_sampler::SamplingErrorKind::IdleTimeout, None),
                     0,
                     transient_state(0, false),
+                    false,
                 )
                 .await;
             assert!(
@@ -222,8 +219,7 @@ async fn kill_switch_disables_the_arm() {
         .await;
 }
 
-/// Budgeted workflow children never enter the arm: the fail-closed usage
-/// accounting guards precede it and stay terminal.
+/// Budgeted workflow children never enter the arm: the guards that account token usage run before it and fail closed to a terminal error.
 #[tokio::test(flavor = "current_thread")]
 async fn budgeted_workflow_child_stays_terminal() {
     let local = tokio::task::LocalSet::new();
@@ -242,6 +238,7 @@ async fn budgeted_workflow_child_stays_terminal() {
                     error_of_kind(xai_grok_sampler::SamplingErrorKind::Api, Some(503)),
                     0,
                     transient_state(0, true),
+                    false,
                 )
                 .await;
             assert!(
@@ -252,8 +249,7 @@ async fn budgeted_workflow_child_stays_terminal() {
         .await;
 }
 
-/// Empty responses stay terminal regardless of budget (the reasoning-only
-/// doom-loop invariant also pinned by the replay-buffer tests).
+/// Empty responses stay terminal regardless of budget, the invariant the replay-buffer tests also pin for reasoning-only doom loops.
 #[tokio::test(flavor = "current_thread")]
 async fn empty_response_stays_terminal_with_full_budget() {
     let local = tokio::task::LocalSet::new();
@@ -265,6 +261,7 @@ async fn empty_response_stays_terminal_with_full_budget() {
                     error_of_kind(xai_grok_sampler::SamplingErrorKind::EmptyResponse, None),
                     0,
                     transient_state(0, true),
+                    false,
                 )
                 .await;
             assert!(
@@ -275,8 +272,7 @@ async fn empty_response_stays_terminal_with_full_budget() {
         .await;
 }
 
-/// The cumulative per-prompt cap holds even with a fresh per-step budget:
-/// long agentic prompts must not multiply retries by round count.
+/// The cumulative per-prompt cap holds even with a fresh per-step budget: long agentic prompts must not multiply retries by round count.
 #[tokio::test(flavor = "current_thread")]
 async fn prompt_total_cap_vetoes_even_with_fresh_step_budget() {
     let local = tokio::task::LocalSet::new();
@@ -292,6 +288,7 @@ async fn prompt_total_cap_vetoes_even_with_fresh_step_budget() {
                     error_of_kind(xai_grok_sampler::SamplingErrorKind::Api, Some(503)),
                     0,
                     state,
+                    false,
                 )
                 .await;
             assert!(
@@ -302,16 +299,15 @@ async fn prompt_total_cap_vetoes_even_with_fresh_step_budget() {
         .await;
 }
 
-/// A recovery episode older than the wall-clock window is terminal: idle
-/// stalls burn a detector cycle per attempt, so count alone cannot bound time.
+/// A recovery episode older than the wall-clock window is terminal.
+/// Idle stalls burn a detector cycle per attempt, so count alone cannot bound time.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn episode_window_vetoes_after_wall_clock_budget() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
             let (actor, _rx) = make_actor().await;
-            // Paused clock: advance past the window instead of back-dating a
-            // live monotonic clock (which underflows on a freshly booted host).
+            // Paused clock: advance past the window instead of back-dating a live monotonic clock (which underflows on a freshly booted host)
             let episode_start = Some(tokio::time::Instant::now());
             tokio::time::advance(MAX_TRANSIENT_RETRY_WINDOW + std::time::Duration::from_secs(1))
                 .await;
@@ -324,6 +320,7 @@ async fn episode_window_vetoes_after_wall_clock_budget() {
                     error_of_kind(xai_grok_sampler::SamplingErrorKind::IdleTimeout, None),
                     0,
                     state,
+                    false,
                 )
                 .await;
             assert!(
@@ -334,8 +331,7 @@ async fn episode_window_vetoes_after_wall_clock_budget() {
         .await;
 }
 
-/// Deterministic image rejections are excluded however the proxy wrapped
-/// them: the sampler's own classifier already stripped images and gave up.
+/// Deterministic image rejections are excluded however the proxy wrapped them: the sampler's own classifier already stripped images and gave up.
 #[tokio::test(flavor = "current_thread")]
 async fn invalid_image_code_is_never_transient_retried() {
     let local = tokio::task::LocalSet::new();
@@ -345,7 +341,7 @@ async fn invalid_image_code_is_never_transient_retried() {
             let mut error = error_of_kind(xai_grok_sampler::SamplingErrorKind::Api, Some(500));
             error.error_code = Some(xai_grok_sampling_types::ApiErrorCode::InvalidImage);
             let result = actor
-                .handle_sampling_failure(error, 0, transient_state(0, true))
+                .handle_sampling_failure(error, 0, transient_state(0, true), false)
                 .await;
             assert!(
                 result.is_err(),

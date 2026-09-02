@@ -11,10 +11,8 @@
 //! 1. [`xai_grok_telemetry::unified_log::warn`] for the local
 //!    `~/.grok/logs/unified.jsonl` file (best-effort; ships to GCS
 //!    only on OIDC refresh failure via `auth/refresh.rs`).
-//! 2. A discrete `tracing::warn_span!("auth_401_attribution", ...)`
-//!    captured by the OTel layer in `util/otel_layer.rs` and shipped
-//!    via OTLP export to the configured telemetry backend
-//!    (queryable by span name `auth_401_attribution`).
+//! 2. A discrete `tracing::warn_span!("auth_401_attribution", ...)` captured by the OTel layer in `util/otel_layer.rs` and shipped
+//!    via OTLP export to the configured telemetry backend (queryable by span name `auth_401_attribution`).
 //!
 //! # Schema (every emit)
 //!
@@ -36,16 +34,13 @@
 //! }
 //! ```
 //!
-//! # Cross-crate plumbing
+//! # Cross-crate wiring
 //!
-//! [`xai_grok_sampler`] is intentionally decoupled from this crate. It
-//! invokes the trait [`xai_grok_sampler::Auth401AttributionCallback`] at
-//! its six 401 arms; this module provides [`ShellAttribution`], the
-//! concrete impl that the shell wires into
-//! [`xai_grok_sampler::SamplerConfig::attribution_callback`] at every
-//! sampler-construction site. Non-sampler sites (storage / feedback /
-//! registry / idle-resume) call [`record_consumer_401`]
-//! directly with their `(consumer_kind, op)` pair.
+//! [`xai_grok_sampler`] is intentionally decoupled from this crate.
+//! It invokes the trait [`xai_grok_sampler::Auth401AttributionCallback`] at its six 401 arms.
+//! This module provides [`ShellAttribution`], the concrete impl wired into [`xai_grok_sampler::SamplerConfig::attribution_callback`].
+//! The shell does that wiring at every sampler-construction site.
+//! Non-sampler sites (storage / feedback / registry / idle-resume) call [`record_consumer_401`] directly with their `(consumer_kind, op)` pair.
 
 use std::sync::Arc;
 
@@ -56,11 +51,9 @@ use xai_grok_tools::{Auth401AttributionCallback as ToolAuth401AttributionCallbac
 use crate::auth::{AuthManager, TOKEN_TTL};
 use xai_grok_auth::bearer_suffix;
 
-/// `cfg(test)`-only process-global counter that bumps on every
-/// successful `record_auth_401` invocation.
+/// `cfg(test)`-only process-global counter that bumps on every successful `record_auth_401` invocation.
 ///
-/// Because the counter is process-global, every test that observes it
-/// MUST be annotated with `#[serial_test::serial(attribution_emit_count)]`.
+/// Because the counter is process-global, every test that observes it MUST be annotated with `#[serial_test::serial(attribution_emit_count)]`.
 #[cfg(test)]
 static EMIT_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -70,32 +63,25 @@ pub(crate) fn test_emit_count() -> u64 {
     EMIT_COUNT.load(std::sync::atomic::Ordering::SeqCst)
 }
 
-/// Reset the test-only emit counter to zero. Tests that span multiple
-/// instrumented call sites should call this at setup so leftover bumps
-/// from earlier tests in the same process do not pollute the assertion.
+/// Reset the test-only emit counter to zero.
+/// Tests that span multiple instrumented call sites should call this at setup.
+/// Leftover bumps from earlier tests in the same process then do not pollute the assertion.
 #[cfg(test)]
 pub(crate) fn reset_test_emit_count() {
     EMIT_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
 }
 
-/// Concrete implementation of [`Auth401AttributionCallback`] for the
-/// sampler crate's six 401 arms.
+/// Concrete implementation of [`Auth401AttributionCallback`] for the sampler crate's six 401 arms.
 ///
-/// One instance is constructed per `SamplerConfig` and cloned cheaply
-/// (the struct holds an `Arc` and an `Option<String>`). The
-/// `session_id` is captured at construction time and used for the
-/// `unified_log::warn` `sid` field; non-session callers may pass
-/// `None`.
+/// One instance is constructed per `SamplerConfig` and cloned cheaply (the struct holds an `Arc` and an `Option<String>`).
+/// The `session_id` is captured at construction time and used for the `unified_log::warn` `sid` field; non-session callers may pass `None`.
 pub(crate) struct ShellAttribution {
     auth_manager: Arc<AuthManager>,
     session_id: Option<String>,
 }
 
-// `AuthManager` does not implement `Debug` (it carries a `RwLock` over
-// auth state and would expose secrets if it did). Hand-roll a redacted
-// `Debug` impl so the `Auth401AttributionCallback` trait's
-// `Debug + Send + Sync` bound is satisfied without changing
-// `AuthManager`'s API surface.
+// `AuthManager` does not implement `Debug` (it carries a `RwLock` over auth state and would expose secrets if it did)
+// Hand-roll a redacted `Debug` impl so the trait's `Debug + Send + Sync` bound is satisfied without changing `AuthManager`'s API
 impl std::fmt::Debug for ShellAttribution {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ShellAttribution")
@@ -106,15 +92,9 @@ impl std::fmt::Debug for ShellAttribution {
 }
 
 impl ShellAttribution {
-    /// Construct a shareable attribution callback wired to the given
-    /// [`AuthManager`]. Returns `Arc<dyn Trait>` for the sampler
-    /// trait so callers can drop the value directly into
-    /// [`xai_grok_sampler::SamplerConfig::attribution_callback`].
-    ///
-    /// (Returns `Arc<dyn Trait>` rather than `Self` because the
-    /// `xai_grok_sampler::SamplerConfig` field expects exactly that;
-    /// keeping the boundary in one place avoids `as Arc<dyn _>`
-    /// coercions at every call site.)
+    /// Construct a shareable attribution callback wired to the given [`AuthManager`].
+    /// Returns `Arc<dyn Trait>` so callers can drop the value directly into [`xai_grok_sampler::SamplerConfig::attribution_callback`].
+    /// That field expects exactly `Arc<dyn Trait>`; keeping the boundary in one place avoids `as Arc<dyn _>` coercions at every call site.
     #[allow(clippy::new_ret_no_self)]
     pub(crate) fn new(
         auth_manager: Arc<AuthManager>,
@@ -126,13 +106,10 @@ impl ShellAttribution {
         })
     }
 
-    /// Tool-side counterpart of [`Self::new`]: returns
-    /// `Arc<dyn xai_grok_tools::Auth401AttributionCallback>` for the
-    /// `with_attribution_callback(...)` builder on each tool HTTP
-    /// client (`ImageGenClient`, `VideoGenClient`, `WebSearchClient`).
-    /// The two callbacks share the same underlying impl and emit the
-    /// same `auth_401_attribution` event format -- only the trait
-    /// signature differs (`SamplingConsumer` vs. `ToolConsumer`).
+    /// Tool-side counterpart of [`Self::new`]: returns `Arc<dyn xai_grok_tools::Auth401AttributionCallback>` for the
+    /// `with_attribution_callback(...)` builder on each tool HTTP client (`ImageGenClient`, `VideoGenClient`, `WebSearchClient`).
+    /// The two callbacks share the same underlying impl and emit the same `auth_401_attribution` event format.
+    /// Only the trait signature differs (`SamplingConsumer` vs. `ToolConsumer`).
     pub(crate) fn new_tool_callback(
         auth_manager: Arc<AuthManager>,
         session_id: Option<String>,
@@ -146,8 +123,7 @@ impl ShellAttribution {
 
 impl Auth401AttributionCallback for ShellAttribution {
     fn record_401(&self, consumer: SamplingConsumer, sent_bearer_suffix: Option<&str>) {
-        // Already truncated by the sampler; the re-truncate downstream is a
-        // deliberate no-op so the full bearer never leaves that crate.
+        // Already truncated by the sampler; the re-truncate downstream is a deliberate no-op so the full bearer never leaves that crate
         record_consumer_401(
             self.auth_manager.as_ref(),
             self.session_id.as_deref(),
@@ -158,14 +134,12 @@ impl Auth401AttributionCallback for ShellAttribution {
     }
 }
 
-/// Tool-side hook: each tool client (image_gen, video_gen, web_search)
-/// in `xai-grok-tools` emits a 401 attribution event through this
-/// trait when its HTTP request returns UNAUTHORIZED. Same shape as
-/// the sampler-side impl above; routes to the same pair of sinks.
+/// Tool-side hook: each tool client (image_gen, video_gen, web_search) in `xai-grok-tools` emits a 401 attribution event through this
+/// trait when its HTTP request returns UNAUTHORIZED.
+/// Same shape as the sampler-side impl above; routes to the same pair of sinks.
 ///
-/// `ToolConsumer::VideoGenStart` and `VideoGenPoll` collapse to the
-/// same [`ConsumerKind::VideoGen`] with different op strings so the
-/// gate query can break down video-gen 401s by phase.
+/// `ToolConsumer::VideoGenStart` and `VideoGenPoll` collapse to the same [`ConsumerKind::VideoGen`] with different op strings.
+/// The gate query can then break down video-gen 401s by phase.
 impl ToolAuth401AttributionCallback for ShellAttribution {
     fn record_401(&self, consumer: ToolConsumer, sent_bearer_suffix: Option<&str>) {
         let (kind, op) = match consumer {
@@ -201,23 +175,17 @@ pub(crate) enum ConsumerKind {
     /// Session registry register/update sites in
     /// `agent/session_registry_client.rs`.
     SessionRegistryClient,
-    /// Idle-resume model-metadata refresh in
-    /// `session/acp_session.rs::maybe_refresh_model_metadata_on_resume`.
-    /// No per-op discriminator -- the consumer string is just
-    /// `"IdleResumeModelRefresh"`.
+    /// Idle-resume model-metadata refresh in `session/acp_session.rs::maybe_refresh_model_metadata_on_resume`.
+    /// No per-op discriminator; the consumer string is just `"IdleResumeModelRefresh"`.
     IdleResumeModelRefresh,
-    /// `xai_grok_tools::ToolConsumer::ImageGen` -- Imagine API
-    /// (`POST /images/generations`). No per-op discriminator;
-    /// consumer string is just `"ImageGen"`.
+    /// `xai_grok_tools::ToolConsumer::ImageGen`, the Imagine API (`POST /images/generations`).
+    /// No per-op discriminator; consumer string is just `"ImageGen"`.
     ImageGen,
-    /// `xai_grok_tools::ToolConsumer::VideoGenStart` and
-    /// `VideoGenPoll` -- Video Generation API. The op string is
-    /// `"start"` (`POST /videos/generations`) or `"poll"`
-    /// (`GET /videos/{request_id}`).
+    /// `xai_grok_tools::ToolConsumer::VideoGenStart` and `VideoGenPoll`, the Video Generation API.
+    /// The op string is `"start"` (`POST /videos/generations`) or `"poll"` (`GET /videos/{request_id}`).
     VideoGen,
-    /// `xai_grok_tools::ToolConsumer::WebSearch` -- web search via
-    /// `POST /responses` with a `WebSearch` tool. No per-op
-    /// discriminator; consumer string is just `"WebSearch"`.
+    /// `xai_grok_tools::ToolConsumer::WebSearch`, web search via `POST /responses` with a `WebSearch` tool.
+    /// No per-op discriminator; consumer string is just `"WebSearch"`.
     WebSearch,
 }
 
@@ -236,11 +204,9 @@ impl ConsumerKind {
         }
     }
 
-    /// `true` for variants that take a per-operation discriminator
-    /// appended as `<prefix>.<op>`. `false` for variants whose
-    /// `consumer` string is just the prefix
-    /// (`IdleResumeModelRefresh`, `ImageGen`, `WebSearch` -- each is
-    /// a single endpoint with no sub-operation).
+    /// `true` for variants that take a per-operation discriminator appended as `<prefix>.<op>`.
+    /// `false` for variants whose `consumer` string is just the prefix.
+    /// `IdleResumeModelRefresh`, `ImageGen`, and `WebSearch` are each a single endpoint with no sub-operation.
     fn takes_op(self) -> bool {
         !matches!(
             self,
@@ -249,7 +215,7 @@ impl ConsumerKind {
     }
 }
 
-/// Format a `(kind, op)` pair into the design-doc `consumer` string.
+/// Format a `(kind, op)` pair into the canonical `consumer` string.
 fn format_consumer(kind: ConsumerKind, op: &str) -> String {
     if kind.takes_op() {
         format!("{}.{}", kind.prefix(), op)
@@ -260,22 +226,15 @@ fn format_consumer(kind: ConsumerKind, op: &str) -> String {
 
 /// Emit a single `auth 401 attribution` event for a per-consumer 401.
 ///
-/// Wraps [`record_auth_401`] with the design-doc `consumer` formatting
-/// (e.g., `"StorageClient.upload"`, `"FeedbackClient.submit"`).
-/// All 401 emit sites in `xai-grok-shell` go through this helper -- the
-/// per-client `record_401_attribution` wrappers in
-/// `agent/feedback_client.rs`, `agent/session_registry_client.rs`,
-/// and `upload/storage_client.rs` each
-/// resolve their bearer and call this with the right `(kind, op)`.
+/// Wraps [`record_auth_401`] with the canonical `consumer` formatting (e.g., `"StorageClient.upload"`, `"FeedbackClient.submit"`).
+/// All 401 emit sites in `xai-grok-shell` go through this helper.
+/// The per-client `record_401_attribution` wrappers in `agent/feedback_client.rs`, `agent/session_registry_client.rs`, and
+/// `upload/storage_client.rs` each resolve their bearer and call this with the right `(kind, op)`.
 ///
-/// `sent_bearer` may be either a full bearer (passed by the
-/// non-sampler call sites listed above, which read directly from the
-/// client's `user_token` / `deployment_key` snapshot) or a 12-char
-/// prefix (passed by the sampler-side
-/// [`Auth401AttributionCallback`] boundary; the sampler scrubs to a
-/// prefix before crossing the crate boundary). The truncation inside
-/// [`record_auth_401`] / `compute_attribution_payload` is idempotent
-/// for the prefix case.
+/// `sent_bearer` may be a full bearer or a 12-char prefix.
+/// The non-sampler call sites listed above pass the full bearer, read directly from the client's `user_token` / `deployment_key` snapshot.
+/// The sampler-side [`Auth401AttributionCallback`] boundary passes a prefix; the sampler scrubs before crossing the crate boundary.
+/// The truncation inside [`record_auth_401`] / `compute_attribution_payload` is idempotent for the prefix case.
 pub(crate) fn record_consumer_401(
     auth_manager: &AuthManager,
     session_id: Option<&str>,
@@ -287,25 +246,18 @@ pub(crate) fn record_consumer_401(
     record_auth_401(auth_manager, session_id, &consumer, sent_bearer);
 }
 
-/// Emit a single `auth 401 attribution` event to both sinks (local
-/// unified log file + OTel span for OTLP export).
+/// Emit a single `auth 401 attribution` event to both sinks (local unified log file and OTel span for OTLP export).
 ///
-/// Schema:
-/// `(sent_key_prefix, current_key_prefix, mint_age_seconds,
-///   expires_at_seconds_from_now, consumer, is_stale_snapshot)`.
+/// Schema: `(sent_key_prefix, current_key_prefix, mint_age_seconds, expires_at_seconds_from_now, consumer, is_stale_snapshot)`.
 ///
-/// `sent_bearer` is the bearer that was sent on the wire (the
-/// `Authorization` value with `"Bearer "` stripped, or `x-api-key`), OR
-/// its 12-char tail fragment -- the sampler and middleware boundaries
-/// pass tails; a caller holding the full bearer may rely on the
-/// [`compute_attribution_payload`] truncation. `None` becomes the empty
-/// string, meaning "no bearer was sent."
+/// `sent_bearer` is the bearer that was sent on the wire (the `Authorization` value with `"Bearer "` stripped, or `x-api-key`).
+/// It may also be that bearer's 12-char tail fragment: the sampler and middleware boundaries pass tails.
+/// A caller holding the full bearer may rely on the [`compute_attribution_payload`] truncation.
+/// `None` becomes the empty string, meaning "no bearer was sent."
 ///
-/// `consumer` should be one of the canonical strings used by the
-/// per-client wrappers, e.g. `"OaiCompatClient.chat_completions_stream"`,
-/// `"StorageClient.upload"`, `"IdleResumeModelRefresh"`. Most call
-/// sites should go through [`record_consumer_401`] which formats the
-/// consumer string from a [`ConsumerKind`] for them.
+/// `consumer` should be one of the canonical strings used by the per-client wrappers,
+/// e.g. `"OaiCompatClient.chat_completions_stream"`, `"StorageClient.upload"`, `"IdleResumeModelRefresh"`.
+/// Most call sites should go through [`record_consumer_401`] which formats the consumer string from a [`ConsumerKind`] for them.
 pub(crate) fn record_auth_401(
     auth_manager: &AuthManager,
     session_id: Option<&str>,
@@ -315,49 +267,39 @@ pub(crate) fn record_auth_401(
     let payload = compute_attribution_payload(auth_manager, consumer, sent_bearer);
 
     // Sink 1 -- local file (~/.grok/logs/unified.jsonl) + scrubbed
-    // tracing event. The local file is reliable but only ships to GCS
-    // on OIDC refresh failure (auth/refresh.rs::spawn_diagnostic_upload),
-    // so by itself it does not give visibility into the steady-state
-    // 401 population. Sink 2 below provides that.
+    // tracing event
+    // The local file is reliable but only ships to GCS on OIDC refresh failure (auth/refresh.rs::spawn_diagnostic_upload)
+    // By itself it does not show the steady-state 401 population; Sink 2 below provides that
     xai_grok_telemetry::unified_log::warn(
         "auth 401 attribution",
         session_id,
         Some(payload.clone()),
     );
 
-    // Sink 2 -- discrete OTel span exported via OTLP
-    // (util/otel_layer.rs). Auth 401 attribution schema fields below
-    // become OTel span attributes under `attributes.custom.<name>`
-    // per the tracing-opentelemetry bridge; query by span name
-    // `auth_401_attribution` in the configured telemetry backend.
+    // Sink 2: discrete OTel span exported via OTLP (util/otel_layer.rs)
+    // The schema fields below become OTel span attributes under `attributes.custom.<name>` per the tracing-opentelemetry bridge
+    // Query by span name `auth_401_attribution` in the configured telemetry backend
     //
-    // Wrapping in a `warn_span!` (vs. plain `tracing::warn!`) ensures
-    // emission even when no parent span is active. The OTel layer
-    // attaches plain events to the currently-entered span only, so a
-    // `tracing::warn!` from a `spawn_blocking` closure (idle-resume
-    // model refresh) or a background sync task is silently dropped.
-    // A `warn_span!` itself is always emitted by the layer's
-    // `on_new_span`/`on_close` hooks regardless of parent context.
+    // Wrapping in a `warn_span!` (vs. plain `tracing::warn!`) emits even when no parent span is active.
+    // The OTel layer attaches plain events to the currently-entered span only
+    // So a `tracing::warn!` from a `spawn_blocking` closure (idle-resume model refresh) or a background sync task is silently dropped
+    // A `warn_span!` itself is always emitted by the layer's `on_new_span`/`on_close` hooks regardless of parent context
     //
-    // The span carries no body and is dropped immediately at the end
-    // of this function, so its `duration` is a few microseconds and
-    // it is logically a one-shot record (not a wrapping context for
-    // any other work).
+    // The span carries no body and is dropped immediately at the end of this function
+    // Its `duration` is a few microseconds and it is logically a one-shot record, not a wrapping context for any other work
     let _attribution_span = tracing::warn_span!(
         "auth_401_attribution",
-        // String fields. tracing flattens Option<&str> via Display, so
-        // we pre-collapse `None` to "" for both prefix fields and for
-        // session_id; downstream queries should treat "" as absent.
+        // String fields
+        // tracing flattens Option<&str> via Display, so we pre-collapse `None` to "" for both prefix fields and for session_id
+        // Downstream queries should treat "" as absent
         sent_key_prefix = payload["sent_key_prefix"].as_str().unwrap_or(""),
         current_key_prefix = payload["current_key_prefix"].as_str().unwrap_or(""),
         consumer = consumer,
         session_id = session_id.unwrap_or(""),
-        // Numeric fields. The sentinel values from
-        // `compute_attribution_payload` (-1, 0) carry through
-        // unchanged.
+        // Numeric fields. The sentinel values from `compute_attribution_payload` (-1, 0) carry through unchanged.
         mint_age_seconds = payload["mint_age_seconds"].as_i64().unwrap_or(-1),
         expires_at_seconds_from_now = payload["expires_at_seconds_from_now"].as_i64().unwrap_or(0),
-        // Boolean -- the load-bearing field for stale-vs-live splits.
+        // Boolean; the field stale-vs-live splits key on
         is_stale_snapshot = payload["is_stale_snapshot"].as_bool().unwrap_or(false),
     )
     .entered();
@@ -366,18 +308,14 @@ pub(crate) fn record_auth_401(
     EMIT_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 }
 
-/// Pure (no I/O) computation of the attribution payload. Extracted
-/// from [`record_auth_401`] so unit tests can assert each field
-/// directly without reaching into `unified_log`'s file writer or the
-/// tracing layer.
+/// Pure (no I/O) computation of the attribution payload.
+/// Extracted from [`record_auth_401`] so unit tests can assert each field without reaching into `unified_log`'s writer or the tracing layer.
 ///
-/// Reads [`AuthManager::current_or_expired`] -- NOT `current()`, which is
-/// `None` by construction in the hard-expired window most 401s land in
-/// and would blank every field this event exists to fill.
+/// Reads [`AuthManager::current_or_expired`], NOT `current()`.
+/// `current()` is `None` by construction in the hard-expired window most 401s land in and would blank every field this event exists to fill.
 ///
-/// `is_stale_snapshot` is `true` only when a bearer was actually sent
-/// and it differs from the held token; "sent nothing" (fail-closed) and
-/// "held nothing" (empty manager) are both `false`.
+/// `is_stale_snapshot` is `true` only when a bearer was actually sent and it differs from the held token.
+/// "Sent nothing" (fail-closed) and "held nothing" (empty manager) are both `false`.
 fn compute_attribution_payload(
     auth_manager: &AuthManager,
     consumer: &str,
@@ -385,41 +323,32 @@ fn compute_attribution_payload(
 ) -> JsonValue {
     let now = chrono::Utc::now();
 
-    // Last-12-char suffix of the bearer the wire actually carried
-    // (see [`bearer_suffix`]: JWT headers share a common base64 prefix).
-    // `""` when the request had no bearer at all (distinct case from
-    // "had a bearer that turned out to be stale" -- the gate-criteria
-    // query can break down on this).
+    // Last-12-char suffix of the bearer the wire actually carried (see [`bearer_suffix`]: JWT headers share a common base64 prefix)
+    // `""` when the request had no bearer at all
+    // That is a distinct case from "had a bearer that turned out to be stale"; the gate-criteria query can break down on this
     let sent_suffix = sent_bearer.map(bearer_suffix).unwrap_or("");
 
-    // One read; `current_or_expired` keeps the hard-expired token visible
-    // (see the fn doc).
+    // One read; `current_or_expired` keeps the hard-expired token visible (see the fn doc)
     let current_auth = auth_manager.current_or_expired();
     let current_suffix_owned: Option<String> = current_auth
         .as_ref()
         .map(|a| bearer_suffix(&a.key).to_string());
 
-    // True-positive staleness only: a bearer was sent AND differs from
-    // the held token. "Sent nothing" is the fail-closed path (in sync,
-    // credential dead); "held nothing" is no evidence -- neither is stale.
+    // True-positive staleness only: a bearer was sent AND differs from the held token
+    // "Sent nothing" is the fail-closed path (in sync, credential dead); "held nothing" is no evidence; neither is stale
     let is_stale_snapshot = match (sent_suffix, current_suffix_owned.as_deref()) {
         ("", _) => false,
         (_, None) => false,
         (sent, Some(held)) => sent != held,
     };
 
-    // Mint-age + expiry come from the same `current_auth` we already
-    // read; sentinels `-1 / 0` when the manager holds nothing. For a
-    // hard-expired token these report true age and (negative)
-    // time-past-expiry: how long the bearer was dead at the 401.
+    // Mint-age and expiry come from the same `current_auth` we already read; sentinels `-1 / 0` when the manager holds nothing
+    // For a hard-expired token these report true age and (negative) time-past-expiry: how long the bearer was dead at the 401
     //
-    // TODO: mirror the full External-with-ttl branch from
-    // `AuthManager::is_token_expired` (uses
-    // `grok_com_config.auth_token_ttl` when `expires_at` is `None`
-    // and `auth_mode == External`). The current 2-branch fallback
-    // (`expires_at` if Some else `create_time + TOKEN_TTL`) is good
-    // enough for diagnostic metadata; the External-ttl branch is
-    // worth wiring once a real consumer needs it.
+    // TODO: mirror the full External-with-ttl branch from `AuthManager::is_token_expired`
+    // (uses `grok_com_config.auth_token_ttl` when `expires_at` is `None` and `auth_mode == External`)
+    // The current 2-branch fallback (`expires_at` if Some else `create_time + TOKEN_TTL`) is good enough for diagnostic metadata
+    // The External-ttl branch is worth wiring once a real consumer needs it
     let (mint_age_seconds, expires_at_seconds_from_now) = match current_auth {
         Some(auth) => {
             let mint_age = now.signed_duration_since(auth.create_time).num_seconds();
@@ -473,9 +402,8 @@ mod tests {
             .unwrap_or_else(|| panic!("payload missing field {key:?}: {payload:?}"))
     }
 
-    /// Live token sent + 401 with matching `current()` ->
-    /// `is_stale_snapshot` must be `false`. Also assert the auxiliary
-    /// fields are set sensibly (prefix, mint age, expiry).
+    /// Live token sent and a 401 with matching `current()`: `is_stale_snapshot` must be `false`.
+    /// Also assert the auxiliary fields are set sensibly (prefix, mint age, expiry).
     #[test]
     fn live_token_sent_is_not_stale() {
         let (_dir, am) = empty_auth_manager();
@@ -492,8 +420,7 @@ mod tests {
             payload_field(&payload, "current_key_prefix"),
             "567890abcdef"
         );
-        // mint_age_seconds: should be small and non-negative for a
-        // freshly-created auth.
+        // mint_age_seconds: small and non-negative for a freshly-created auth
         let mint = payload_field(&payload, "mint_age_seconds")
             .as_i64()
             .unwrap();
@@ -501,8 +428,7 @@ mod tests {
             (0..5).contains(&mint),
             "mint_age_seconds should be 0-5 sec for a freshly-created auth, got {mint}"
         );
-        // expires_at_seconds_from_now: should be just under 1 hour
-        // (3600s), with a tolerance for elapsed time during the test.
+        // expires_at_seconds_from_now: just under 1 hour (3600s), with a tolerance for elapsed time during the test
         let expires = payload_field(&payload, "expires_at_seconds_from_now")
             .as_i64()
             .unwrap();
@@ -512,8 +438,7 @@ mod tests {
         );
     }
 
-    /// Stale snapshot sent + 401 with a different (newer) `current()`
-    /// -> `is_stale_snapshot` must be `true`.
+    /// Stale snapshot sent and a 401 with a different (newer) `current()`: `is_stale_snapshot` must be `true`.
     #[test]
     fn stale_snapshot_is_detected() {
         let (_dir, am) = empty_auth_manager();
@@ -532,15 +457,12 @@ mod tests {
         assert_eq!(payload_field(&payload, "consumer"), "Test.stale");
     }
 
-    /// Live token sent + 401 with `current() == None` ->
-    /// `is_stale_snapshot` must be `false` (no evidence of staleness).
-    /// Sentinel `mint_age_seconds = -1`,
-    /// `expires_at_seconds_from_now = 0`. `current_key_prefix` is JSON
-    /// `null`.
+    /// Live token sent and a 401 with `current() == None`: `is_stale_snapshot` must be `false` (no evidence of staleness).
+    /// Sentinel `mint_age_seconds = -1`, `expires_at_seconds_from_now = 0`; `current_key_prefix` is JSON `null`.
     #[test]
     fn absent_current_is_not_stale() {
         let (_dir, am) = empty_auth_manager();
-        // Do NOT inject anything -- manager has no current token.
+        // Do NOT inject anything; the manager has no current token
 
         let payload = compute_attribution_payload(&am, "Test.absent", Some("any-token"));
 
@@ -551,9 +473,8 @@ mod tests {
         assert_eq!(payload_field(&payload, "expires_at_seconds_from_now"), 0);
     }
 
-    /// Test helper: a token minted 2h ago that hard-expired 1h ago --
-    /// the in-memory state during the exact window most 401s occur in
-    /// (`current()` is `None`, `expired_auth()` is `Some`).
+    /// Test helper: a token minted 2h ago that hard-expired 1h ago.
+    /// That is the in-memory state during the exact window most 401s occur in (`current()` is `None`, `expired_auth()` is `Some`).
     fn hard_expired_auth(key: &str) -> GrokAuth {
         GrokAuth {
             key: key.to_string(),
@@ -563,9 +484,8 @@ mod tests {
         }
     }
 
-    /// A consumer sends the very token the manager holds, hard-expired:
-    /// NOT stale (in sync; the token itself is dead). The held token and
-    /// real age fields must stay visible -- `current()` used to blank them.
+    /// A consumer sends the very token the manager holds, hard-expired: NOT stale (in sync; the token itself is dead).
+    /// The held token and real age fields must stay visible; `current()` used to blank them.
     #[test]
     fn hard_expired_held_token_sent_is_not_stale() {
         let (_dir, am) = empty_auth_manager();
@@ -597,11 +517,9 @@ mod tests {
         );
     }
 
-    /// The fail-closed path: a hard-expired token is held, and the
-    /// wire-valid-only resolver correctly put NO bearer on the wire.
-    /// Not a stale snapshot -- the consumer did the right thing; the
-    /// credential is dead. Absorbing this into the stale bucket would
-    /// bury the true-positive split the field exists for.
+    /// The fail-closed path: a hard-expired token is held, and the wire-valid-only resolver correctly put NO bearer on the wire.
+    /// Not a stale snapshot: the consumer did the right thing; the credential is dead.
+    /// Absorbing this into the stale bucket would bury the true-positive split the field exists for.
     #[test]
     fn nothing_sent_with_hard_expired_held_token_is_not_stale() {
         let (_dir, am) = empty_auth_manager();
@@ -618,9 +536,8 @@ mod tests {
         );
     }
 
-    /// A consumer sends an OLDER bearer than the (hard-expired) one the
-    /// manager holds: a true stale snapshot, and it must be flagged even
-    /// though `current()` is `None` in this window.
+    /// A consumer sends an OLDER bearer than the (hard-expired) one the manager holds: a true stale snapshot.
+    /// It must be flagged even though `current()` is `None` in this window.
     #[test]
     fn stale_snapshot_detected_against_hard_expired_held_token() {
         let (_dir, am) = empty_auth_manager();
@@ -637,17 +554,15 @@ mod tests {
         );
     }
 
-    /// Two-branch fallback: legacy token (no `expires_at`) uses
-    /// `create_time + TOKEN_TTL` as the expiry source. We assert the
-    /// computed `expires_at_seconds_from_now` reflects that.
+    /// Two-branch fallback: a legacy token (no `expires_at`) uses `create_time + TOKEN_TTL` as the expiry source.
+    /// We assert the computed `expires_at_seconds_from_now` reflects that.
     #[test]
     fn legacy_token_uses_two_branch_fallback() {
         let (_dir, am) = empty_auth_manager();
         let auth = GrokAuth {
             key: "k".into(),
             create_time: Utc::now() - Duration::seconds(60),
-            // No expires_at => falls through to create_time + TOKEN_TTL
-            // (= 30 days).
+            // No expires_at falls through to create_time + TOKEN_TTL (30 days)
             ..GrokAuth::test_default()
         };
         am.hot_swap(auth);
@@ -662,8 +577,7 @@ mod tests {
             (60..=70).contains(&mint),
             "mint_age_seconds should be ~60 for a 60s-old auth, got {mint}"
         );
-        // expires_at_seconds_from_now: TOKEN_TTL minus 60s = roughly
-        // 30 * 86400 - 60 = 2_591_940. Tolerate ~10s drift.
+        // expires_at_seconds_from_now: TOKEN_TTL minus 60s, roughly 30 * 86400 - 60 = 2_591_940. Tolerate ~10s drift.
         let expires = payload_field(&payload, "expires_at_seconds_from_now")
             .as_i64()
             .unwrap();
@@ -675,9 +589,8 @@ mod tests {
     }
 
     /// `format_consumer` matrix:
-    ///   - generic ops append "." + op (`OaiCompatClient.foo`)
-    ///   - IdleResumeModelRefresh and tool variants drop the op
-    ///     (their consumer string has no sub-op axis).
+    ///   - generic ops append "." plus the op (`OaiCompatClient.foo`)
+    ///   - IdleResumeModelRefresh and tool variants drop the op (their consumer string has no sub-op axis).
     #[test]
     fn format_consumer_matrix() {
         let cases: &[(ConsumerKind, &str, &str)] = &[
@@ -717,9 +630,7 @@ mod tests {
         }
     }
 
-    /// `format_consumer` formats `OaiCompatClient.<endpoint>`
-    /// correctly and omits the `.` separator for
-    /// `IdleResumeModelRefresh`.
+    /// `format_consumer` formats `OaiCompatClient.<endpoint>` correctly and omits the `.` separator for `IdleResumeModelRefresh`.
     #[test]
     fn format_consumer_with_op_appends_dot() {
         assert_eq!(
@@ -732,10 +643,8 @@ mod tests {
         );
     }
 
-    /// `ShellAttribution` implements `xai_grok_tools::Auth401AttributionCallback`
-    /// by routing each `ToolConsumer` variant to the right
-    /// `(ConsumerKind, op)` pair, which formats to the expected
-    /// `consumer` string in the emitted payload.
+    /// `ShellAttribution` implements `xai_grok_tools::Auth401AttributionCallback` by routing each `ToolConsumer` variant to the right
+    /// `(ConsumerKind, op)` pair, which formats to the expected `consumer` string in the emitted payload.
     #[test]
     #[serial_test::serial(attribution_emit_count)]
     fn shell_attribution_tool_impl_routes_to_correct_consumer_strings() {
@@ -771,15 +680,11 @@ mod tests {
         assert_eq!(test_emit_count() as usize, cases.len());
     }
 
-    /// Capture `tracing::Span` `on_new_span` callbacks into a
-    /// `Mutex<Vec<CapturedSpan>>` so tests can assert the
-    /// `warn_span!("auth_401_attribution", ...)` emit fired with the
-    /// expected name and field values.
+    /// Capture `tracing::Span` `on_new_span` callbacks into a `Mutex<Vec<CapturedSpan>>` so tests can assert the
+    /// `warn_span!("auth_401_attribution", ...)` emit fired with the expected name and field values.
     ///
-    /// We intentionally only need `on_new_span` (which the
-    /// tracing-opentelemetry layer uses as its `OTel span_started`
-    /// hook). `on_close` is not asserted because the test cares about
-    /// "did the span exist with these attributes," not its duration.
+    /// We only need `on_new_span` (which the tracing-opentelemetry layer uses as its `OTel span_started` hook).
+    /// `on_close` is not asserted because the test cares about "did the span exist with these attributes," not its duration.
     mod span_capture {
         use std::sync::Mutex;
         use tracing::Subscriber;
@@ -854,12 +759,9 @@ mod tests {
         }
     }
 
-    /// `record_auth_401` emits a discrete `warn_span!` with name
-    /// `"auth_401_attribution"` and the attribution fields as span
-    /// attributes. This is the span the tracing-opentelemetry bridge
-    /// ships via OTLP export to the configured telemetry backend.
-    /// Verifies field names, types, and values match the schema
-    /// documented at the top of this module.
+    /// `record_auth_401` emits a discrete `warn_span!` named `"auth_401_attribution"` with the attribution fields as span attributes.
+    /// This is the span the tracing-opentelemetry bridge ships via OTLP export to the configured telemetry backend.
+    /// Verifies field names, types, and values match the schema documented at the top of this module.
     #[test]
     #[serial_test::serial(attribution_emit_count)]
     fn record_auth_401_emits_otel_span_with_attribution_fields() {
@@ -887,8 +789,7 @@ mod tests {
             .find(|s| s.name == "auth_401_attribution")
             .expect("expected one auth_401_attribution span; got: {spans:?}");
 
-        // String fields: prefixes truncated to 12 chars, consumer +
-        // session_id passed verbatim.
+        // String fields: prefixes truncated to 12 chars, consumer and session_id passed verbatim
         assert_eq!(
             attribution
                 .fields_str
@@ -913,15 +814,13 @@ mod tests {
             Some("sid-otel-span"),
         );
 
-        // Boolean: the load-bearing field for stale-vs-live splits.
-        // `true` because `sent != current`.
+        // Boolean: the field stale-vs-live splits key on. `true` because `sent != current`.
         assert_eq!(
             attribution.fields_bool.get("is_stale_snapshot"),
             Some(&true),
         );
 
-        // Numeric: mint_age in [0, 5) for a freshly-injected auth;
-        // expires_at ~3600s away.
+        // Numeric: mint_age in [0, 5) for a freshly-injected auth; expires_at ~3600s away
         let mint = attribution
             .fields_i64
             .get("mint_age_seconds")
@@ -942,12 +841,10 @@ mod tests {
         );
     }
 
-    /// `record_auth_401` (the I/O-bearing wrapper) bumps the
-    /// `cfg(test)` counter so cross-module tests can observe how many
-    /// times an attribution event was actually emitted.
+    /// `record_auth_401` (the I/O-bearing wrapper) bumps the `cfg(test)` counter.
+    /// Cross-module tests can then observe how many times an attribution event was actually emitted.
     ///
-    /// `#[serial]` because `EMIT_COUNT` is process-global; concurrent
-    /// tests that exercise the counter would race each other.
+    /// `#[serial]` because `EMIT_COUNT` is process-global; concurrent tests that exercise the counter would race each other.
     #[test]
     #[serial_test::serial(attribution_emit_count)]
     fn record_auth_401_bumps_emit_counter() {
@@ -960,13 +857,10 @@ mod tests {
         assert_eq!(test_emit_count(), 2);
     }
 
-    /// The SubagentSpawnContext-borne callback flows through
-    /// `read_parent_sampling_config` into the inherited
-    /// `SamplerConfig.attribution_callback`. We can't drive the full
-    /// subagent path here (requires SessionActor + chat-state
-    /// scaffolding), but we can assert the structural property: the
-    /// callback the parent constructs is the one any later
-    /// `SamplerConfig` clone carries forward unchanged.
+    /// The SubagentSpawnContext-borne callback flows through `read_parent_sampling_config` into the inherited
+    /// `SamplerConfig.attribution_callback`.
+    /// We can't drive the full subagent path here (requires SessionActor and chat-state scaffolding).
+    /// We can assert the structural property: the callback the parent constructs is the one any later `SamplerConfig` clone carries forward.
     #[test]
     #[serial_test::serial(attribution_emit_count)]
     fn parent_callback_flows_through_arc_clone() {
@@ -975,14 +869,12 @@ mod tests {
         let am_arc = Arc::new(am);
         let parent_cb = ShellAttribution::new(am_arc.clone(), Some("parent-sid".into()));
 
-        // Simulate the inheritance hand-off: the parent callback flows
-        // through SessionHandle -> SubagentSpawnContext ->
-        // SamplerConfig.attribution_callback as plain Arc clones.
+        // Simulate the inheritance: the parent callback flows through SessionHandle, then SubagentSpawnContext, then
+        // SamplerConfig.attribution_callback, as plain Arc clones
         let inherited_cb = parent_cb.clone();
 
-        // Drive the inherited callback. The `record_401` should bump
-        // the same global counter the parent callback would, proving
-        // they refer to the same underlying impl.
+        // Drive the inherited callback
+        // The `record_401` bumps the same global counter the parent callback would, proving they refer to the same underlying impl
         inherited_cb.record_401(SamplingConsumer::ChatCompletionsStream, Some("bearer"));
         assert_eq!(test_emit_count(), 1);
 
@@ -991,13 +883,11 @@ mod tests {
         assert_eq!(test_emit_count(), 2);
     }
 
-    /// End-to-end: the trait impl wraps `consumer.as_endpoint()` in
-    /// `"OaiCompatClient.<endpoint>"` and delegates to
-    /// `record_consumer_401` for every variant of `SamplingConsumer`.
-    /// We assert one bump per variant via the test counter, plus the
-    /// rendered `consumer` string for one variant via a payload
-    /// recompute (the trait does not return the payload, so we
-    /// recompute directly from the same inputs).
+    /// End-to-end: the trait impl wraps `consumer.as_endpoint()` in `"OaiCompatClient.<endpoint>"` and delegates to `record_consumer_401`
+    /// for every variant of `SamplingConsumer`.
+    /// We assert one bump per variant via the test counter.
+    /// We also assert the rendered `consumer` string for one variant via a payload recompute.
+    /// The trait does not return the payload, so we recompute directly from the same inputs.
     #[test]
     #[serial_test::serial(attribution_emit_count)]
     fn shell_attribution_trait_impl_routes_through_helper() {
@@ -1018,8 +908,7 @@ mod tests {
         }
         assert_eq!(test_emit_count() as usize, variants.len());
 
-        // Sanity-check the consumer-string formatting via direct
-        // payload computation.
+        // Check the consumer-string formatting via direct payload computation
         let payload = compute_attribution_payload(
             am_arc.as_ref(),
             &format_consumer(

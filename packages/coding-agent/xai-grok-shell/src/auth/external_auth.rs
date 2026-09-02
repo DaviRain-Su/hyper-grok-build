@@ -50,16 +50,15 @@ pub(crate) fn parse_output(output: &std::process::Output) -> anyhow::Result<Grok
 /// The single run in `ExternalBinaryRefresher` gets this whole budget.
 const EXTERNAL_AUTH_REFRESH_TIMEOUT: Duration = Duration::from_secs(7);
 
-/// Runs the external auth binary for a headless mid-session refresh. Initial,
-/// interactive sign-in takes a separate path (`flow::run_external_auth_provider`,
-/// which bridges the provider's stderr link), so this handles refresh only.
+/// Runs the external auth binary for a headless mid-session refresh.
+/// Initial, interactive sign-in takes a separate path (`flow::run_external_auth_provider`, which bridges the provider's stderr link).
+/// This handles refresh only.
 pub(crate) async fn run_external_refresh(command: &str) -> Option<GrokAuth> {
     tracing::info!(cmd = %command, timeout_secs = EXTERNAL_AUTH_REFRESH_TIMEOUT.as_secs(), "auth: running external auth provider (headless refresh)");
 
     let mut cmd = shell_c(command);
     cmd.env("GROK_AUTH_EXPIRED", "1");
-    // Route through the group-killing runner so a provider that spawns helpers
-    // is torn down as a unit on timeout.
+    // Route through the group-killing runner so a provider that spawns helpers is torn down as a unit on timeout
     let output = match run_detached_with_timeout(
         cmd,
         EXTERNAL_AUTH_REFRESH_TIMEOUT,
@@ -135,7 +134,7 @@ mod tests {
             stderr: vec![],
         };
 
-        // x.ai issuer claim → first-party session (relay-eligible).
+        // An x.ai issuer claim yields a first-party session (relay-eligible)
         let auth = parse_output(&ok(
             r#"{"access_token":"t","expires_in":900,"issuer":"https://auth.x.ai"}"#,
         ))
@@ -154,7 +153,7 @@ mod tests {
         );
         assert!(!auth.is_xai_auth());
 
-        // Missing / empty / whitespace issuer → None.
+        // A missing, empty, or whitespace issuer stores None
         let auth = parse_output(&ok(r#"{"access_token":"t"}"#)).unwrap();
         assert_eq!(auth.oidc_issuer, None);
         assert!(!auth.is_xai_auth());

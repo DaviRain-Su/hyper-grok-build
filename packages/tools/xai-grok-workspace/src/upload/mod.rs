@@ -25,8 +25,7 @@ static UPLOAD_QUEUE_PENDING: LazyLock<IntGauge> = LazyLock::new(|| {
     )
     .unwrap()
 });
-/// Per-phase terminal upload outcome: `succeeded` (bytes accepted, not
-/// GCS-confirmed) / `failed` / `skipped`.
+/// Per-phase terminal upload outcome: `succeeded` (bytes accepted, not GCS-confirmed) / `failed` / `skipped`.
 static UPLOAD_OUTCOME_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
         "grok_workspace_upload_outcome_total",
@@ -35,8 +34,7 @@ static UPLOAD_OUTCOME_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     )
     .unwrap()
 });
-/// Per-phase upload failures, by error category
-/// (`archive_failed` / `enqueue_failed` / `upload_failed`).
+/// Per-phase upload failures, by error category (`archive_failed` / `enqueue_failed` / `upload_failed`).
 static UPLOAD_FAILED_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
         "grok_workspace_upload_failed_total",
@@ -45,8 +43,8 @@ static UPLOAD_FAILED_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     )
     .unwrap()
 });
-/// Per-phase deliberate upload skips (policy / missing-config only). Failure
-/// declines are counted as failures, not here.
+/// Per-phase deliberate upload skips (policy / missing-config only).
+/// Failure declines are counted as failures, not here.
 static UPLOAD_SKIPPED_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
         "grok_workspace_upload_skipped_total",
@@ -55,20 +53,17 @@ static UPLOAD_SKIPPED_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     )
     .unwrap()
 });
-/// Record a terminal upload outcome; call sites pair it with the matching
-/// [`record_upload_failed`] / [`record_upload_skipped`] when one applies.
+/// Record a terminal upload outcome; call sites pair it with the matching [`record_upload_failed`] / [`record_upload_skipped`] when one applies.
 pub(crate) fn record_upload_outcome(phase: &str, outcome: &str) {
     UPLOAD_OUTCOME_TOTAL
         .with_label_values(&[phase, outcome])
         .inc();
 }
-/// Record an upload failure, by error category.
 pub(crate) fn record_upload_failed(phase: &str, error_category: &str) {
     UPLOAD_FAILED_TOTAL
         .with_label_values(&[phase, error_category])
         .inc();
 }
-/// Record a deliberate upload skip, by skip reason.
 pub(crate) fn record_upload_skipped(phase: &str, skip_reason: &str) {
     UPLOAD_SKIPPED_TOTAL
         .with_label_values(&[phase, skip_reason])
@@ -100,10 +95,8 @@ pub(crate) fn init_metrics() {
         .with_label_values(&["workspace_environment", "enqueue_failed"])
         .inc_by(0);
 }
-/// Spawn a detached sampler that mirrors the queue's pending/pending-bytes
-/// stats into the Prometheus gauges every `interval`, and emits a matching
-/// queue-aggregate telemetry snapshot so queue pressure is visible in the
-/// same log stream as upload outcomes.
+/// Spawn a detached sampler that mirrors the queue's pending/pending-bytes stats into the Prometheus gauges every `interval`.
+/// It also emits a matching queue-aggregate telemetry snapshot so queue pressure is visible in the same log stream as upload outcomes.
 pub(crate) fn spawn_queue_stats_sampler(
     queue: Arc<UploadQueue>,
     interval: std::time::Duration,
@@ -131,12 +124,10 @@ pub(crate) fn spawn_queue_stats_sampler(
         }
     })
 }
-/// Wraps the server [`AuthProvider`] as an [`AuthCredentialProvider`] +
-/// [`HttpAuth`] so the `StorageClient` can authenticate requests.
+/// Wraps the server [`AuthProvider`] as an [`AuthCredentialProvider`] and [`HttpAuth`] so the `StorageClient` can authenticate requests.
 struct HubAuthCredentialProvider {
     auth: Arc<dyn AuthProvider>,
-    /// Resolved workspace owner so `snapshot` can attribute uploads (and 401s)
-    /// to the real `user_id`/`team_id`.
+    /// Resolved workspace owner so `snapshot` can attribute uploads (and 401s) to the real `user_id`/`team_id`.
     identity: WorkspaceIdentity,
 }
 impl xai_grok_auth::visibility::HttpAuth for HubAuthCredentialProvider {
@@ -180,8 +171,7 @@ impl AuthCredentialProvider for HubAuthCredentialProvider {
         false
     }
 }
-/// [`StorageConfig`] implementation that proxies uploads through the
-/// configured proxy endpoint using the connection's auth credentials.
+/// [`StorageConfig`] implementation that proxies uploads through the configured proxy endpoint using the connection's auth credentials.
 pub(crate) struct ProxyStorageConfig {
     method: UploadMethod,
     credentials: Arc<dyn AuthCredentialProvider>,
@@ -217,15 +207,8 @@ impl StorageConfig for ProxyStorageConfig {
         Some(self.credentials.clone())
     }
 }
-/// Adapts the workspace's [`ProxyStorageConfig`] to the upload queue's
-/// [`TraceExportSource`] contract so [`UploadQueue`] can resolve fresh proxy
-/// credentials on every upload attempt.
-///
-/// `resolve` builds a [`TraceExportConfig`] from the proxy config's
-/// `bucket_url` + `upload_method`; the auth / attribution / http-client hooks
-/// delegate straight through to the wrapped [`ProxyStorageConfig`] (whose
-/// `proxy_credentials` is a [`HubAuthCredentialProvider`] over the server's
-/// `AuthProvider`).
+/// Adapts the workspace's [`ProxyStorageConfig`] to the upload queue's [`TraceExportSource`] contract.
+/// [`UploadQueue`] resolves fresh proxy credentials through it on every upload attempt.
 pub(crate) struct WorkspaceTraceExportSource {
     proxy_storage_config: Arc<ProxyStorageConfig>,
 }
@@ -258,10 +241,8 @@ impl TraceExportSource for WorkspaceTraceExportSource {
         self.proxy_storage_config.proxy_http_client()
     }
 }
-/// Enqueue the flushed tool-state bytes at
-/// `"{session_id}/turn_{turn_number}/tool_state.json"`. The local spill file is
-/// named `resources_state.json`, but the durable artifact is always
-/// `tool_state.json` to match the environment naming scheme.
+/// Enqueue the flushed tool-state bytes at `"{session_id}/turn_{turn_number}/tool_state.json"`.
+/// The local spill file is named `resources_state.json`, but the durable artifact is `tool_state.json` to match the environment naming scheme.
 /// `Enqueued`/`FellBackToInline` are success; `Failed` is an error.
 pub(crate) async fn upload_tool_state_queued(
     state_bytes: Vec<u8>,
@@ -344,8 +325,7 @@ mod tests {
             identity,
         ))
     }
-    /// A Team principal's snapshot must carry the real `user_id` and the
-    /// `team_id` (from `principal_id`).
+    /// A Team principal's snapshot must carry the real `user_id` and the `team_id` (from `principal_id`).
     #[test]
     fn snapshot_carries_team_identity() {
         let identity = WorkspaceIdentity::new(
@@ -362,8 +342,7 @@ mod tests {
         assert_eq!(snap.user_id.as_deref(), Some("user-team-1"));
         assert_eq!(snap.team_id.as_deref(), Some("team-9"));
     }
-    /// A User principal's snapshot carries `user_id` but never a `team_id`,
-    /// even though the same code path runs.
+    /// A User principal's snapshot carries `user_id` but never a `team_id`, even though the same code path runs.
     #[test]
     fn snapshot_user_identity_has_no_team_id() {
         let identity = WorkspaceIdentity::new("user-solo", Some("User".to_string()), None);
@@ -375,8 +354,7 @@ mod tests {
         assert_eq!(snap.user_id.as_deref(), Some("user-solo"));
         assert_eq!(snap.team_id, None);
     }
-    /// With no resolved identity (headless / local-dev), `user_id` and
-    /// `team_id` are `None` but the live bearer token still flows.
+    /// With no resolved identity (headless / local-dev), `user_id` and `team_id` are `None` but the live bearer token still flows.
     #[test]
     fn snapshot_default_identity_omits_user_and_team() {
         let snap = proxy_config()
@@ -387,8 +365,8 @@ mod tests {
         assert_eq!(snap.user_id, None);
         assert_eq!(snap.team_id, None);
     }
-    /// The `Headers` credential arm must surface the real `user_id` / `team_id`
-    /// too. It has no bearer token, so `token` stays `None`.
+    /// The `Headers` credential arm must carry the real `user_id` / `team_id` too.
+    /// It has no bearer token, so `token` stays `None`.
     #[test]
     fn snapshot_headers_credential_carries_identity() {
         let identity = WorkspaceIdentity::new(
@@ -404,8 +382,7 @@ mod tests {
         assert_eq!(snap.user_id.as_deref(), Some("user-headers"));
         assert_eq!(snap.team_id.as_deref(), Some("team-h"));
     }
-    /// `WorkspaceTraceExportSource` must delegate all four `TraceExportSource`
-    /// hooks to the wrapped `ProxyStorageConfig`.
+    /// `WorkspaceTraceExportSource` must delegate all four `TraceExportSource` hooks to the wrapped `ProxyStorageConfig`.
     #[tokio::test]
     async fn workspace_trace_export_source_delegates_all_methods() {
         let source = WorkspaceTraceExportSource::new(proxy_config());
@@ -427,9 +404,8 @@ mod tests {
         assert!(source.proxy_attribution().is_none());
         assert!(source.proxy_http_client().is_none());
     }
-    /// The credential the queue resolves must be the server-backed provider whose
-    /// snapshot carries the live bearer token (not the placeholder baked into
-    /// `UploadMethod::Proxy`).
+    /// The credential the queue resolves must be the server-backed provider.
+    /// Its snapshot carries the live bearer token, not the placeholder baked into `UploadMethod::Proxy`.
     #[test]
     fn workspace_trace_export_source_credentials_snapshot_live_token() {
         let source = WorkspaceTraceExportSource::new(proxy_config());
@@ -440,10 +416,9 @@ mod tests {
     }
     use std::path::Path;
     use tempfile::TempDir;
-    /// Spawn a real [`UploadQueue`] spilling under `home`. The proxy points at a
-    /// dead local port so any background cloud upload fails fast without DNS —
-    /// the tests only assert the *enqueue* side (`stats().enqueued`), never the
-    /// upload itself.
+    /// Spawn a real [`UploadQueue`] spilling under `home`.
+    /// The proxy points at a dead local port so any background cloud upload fails fast without DNS.
+    /// The tests only assert the *enqueue* side (`stats().enqueued`), never the upload itself.
     fn test_queue(home: &Path) -> Arc<UploadQueue> {
         let auth: Arc<dyn AuthProvider> = Arc::new(AuthCredential::bearer("test-token"));
         let proxy = Arc::new(ProxyStorageConfig::new(
@@ -458,9 +433,8 @@ mod tests {
             xai_file_utils::queue::UploadRetryPolicy::default(),
         ))
     }
-    /// Pins the tool-state path contract: bytes enqueued at exactly
-    /// `{session_id}/turn_{N}/tool_state.json` with JSON content-type and the
-    /// `tool_state` artifact name (asserted via queue stat + sidecar manifest).
+    /// Pins the tool-state path contract: bytes enqueued at exactly `{session_id}/turn_{N}/tool_state.json`.
+    /// The content-type is JSON and the artifact name is `tool_state` (asserted via queue stat and sidecar manifest).
     #[tokio::test]
     async fn tool_state_enqueues_at_session_turn_gcs_path() {
         use xai_file_utils::queue::{
@@ -513,8 +487,7 @@ mod tests {
         assert_eq!(sidecar.session_id, "sess-XYZ");
         assert_eq!(sidecar.turn_number, 7);
     }
-    /// The closed field vocabulary; only fields in this set are emitted
-    /// (never the free-form `reason`/`error`/`*_path`).
+    /// The closed field vocabulary; only fields in this set are emitted (never the free-form `reason`/`error`/`*_path`).
     const APPROVED_DC_FIELDS: &[&str] = &[
         "session_id",
         "turn_number",
@@ -575,8 +548,7 @@ mod tests {
             });
         }
     }
-    /// Run `f` with a thread-local capturing subscriber; returns only the events
-    /// on the `workspace::telemetry` target.
+    /// Run `f` with a thread-local capturing subscriber; returns only the events on the `workspace::telemetry` target.
     fn capture_dc(f: impl FnOnce()) -> Vec<CapturedEvent> {
         use tracing_subscriber::layer::SubscriberExt;
         let events = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -590,8 +562,7 @@ mod tests {
             .filter(|e| e.target == crate::telemetry::TELEMETRY_TARGET)
             .collect()
     }
-    /// `dc_log!` pins the target, honors the level, keeps the message a verbatim
-    /// literal, and only ever carries the approved field vocabulary.
+    /// `dc_log!` pins the target, honors the level, keeps the message a verbatim literal, and only ever carries the approved field vocabulary.
     #[test]
     fn dc_log_pins_target_level_and_vocabulary() {
         let events = capture_dc(|| {
@@ -628,8 +599,7 @@ mod tests {
             }
         }
     }
-    /// The net-new queue-stats snapshot is INFO, queue-aggregate (no `session_id`),
-    /// and carries exactly the queue counters.
+    /// The queue-stats snapshot is INFO, queue-aggregate (no `session_id`), and carries exactly the queue counters.
     #[tokio::test]
     async fn queue_stats_sampler_emits_info_snapshot() {
         let home = TempDir::new().unwrap();

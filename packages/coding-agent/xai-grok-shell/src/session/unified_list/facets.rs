@@ -699,7 +699,7 @@ mod tests {
             Some(FacetValue::One(serde_json::Value::String(s))) if s == "/Users/me/xai-main"
         ));
 
-        // Conversations carry no local git enrichment.
+        // Conversations carry no local git data
         let conv = NormalizedItem::from_conversation(&Conversation {
             conversation_id: "c1".into(),
             ..Conversation::default()

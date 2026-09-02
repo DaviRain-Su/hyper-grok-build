@@ -1,29 +1,23 @@
 //! Opt-in, content-redacted **external OTEL** telemetry stream.
 //!
-//! Enterprise customers point the Grok CLI at *their own* OpenTelemetry
-//! collector (standard `OTEL_*` env vars + the `GROK_EXTERNAL_OTEL` master
-//! switch) and receive a curated, ZDR-safe schema: ~6 counters and ~17
-//! log-record events fanned out from the same typed call sites that emit the
-//! product events ([`crate::session_ctx::log_event`]).
+//! Enterprise customers point the Grok CLI at *their own* OpenTelemetry collector through the standard `OTEL_*` env vars.
+//! `GROK_EXTERNAL_OTEL` is the master switch.
+//! The stream is independent of ZDR: it ships only to the customer's collector
+//! under an explicit double opt-in. Default content-free (~6 counters and ~17
+//! log-record events); `user.email` is identity, not a content gate.
+//! Events fan out from the same typed call sites that emit the product events
+//! ([`crate::session_ctx::log_event`]).
 //!
 //! Structural invariants (enforced by construction and tests):
-//! - The providers here are **never** registered with `opentelemetry::global`
-//!   (the internal tracer provider owns the global slot); everything is
-//!   handle-based through the [`EXTERNAL`] registry.
-//! - The exporters carry **only** customer headers/metadata from
-//!   `OTEL_EXPORTER_OTLP_HEADERS` — this module has no dependency on
-//!   `AuthCredentialProvider` and no code path that can attach internal auth
-//!   headers.
-//! - Default **off**: with `GROK_EXTERNAL_OTEL` unset (or no exporter
-//!   selected) nothing is constructed — zero allocation, zero threads, zero
-//!   sockets.
-//! - Independent of `TelemetryMode`, GCS trace upload, and the data-collection /
-//!   data-retention opt-outs (user-confirmed): those govern xAI-side
-//!   retention; this stream ships only to the customer's own collector under
-//!   the customer's own explicit double opt-in.
+//! - The providers here are **never** registered with `opentelemetry::global`; the internal tracer provider owns the global slot.
+//!   Everything goes through the [`EXTERNAL`] registry handle.
+//! - The exporters carry **only** customer headers/metadata from `OTEL_EXPORTER_OTLP_HEADERS`.
+//!   This module has no dependency on `AuthCredentialProvider` and no code path that can attach internal auth headers.
+//! - Default **off**: with `GROK_EXTERNAL_OTEL` unset (or no exporter selected) nothing is constructed; zero allocation, zero threads, zero sockets.
+//! - Independent of `TelemetryMode`, GCS trace upload, and the user-confirmed data-collection and data-retention opt-outs.
+//!   Those govern xAI-side retention; this stream ships only to the customer's own collector under the customer's own explicit double opt-in.
 //!
-//! This module is the second authoritative privacy boundary in this crate
-//! (alongside `otel_layer::redact`).
+//! This module is the second authoritative privacy boundary in this crate (alongside `otel_layer::redact`).
 
 pub mod config;
 mod emit;
@@ -45,21 +39,30 @@ pub use config::{ContentGates, ExternalOtelConfig, ExternalOtelFileConfig};
 
 static EXTERNAL: OnceLock<Option<Arc<ExternalTelemetry>>> = OnceLock::new();
 
-/// Identity *attributes* (plain id strings — never tokens). Derived from a
-/// `CredentialSnapshot` at the telemetry-client init sites; updated post-auth
-/// and on logout.
+/// Identity *attributes* (plain id strings, never tokens).
+/// Derived from a `CredentialSnapshot` at the telemetry-client init sites; updated post-auth and on logout.
 #[derive(Debug, Clone, Default)]
 pub struct IdentityAttrs {
     pub user_id: Option<String>,
+    /// OAuth/gateway email. Identity, not a content gate — attached whenever
+    /// present. Never filled from git, API-key, or deployment-key.
+    pub email: Option<String>,
     pub organization_id: Option<String>,
     pub team_id: Option<String>,
     pub deployment_id: Option<String>,
 }
 
 impl IdentityAttrs {
+    /// Copy principal ids from the snapshot. `user.id` follows whatever the
+    /// snapshot has (OIDC principal, or an API-key session that populated
+    /// `user_id`). Email is never taken from the snapshot — OAuth/gateway
+    /// only, filled by the shell after `from_snapshot`. Env-only API-key
+    /// (no `GrokAuth` session) has no principal; we do not invent a
+    /// per-install hash.
     pub fn from_snapshot(snapshot: &xai_grok_auth::CredentialSnapshot) -> Self {
         Self {
             user_id: snapshot.user_id.clone(),
+            email: None,
             organization_id: snapshot.organization_id.clone(),
             team_id: snapshot.team_id.clone(),
             deployment_id: snapshot.deployment_id.clone(),
@@ -67,10 +70,9 @@ impl IdentityAttrs {
     }
 }
 
-/// Remote-settings policy for the external stream. **Restrictive-only by
-/// construction**: there is deliberately no enable direction (remote settings
-/// are fetched per-run and never persisted, so a remote "enable" could never
-/// reach init).
+/// Remote-settings policy for the external stream.
+/// **Restrictive-only by construction**: there is deliberately no enable direction.
+/// Remote settings are fetched per-run and never persisted, so a remote "enable" could never reach init.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ExternalOtelRemotePolicy {
     /// Remote-policy force-disable: flush, then drop subsequent emissions in-process.
@@ -79,15 +81,15 @@ pub struct ExternalOtelRemotePolicy {
     pub lock_content_gates: bool,
 }
 
-/// The handle owning both providers. Never global; reached only through the
-/// [`EXTERNAL`] registry.
+/// The handle owning both providers.
+/// Never global; reached only through the [`EXTERNAL`] registry.
 pub struct ExternalTelemetry {
     logger_provider: Option<SdkLoggerProvider>,
     meter_provider: Option<SdkMeterProvider>,
     logger: Option<SdkLogger>,
     instruments: Option<emit::Instruments>,
-    /// Emission gate; cleared by the remote force-disable. The single
-    /// authority for "emitting right now".
+    /// Emission gate; cleared by the remote force-disable.
+    /// The single authority for "emitting right now".
     active: AtomicBool,
     /// Content gates; may only TIGHTEN post-init.
     gates: redact::SharedGates,
@@ -124,6 +126,8 @@ struct ConfiguredMeta {
     protocol: String,
     prompts_gate: bool,
     details_gate: bool,
+    assistant_gate: bool,
+    content_gate: bool,
     source: &'static str,
 }
 
@@ -141,9 +145,8 @@ impl ExternalTelemetry {
     }
 }
 
-/// Initialize the external stream. Called once from binary startup after
-/// config resolution, **before auth** (no credentials needed). `None` records
-/// the dormant state — the default path allocates nothing.
+/// Called once from binary startup after config resolution, **before auth** (no credentials needed).
+/// `None` records the dormant state; the default path allocates nothing.
 pub fn init(cfg: Option<ExternalOtelConfig>) {
     let value = cfg.and_then(build_handle);
     if EXTERNAL.set(value).is_err() {
@@ -152,9 +155,8 @@ pub fn init(cfg: Option<ExternalOtelConfig>) {
 }
 
 fn build_handle(cfg: ExternalOtelConfig) -> Option<Arc<ExternalTelemetry>> {
-    // No-double-send invariant, enforced in code (not release discipline):
-    // if the internal firehose resolved its endpoint/headers from
-    // `OTEL_EXPORTER_OTLP_*` (the deprecated fallback), refuse to activate.
+    // If the internal firehose resolved its endpoint/headers from `OTEL_EXPORTER_OTLP_*` (the deprecated fallback), refuse to activate
+    // This check, in code rather than release discipline, keeps the same events from going out twice
     if cfg.internal_pipeline_consumed_otel_vars {
         tracing::warn!(
             "external otel: refusing to activate — the internal trace pipeline consumed \
@@ -206,6 +208,8 @@ fn build_handle(cfg: ExternalOtelConfig) -> Option<Arc<ExternalTelemetry>> {
         },
         prompts_gate: cfg.gates.log_user_prompts,
         details_gate: cfg.gates.log_tool_details,
+        assistant_gate: cfg.gates.log_assistant_responses,
+        content_gate: cfg.gates.log_tool_content,
         source: cfg.enabled_source,
     };
 
@@ -248,15 +252,12 @@ fn active_handle() -> Option<Arc<ExternalTelemetry>> {
     handle().filter(|ext| ext.active.load(Ordering::Relaxed))
 }
 
-/// Fail-closed OTEL gate. Defaults open; the leader closes it before init and
-/// re-opens it when settings resolve.
+/// Fail-closed OTEL gate.
+/// Defaults open; the leader closes it before init and re-opens it when settings resolve.
 ///
-/// Opening is the synchronizing event: `OtelGate::apply_and_open` applies the
-/// remote force-disable (`active = false`) and then opens here, so an emitter
-/// whose `Acquire` read observes the `Release` open also observes
-/// `active = false`; the emit-path `active` load can therefore stay `Relaxed`.
-/// The window-expiry open has no such pairing and relies on eventual
-/// visibility, acceptable because the policy is tighten-only.
+/// Opening is the synchronizing event: `OtelGate::apply_and_open` applies the remote force-disable (`active = false`) and then opens here.
+/// An emitter whose `Acquire` read observes the `Release` open also observes `active = false`, so the emit-path `active` load can stay `Relaxed`.
+/// The window-expiry open has no such pairing and relies on eventual visibility, acceptable because the policy is tighten-only.
 static SETTINGS_RESOLVED: AtomicBool = AtomicBool::new(true);
 
 const DEFAULT_SETTINGS_GATE_MAX_WAIT: Duration = Duration::from_secs(30);
@@ -290,12 +291,11 @@ pub fn settings_gate_max_wait() -> Duration {
     Duration::from_millis(SETTINGS_GATE_MAX_WAIT_MS.load(Ordering::Relaxed))
 }
 
-/// Close the gate (leader preinit + account switch).
+/// Close the gate (leader preinit and account switch).
 pub fn suppress_external_otel_until_settings() {
     GATE_CLOSED_AT_MS.store(process_uptime_ms(), Ordering::Relaxed);
-    // `Release`: a reader that observes the close must also observe the
-    // timestamp published just above, or it would measure this window from an
-    // earlier close and open immediately.
+    // `Release`: a reader that observes the close must also observe the timestamp published just above
+    // Otherwise it would measure this window from an earlier close and open immediately
     SETTINGS_RESOLVED.store(false, Ordering::Release);
 }
 
@@ -306,8 +306,8 @@ pub fn mark_external_otel_settings_resolved() {
     }
 }
 
-/// Read the gate. `Acquire` pairs with the `Release` open (and with the
-/// `Release` close that publishes the window start).
+/// Read the gate.
+/// `Acquire` pairs with the `Release` open (and with the `Release` close that publishes the window start).
 #[inline]
 pub fn is_settings_gate_open() -> bool {
     SETTINGS_RESOLVED.load(Ordering::Acquire) || settings_gate_window_expired()
@@ -330,21 +330,18 @@ fn settings_gate_window_expired() -> bool {
     true
 }
 
-/// Cheap check used by the fan-out hook and the split-sink call sites:
-/// registry present AND the runtime emission gate set AND the settings gate
-/// open. A stale `true` read only costs a wasted mapping, never an export
-/// ([`emit`] re-checks).
+/// Cheap check used by the fan-out hook and the split-sink call sites: registry present AND the runtime emission gate set AND the settings gate open.
+/// A stale `true` read only costs a wasted mapping, never an export ([`emit`] re-checks).
 pub fn is_active() -> bool {
     is_settings_gate_open()
         && matches!(EXTERNAL.get(), Some(Some(ext)) if ext.active.load(Ordering::Relaxed))
 }
 
-/// Map and emit one typed telemetry event. No-op unless the stream is active
-/// and the event has an `external = …` mapping. Synchronous and cheap (the
-/// batch processor queues; nothing blocks on I/O).
+/// Map and emit one typed telemetry event.
+/// No-op unless the stream is active and the event has an `external = …` mapping.
+/// Synchronous and cheap (the batch processor queues; nothing blocks on I/O).
 pub fn emit<T: crate::events::TelemetryEvent>(data: &T) {
-    // Fail-closed: suppress until the leader confirms the remote policy; open by
-    // default for everyone else.
+    // Fail-closed: suppress until the leader confirms the remote policy; open by default for everyone else
     if !is_settings_gate_open() {
         return;
     }
@@ -357,9 +354,8 @@ pub fn emit<T: crate::events::TelemetryEvent>(data: &T) {
     emit::emit_record(&ext, record);
 }
 
-/// Update identity attrs when auth completes (called alongside the
-/// telemetry-client init sites). Also emits the one-shot internal adoption
-/// meta-event — post-auth, when the product events client is live.
+/// Update identity attrs when auth completes (called alongside the telemetry-client init sites).
+/// Also emits the one-shot internal adoption meta-event, post-auth, when the product events client is live.
 pub fn set_identity(attrs: IdentityAttrs) {
     let Some(ext) = handle() else {
         return;
@@ -379,16 +375,16 @@ pub(crate) fn set_identity_on(ext: &ExternalTelemetry, attrs: IdentityAttrs) {
             metrics_endpoint_origin: meta.metrics_endpoint_origin.clone(),
             prompts_gate: meta.prompts_gate,
             details_gate: meta.details_gate,
+            assistant_gate: meta.assistant_gate,
+            content_gate: meta.content_gate,
             source: meta.source.to_owned(),
         });
     });
 }
 
-/// Apply remote policy when `RemoteSettings` arrive (post-auth, alongside
-/// [`set_identity`]). **TIGHTEN-ONLY**: may clear `active` (remote-policy
-/// force-disable, flushes then drops subsequent emissions) and may force content gates
-/// off; it can never enable a stream that env/config left off, and never
-/// loosens gates mid-run.
+/// Apply remote policy when `RemoteSettings` arrive (post-auth, alongside [`set_identity`]).
+/// **TIGHTEN-ONLY**: may clear `active` (remote-policy force-disable, flushes then drops subsequent emissions) and may force content gates off.
+/// It can never enable a stream that env/config left off, and never loosens gates mid-run.
 pub fn apply_remote_policy(policy: ExternalOtelRemotePolicy) {
     let Some(ext) = handle() else {
         return;
@@ -399,7 +395,11 @@ pub fn apply_remote_policy(policy: ExternalOtelRemotePolicy) {
 pub(crate) fn apply_remote_policy_on(ext: &ExternalTelemetry, policy: ExternalOtelRemotePolicy) {
     if policy.lock_content_gates {
         let mut gates = ext.gates.write();
-        if gates.log_user_prompts || gates.log_tool_details {
+        if gates.log_user_prompts
+            || gates.log_tool_details
+            || gates.log_assistant_responses
+            || gates.log_tool_content
+        {
             *gates = ContentGates::default();
             drop(gates);
             crate::session_ctx::log_session_event(crate::events::ExternalOtelRemotePolicyApplied {
@@ -416,9 +416,9 @@ pub(crate) fn apply_remote_policy_on(ext: &ExternalTelemetry, policy: ExternalOt
     }
 }
 
-/// Flush both providers (logout path: called *before* credentials are
-/// cleared, so post-logout records cannot carry the prior user's ids —
-/// follow with [`set_identity`] carrying the new/empty identity).
+/// Flush both providers.
+/// On the logout path this runs *before* credentials are cleared, so post-logout records cannot carry the prior user's ids.
+/// Follow with [`set_identity`] carrying the new/empty identity.
 pub fn flush() {
     let Some(ext) = handle() else {
         return;
@@ -439,9 +439,8 @@ pub(crate) fn flush_on(ext: &ExternalTelemetry) {
     }
 }
 
-/// Flush + shutdown both providers with a 2-second watchdog. Idempotent —
-/// reachable from every `shutdown_otel()` exit path (16 `OtelGuard` sites,
-/// the direct call, and the signal handler); subsequent calls are no-ops.
+/// Flush and shut down both providers with a 2-second watchdog.
+/// Reachable from every `shutdown_otel()` exit path (16 `OtelGuard` sites, the direct call, and the signal handler); subsequent calls are no-ops.
 pub fn shutdown() {
     let Some(ext) = handle() else {
         return;
@@ -451,8 +450,7 @@ pub fn shutdown() {
         let logger_provider = ext.logger_provider.clone();
         let meter_provider = ext.meter_provider.clone();
         let (tx, rx) = std::sync::mpsc::channel::<()>();
-        // Detached thread + timed wait: a hung provider must not hang exit
-        // (`std::thread::scope` is unusable here — it joins unconditionally).
+        // Detached thread and timed wait: a hung provider must not hang exit (`std::thread::scope` is unusable here; it joins unconditionally)
         std::thread::spawn(move || {
             if let Some(p) = logger_provider
                 && let Err(e) = p.shutdown()
@@ -469,16 +467,14 @@ pub fn shutdown() {
         if rx.recv_timeout(std::time::Duration::from_secs(2)).is_err() {
             tracing::debug!("external otel: shutdown watchdog expired; abandoning flush thread");
         }
-        // After provider shutdown (which flushes pending batches). Short-lived
-        // CLI exits often only export on this path, so health counters and the
-        // mTLS total-failure warn must run after it — not before.
+        // Runs after provider shutdown, which flushes pending batches
+        // Short-lived CLI exits often only export on this path, so the health counters and the mTLS total-failure warn must run after it
         emit_export_health(&ext);
     });
 }
 
-/// Best-effort product-events export-health meta-event (never exported
-/// externally — avoid feedback loops). Emitting needs a Tokio runtime
-/// (`emit_event` spawns); skip silently when exiting without one.
+/// Best-effort export-health meta-event on the product-events stream; never exported externally (avoid feedback loops).
+/// Emitting needs a Tokio runtime (`emit_event` spawns); skip silently when exiting without one.
 fn emit_export_health(ext: &ExternalTelemetry) {
     let health = &ext.health;
     let snapshot = crate::events::ExternalOtelExportHealth {
@@ -494,9 +490,8 @@ fn emit_export_health(ext: &ExternalTelemetry) {
         export_successes = snapshot.export_successes,
         "external otel: export health"
     );
-    // mTLS misconfig (expired/wrong CA client cert) otherwise looks like a
-    // clean exit with an empty collector. Surface that at warn once on
-    // shutdown when every export attempt failed.
+    // An mTLS misconfig (expired/wrong CA client cert) otherwise looks like a clean exit with an empty collector
+    // Warn once on shutdown when every export attempt failed
     if ext.mtls_identity_configured
         && snapshot.export_failures > 0
         && snapshot.export_successes == 0
@@ -533,8 +528,7 @@ pub fn export_health() -> Option<ExportHealthSnapshot> {
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    //! Build an [`ExternalTelemetry`] over in-memory exporters so unit tests
-    //! can assert exactly what would reach the wire (post-validator).
+    //! Build an [`ExternalTelemetry`] over in-memory exporters so unit tests can assert exactly what would reach the wire (post-validator).
 
     use super::*;
     use opentelemetry_sdk::logs::InMemoryLogExporter;
@@ -595,6 +589,8 @@ pub(crate) mod test_support {
                 protocol: "test".into(),
                 prompts_gate: gates.log_user_prompts,
                 details_gate: gates.log_tool_details,
+                assistant_gate: gates.log_assistant_responses,
+                content_gate: gates.log_tool_content,
                 source: "env",
             },
             meta_event_once: std::sync::Once::new(),

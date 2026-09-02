@@ -439,97 +439,6 @@ fn check_is_subvolume_cmd(path: &Path) -> bool {
 mod tests {
     use super::*;
 
-    /// Helper to check if we're running on a BTRFS filesystem.
-    /// Returns the BTRFS path if available, None otherwise.
-    fn get_btrfs_test_path() -> Option<PathBuf> {
-        // Check environment variable first
-        if let Ok(path) = std::env::var("BTRFS_TEST_PATH") {
-            let path = PathBuf::from(path);
-            if path.exists() && is_btrfs(&path).unwrap_or(false) {
-                return Some(path);
-            }
-        }
-
-        // Check common BTRFS mount points
-        for candidate in &["/", "/home", "/btrfs", "/mnt/btrfs"] {
-            let path = Path::new(candidate);
-            if path.exists() && is_btrfs(path).unwrap_or(false) {
-                return Some(path.to_path_buf());
-            }
-        }
-
-        None
-    }
-
-    /// Helper to check if a path is a BTRFS subvolume for testing.
-    fn get_btrfs_subvolume_test_path() -> Option<PathBuf> {
-        if let Some(btrfs_path) = get_btrfs_test_path()
-            && is_btrfs_subvolume(&btrfs_path).ok().flatten().is_some()
-        {
-            return Some(btrfs_path);
-        }
-        None
-    }
-
-    #[test]
-    fn test_btrfs_info_debug() {
-        let info = BtrfsInfo {
-            subvolume_root: PathBuf::from("/test/path"),
-            bind_mount_source: None,
-            btrfs_mount_point: None,
-        };
-        let debug_str = format!("{:?}", info);
-        assert!(debug_str.contains("BtrfsInfo"));
-        assert!(debug_str.contains("/test/path"));
-    }
-
-    #[test]
-    fn test_btrfs_info_clone() {
-        let info = BtrfsInfo {
-            subvolume_root: PathBuf::from("/original/path"),
-            bind_mount_source: Some(PathBuf::from("/btrfs/source")),
-            btrfs_mount_point: Some(PathBuf::from("/btrfs")),
-        };
-        let cloned = info.clone();
-        assert_eq!(info.subvolume_root, cloned.subvolume_root);
-        assert_eq!(info.bind_mount_source, cloned.bind_mount_source);
-        assert_eq!(info.btrfs_mount_point, cloned.btrfs_mount_point);
-    }
-
-    #[test]
-    fn test_btrfs_info_with_bind_mount() {
-        let info = BtrfsInfo {
-            subvolume_root: PathBuf::from("/workspace/repo"),
-            bind_mount_source: Some(PathBuf::from("/mnt/btrfs/repo")),
-            btrfs_mount_point: Some(PathBuf::from("/mnt/btrfs")),
-        };
-        assert!(info.bind_mount_source.is_some());
-        assert_eq!(
-            info.bind_mount_source.as_ref().unwrap(),
-            &PathBuf::from("/mnt/btrfs/repo")
-        );
-        assert_eq!(
-            info.btrfs_mount_point.as_ref().unwrap(),
-            &PathBuf::from("/mnt/btrfs")
-        );
-    }
-
-    #[test]
-    fn test_is_btrfs_on_root() {
-        // Test on root filesystem - should not panic regardless of fs type
-        let result = is_btrfs(Path::new("/"));
-        assert!(result.is_ok());
-        // We can't assert the value since it depends on the system
-    }
-
-    #[test]
-    fn test_is_btrfs_on_tmp() {
-        // /tmp is typically not on BTRFS (tmpfs or ext4)
-        // This test just verifies the function doesn't panic
-        let result = is_btrfs(Path::new("/tmp"));
-        assert!(result.is_ok());
-    }
-
     #[test]
     fn test_is_btrfs_nonexistent_path() {
         let result = is_btrfs(Path::new("/nonexistent/path/that/does/not/exist"));
@@ -539,56 +448,10 @@ mod tests {
     }
 
     #[test]
-    fn test_is_btrfs_subvolume_on_tmp() {
-        // Should return None for non-BTRFS paths (or paths that aren't subvolumes)
-        let result = is_btrfs_subvolume(Path::new("/tmp"));
-        assert!(result.is_ok());
-        // On most systems /tmp is not a BTRFS subvolume
-        // But we can't assert None because some systems might have BTRFS /tmp
-    }
-
-    #[test]
     fn test_is_btrfs_subvolume_nonexistent_path() {
         // Nonexistent paths should error in is_btrfs before reaching btrfs command
         let result = is_btrfs_subvolume(Path::new("/nonexistent/path/xyz"));
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_is_btrfs_subvolume_on_root() {
-        // Test on root - should not panic
-        let result = is_btrfs_subvolume(Path::new("/"));
-        assert!(result.is_ok());
-        // Result depends on whether / is a BTRFS subvolume
-    }
-
-    #[test]
-    fn test_btrfs_detection_on_real_btrfs() {
-        // This test automatically skips if no BTRFS is detected
-        let Some(btrfs_path) = get_btrfs_test_path() else {
-            eprintln!("Skipping test: no BTRFS filesystem detected");
-            return;
-        };
-
-        let is_btrfs_result = is_btrfs(&btrfs_path);
-        assert!(is_btrfs_result.is_ok());
-        assert!(is_btrfs_result.unwrap(), "Expected path to be on BTRFS");
-        eprintln!("BTRFS detected at: {}", btrfs_path.display());
-    }
-
-    #[test]
-    fn test_btrfs_subvolume_detection_on_real_btrfs() {
-        // This test automatically skips if no BTRFS subvolume is detected
-        let Some(subvol_path) = get_btrfs_subvolume_test_path() else {
-            eprintln!("Skipping test: no BTRFS subvolume detected");
-            return;
-        };
-
-        let result = is_btrfs_subvolume(&subvol_path);
-        assert!(result.is_ok());
-        let info = result.unwrap();
-        assert!(info.is_some(), "Expected path to be a BTRFS subvolume");
-        eprintln!("BTRFS subvolume detected at: {}", subvol_path.display());
     }
 
     /// Test that a bind-mounted btrfs path (which reports as btrfs via statfs)

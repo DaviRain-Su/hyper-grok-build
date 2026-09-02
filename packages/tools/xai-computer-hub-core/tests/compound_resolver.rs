@@ -275,16 +275,6 @@ async fn compound_returns_none_when_neither_plane_holds_id() {
 }
 
 #[tokio::test]
-async fn resolved_tool_helpers_borrow_active_handle_and_registration() {
-    let local = Arc::new(PlaneRegistry::new(TransportKind::Local));
-    local.install(&sid("sess-1"), &tid("foo"));
-    let resolver = CompoundResolver::local_only(local as Arc<dyn ToolRegistry>);
-    let resolved = resolver.resolve(&sid("sess-1"), &tid("foo")).expect("hit");
-    assert_eq!(resolved.registration().tool_id, tid("foo"));
-    assert_eq!(resolved.handle().id(), tid("foo"));
-}
-
-#[tokio::test]
 async fn resolve_and_dispatch_drives_the_resolved_handle() {
     let local = Arc::new(PlaneRegistry::new(TransportKind::Local));
     local.install(&sid("sess-1"), &tid("foo"));

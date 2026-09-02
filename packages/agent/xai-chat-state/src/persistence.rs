@@ -347,12 +347,4 @@ mod tests {
             StrictAppendAck::AlreadyPresent(item) if item.text_content() == "authoritative"
         ));
     }
-
-    #[test]
-    fn null_persistence_does_not_panic() {
-        let mut null = NullChatPersistence;
-        null.persist_message(&ConversationItem::system("test"));
-        null.replace_history(&[ConversationItem::user("a")]);
-        null.flush();
-    }
 }

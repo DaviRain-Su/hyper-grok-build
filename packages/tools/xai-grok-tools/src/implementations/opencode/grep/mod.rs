@@ -161,7 +161,7 @@ impl xai_tool_runtime::Tool for GrepTool {
         };
 
         // Build rg command.
-        let rg_exec = rg_path();
+        let rg_exec = rg_path()?;
         let mut cmd = Command::new(rg_exec);
         cmd.args([
             "-n",

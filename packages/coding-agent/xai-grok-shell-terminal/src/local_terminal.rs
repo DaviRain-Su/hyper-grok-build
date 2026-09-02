@@ -10,8 +10,7 @@ use xai_tty_utils::KILL_REAP_TIMEOUT;
 
 pub struct LocalTerminalRunner;
 
-/// A pipe reader whose buffer is shared with the spawner, so bytes read
-/// before an abort are not lost with the task.
+/// A pipe reader whose buffer is shared with the spawner, so bytes read before an abort are not lost with the task.
 struct PipeReader {
     task: tokio::task::JoinHandle<()>,
     buffer: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
@@ -33,8 +32,7 @@ impl PipeReader {
         Self { task, buffer }
     }
 
-    /// Never panics: a poisoned lock just means a holder panicked mid-append —
-    /// the buffer is plain bytes and stays consistent, so recover it.
+    /// Never panics: a poisoned lock just means a holder panicked mid-append; the buffer is plain bytes and stays consistent, so recover it.
     fn lock_buffer(buffer: &std::sync::Mutex<Vec<u8>>) -> std::sync::MutexGuard<'_, Vec<u8>> {
         buffer
             .lock()
@@ -45,14 +43,10 @@ impl PipeReader {
         std::mem::take(&mut Self::lock_buffer(&self.buffer))
     }
 
-    /// Wait for EOF (pipe closed by all writers) at most [`KILL_REAP_TIMEOUT`],
-    /// then return everything read so far.
-    ///
-    /// Callers only join after the child was reaped or killed, so EOF is
-    /// normally immediate; the bound is a backstop for writers that outlive
-    /// the command and keep the pipe open — a background descendant
-    /// (`printf hi; sleep 30 &`) or a process wedged in uninterruptible
-    /// kernel I/O (D-state), which not even SIGKILL moves.
+    /// Wait for EOF (pipe closed by all writers) at most [`KILL_REAP_TIMEOUT`], then return everything read so far.
+    /// Callers only join after the child was reaped or killed, so EOF is normally immediate.
+    /// The bound is a backstop for writers that outlive the command and keep the pipe open, like a background descendant (`printf hi; sleep 30 &`).
+    /// A process wedged in uninterruptible kernel I/O (D-state) also holds the pipe open, and not even SIGKILL moves it.
     async fn join_bounded(mut self) -> Vec<u8> {
         if time::timeout(KILL_REAP_TIMEOUT, &mut self.task)
             .await
@@ -64,11 +58,8 @@ impl PipeReader {
     }
 }
 
-/// Truncate buffer to keep only the last `limit` bytes (drops oldest bytes).
+/// Truncate buffer to keep only the last `limit` bytes, without splitting a UTF-8 character.
 /// Returns true if truncation occurred.
-///
-/// This function ensures we don't split UTF-8 characters when truncating
-/// by using char_indices to find a valid character boundary.
 fn truncate_buffer(buf: &mut Vec<u8>, limit: usize) -> bool {
     if buf.len() > limit {
         // Convert to string to work with character boundaries
@@ -82,7 +73,6 @@ fn truncate_buffer(buf: &mut Vec<u8>, limit: usize) -> bool {
             .map(|(i, _)| i)
             .unwrap_or(s.len());
 
-        // Slice from that boundary and update buffer
         *buf = s[start_idx..].as_bytes().to_vec();
 
         true
@@ -115,26 +105,21 @@ impl AsyncTerminalRunner for LocalTerminalRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        // Detach from the controlling terminal so child processes
-        // (e.g. GPG pinentry) cannot open /dev/tty and corrupt the TUI.
-        // (This also makes the child its own session/group leader, which the
-        // ProcessGroup attach below relies on.)
+        // Detach from the controlling terminal so child processes (e.g. GPG pinentry) cannot open /dev/tty and corrupt the TUI.
+        // (This also makes the child its own session/group leader, which the ProcessGroup attach below relies on.)
         xai_grok_tools::util::detach_command(&mut cmd);
         xai_grok_sandbox::child_net::restrict_child_network(&mut cmd);
 
         #[allow(clippy::disallowed_methods)]
-        // process-group-killed on the request timeout; an unreapable (D-state)
-        // child is abandoned to the runtime's orphan reaper
+        // The child is killed via its process group on timeout; an unreapable (D-state) child is abandoned to the runtime's orphan reaper
         let mut child = cmd
             .spawn()
             .map_err(|e| TerminalError::Other(format!("Failed to start shell: {e}")))?;
 
-        // Own the whole tree, not just the direct shell: on timeout the group
-        // is killed so grandchildren can't keep running (and can't hold the
-        // output pipes open past the kill). Same pattern as
-        // `gateway_bridge::local_workspace_supervisor`. Group teardown is an
-        // enhancement over the direct-kill floor, so both enrollment failures
-        // degrade softly instead of dropping an already-running shell.
+        // Own the whole tree, not just the direct shell
+        // On timeout the group is killed so grandchildren can't keep running (and can't hold the output pipes open past the kill)
+        // This is the same pattern as `gateway_bridge::local_workspace_supervisor`
+        // The group kill is extra on top of the direct kill, so a failure to create or attach the group only logs and the shell keeps running
         let process_group = match xai_tty_utils::ProcessGroup::new() {
             Ok(mut group) => {
                 if let Err(e) = group.attach(&child) {
@@ -170,16 +155,13 @@ impl AsyncTerminalRunner for LocalTerminalRunner {
                 .code(),
             Err(_) => {
                 timed_out = true;
-                // Kill the direct child AND the whole group (grandchildren),
-                // then return the synthetic timeout result without waiting
-                // for the corpse: `timed_out: true` already tells the caller
-                // everything, and a D-state child would never become reapable
-                // anyway. Both kills are unconditional — `kill()` on a group
-                // whose attach failed is a silent no-op, so the direct
-                // `start_kill` is the guaranteed floor (same as
-                // `util/subprocess.rs`). The kills close the pipes, so the
-                // bounded joins below return immediately in the normal case;
-                // the abandoned child goes to tokio's orphan reaper.
+                // Kill the direct child AND the whole group (grandchildren)
+                // Then return the synthetic timeout result without waiting for the corpse: `timed_out: true` already tells the caller everything
+                // A D-state child would never become reapable anyway
+                // Both kills are unconditional: `kill()` on a group whose attach failed is a silent no-op
+                // The direct `start_kill` is the guaranteed floor (same as `util/subprocess.rs`)
+                // The kills close the pipes, so the bounded joins below return immediately in the normal case
+                // The abandoned child goes to tokio's orphan reaper
                 if let Err(e) = child.start_kill() {
                     tracing::warn!("Failed to kill timed-out process: {e}");
                 }
@@ -193,9 +175,8 @@ impl AsyncTerminalRunner for LocalTerminalRunner {
         };
 
         // Join concurrently (worst case one reap bound, not one per pipe).
-        // Bounded on the natural-exit arm too: a background descendant that
-        // outlives the shell (`printf hi; sleep 30 &`) holds the pipes open
-        // past the child's exit, and previously stalled this wait unboundedly.
+        // The joins are bounded on the natural-exit arm too
+        // A background descendant that outlives the shell (`printf hi; sleep 30 &`) holds the pipes open past the child's exit
         let (stdout_result, stderr_result) =
             tokio::join!(stdout_reader.join_bounded(), stderr_reader.join_bounded());
 
@@ -237,8 +218,8 @@ mod tests {
         }
     }
 
-    /// Verify that `detach_from_tty` prevents child processes from opening
-    /// `/dev/tty`. After setsid(), the child has no controlling terminal.
+    /// Verify that `detach_from_tty` prevents child processes from opening `/dev/tty`.
+    /// After setsid(), the child has no controlling terminal.
     #[tokio::test]
     #[cfg(unix)]
     async fn test_child_cannot_open_dev_tty() {
@@ -278,12 +259,10 @@ mod tests {
         assert_eq!(result.exit_code, Some(0));
     }
 
-    /// Timing out a command whose grandchild inherited the output pipes must
-    /// (a) return promptly — before the group kill, the joins waited for the
-    /// grandchild's EOF (the full sleep here; forever for a writer wedged in
-    /// uninterruptible kernel I/O, the production incident this guards
-    /// against) — and (b) actually kill the grandchild via the group kill,
-    /// not merely stop waiting for it.
+    /// Timing out a command whose grandchild inherited the output pipes must return promptly.
+    /// It must also actually kill the grandchild via the group kill, not merely stop waiting for it.
+    /// Without the group kill the joins wait for the grandchild's EOF: the full sleep here, forever for a D-state writer.
+    /// That unbounded wait was the production incident this guards against.
     #[tokio::test]
     #[cfg(unix)]
     async fn test_timeout_kills_grandchildren_and_returns_promptly() {
@@ -294,18 +273,16 @@ mod tests {
         let result = LocalTerminalRunner.run(request).await.unwrap();
 
         assert!(result.timed_out, "run should report the timeout");
-        // Prompt return: request timeout (0.3s) + pipe EOF from the group
-        // kill (normally instant; KILL_REAP_TIMEOUT-bounded worst case) —
-        // anything near the 5s sleeps means we waited for the grandchild.
+        // The bound covers the 0.3s request timeout plus the pipe EOF from the group kill (normally instant, at worst KILL_REAP_TIMEOUT)
+        // Anything near the 5s sleeps means we waited for the grandchild
         assert!(
             started.elapsed() < std::time::Duration::from_secs(4),
             "timeout path must not wait for the killed tree (took {:?})",
             started.elapsed()
         );
 
-        // Outcome: the background grandchild must actually be dead, proving
-        // the group kill reached it. Poll briefly — the SIGKILL is delivered
-        // synchronously but init may reap the orphan a beat later.
+        // Outcome: the background grandchild must actually be dead, proving the group kill reached it
+        // Poll briefly: the SIGKILL is delivered synchronously but init may reap the orphan a beat later
         let bg_pid = result
             .combined_output
             .lines()

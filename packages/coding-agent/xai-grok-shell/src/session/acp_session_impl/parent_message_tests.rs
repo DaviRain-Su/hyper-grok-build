@@ -14,6 +14,8 @@ fn admission_response(
 
 const TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+use xai_grok_tools::implementations::grok_build::task::types::ActiveAgentMessageOperation;
+
 fn message(id: &str) -> ActiveAgentMessage {
     ActiveAgentMessage {
         message_id: id.into(),
@@ -28,6 +30,37 @@ async fn await_with_timeout<T>(future: impl Future<Output = T>) -> T {
         .expect("parent-message test timed out")
 }
 
+async fn admit_steer(
+    actor: &Arc<SessionActor>,
+    id: &str,
+) -> crate::agent::subagent::PromptTurnReceipt {
+    let (receipt_sink, mut receipt_rx) = mpsc::channel(1);
+    let (respond_to, response_rx) = oneshot::channel();
+    let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
+    actor
+        .admit_parent_agent_message_for_test(
+            message(id),
+            ActiveAgentMessageOperation::Steer,
+            receipt_sink,
+            respond_to,
+            completion_tx,
+        )
+        .await;
+    assert_eq!(
+        admission_response(await_with_timeout(response_rx).await),
+        ActiveMessageAdmission::Admitted
+    );
+    receipt_rx.recv().await.expect("typed receipt handed off")
+}
+
+async fn set_running(actor: &SessionActor, prompt_id: &str) {
+    let mut state = actor.state.lock().await;
+    state
+        .pending_inputs
+        .push_back(super::super::support::user_item(prompt_id, "owner"));
+    state.running_task = Some(super::super::support::running_task_stub(prompt_id));
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn admission_rejects_closed_receipt_sink_without_queueing() {
     let local = tokio::task::LocalSet::new();
@@ -40,6 +73,7 @@ async fn admission_rejects_closed_receipt_sink_without_queueing() {
 
         await_with_timeout(actor.admit_parent_agent_message_for_test(
             message("closed"),
+            ActiveAgentMessageOperation::Queue,
             receipt_sink,
             respond_to,
             completion_tx,
@@ -71,13 +105,16 @@ async fn receipt_backpressure_waits_before_queue_commit() {
             .send(crate::agent::subagent::PromptTurnReceipt {
                 prompt_id: "occupied".into(),
                 result: occupied_rx,
-                telemetry: crate::session::telemetry::ActiveAgentMessageAdmissionTelemetry {
-                    admitted_at: std::time::Instant::now(),
-                    parent_ctx: xai_grok_telemetry::TelemetryCtx::new(
+                telemetry: crate::session::telemetry::ActiveAgentMessageAdmissionTelemetry::new(
+                    std::time::Instant::now(),
+                    xai_grok_telemetry::TelemetryCtx::new(
                         "parent".to_owned(),
                         Arc::new(tokio::sync::Mutex::new(0)),
                     ),
-                },
+                    ActiveAgentMessageOperation::Queue,
+                    ActiveAgentMessageOperation::Queue,
+                    None,
+                ),
             })
             .await
             .expect("occupy receipt capacity");
@@ -89,6 +126,7 @@ async fn receipt_backpressure_waits_before_queue_commit() {
                 actor
                     .admit_parent_agent_message_for_test(
                         message("backpressured"),
+                        ActiveAgentMessageOperation::Queue,
                         receipt_sink,
                         respond_to,
                         completion_tx,
@@ -151,6 +189,7 @@ async fn busy_state_lock_waits_before_commit_and_receipt_handoff() {
                 actor
                     .admit_parent_agent_message_for_test(
                         message("busy"),
+                        ActiveAgentMessageOperation::Queue,
                         receipt_sink,
                         respond_to,
                         completion_tx,
@@ -186,6 +225,602 @@ async fn busy_state_lock_waits_before_commit_and_receipt_handoff() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn duplicate_live_identity_rejects_without_second_receiver() {
+    let local = tokio::task::LocalSet::new();
+    await_with_timeout(local.run_until(async {
+        let (actor, _) = await_with_timeout(super::super::support::build_actor()).await;
+        let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
+        {
+            let mut state = await_with_timeout(actor.state.lock()).await;
+            state
+                .pending_inputs
+                .push_back(super::super::support::user_item("running", "owner"));
+            state.running_task = Some(super::super::support::running_task_stub("running"));
+        }
+        let (receipt_sink, mut receipt_rx) = mpsc::channel(2);
+        for expected in [
+            ActiveMessageAdmission::Admitted,
+            ActiveMessageAdmission::Rejected,
+        ] {
+            let (respond_to, response_rx) = oneshot::channel();
+            await_with_timeout(actor.admit_parent_agent_message_for_test(
+                message("duplicate"),
+                ActiveAgentMessageOperation::Steer,
+                receipt_sink.clone(),
+                respond_to,
+                completion_tx.clone(),
+            ))
+            .await;
+            assert_eq!(
+                admission_response(await_with_timeout(response_rx).await),
+                expected
+            );
+        }
+        assert!(receipt_rx.try_recv().is_ok());
+        assert!(receipt_rx.try_recv().is_err());
+    }))
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn idle_steer_queues_one_protected_row() {
+    let local = tokio::task::LocalSet::new();
+    await_with_timeout(local.run_until(async {
+        let (actor, _) = await_with_timeout(super::super::support::build_actor()).await;
+        actor.deferred_prefix.arm(tokio::task::spawn_local(async {
+            "PARENT_PREFIX_READY".to_owned()
+        }));
+        actor.state.lock().await.arm_hook_block_hold();
+        let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
+        let (receipt_sink, _receipt_rx) = mpsc::channel(1);
+        let (respond_to, response_rx) = oneshot::channel();
+
+        await_with_timeout(actor.admit_parent_agent_message_for_test(
+            message("idle-steer"),
+            ActiveAgentMessageOperation::Steer,
+            receipt_sink,
+            respond_to,
+            completion_tx,
+        ))
+        .await;
+
+        assert_eq!(
+            admission_response(await_with_timeout(response_rx).await),
+            ActiveMessageAdmission::Admitted
+        );
+        let state = await_with_timeout(actor.state.lock()).await;
+        assert_eq!(state.pending_inputs.len(), 1);
+        assert!(
+            state
+                .pending_inputs
+                .front()
+                .expect("one queued row")
+                .is_queue_protected()
+        );
+        assert!(state.message_delivery.is_empty());
+    }))
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn running_steer_projects_at_safe_point_with_agent_provenance() {
+    let local = tokio::task::LocalSet::new();
+    await_with_timeout(local.run_until(async {
+        let (actor, _) = await_with_timeout(super::super::support::build_actor()).await;
+        let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
+        {
+            let mut state = await_with_timeout(actor.state.lock()).await;
+            state
+                .pending_inputs
+                .push_back(super::super::support::user_item("running", "owner"));
+            state.running_task = Some(super::super::support::running_task_stub("running"));
+        }
+        let (receipt_sink, mut receipt_rx) = mpsc::channel(1);
+        let (respond_to, response_rx) = oneshot::channel();
+
+        await_with_timeout(actor.admit_parent_agent_message_for_test(
+            message("steered"),
+            ActiveAgentMessageOperation::Steer,
+            receipt_sink,
+            respond_to,
+            completion_tx,
+        ))
+        .await;
+
+        assert_eq!(
+            admission_response(await_with_timeout(response_rx).await),
+            ActiveMessageAdmission::Admitted
+        );
+        assert_eq!(
+            await_with_timeout(actor.state.lock())
+                .await
+                .pending_inputs
+                .len(),
+            1,
+        );
+        let receipt = receipt_rx.recv().await.expect("typed receipt handed off");
+        assert!(actor.drain_parent_messages_at_safe_point().await);
+        let conversation = await_with_timeout(actor.chat_state_handle.get_conversation()).await;
+        assert!(matches!(
+            conversation.as_slice(),
+            [ConversationItem::User(user)]
+                if user.synthetic_reason == Some(SyntheticReason::AgentMessage)
+                    && conversation[0].text_content() == "parent update"
+        ));
+        let completions = {
+            let mut state = await_with_timeout(actor.state.lock()).await;
+            let task = state.running_task.as_ref().expect("running task");
+            let binding =
+                xai_message_delivery_core::TurnBinding::new(task.prompt_id.clone(), task.epoch);
+            let (completions, _) = actor.transition_parent_messages(
+                &mut state,
+                xai_message_delivery_core::TerminalTarget::Turn(&binding),
+                xai_message_delivery_core::TerminalCause::Completion,
+            );
+            let (second, _) = actor.transition_parent_messages(
+                &mut state,
+                xai_message_delivery_core::TerminalTarget::Turn(&binding),
+                xai_message_delivery_core::TerminalCause::Completion,
+            );
+            assert!(second.is_empty());
+            completions
+        };
+        let result = crate::session::commands::ok_end_turn(7, None);
+        SessionActor::settle_parent_message_completions(completions, &result);
+        assert_eq!(
+            await_with_timeout(receipt.result)
+                .await
+                .expect("receipt settles")
+                .expect("successful turn")
+                .total_tokens,
+            7
+        );
+    }))
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn completion_fallback_appends_after_retained_queue() {
+    let local = tokio::task::LocalSet::new();
+    await_with_timeout(local.run_until(async {
+        let (actor, _) = await_with_timeout(super::super::support::build_actor()).await;
+        let task = super::super::support::running_task_stub("running");
+        let binding = xai_message_delivery_core::TurnBinding::new("running".to_owned(), task.epoch);
+        let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
+        {
+            let mut state = await_with_timeout(actor.state.lock()).await;
+            state
+                .pending_inputs
+                .push_back(super::super::support::user_item("running", "owner"));
+            state
+                .pending_inputs
+                .push_back(super::super::support::user_item("retained", "owner"));
+            state.running_task = Some(task);
+        }
+        let (receipt_sink, _receipt_rx) = mpsc::channel(1);
+        let (respond_to, response_rx) = oneshot::channel();
+        await_with_timeout(actor.admit_parent_agent_message_for_test(
+            message("fallback"),
+            ActiveAgentMessageOperation::Steer,
+            receipt_sink,
+            respond_to,
+            completion_tx,
+        ))
+        .await;
+        assert_eq!(
+            admission_response(await_with_timeout(response_rx).await),
+            ActiveMessageAdmission::Admitted
+        );
+
+        let mut state = await_with_timeout(actor.state.lock()).await;
+        let (completions, had_fallbacks) = actor.transition_parent_messages(
+            &mut state,
+            xai_message_delivery_core::TerminalTarget::Turn(&binding),
+            xai_message_delivery_core::TerminalCause::Completion,
+        );
+        assert!(had_fallbacks);
+        assert!(completions.is_empty());
+        assert_eq!(
+            state
+                .pending_inputs
+                .iter()
+                .map(|input| input.prompt_id.as_str())
+                .collect::<Vec<_>>(),
+            ["running", "retained", "parent-message-fallback"]
+        );
+        assert!(state.message_delivery.is_empty());
+    }))
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancelled_persistence_barrier_skips_delivery_without_fallback() {
+    let local = tokio::task::LocalSet::new();
+    await_with_timeout(local.run_until(async {
+        let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+        let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel();
+        let (actor, _) = super::super::support::create_test_actor_with_chat_persistence(
+            0,
+            256_000,
+            85,
+            gateway_tx,
+            persistence_tx.clone(),
+            Box::new(crate::session::chat_persistence::ChannelChatPersistence::new(persistence_tx)),
+        )
+        .await;
+        let actor = Arc::new(actor);
+        set_running(&actor, "running").await;
+        let mut receipt = admit_steer(&actor, "persist-failed").await;
+        tokio::task::spawn_local(async move {
+            while let Some(message) = persistence_rx.recv().await {
+                if let PersistenceMsg::FlushAndAck { respond_to } = message {
+                    drop(respond_to);
+                }
+            }
+        });
+
+        assert!(!actor.drain_parent_messages_at_safe_point().await);
+        let _ = actor
+            .cancel_running_task(crate::session::CancelOptions::default())
+            .await;
+        let state = actor.state.lock().await;
+        assert!(state.message_delivery.is_empty());
+        assert!(state.pending_inputs.is_empty());
+        let conversation = actor.chat_state_handle.get_conversation().await;
+        assert_eq!(
+            conversation
+                .iter()
+                .filter(|item| item.text_content() == "parent update")
+                .count(),
+            0,
+            "a failed barrier must keep the undelivered text out of chat state"
+        );
+        drop(state);
+        let settled = receipt
+            .result
+            .try_recv()
+            .expect("soft cancel settles the in-flight steer receipt");
+        assert!(
+            matches!(settled, Ok(ok) if ok.stop_reason == acp::StopReason::Cancelled),
+            "soft cancel must not fallback and must settle Cancelled"
+        );
+    }))
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancel_running_turn_shutdown_drains_after_stale_rewind_cancel() {
+    let local = tokio::task::LocalSet::new();
+    await_with_timeout(local.run_until(async {
+        let (gateway_tx, mut gateway_rx) = mpsc::unbounded_channel();
+        tokio::task::spawn_local(async move {
+            while let Some(message) = gateway_rx.recv().await {
+                if let xai_acp_lib::AcpClientMessage::SessionNotification(args) = message {
+                    let _ = args.response_tx.send(Ok(()));
+                }
+            }
+        });
+        let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel();
+        tokio::task::spawn_local(async move {
+            while let Some(message) = persistence_rx.recv().await {
+                if let PersistenceMsg::FlushAndAck { respond_to } = message {
+                    let _ = respond_to.send(Ok(()));
+                }
+            }
+        });
+        let (actor, event_rx) =
+            super::super::support::create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx)
+                .await;
+        let actor = Arc::new(actor);
+        set_running(&actor, "running").await;
+        let receipt = admit_steer(&actor, "shutdown").await;
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (_chat_tx, chat_rx) = mpsc::unbounded_channel();
+        let loop_task = tokio::task::spawn_local(super::super::run_session(
+            Arc::clone(&actor),
+            cmd_rx,
+            chat_rx,
+            event_rx,
+            None,
+            Arc::new(parking_lot::Mutex::new(
+                xai_grok_workspace::file_system::CodebaseIndexManager::new(),
+            )),
+            std::path::PathBuf::from("/tmp"),
+            crate::session::fs_watch::FsWatchCapabilities::none(),
+        ));
+        cmd_tx
+            .send(SessionCommand::Cancel(crate::session::CancelOptions {
+                cancel_subagents: true,
+                kill_background_tasks: true,
+                history: crate::session::CancelHistoryDisposition::RewindIfNoOutput {
+                    prompt_id: Some("stale".to_owned()),
+                },
+                trigger: Some(crate::session::CancelTrigger::Shutdown),
+                user_initiated: false,
+            }))
+            .expect("loop running");
+        cmd_tx
+            .send(SessionCommand::Shutdown(
+                crate::session::ShutdownKind::CancelRunningTurn,
+            ))
+            .expect("loop running");
+        await_with_timeout(loop_task).await.expect("loop exits");
+
+        assert!(actor.state.lock().await.message_delivery.is_empty());
+        let settled = await_with_timeout(receipt.result)
+            .await
+            .expect("shutdown settles the steer receipt");
+        assert!(
+            matches!(settled, Ok(ok) if ok.stop_reason == acp::StopReason::Cancelled),
+            "shutdown cancel settles Cancelled rather than dropping the sender"
+        );
+    }))
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unresolved_persistence_barrier_does_not_block_hard_teardown() {
+    let local = tokio::task::LocalSet::new();
+    await_with_timeout(local.run_until(async {
+        let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+        let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel();
+        let (actor, _) = super::super::support::create_test_actor_with_chat_persistence(
+            0,
+            256_000,
+            85,
+            gateway_tx,
+            persistence_tx.clone(),
+            Box::new(crate::session::chat_persistence::ChannelChatPersistence::new(persistence_tx)),
+        )
+        .await;
+        let actor = Arc::new(actor);
+        set_running(&actor, "running").await;
+        let receipt = admit_steer(&actor, "stalled").await;
+        let (barrier_seen_tx, barrier_seen_rx) = oneshot::channel();
+        let held_barrier = Arc::new(tokio::sync::Mutex::new(None));
+        let held_by_drain = Arc::clone(&held_barrier);
+        tokio::task::spawn_local(async move {
+            let mut barrier_seen_tx = Some(barrier_seen_tx);
+            while let Some(message) = persistence_rx.recv().await {
+                if let PersistenceMsg::FlushAndAck { respond_to } = message {
+                    *held_by_drain.lock().await = Some(respond_to);
+                    if let Some(barrier_seen_tx) = barrier_seen_tx.take() {
+                        let _ = barrier_seen_tx.send(());
+                    }
+                }
+            }
+        });
+        let drain = tokio::task::spawn_local({
+            let actor = Arc::clone(&actor);
+            async move { actor.drain_parent_messages_at_safe_point().await }
+        });
+        await_with_timeout(barrier_seen_rx)
+            .await
+            .expect("barrier was enqueued");
+
+        await_with_timeout(
+            actor
+                .settle_all_parent_messages(xai_message_delivery_core::TerminalCause::HardTeardown),
+        )
+        .await;
+        let state = actor.state.lock().await;
+        assert!(state.message_delivery.is_empty());
+        assert!(
+            state
+                .pending_inputs
+                .iter()
+                .all(|input| input.prompt_id == "running"),
+            "hard teardown must not requeue the in-flight steer"
+        );
+        drop(state);
+        assert_eq!(
+            actor
+                .chat_state_handle
+                .get_conversation()
+                .await
+                .iter()
+                .filter(|item| item.text_content() == "parent update")
+                .count(),
+            0,
+            "hard teardown must keep the settled steer text out of chat state"
+        );
+        let settled = await_with_timeout(receipt.result)
+            .await
+            .expect("hard teardown settles the steer receipt");
+        assert!(settled.is_err(), "hard teardown settles with an error");
+        held_barrier.lock().await.take();
+        assert!(!await_with_timeout(drain).await.expect("drain task"));
+    }))
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn teardown_settlement_during_barrier_skips_persist_and_push() {
+    let local = tokio::task::LocalSet::new();
+    await_with_timeout(local.run_until(async {
+        let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+        let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel();
+        let (actor, _) = super::super::support::create_test_actor_with_chat_persistence(
+            0,
+            256_000,
+            85,
+            gateway_tx,
+            persistence_tx.clone(),
+            Box::new(crate::session::chat_persistence::ChannelChatPersistence::new(persistence_tx)),
+        )
+        .await;
+        let actor = Arc::new(actor);
+        set_running(&actor, "running").await;
+        let receipt = admit_steer(&actor, "settled-mid-drain").await;
+        let (barrier_seen_tx, barrier_seen_rx) = oneshot::channel();
+        let held_barrier = Arc::new(tokio::sync::Mutex::new(None));
+        let steer_text_persisted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let held_by_drain = Arc::clone(&held_barrier);
+        let persisted_flag = Arc::clone(&steer_text_persisted);
+        tokio::task::spawn_local(async move {
+            let mut barrier_seen_tx = Some(barrier_seen_tx);
+            while let Some(message) = persistence_rx.recv().await {
+                match message {
+                    PersistenceMsg::FlushAndAck { respond_to } => {
+                        *held_by_drain.lock().await = Some(respond_to);
+                        if let Some(barrier_seen_tx) = barrier_seen_tx.take() {
+                            let _ = barrier_seen_tx.send(());
+                        }
+                    }
+                    PersistenceMsg::Update(update) => {
+                        if serde_json::to_string(&update)
+                            .is_ok_and(|json| json.contains("parent update"))
+                        {
+                            persisted_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
+                    PersistenceMsg::Chat(item) => {
+                        if item.text_content() == "parent update" {
+                            persisted_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let drain = tokio::task::spawn_local({
+            let actor = Arc::clone(&actor);
+            async move { actor.drain_parent_messages_at_safe_point().await }
+        });
+        await_with_timeout(barrier_seen_rx)
+            .await
+            .expect("barrier was enqueued");
+
+        // The command channel closing settles all receipts with `ActorDrop`
+        // while the drain is suspended on its persistence barrier.
+        await_with_timeout(
+            actor.settle_all_parent_messages(xai_message_delivery_core::TerminalCause::ActorDrop),
+        )
+        .await;
+        let settled = await_with_timeout(receipt.result)
+            .await
+            .expect("teardown settles the steer receipt");
+        assert!(settled.is_err(), "teardown settles with an error");
+
+        let released = held_barrier
+            .lock()
+            .await
+            .take()
+            .expect("drain enqueued the barrier");
+        let _ = released.send(Ok(()));
+        assert!(
+            !await_with_timeout(drain).await.expect("drain task"),
+            "a drain resumed after settlement must not report a delivery"
+        );
+        assert!(actor.state.lock().await.message_delivery.is_empty());
+        assert_eq!(
+            actor
+                .chat_state_handle
+                .get_conversation()
+                .await
+                .iter()
+                .filter(|item| item.text_content() == "parent update")
+                .count(),
+            0,
+            "settled steer text must not be pushed into chat state"
+        );
+        assert!(
+            !steer_text_persisted.load(std::sync::atomic::Ordering::SeqCst),
+            "settled steer text must not be persisted"
+        );
+    }))
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn delivered_message_is_durable_in_updates_and_chat_history_before_shutdown() {
+    let local = tokio::task::LocalSet::new();
+    await_with_timeout(local.run_until(async {
+        let session_dir = tempfile::tempdir().expect("session dir");
+        let sampling_client =
+            crate::sampling::Client::new(xai_grok_sampler::SamplerConfig::default())
+                .expect("sampling client");
+        let info = crate::session::info::Info {
+            id: acp::SessionId::new("parent-message-durable"),
+            cwd: "/tmp".to_owned(),
+        };
+        let persistence = crate::session::persistence::new_with_explicit_dir(
+            &info,
+            session_dir.path().to_path_buf(),
+            acp::ModelId::new("test-model"),
+            sampling_client,
+            "test-model".to_owned(),
+        )
+        .await
+        .expect("persistence actor");
+        let persistence_tx = persistence.tx.clone();
+        let (gateway_tx, mut gateway_rx) = mpsc::unbounded_channel();
+        tokio::task::spawn_local(async move {
+            while let Some(message) = gateway_rx.recv().await {
+                if let xai_acp_lib::AcpClientMessage::SessionNotification(args) = message {
+                    let _ = args.response_tx.send(Ok(()));
+                }
+            }
+        });
+        let (actor, event_rx) = super::super::support::create_test_actor_with_chat_persistence(
+            0,
+            256_000,
+            85,
+            gateway_tx,
+            persistence_tx.clone(),
+            Box::new(crate::session::chat_persistence::ChannelChatPersistence::new(persistence_tx)),
+        )
+        .await;
+        let actor = Arc::new(actor);
+        set_running(&actor, "running").await;
+        let _receipt = admit_steer(&actor, "durable").await;
+
+        assert!(actor.drain_parent_messages_at_safe_point().await);
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (_chat_tx, chat_rx) = mpsc::unbounded_channel();
+        let loop_task = tokio::task::spawn_local(super::super::run_session(
+            Arc::clone(&actor),
+            cmd_rx,
+            chat_rx,
+            event_rx,
+            None,
+            Arc::new(parking_lot::Mutex::new(
+                xai_grok_workspace::file_system::CodebaseIndexManager::new(),
+            )),
+            std::path::PathBuf::from("/tmp"),
+            crate::session::fs_watch::FsWatchCapabilities::none(),
+        ));
+        cmd_tx
+            .send(SessionCommand::Shutdown(
+                crate::session::ShutdownKind::Graceful,
+            ))
+            .expect("loop running");
+        await_with_timeout(loop_task).await.expect("loop exits");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        persistence
+            .tx
+            .send(PersistenceMsg::FlushAndAck {
+                respond_to: shutdown_tx,
+            })
+            .expect("persistence actor alive");
+        await_with_timeout(shutdown_rx)
+            .await
+            .expect("shutdown barrier reply")
+            .expect("shutdown barrier");
+
+        for file in ["updates.jsonl", "chat_history.jsonl"] {
+            let contents = std::fs::read_to_string(session_dir.path().join(file))
+                .unwrap_or_else(|error| panic!("read {file}: {error}"));
+            assert!(
+                contents.contains("parent update"),
+                "missing delivery in {file}"
+            );
+        }
+    }))
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn committed_delivery_queues_protected_fifo_row_with_typed_receipt_identity() {
     let local = tokio::task::LocalSet::new();
     await_with_timeout(local.run_until(async {
@@ -206,6 +841,7 @@ async fn committed_delivery_queues_protected_fifo_row_with_typed_receipt_identit
 
         await_with_timeout(actor.admit_parent_agent_message_for_test(
             message("queued"),
+            ActiveAgentMessageOperation::Queue,
             receipt_sink,
             respond_to,
             completion_tx,
@@ -242,6 +878,46 @@ async fn committed_delivery_queues_protected_fifo_row_with_typed_receipt_identit
             Some(ConversationItem::User(user))
                 if matches!(user.content.first(), Some(ContentPart::Text { text }) if text.as_ref() == "PARENT_PREFIX_READY")
         ));
+    }))
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn steer_slots_reject_past_named_cap() {
+    let local = tokio::task::LocalSet::new();
+    await_with_timeout(local.run_until(async {
+        let (actor, _) = await_with_timeout(super::super::support::build_actor()).await;
+        set_running(&actor, "running").await;
+        let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
+        let (receipt_sink, _receipt_rx) = mpsc::channel(super::MAX_PARENT_STEER_SLOTS + 1);
+        for i in 0..super::MAX_PARENT_STEER_SLOTS {
+            let (respond_to, response_rx) = oneshot::channel();
+            await_with_timeout(actor.admit_parent_agent_message_for_test(
+                message(&format!("cap-{i}")),
+                ActiveAgentMessageOperation::Steer,
+                receipt_sink.clone(),
+                respond_to,
+                completion_tx.clone(),
+            ))
+            .await;
+            assert_eq!(
+                admission_response(await_with_timeout(response_rx).await),
+                ActiveMessageAdmission::Admitted
+            );
+        }
+        let (respond_to, response_rx) = oneshot::channel();
+        await_with_timeout(actor.admit_parent_agent_message_for_test(
+            message("cap-overflow"),
+            ActiveAgentMessageOperation::Steer,
+            receipt_sink,
+            respond_to,
+            completion_tx,
+        ))
+        .await;
+        assert_eq!(
+            admission_response(await_with_timeout(response_rx).await),
+            ActiveMessageAdmission::Rejected
+        );
     }))
     .await;
 }

@@ -37,7 +37,6 @@ pub struct SkillsAddResponse {
     pub path: String,
     /// Full updated skill list after reload.
     pub skills: Vec<SkillInfo>,
-    /// Human-readable message.
     pub message: String,
 }
 
@@ -54,11 +53,9 @@ pub struct SkillsRemoveRequest {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillsRemoveResponse {
-    /// The path that was removed.
     pub path: String,
     /// Full updated skill list after reload.
     pub skills: Vec<SkillInfo>,
-    /// Human-readable message.
     pub message: String,
 }
 
@@ -67,16 +64,13 @@ pub struct SkillsRemoveResponse {
 pub struct SkillsResetResponse {
     /// Full updated skill list after reload.
     pub skills: Vec<SkillInfo>,
-    /// Human-readable message.
     pub message: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SkillsToggleRequest {
-    /// Skill name to toggle.
     pub name: String,
-    /// Whether to enable (`true`) or disable (`false`) the skill.
     pub enabled: bool,
     /// Working directory for skill discovery context.
     #[serde(default)]
@@ -99,7 +93,6 @@ struct WorkflowsListRequest {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillsListResponse {
-    /// All discovered skills.
     pub skills: Vec<SkillInfo>,
 }
 
@@ -110,11 +103,8 @@ pub struct SkillsConfigResponse {
     pub paths: Vec<String>,
     /// Ignored paths from `[skills].ignore`.
     pub ignore: Vec<String>,
-    /// Total loaded skill count.
     pub total_skills: usize,
-    /// Human-readable summary.
     pub message: String,
-    /// Full updated skill list.
     pub skills: Vec<SkillInfo>,
 }
 
@@ -142,8 +132,6 @@ fn count_skills_from(skills: &[SkillInfo], dir: &std::path::Path) -> usize {
     skills.iter().filter(|s| s.path.starts_with(prefix)).count()
 }
 
-/// Resolve a skill path to an absolute path.
-///
 /// Handles `~` expansion and relative path resolution against `cwd`.
 /// Falls back to the original string if canonicalization fails.
 fn resolve_skill_path(raw: &str, cwd: &str) -> String {
@@ -168,8 +156,7 @@ fn resolve_skill_path(raw: &str, cwd: &str) -> String {
         PathBuf::from(cwd).join(&expanded)
     };
 
-    // canonicalize resolves symlinks and `..` — fall back to the joined path if it fails
-    // (e.g. path doesn't exist yet)
+    // canonicalize resolves symlinks and `..`; fall back to the joined path if it fails (e.g. the path doesn't exist yet)
     dunce::canonicalize(&absolute)
         .unwrap_or(absolute)
         .to_string_lossy()
@@ -184,9 +171,8 @@ fn discover_auto_sources(cwd: &str, skills: &[SkillInfo]) -> Vec<(String, usize)
         .ok()
         .and_then(|repo| repo.workdir().map(|p| p.to_path_buf()));
 
-    // Once the user has imported, stop scanning hardcoded
-    // .claude/skills/ paths. Equivalent locations should be opted in via
-    // [paths] extra_skill_dirs in config.toml (written by /import-claude).
+    // Once the user has imported, stop scanning hardcoded .claude/skills/ paths
+    // Equivalent locations should be opted in via [paths] extra_skill_dirs in config.toml (written by /import-claude)
     let imported = crate::claude_import::is_claude_import_marked();
     let local_dir_names: &[&str] = if imported {
         &[".grok", ".agents"]
@@ -238,9 +224,8 @@ fn discover_auto_sources(cwd: &str, skills: &[SkillInfo]) -> Vec<(String, usize)
         }
     }
 
-    // [paths] extra_skill_dirs from config.toml. These supplement the built-in
-    // scan locations. Used both standalone and as the migration target after
-    // /import-claude when the runtime .claude/skills/ scan is disabled.
+    // [paths] extra_skill_dirs from config.toml supplement the built-in scan locations
+    // They are used standalone and as the migration target after /import-claude disables the runtime .claude/skills/ scan
     for dir in extra_skill_dirs_from_config() {
         let path = crate::util::expand_home(&dir);
         if path.is_dir()
@@ -258,8 +243,8 @@ fn discover_auto_sources(cwd: &str, skills: &[SkillInfo]) -> Vec<(String, usize)
     sources
 }
 
-/// Read `[paths] extra_skill_dirs` from the effective config. Returns empty
-/// on any read/parse failure so misconfiguration never breaks listing.
+/// Read `[paths] extra_skill_dirs` from the effective config.
+/// Returns empty on any read/parse failure so misconfiguration never breaks listing.
 fn extra_skill_dirs_from_config() -> Vec<String> {
     let Ok(root) = crate::config::load_effective_config() else {
         return Vec::new();
@@ -519,8 +504,7 @@ pub async fn handle(
                 )));
             }
 
-            // Re-apply disabled marking against the already-loaded skills
-            // to reflect the config change without a second full discovery.
+            // Re-apply disabled marking against the already-loaded skills to reflect the config change without a second full discovery
             let config = cli_config::load_config().await.skills;
             let disabled_set: std::collections::HashSet<&str> =
                 config.disabled.iter().map(|s| s.as_str()).collect();
@@ -621,11 +605,9 @@ mod tests {
         );
     }
 
-    /// Hermetic tilde expansion: pin both HOME and USERPROFILE to the temp dir
-    /// (`xai_dirs::home_dir()` prefers USERPROFILE on Windows) so remote
-    /// sandboxes (missing HOME, symlink-resolved homes, pre-existing
-    /// ~/my-skills) cannot make `starts_with($HOME)` fail spuriously. Serial
-    /// because env mutation is process-global.
+    /// Pin both HOME and USERPROFILE to the temp dir; `xai_dirs::home_dir()` prefers USERPROFILE on Windows.
+    /// Remote sandboxes (missing HOME, symlink-resolved homes, a pre-existing ~/my-skills) can make `starts_with($HOME)` fail spuriously.
+    /// Serial because env mutation is process-global.
     #[test]
     #[serial_test::serial]
     fn test_resolve_tilde_path() {

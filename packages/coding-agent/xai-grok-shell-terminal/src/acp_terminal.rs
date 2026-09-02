@@ -9,13 +9,11 @@ pub struct AcpTerminalRunner {
 }
 
 #[async_trait::async_trait]
-// Terminal release on cancel is now handled by kill_and_release_all_for_session()
-// in cancel_running_task() — see acp_session.rs.
+// Terminal release on cancel is handled by kill_and_release_all_for_session() in cancel_running_task() (see acp_session.rs)
 impl AsyncTerminalRunner for AcpTerminalRunner {
     async fn run(&self, request: TerminalRunRequest) -> Result<TerminalRunResult, TerminalError> {
         let session_id = self.session_id.clone();
-        // On Windows the ACP client spawns with its own shell; sending the
-        // raw command avoids the /bin/bash dependency.
+        // On Windows the ACP client spawns with its own shell; sending the raw command avoids the /bin/bash dependency
         #[cfg(unix)]
         let command = {
             let quoted =
@@ -69,7 +67,7 @@ impl AsyncTerminalRunner for AcpTerminalRunner {
             Ok(Ok(_)) => false,
             Ok(Err(e)) => return Err(TerminalError::Other(e.to_string())),
             Err(_) => {
-                // timeout occurred, need to stop the command
+                // The wait timed out, so kill the command
                 let _ = self
                     .gateway
                     .send(acp::KillTerminalRequest::new(

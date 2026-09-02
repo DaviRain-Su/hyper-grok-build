@@ -6,6 +6,7 @@ use ratatui::layout::Rect;
 use super::image::{
     GraphicsProtocol, KITTY_PLACEMENT_ID, build_overlay_image_escapes_for_protocol,
     clear_kitty_image, detect_graphics_protocol, fit_image_to_cells,
+    prompt_preview_graphics_protocol,
 };
 
 static NEXT_OWNER_ID: AtomicU64 = AtomicU64::new(1);
@@ -121,6 +122,11 @@ impl From<Escapes> for PostFlush {
 
 pub(crate) fn next_owner_id() -> u64 {
     NEXT_OWNER_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// True while inline pixels are believed live on screen.
+pub fn has_committed_owner() -> bool {
+    current_owner().is_some()
 }
 
 pub fn reset_owner() {
@@ -240,10 +246,21 @@ pub fn volatile_centered(
     volatile_image(image_data, cols, rows, x, y)
 }
 
+/// Release the shared pixel slot on a frame that did not paint it.
+///
+/// Kitty deletes the placement by id.
+/// iTerm2 has no delete escape (its pixels die when the cells underneath repaint), but the ownership tracking must still reset.
+/// Pixels are only known-alive while the owner repaints every frame.
+/// A later identical placement request must therefore re-emit rather than take the keep path (which would leave a blank box).
 pub fn clear() -> Option<Escapes> {
-    match detect_graphics_protocol() {
+    match prompt_preview_graphics_protocol() {
         GraphicsProtocol::Kitty => Some(clear_kitty()),
-        GraphicsProtocol::ITerm2 | GraphicsProtocol::None => None,
+        GraphicsProtocol::ITerm2 => Some(Escapes {
+            bytes: String::new(),
+            ownership: Ownership::Clear,
+            placement: None,
+        }),
+        GraphicsProtocol::None => None,
     }
 }
 

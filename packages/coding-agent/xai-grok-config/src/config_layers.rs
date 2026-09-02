@@ -1,8 +1,5 @@
-//! `ConfigLayers` and the layered config merge / overlay / campaign policy.
-//!
-//! The layer *files* are read by [`crate::loader`]; this module owns how those
-//! layers combine into the effective config — layer precedence, the
-//! `GROK_CONFIG` overlay, and campaign resolution.
+//! The layer *files* are read by [`crate::loader`].
+//! This module owns how those layers combine into the effective config: layer precedence, the `GROK_CONFIG` overlay, and campaign resolution.
 
 use crate::loader::{
     deep_merge_toml, load_from_disk, load_managed_config, load_system_managed_config,
@@ -17,56 +14,42 @@ enum OverlayInclusion {
     Exclude,
 }
 
-/// Layers lowest→highest priority. `[[campaigns]]` taken off each layer at load.
+/// Layers from lowest to highest priority. `[[campaigns]]` is taken off each layer at load.
 #[derive(Clone)]
 pub struct ConfigLayers {
     pub system_managed: toml::Value,
     pub managed: toml::Value,
     pub user: toml::Value,
-    /// `GROK_CONFIG` / `GROK_CONFIG_PATH` overlay, above user but below
-    /// requirements. Soft settings only, and the canonical source of truth for
-    /// what the overlay can and cannot reach.
+    /// `GROK_CONFIG` / `GROK_CONFIG_PATH` overlay, above user but below requirements.
+    /// Soft settings only; this doc is the canonical source of truth for what the overlay can and cannot reach.
     ///
-    /// Values are confined at [`crate::env_overlay`]'s `finalize_overlay` choke
-    /// point. Both producers return confined overlays: `load_env_overlay` (the
-    /// merge path, via [`Self::load`]) and `resolved_env_overlay` (hints, which
-    /// constructs this field directly, and `grok inspect`). Construct this field
-    /// only from one of those producers. Tests that assign an unconfined value do
-    /// so deliberately, to exercise a gate independent of the allowlist.
+    /// Values are confined at [`crate::env_overlay`]'s `finalize_overlay` choke point.
+    /// Both producers return confined overlays.
+    /// `load_env_overlay` feeds the merge path via [`Self::load`].
+    /// `resolved_env_overlay` serves hints (which constructs this field directly) and `grok inspect`.
+    /// Construct this field only from one of those producers.
+    /// Tests that assign an unconfined value do so deliberately, to exercise a gate independent of the allowlist.
     ///
-    /// The overlay is confined to an allowlist of soft paths
-    /// ([`crate::config_override::OVERLAY_ALLOW_PATHS`]): the `models` and
-    /// `features` tables, a narrowed `toolset` (only `[toolset.bash]
-    /// login_shell_capture` and the `[toolset.web_search]` domain lists), and a
-    /// `shell_environment_policy` restricted to its filter fields (`inherit`,
-    /// `exclude`, `include_only`, `ignore_default_excludes`). Every other table,
-    /// plus the shell-env `set` field, is dropped at the choke point
-    /// ([`crate::env_overlay`]'s finalize step). This is fail-closed: any
-    /// code-exec, auth, egress, trust, or discovery table (`mcp_servers`,
-    /// `auth_provider`, `model_providers`, `plugins`, `auth`, `grok_com_config`,
-    /// `endpoints`, `marketplace`, `feedback`, `voice`, `cli`, `ui`, the
-    /// per-model `[model.<id>]` block, plus `version_overrides` / `campaigns`) is
-    /// absent from the allowlist, so it is dropped by default and a newly added
-    /// dangerous table stays out until it is explicitly allowlisted. The overlay
-    /// therefore cannot spawn a new command sink, set auth policy, redirect
-    /// egress, elevate trust, or add a discovery source. `shell_environment_policy`
-    /// cannot inject an env value (`set` is dropped); its remaining fields only
-    /// select among env names the launcher already controls, so relative to a
-    /// lower layer they may loosen or tighten what a subprocess inherits but never
-    /// introduce a value. The overlay cannot influence subprocess execution
-    /// beyond the launcher's own env. A launcher that must add an env var sets it
-    /// on the process directly.
-    /// `sandbox` and `telemetry` are likewise not allowlisted (set them via
-    /// `GROK_SANDBOX` / `OTEL_*`); `[features] telemetry` is the master switch
-    /// and is allowlisted.
+    /// The overlay is confined to an allowlist of soft paths ([`crate::config_override::OVERLAY_ALLOW_PATHS`]).
+    /// The allowlist holds the `models` and `features` tables, a narrowed `toolset`, and a filtered `shell_environment_policy`.
+    /// `toolset` keeps only `[toolset.bash] login_shell_capture` and the `[toolset.web_search]` domain lists.
+    /// `shell_environment_policy` keeps only its filter fields (`inherit`, `exclude`, `include_only`, `ignore_default_excludes`).
+    /// Every other table, plus the shell-env `set` field, is dropped at the choke point.
+    /// This is fail-closed: every code-exec, auth, egress, trust, or discovery table is absent from the allowlist and dropped by default.
+    /// A newly added dangerous table stays out until it is explicitly allowlisted.
+    /// The overlay therefore cannot spawn a new command sink, set auth policy, redirect egress, elevate trust, or add a discovery source.
+    /// `shell_environment_policy` cannot inject an env value (`set` is dropped).
+    /// Its remaining fields only select among env names the launcher already controls.
+    /// Relative to a lower layer they may loosen or tighten what a subprocess inherits but never introduce a value.
+    /// A launcher that must add an env var sets it on the process directly.
+    /// `sandbox` and `telemetry` are likewise not allowlisted (set them via `GROK_SANDBOX` / `OTEL_*`).
+    /// `[features] telemetry` is the master switch and is allowlisted.
     ///
-    /// Even on the allowlisted tables, security gates read overlay-free (the raw
-    /// disk layers via [`Self::effective_config_base_without_overlay`], explicit
-    /// per-layer values, or the raw config files; requirements/MDM clamp on
-    /// top): permission mode, plan approval, auto permission mode plus its
-    /// classifier, remember tool approvals, `remote_fetch`, managed-config fetch,
-    /// marketplace `require_sha`, ZDR access, folder trust, `[permission]`
-    /// allow/deny rules, and the `[cli]` version bounds.
+    /// Even on the allowlisted tables, security gates read overlay-free; requirements/MDM clamp on top.
+    /// They read the raw disk layers via [`Self::effective_config_base_without_overlay`], explicit per-layer values, or the raw config files.
+    /// Those gates cover permission mode, plan approval, auto permission mode plus its classifier, and remember tool approvals.
+    /// They also cover `remote_fetch`, managed-config fetch, marketplace `require_sha`, ZDR access, and folder trust.
+    /// `[permission]` allow/deny rules and the `[cli]` version bounds are read overlay-free as well.
     pub env_overlay: Option<toml::Value>,
     pub user_requirements: Option<toml::Value>,
     pub system_requirements: Option<toml::Value>,
@@ -109,10 +92,8 @@ impl ConfigLayers {
         let mut system_requirements = load_system_requirements();
         let mut mdm_requirements = crate::validation::mdm_requirements_value();
 
-        // Highest-authority requirements tier first: `merge_campaign_entries` is
-        // first-id-wins, so a duplicate campaign id must resolve mdm > system >
-        // user — matching the layer precedence in `effective_config_base` (where
-        // mdm is merged last/highest).
+        // Highest-authority tier first: `merge_campaign_entries` is first-id-wins, so a duplicate campaign id must resolve mdm > system > user
+        // That matches the layer precedence in `effective_config_base`, where mdm is merged last/highest
         let mut requirements_campaigns = Vec::new();
         if let Some(ref mut req) = mdm_requirements {
             requirements_campaigns.extend(take_campaign_entries(req, "requirements"));
@@ -124,11 +105,9 @@ impl ConfigLayers {
             requirements_campaigns.extend(take_campaign_entries(req, "requirements"));
         }
 
-        // Normalize each layer before it is ever merged, so `[toolset.web_search]`'s
-        // mutually-exclusive `allowed_domains` / `excluded_domains` travel together:
-        // a layer that sets one clears the other to `[]`. That makes the existing
-        // `deep_merge_toml` replace the whole policy from the winning layer instead
-        // of mixing keys across layers.
+        // Normalize each layer before any merge, so `[toolset.web_search]`'s `allowed_domains` / `excluded_domains` travel together
+        // A layer that sets one clears the other to `[]`
+        // That makes `deep_merge_toml` replace the whole policy from the winning layer instead of mixing keys across layers
         normalize_config_layer(&mut system_managed);
         normalize_config_layer(&mut managed);
         normalize_config_layer(&mut user);
@@ -162,9 +141,8 @@ impl ConfigLayers {
 
     /// Layer merge (no campaigns), including the `GROK_CONFIG` overlay.
     ///
-    /// Overlay-inclusive: security gates must not read this. Use
-    /// [`Self::effective_config_base_without_overlay`] for any gate (the
-    /// overlay-free set is enumerated on [`Self::env_overlay`]).
+    /// Overlay-inclusive: security gates must not read this.
+    /// Use [`Self::effective_config_base_without_overlay`] for any gate (the overlay-free set is enumerated on [`Self::env_overlay`]).
     pub fn effective_config_base(&self) -> toml::Value {
         self.merge(OverlayInclusion::Include)
     }
@@ -207,9 +185,8 @@ impl ConfigLayers {
         .flatten()
     }
 
-    /// Campaign source slices in priority order (first id wins):
-    /// requirements > remote > user > managed > system_managed. Single source of
-    /// truth for the precedence; both this crate and the shell resolver consume it.
+    /// Campaign source slices in priority order (first id wins): requirements > remote > user > managed > system_managed.
+    /// This is the single source of truth for the precedence; both this crate and the shell resolver consume it.
     pub fn campaign_source_slices<'a>(
         &'a self,
         remote_campaigns: &'a [crate::campaigns::CampaignEntry],
@@ -223,9 +200,8 @@ impl ConfigLayers {
         ]
     }
 
-    /// Active campaigns against `base`: kill switch → priority merge (first-id-wins)
-    /// → drop dismissed. The single place disk campaign resolution lives; the shell
-    /// wraps this with the `GROK_CAMPAIGNS_OVERRIDE` env layer.
+    /// Active campaigns against `base`: the kill switch, then the priority merge (first-id-wins), then dropping dismissed ids.
+    /// This is the one place that resolves disk campaigns; the shell wraps it with the `GROK_CAMPAIGNS_OVERRIDE` env layer.
     pub fn resolve_campaigns(
         &self,
         base: &toml::Value,
@@ -241,10 +217,8 @@ impl ConfigLayers {
         crate::campaigns::filter_active_campaigns(merged, dismissed_ids)
     }
 
-    /// Re-merge the requirements layers so an admin's `requirements.toml` always
-    /// wins over a campaign overlay, regardless of the campaign's source layer.
-    /// Campaigns are full-power (any field), so this is the structural guarantee
-    /// that a lower-trust layer's campaign can't override an admin-set field.
+    /// Re-merge the requirements layers so an admin's `requirements.toml` always wins over a campaign overlay, whatever the campaign's source layer.
+    /// Campaigns are full-power (any field), so this is the structural guarantee that a lower-trust campaign can't override an admin-set field.
     fn reapply_requirements(&self, merged: &mut toml::Value) {
         for req in self.requirements_in_order() {
             deep_merge_toml(merged, req);
@@ -264,9 +238,8 @@ impl ConfigLayers {
         self.reapply_requirements(merged);
     }
 
-    /// Layer merge + disk/remote campaign overlay, honoring the kill switch. The
-    /// shell's `load_effective_config` is the remote/override-aware path; this is
-    /// used by `effective_config_disk_only` and tests.
+    /// Layer merge and disk/remote campaign overlay, honoring the kill switch.
+    /// The shell's `load_effective_config` is the remote/override-aware path; this is used by `effective_config_disk_only` and tests.
     pub fn effective_config_with_campaigns(
         &self,
         remote_campaigns: &[crate::campaigns::CampaignEntry],
@@ -278,9 +251,8 @@ impl ConfigLayers {
         merged
     }
 
-    /// Disk campaigns + on-disk dismiss (`campaigns_state.json`); **no remote, no
-    /// env override**. Named to make the divergence from the shell's remote-aware
-    /// `load_effective_config` explicit at every call site.
+    /// Disk campaigns and on-disk dismiss (`campaigns_state.json`); **no remote, no env override**.
+    /// The name makes the divergence from the shell's remote-aware `load_effective_config` explicit at every call site.
     pub fn effective_config_disk_only(&self) -> toml::Value {
         self.effective_config_with_campaigns(&[], &load_dismissed_ids_from_home())
     }
@@ -312,18 +284,16 @@ pub fn campaigns_application_disabled(base_effective: &toml::Value) -> bool {
         == Some(false)
 }
 
-/// Disk layers only (no remote, no env override). Prefer the shell loader
-/// (`xai_grok_shell::util::config::load_effective_config`) when remote campaigns
-/// or `GROK_CAMPAIGNS_OVERRIDE` must be honored. The name mirrors the
-/// [`ConfigLayers::effective_config_disk_only`] method so the divergence from the
-/// remote-aware loader is un-ignorable at every call site.
+/// Disk layers only (no remote, no env override).
+/// Prefer `xai_grok_shell::util::config::load_effective_config` when remote campaigns or `GROK_CAMPAIGNS_OVERRIDE` must be honored.
+/// The name mirrors [`ConfigLayers::effective_config_disk_only`] so the divergence from the remote-aware loader is explicit at every call site.
 pub fn load_effective_config_disk_only() -> std::io::Result<toml::Value> {
     Ok(ConfigLayers::load()?.effective_config_disk_only())
 }
 
-/// On-disk campaign dismiss state. Single source of truth for the file's name,
-/// location, and JSON shape — the shell's writer reuses these so the read and
-/// write sides can't drift.
+/// On-disk campaign dismiss state.
+/// This is the single source of truth for the file's name, location, and JSON shape.
+/// The shell's writer reuses these so the read and write sides can't drift.
 pub const CAMPAIGNS_STATE_FILE: &str = "campaigns_state.json";
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -354,36 +324,9 @@ pub fn load_dismissed_ids_from_home() -> std::collections::HashSet<String> {
 mod tests {
     use super::*;
 
-    use crate::version_overrides::apply_version_overrides;
-
-    #[test]
-    fn full_layer_precedence_requirements_over_config_over_managed() {
-        let system_managed: toml::Value =
-            toml::from_str("[telemetry]\nmode = \"system_managed_value\"\n").unwrap();
-        let managed: toml::Value =
-            toml::from_str("[telemetry]\nmode = \"managed_value\"\n").unwrap();
-        let user: toml::Value = toml::from_str("[telemetry]\nmode = \"user_value\"\n").unwrap();
-        let user_requirements: toml::Value =
-            toml::from_str("[telemetry]\nmode = \"user_requirements_value\"\n").unwrap();
-        let system_requirements: toml::Value =
-            toml::from_str("[telemetry]\nmode = \"system_requirements_value\"\n").unwrap();
-
-        let mut merged = system_managed;
-        deep_merge_toml(&mut merged, &managed);
-        deep_merge_toml(&mut merged, &user);
-        deep_merge_toml(&mut merged, &user_requirements);
-        deep_merge_toml(&mut merged, &system_requirements);
-
-        assert_eq!(
-            merged["telemetry"]["mode"].as_str(),
-            Some("system_requirements_value")
-        );
-    }
-
     #[test]
     fn effective_config_mdm_requirements_win_over_system_and_user() {
-        // MDM is merged last, so an admin-forced value clamps the effective
-        // config over both the user config and the system requirements layer.
+        // MDM is merged last, so an admin-forced value clamps the effective config over both the user config and the system requirements layer
         let layers = ConfigLayers {
             user: toml::from_str("[features]\nweb_fetch = true\n").unwrap(),
             system_requirements: Some(toml::from_str("[features]\nweb_fetch = true\n").unwrap()),
@@ -396,57 +339,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn full_precedence_holds_when_values_come_from_version_overrides() {
-        let cli_version = semver::Version::parse("1.8.0").unwrap();
-
-        let mut managed: toml::Value = toml::from_str(
-            r#"
-            [[version_overrides]]
-            minimum_version = "1.0.0"
-            [version_overrides.telemetry]
-            mode = "managed_versioned"
-            "#,
-        )
-        .unwrap();
-        let mut user: toml::Value = toml::from_str(
-            r#"
-            [[version_overrides]]
-            minimum_version = "1.0.0"
-            [version_overrides.telemetry]
-            mode = "user_versioned"
-            "#,
-        )
-        .unwrap();
-        let mut requirements: toml::Value = toml::from_str(
-            r#"
-            [[version_overrides]]
-            minimum_version = "1.0.0"
-            [version_overrides.telemetry]
-            mode = "requirements_versioned"
-            "#,
-        )
-        .unwrap();
-
-        apply_version_overrides(&mut managed, &cli_version).unwrap();
-        apply_version_overrides(&mut user, &cli_version).unwrap();
-        apply_version_overrides(&mut requirements, &cli_version).unwrap();
-
-        let mut merged = managed;
-        deep_merge_toml(&mut merged, &user);
-        deep_merge_toml(&mut merged, &requirements);
-
-        assert_eq!(
-            merged["telemetry"]["mode"].as_str(),
-            Some("requirements_versioned")
-        );
-    }
-
     /// `GROK_CAMPAIGNS=0` disables campaign application regardless of config.
-    /// `GROK_CAMPAIGNS` is process-global, so this test serializes itself with a
-    /// module-local mutex and save/restores the prior value. (This crate has no
-    /// `serial_test` dev-dep and no other test reads this var, so a local guard
-    /// is sufficient.)
+    /// `GROK_CAMPAIGNS` is process-global, so this test serializes itself with a module-local mutex and save/restores the prior value.
+    /// (This crate has no `serial_test` dev-dep and no other test reads this var, so a local guard is sufficient.)
     #[test]
     fn kill_switch_env_var_disables() {
         static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());

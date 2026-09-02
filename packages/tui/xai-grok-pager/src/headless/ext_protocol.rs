@@ -221,6 +221,12 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
         ImageCompressed {
             message: String,
         },
+        MemoryFlushStarted {},
+        MemoryFlushCompleted {
+            result: String,
+            #[serde(default)]
+            path: Option<String>,
+        },
         SubagentSpawned {
             subagent_id: String,
         },
@@ -293,6 +299,10 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
         }
         XaiUpdate::ImageCompressed { message } => {
             ExtEvent::Lifecycle(Lifecycle::ImageCompressed { message })
+        }
+        XaiUpdate::MemoryFlushStarted {} => ExtEvent::Lifecycle(Lifecycle::MemoryFlushStarted),
+        XaiUpdate::MemoryFlushCompleted { result, path } => {
+            ExtEvent::Lifecycle(Lifecycle::MemoryFlushCompleted { result, path })
         }
         XaiUpdate::SubagentSpawned { subagent_id } => ExtEvent::SubagentSpawned { subagent_id },
         XaiUpdate::SubagentFinished { subagent_id, .. } => {

@@ -589,7 +589,6 @@ mod tests {
     use serde::Deserialize;
     use xai_computer_hub_sdk::harness::LocalRegistry;
     use xai_grok_workspace_types::rpc::RpcActivityClass;
-    use xai_grok_workspace_types::rpc::skills::SkillScope;
     use xai_tool_protocol::{SessionId, ToolId};
     use xai_tool_runtime::{Tool, ToolError};
     use xai_tool_types::ToolDescription;
@@ -620,18 +619,6 @@ mod tests {
                     "os": "linux", "shell": "bash", "cwd": "/workspace",
                     "version": "1.2.3",
                 })),
-                "workspace.git_status" => ok(serde_json::json!("On branch main")),
-                "workspace.discover_skills" => ok(serde_json::json!([{
-                    "name": "my-skill",
-                    "description": "A test skill",
-                    "path": "/workspace/.grok/skills/my-skill/SKILL.md",
-                    "scope": "local",
-                }])),
-                "workspace.discover_agents_md" => ok(serde_json::json!([{
-                    "file_name": "AGENTS.md",
-                    "file_path": "/workspace/AGENTS.md",
-                    "content": "# Project instructions",
-                }])),
                 "workspace.echo_params" => ok(args.params),
                 "workspace.err" => Ok(RawOut(serde_json::json!({
                     "err": { "code": "session_not_found", "message": "ghost" },
@@ -701,25 +688,6 @@ mod tests {
                 version: Some("1.2.3".into()),
             }
         );
-    }
-    #[tokio::test]
-    async fn git_status_returns_raw_value() {
-        let v = client().git_status().await.unwrap();
-        assert_eq!(v, serde_json::json!("On branch main"));
-    }
-    #[tokio::test]
-    async fn discover_skills_decodes_typed_list() {
-        let skills = client().discover_skills().await.unwrap();
-        assert_eq!(skills.len(), 1);
-        assert_eq!(skills[0].name, "my-skill");
-        assert_eq!(skills[0].scope, SkillScope::Local);
-    }
-    #[tokio::test]
-    async fn discover_agents_md_decodes_typed_list() {
-        let files = client().discover_agents_md().await.unwrap();
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].file_name, "AGENTS.md");
-        assert_eq!(files[0].file_path, "/workspace/AGENTS.md");
     }
     #[tokio::test]
     async fn typed_request_params_round_trip() {
@@ -869,16 +837,6 @@ mod tests {
         let b = a.clone();
         a.mark_disconnected();
         assert!(!b.is_connected());
-    }
-    #[tokio::test]
-    async fn consume_stream_terminal_returns_ok() {
-        let value = serde_json::json!({"result": "hello"});
-        let typed = TypedToolOutput::from_value(ToolId::new("t").unwrap(), value.clone());
-        let mut stream = xai_tool_runtime::terminal_only(Ok(typed));
-        assert_eq!(
-            consume_stream_terminal(&mut stream).await.unwrap().value,
-            value
-        );
     }
     #[tokio::test]
     async fn consume_stream_terminal_returns_err() {

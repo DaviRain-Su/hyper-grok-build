@@ -1,4 +1,4 @@
-//! JWT expiration detection. Returns `None`/`false` for non-JWT tokens.
+//! For a token that is not a JWT, `parse_jwt_expiration` returns `None` and `is_jwt_expired_or_near` returns `false`.
 
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
@@ -26,8 +26,7 @@ mod tests {
     use super::*;
 
     /// Tokens with an `aud` claim must parse successfully.
-    /// `jsonwebtoken::Validation::default()` enables audience validation which
-    /// silently rejects these tokens unless `validate_aud = false` is set.
+    /// `jsonwebtoken::Validation::default()` enables audience validation which silently rejects these tokens unless `validate_aud = false` is set.
     #[test]
     fn parses_jwt_with_aud_claim() {
         let token = build_test_jwt(r#"{"aud":["some-audience"],"exp":1772575524}"#);

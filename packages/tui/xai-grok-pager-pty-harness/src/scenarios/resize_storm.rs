@@ -1,8 +1,6 @@
-//! `resize_storm` — resize the PTY many times in quick succession; assert
-//! no crash and measure recovery.
+//! Resize the PTY many times in quick succession; assert no crash and measure recovery.
 //!
-//! What it stresses: `prepare_layout` Case 1 (full width-change rebuild),
-//! wrap-cache misses across every entry, resize-debounce in `event_loop.rs`.
+//! What it stresses: `prepare_layout` Case 1 (full width-change rebuild), wrap-cache misses across every entry, resize-debounce in `event_loop.rs`.
 
 use std::time::{Duration, Instant};
 

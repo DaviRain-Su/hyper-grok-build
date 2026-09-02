@@ -7,27 +7,23 @@ use xai_grok_telemetry::events::ResourceReportTrigger;
 
 use super::*;
 
-/// Floor between growth-driven reports, so a fast climb costs a bounded number
-/// of events.
+/// Reports driven by RSS growth wait at least this long apart, so a fast climb costs a bounded number of events.
 const MIN_REPORT_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
-/// A quiet process still reports this often, so a flat line is evidence rather
-/// than absence.
+/// A quiet process still reports this often, so a flat line is evidence rather than absence.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 /// Fraction of the last reading that counts as movement worth an event.
 const MATERIAL_CHANGE_DIVISOR: u64 = 10;
 
-/// Keeps the periodic reports rare while a process is behaving, and frequent
-/// while it is not.
+/// Keeps the periodic reports rare while a process is behaving, and frequent while it is not.
 #[derive(Default)]
 struct ReportCadence {
     last: Option<Report>,
 }
 
-// The gauges describe the process, so the cadence that rate-limits them belongs
-// to the process, not to any one agent. `//` comments: `///` above
-// `thread_local!` trips `clippy::unused_doc_comments`.
+// The gauges describe the process, so the cadence that rate-limits them belongs to the process, not to any one agent
+// This is a `//` comment because `///` above `thread_local!` trips `clippy::unused_doc_comments`
 thread_local! {
     static CADENCE: RefCell<ReportCadence> = RefCell::new(ReportCadence::default());
 }
@@ -63,7 +59,7 @@ impl ReportCadence {
 }
 
 impl MvpAgent {
-    /// Sampled after removal, so a leak reads as a rising tail across releases.
+    /// The sample is taken after the session is removed, so a leak reads as a rising tail across releases.
     pub(super) fn log_resource_usage(&self, trigger: ResourceReportTrigger) {
         let usage = xai_tty_utils::sample_process_resources();
         CADENCE.with_borrow_mut(|cadence| cadence.record(Instant::now(), usage.rss_bytes));
@@ -78,17 +74,14 @@ impl MvpAgent {
                 open_files: usage.open_files,
                 resident_sessions: self.session_registry.resident_count(),
                 session_threads: self.session_registry.counts().session_threads,
+                idle: xai_grok_telemetry::activity::work_is_idle(),
             },
         );
     }
 
-    /// Called from the heap monitor's poll loop, which runs whether or not
-    /// profiling is on. A session that never closes reports through this.
-    ///
-    /// Every tick pays one memory read, which now carries the thread count
-    /// (free from the same `/proc/self/status` read on Linux, one
-    /// `proc_pidinfo` on macOS); only a tick that reports pays for the
-    /// descriptor scan.
+    /// Called from the heap monitor's poll loop, which runs whether or not profiling is on, so a session that never closes still reports.
+    /// Every tick pays one memory read (`/proc/self/status` on Linux, one `proc_pidinfo` on macOS), which also carries the thread count.
+    /// Only a tick that reports pays for the descriptor scan.
     pub(super) fn report_resource_usage_if_due(&self) {
         let memory = xai_tty_utils::sample_process_memory();
         let due = CADENCE.with_borrow(|cadence| cadence.is_due(Instant::now(), memory.rss_bytes));

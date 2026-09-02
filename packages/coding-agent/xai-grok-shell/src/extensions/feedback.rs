@@ -1,12 +1,8 @@
-//! `x.ai/feedback`, `x.ai/feedback/dismiss`, `x.ai/btw`, and `x.ai/review/*`
-//! extension handlers.
+//! `x.ai/feedback`, `x.ai/feedback/dismiss`, `x.ai/btw`, and `x.ai/review/*` extension handlers.
 //!
-//! - `feedback`/`feedback/dismiss`: persist user ratings/text locally and
-//!   forward to cli-chat-proxy.
-//! - `btw`: dispatch a side question to the active session via
-//!   `SessionCommand::SideQuestion` and return the answer.
-//! - `review/comment` and `review/comment/delete`: record inline code review
-//!   events to cloud storage.
+//! - `feedback` and `feedback/dismiss`: persist user ratings and text locally and forward to cli-chat-proxy.
+//! - `btw`: dispatch a side question to the active session via `SessionCommand::SideQuestion` and return the answer.
+//! - `review/comment` and `review/comment/delete`: record inline code review events to cloud storage.
 use super::{ExtResult, parse_params};
 use crate::agent::MvpAgent;
 use crate::session::persistence::{LocalFeedbackEntry, UserFeedbackEntry};
@@ -39,7 +35,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         _ => Err(acp::Error::method_not_found()),
     }
 }
-/// Handle `x.ai/btw` -- a side question that doesn't interrupt the current turn.
+/// Handle `x.ai/btw`, a side question that doesn't interrupt the current turn.
 async fn handle_btw(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -308,8 +304,7 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
         _ => Err(acp::Error::method_not_found()),
     }
 }
-/// Bounds the one-shot GCS upload so a stalled connection can't hang the ACP
-/// handler; sized for the 50 MiB archive cap on a slow uplink.
+/// Bounds the one-shot GCS upload so a stalled connection can't hang the ACP handler; sized for the 50 MiB archive cap on a slow uplink.
 const FEEDBACK_TRACE_UPLOAD_TIMEOUT_SECS: u64 = 120;
 async fn handle_upload_trace(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     #[derive(serde::Deserialize)]

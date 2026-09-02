@@ -1,12 +1,10 @@
 use super::*;
 
-/// Regression test: exact incident that caused kimi-k2.5 / OpenRouter
-/// sessions to fail with 400 errors on every retry.
+/// Regression test: exact incident that caused kimi-k2.5 / OpenRouter sessions to fail with 400 errors on every retry.
 ///
 /// The model produced malformed JSON (missing `"` before `new_string`).
 /// The error message must include:
-///   1. The original broken arguments (up to MAX_ARGS_IN_ERROR chars) so
-///      the model can fix the one-character syntax error directly.
+///   1. The original broken arguments (up to MAX_ARGS_IN_ERROR chars) so the model can fix the one-character syntax error directly.
 ///   2. The JSON parse error with the exact char position.
 #[test]
 fn test_malformed_json_includes_original_args_and_position() {
@@ -18,12 +16,10 @@ fn test_malformed_json_includes_original_args_and_position() {
 
     let msg = build_tool_parse_error_message("search_replace", &err, bad_args);
 
-    // Must contain the original arguments.
     assert!(
         msg.contains(bad_args),
         "error message must contain original arguments; got:\n{msg}"
     );
-    // Must flag that the arguments contain invalid JSON.
     assert!(
         msg.contains("invalid JSON"),
         "error message must mention invalid JSON; got:\n{msg}"
@@ -33,7 +29,6 @@ fn test_malformed_json_includes_original_args_and_position() {
         msg.contains("column 81") || msg.contains("char 80"),
         "error message must include the parse-error position; got:\n{msg}"
     );
-    // Must tell the model to fix and retry.
     assert!(
         msg.contains("fix") || msg.contains("retry"),
         "error message must guide the model to fix and retry; got:\n{msg}"
@@ -84,13 +79,12 @@ fn test_long_arguments_are_truncated() {
         xai_tool_runtime::ToolError::invalid_arguments("missing field `file_path`".to_string());
     let msg = build_tool_parse_error_message("search_replace", &err, &long_args);
 
-    // The message must be capped — the full args must NOT appear verbatim.
+    // The message must be capped: the full args must NOT appear verbatim
     assert!(
         !msg.contains(&long_args),
         "long arguments must be truncated; message length: {}",
         msg.len()
     );
-    // A truncation marker must be present.
     assert!(
         msg.contains("(truncated)"),
         "truncation marker must appear in message"
@@ -108,7 +102,7 @@ fn test_long_arguments_are_truncated() {
 #[test]
 fn test_truncate_bytes_non_ascii() {
     // "日本語" is 9 bytes (3 chars × 3 bytes each).
-    // Truncating at 5 would land in the middle of the second char — must walk back.
+    // Truncating at 5 would land in the middle of the second char, so truncate_bytes must walk back
     let s = "日本語";
     assert_eq!(s.len(), 9);
     let t = truncate_bytes(s, 5);
@@ -116,7 +110,7 @@ fn test_truncate_bytes_non_ascii() {
         s.is_char_boundary(t.len()),
         "result must end on a char boundary"
     );
-    assert_eq!(t, "日"); // only the first char (3 bytes) fits before byte 5
+    assert_eq!(t, "日"); // Only the first char (3 bytes) fits before byte 5
 
     // Exact boundary is fine.
     assert_eq!(truncate_bytes(s, 3), "日");
@@ -126,8 +120,7 @@ fn test_truncate_bytes_non_ascii() {
     assert_eq!(truncate_bytes(s, 0), "");
 }
 
-/// build_tool_parse_error_message must not panic when raw_arguments contains
-/// non-ASCII characters and the byte limit falls mid-char.
+/// build_tool_parse_error_message must not panic when raw_arguments contains non-ASCII characters and the byte limit falls mid-char.
 #[test]
 fn test_non_ascii_arguments_truncated_safely() {
     // Construct args where MAX_ARGS_IN_ERROR bytes falls inside a multi-byte char.
@@ -140,6 +133,6 @@ fn test_non_ascii_arguments_truncated_safely() {
     // Must not panic.
     let msg = build_tool_parse_error_message("search_replace", &err, &long_args);
     assert!(msg.contains("(truncated)"));
-    // The prefix in the message must be valid UTF-8 (implicit — String is always UTF-8).
+    // The prefix in the message must be valid UTF-8 (implicit: String is always UTF-8)
     assert!(!msg.is_empty());
 }

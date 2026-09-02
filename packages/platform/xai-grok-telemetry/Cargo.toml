@@ -89,7 +89,6 @@ base64 = { workspace = true }
 http = { workspace = true }
 bytes = { workspace = true }
 async-trait = { workspace = true }
-futures-executor = "0.3"
 tokio-stream = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 
@@ -113,7 +112,6 @@ prost = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
 # Sets a symlink's own mtime (std's `set_modified` follows links) for prune tests.
 filetime = { workspace = true }
-futures-executor = "0.3"
 tempfile = { workspace = true }
 
 [lints]

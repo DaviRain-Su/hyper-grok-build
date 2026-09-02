@@ -9,8 +9,8 @@ use crate::session::CancelTrigger;
 use xai_grok_hooks::event::{HookEventName, StopCancelledReason, StopFailureKind};
 
 #[derive(Default)]
-struct RecordingLifecycle {
-    aborts: std::cell::Cell<usize>,
+pub(super) struct RecordingLifecycle {
+    pub(super) aborts: std::cell::Cell<usize>,
     idles: std::cell::Cell<usize>,
 }
 
@@ -52,8 +52,8 @@ impl Harness {
         let (gateway_tx, gateway) = tokio::sync::mpsc::unbounded_channel();
         let (persistence_tx, mut persistence) =
             tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-        // Drop each message rather than hold the queue: that drops any ack channel inside it, so
-        // a writer waiting on one fails fast instead of waiting forever.
+        // Drop each message rather than hold the queue: that drops any ack channel inside it
+        // A writer waiting on one then fails fast instead of waiting forever
         tokio::task::spawn_local(async move { while persistence.recv().await.is_some() {} });
         let (mut actor, events) =
             create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
@@ -77,14 +77,14 @@ impl Harness {
         }
     }
 
-    /// Drains without re-arming, leaving the next report nowhere to go.
+    /// Drains without respawning the queue, leaving the next report nowhere to go.
     async fn close_turn_end_queue(&mut self) {
         if let Some(queue) = self.queue.take() {
             queue.drain().await;
         }
     }
 
-    /// Runs every queued report, then re-arms, so a test never races the worker.
+    /// Runs every queued report, then respawns the queue, so a test never races the worker.
     async fn drain_turn_ends(&mut self) {
         if let Some(queue) = self.queue.take() {
             queue.drain().await;
@@ -94,8 +94,8 @@ impl Harness {
         ));
     }
 
-    /// Drives the real `run_session`. Takes the gateway, whose notifications must be
-    /// acknowledged or the actor blocks; hook events land in the returned buffer.
+    /// Drives the real `run_session`.
+    /// Takes the gateway, whose notifications must be acknowledged or the actor blocks; hook events land in the returned buffer.
     async fn spawn_loop(
         &mut self,
     ) -> (
@@ -158,15 +158,17 @@ impl Harness {
         *self.actor.client_hooks.borrow_mut() = hooks;
     }
 
-    /// A running turn whose prompt is queued at the front, which is what makes a completion
-    /// this actor's own.
+    /// A running turn whose prompt is queued at the front, which is what makes a completion this actor's own.
     async fn queue_turn(
         &self,
         prompt_id: &str,
     ) -> tokio::sync::oneshot::Receiver<PromptTurnResult> {
-        self.start_turn(prompt_id).await;
         let (item, rx) = super::turn_completion_emit_tests::pending_input(prompt_id);
-        self.actor.state.lock().await.pending_inputs.push_back(item);
+        let handle = tokio::task::spawn_local(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        })
+        .abort_handle();
+        self.run_turn(prompt_id, item, handle).await;
         rx
     }
 
@@ -175,16 +177,23 @@ impl Harness {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         })
         .abort_handle();
-        self.run_turn(prompt_id, handle).await;
+        self.run_turn(prompt_id, user_item(prompt_id, "test"), handle)
+            .await;
     }
 
-    async fn run_turn(&self, prompt_id: &str, handle: tokio::task::AbortHandle) {
+    async fn run_turn(&self, prompt_id: &str, item: InputItem, handle: tokio::task::AbortHandle) {
         *self
             .actor
             .current_prompt_id
             .lock()
             .expect("current_prompt_id mutex poisoned") = Some(prompt_id.to_string());
-        self.actor.state.lock().await.running_task = Some(AgentTask::new(prompt_id, handle));
+        let mut state = self.actor.state.lock().await;
+        state.running_task = Some(AgentTask::new_at_epoch(
+            prompt_id,
+            self.actor.turn_report.epoch(),
+            handle,
+        ));
+        state.pending_inputs.push_back(item);
     }
 
     async fn cancel(&self, trigger: CancelTrigger) -> super::tasks_cancel::CancelOutcome {
@@ -281,7 +290,8 @@ async fn interrupting_a_parked_stop_gate_still_reports() {
 
             let actor = h.actor.clone();
             let gate = tokio::task::spawn_local(async move { actor.run_stop_gate("p1", 0).await });
-            h.run_turn("p1", gate.abort_handle()).await;
+            h.run_turn("p1", user_item("p1", "test"), gate.abort_handle())
+                .await;
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 while !matches!(h.actor.turn_report.state(), TurnReportState::Held { .. }) {
                     tokio::task::yield_now().await;
@@ -384,7 +394,6 @@ async fn a_rewind_reports_nothing_but_still_settles_the_session() {
         {
             let mut state = h.actor.state.lock().await;
             state.rewindable = true;
-            state.pending_inputs.push_back(user_item("p1", "alice"));
         }
         h.start_turn("p1").await;
 
@@ -498,9 +507,13 @@ async fn only_a_settled_main_session_offers_an_idle_ping() {
             "a running turn is not idle"
         );
 
-        parent.actor.state.lock().await.running_task = None;
-        // Suppressed by the interrupt that ended the turn, which must not swallow the ping.
-        parent.actor.state.lock().await.notifications_suppressed = true;
+        {
+            let mut state = parent.actor.state.lock().await;
+            state.pending_inputs.clear();
+            state.running_task = None;
+            // Suppressed by the interrupt that ended the turn, which must not swallow the ping.
+            state.notifications_suppressed = true;
+        }
         parent.actor.emit_session_idle_if_idle().await;
         assert_eq!(parent.lifecycle.idles.get(), 1);
 
@@ -713,8 +726,7 @@ async fn a_long_assistant_message_is_clipped() {
                 .expect("a last message"),
         );
 
-        // Driven as a subagent because that branch of the gate's builder skips the work
-        // snapshot, which would need a live tool bridge to answer.
+        // This runs as a subagent because that branch of the gate's builder skips the work snapshot, which would need a live tool bridge to answer
         let sub = Harness::subagent().await;
         sub.actor.chat_state_handle.push_assistant_response(long());
         sub.start_turn("p1").await;
@@ -783,16 +795,79 @@ async fn teardown_runs_queued_reports_before_the_session_end_hooks() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn stale_completion_does_not_post_process_the_successor_turn() {
+    run(async {
+        let mut h = Harness::new().await;
+        let _old_response = h.queue_turn("same").await;
+        let stale_epoch = h.actor.turn_report.epoch();
+        assert!(h.cancel(CancelTrigger::CtrlC).await.turn_stopped);
+
+        let live_epoch = h.actor.turn_report.start_next_turn();
+        let (item, mut response_rx) = super::turn_completion_emit_tests::pending_input("same");
+        let handle = tokio::task::spawn_local(std::future::pending::<()>()).abort_handle();
+        {
+            let mut state = h.actor.state.lock().await;
+            state.pending_inputs.push_back(item);
+            state.running_task = Some(AgentTask::new_at_epoch("same", live_epoch, handle));
+        }
+        *h.actor
+            .current_prompt_id
+            .lock()
+            .expect("current_prompt_id mutex poisoned") = Some("same".into());
+        h.actor.pending_interjections.push(PendingInterjection {
+            text: "keep this with the successor".into(),
+            attachments: vec![],
+        });
+        let idles_before = h.lifecycle.idles.get();
+        let (command, _fired) = h.spawn_loop().await;
+        let (processed_tx, processed_rx) = tokio::sync::oneshot::channel();
+
+        command
+            .send(SessionCommand::InjectTurnCompletion {
+                prompt_id: "same".into(),
+                epoch: stale_epoch,
+                result: Box::new(crate::session::commands::ok_end_turn(0, None)),
+                elapsed_ms: Some(0),
+                processed: processed_tx,
+            })
+            .expect("the actor loop accepts the stale completion");
+        tokio::time::timeout(std::time::Duration::from_secs(5), processed_rx)
+            .await
+            .expect("the stale completion is processed")
+            .expect("the actor loop acknowledges the completion");
+        drop(command);
+
+        assert!(matches!(
+            response_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(!h.actor.pending_interjections.is_empty());
+        let state = h.actor.state.lock().await;
+        assert_eq!(state.pending_inputs.len(), 1);
+        let task = state
+            .running_task
+            .as_ref()
+            .expect("successor task remains installed");
+        assert_eq!((task.prompt_id.as_str(), task.epoch), ("same", live_epoch));
+        assert_eq!(h.lifecycle.idles.get(), idles_before);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn a_completion_arriving_after_its_cancel_reports_nothing() {
     run(async {
         let mut h = Harness::new().await;
         h.listen(&[HookEventName::StopCancelled]);
         let _p1 = h.queue_turn("p1").await;
+        let identity = completion_identity(&h.actor);
 
         let _ = h.cancel(CancelTrigger::CtrlC).await;
         h.actor
             .handle_completion(
                 "p1".into(),
+                TurnEpoch::default(),
+                &identity,
                 Ok(PromptTurnOk {
                     stop_reason: acp::StopReason::Cancelled,
                     total_tokens: 0,
@@ -811,6 +886,7 @@ async fn a_completion_arriving_after_its_cancel_reports_nothing() {
         h.drain_turn_ends().await;
 
         assert_eq!(h.fired(), ["stop_cancelled"], "one turn, one report");
+        assert!(!h.actor.state.lock().await.finalization_gate.is_active());
     })
     .await;
 }
@@ -836,6 +912,8 @@ async fn a_completion_reports_its_own_cancel_reason() {
         h.actor
             .handle_completion(
                 "p1".into(),
+                h.actor.turn_report.epoch(),
+                &completion_identity(&h.actor),
                 ok(PromptCompletionKind::MaxTurnsReached { limit: 1 }),
                 Some(0),
             )
@@ -846,6 +924,8 @@ async fn a_completion_reports_its_own_cancel_reason() {
         h.actor
             .handle_completion(
                 "p2".into(),
+                h.actor.turn_report.epoch(),
+                &completion_identity(&h.actor),
                 ok(PromptCompletionKind::Cancelled {
                     category: Some(
                         crate::session::events::CancellationCategory::PermissionRejected,
@@ -896,8 +976,8 @@ async fn a_flush_leaves_the_queue_open() {
         let mut h = Harness::new().await;
         h.listen(&[HookEventName::StopCancelled]);
         for prompt_id in ["p1", "p2"] {
-            h.start_turn(prompt_id).await;
             h.actor.turn_report.start_next_turn();
+            h.start_turn(prompt_id).await;
             let _ = h.cancel(CancelTrigger::CtrlC).await;
             h.queue.as_mut().expect("a live queue").flush().await;
         }

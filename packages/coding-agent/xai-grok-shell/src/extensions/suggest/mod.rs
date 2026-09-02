@@ -29,8 +29,7 @@ struct SuggestRequest {
     #[serde(default)]
     session_id: Option<String>,
     /// Deterministic Tab mode: run only the token providers (path/file).
-    /// A history/AI row would make the set mixed — killing the pager's
-    /// insta-accept/LCP semantics — and reparse history per keystroke.
+    /// A history/AI row would make the set mixed (killing the pager's insta-accept/LCP behavior) and reparse history per keystroke.
     #[serde(default)]
     token_only: bool,
 }
@@ -51,16 +50,12 @@ struct GhostSuggestion {
     source: String,
 }
 
-/// One completion row. Wire-compat contract (leader mode and the cloud
-/// bridge mix shell/pager versions):
-/// - `insert_text` is ALWAYS a safe whole-line replacement — range-unaware
-///   pagers `set_text` it, so it must never be a bare token.
-/// - `replace_range` + `token_text` are the additive token-in-place upgrade:
-///   byte offsets `[start, end)` into the request `text` and the text that
-///   replaces that span. Range-aware pagers use them as an ATOMIC pair —
-///   a range without `token_text` (history/AI whole-line rows, where
-///   `insert_text` doubles as the span replacement) degrades to the
-///   equivalent whole-line accept.
+/// One completion row. Wire-compat contract (leader mode and the cloud bridge mix shell/pager versions):
+/// - `insert_text` is ALWAYS a safe whole-line replacement: range-unaware pagers `set_text` it, so it must never be a bare token.
+/// - `replace_range` and `token_text` are the additive token-in-place upgrade:
+///   byte offsets `[start, end)` into the request `text` and the text that replaces that span.
+///   Range-aware pagers use them as an ATOMIC pair.
+///   A range without `token_text` (history/AI whole-line rows, `insert_text` doubles as the span replacement) degrades to the whole-line accept.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CompletionItem {
@@ -73,9 +68,8 @@ struct CompletionItem {
     replace_range: Option<(usize, usize)>,
     #[serde(skip_serializing_if = "Option::is_none")]
     token_text: Option<String>,
-    /// The provider capped its scan/result set: the row set may be
-    /// incomplete, so range-aware pagers keep dropdown-only semantics
-    /// (absent = `false` for older shells).
+    /// The provider capped its scan/result set: the row set may be incomplete, so range-aware pagers keep dropdown-only behavior.
+    /// Absent means `false` for older shells.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     truncated: bool,
 }
@@ -109,13 +103,11 @@ pub(crate) struct RankedSuggestion {
     pub(crate) source: SuggestionSource,
     pub(crate) priority: i32,
     pub(crate) is_ghost_candidate: bool,
-    /// Request-text byte range the completion targets (token for path/file,
-    /// whole line for history/AI); `None` keeps whole-line-only semantics.
+    /// Request-text byte range the completion targets (token for path/file, whole line for history/AI); `None` keeps whole-line-only behavior.
     pub(crate) replace_range: Option<(usize, usize)>,
     /// Replacement for `replace_range` when it differs from `insert_text`.
     pub(crate) token_text: Option<String>,
-    /// Provider capped its scan/results — a hidden row could disprove a
-    /// sole match or an LCP.
+    /// Provider capped its scan/results: a hidden row could disprove a sole match or an LCP.
     pub(crate) truncated: bool,
 }
 
@@ -153,18 +145,15 @@ impl From<RankedSuggestion> for CompletionItem {
     }
 }
 
-/// Mark whole-line suggestions (history/AI carry the full command as
-/// `insert_text`) as replacing the entire request text.
+/// Mark whole-line suggestions (history/AI carry the full command as `insert_text`) as replacing the entire request text.
 fn stamp_whole_line_range(results: &mut [RankedSuggestion], text_len: usize) {
     results
         .iter_mut()
         .for_each(|s| s.replace_range = Some((0, text_len)));
 }
 
-/// Convert token-valued suggestions (path/file build `insert_text` as the
-/// token replacing `range`) into the wire pair: the token moves to
-/// `token_text` and `insert_text` becomes the full line with the token
-/// spliced in — the shape range-unaware pagers can safely `set_text`.
+/// Convert token-valued suggestions (path/file build `insert_text` as the token replacing `range`) into the wire pair.
+/// The token moves to `token_text`; `insert_text` becomes the full line with the token spliced in, which range-unaware pagers can safely `set_text`.
 fn splice_token_into_line(results: &mut [RankedSuggestion], text: &str, range: (usize, usize)) {
     for s in results {
         let token = std::mem::take(&mut s.insert_text);
@@ -182,23 +171,16 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     }
 }
 
-/// Request/response for `x.ai/suggestPrompt` — predict the user's likely next
-/// prompt after a completed turn (tab-autocomplete ghost text).
+/// Request/response for `x.ai/suggestPrompt`: predict the user's likely next prompt after a completed turn (tab-autocomplete ghost text).
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SuggestPromptRequest {
-    /// Client-side generation counter, echoed back so stale responses can be
-    /// discarded (the client may have started a newer turn meanwhile).
+    /// Client-side generation counter, echoed back so stale responses can be discarded (the client may have started a newer turn meanwhile).
     generation: u64,
     #[serde(default)]
     session_id: Option<String>,
-    /// Client hint for the suggestion model (the pager sends its env
-    /// override, or `grok-4.6` when its catalog offers it). One tier
-    /// of the shell-side resolution in
-    /// `prompt_suggest::effective_suggest_model`: env > config.toml > remote
-    /// > this hint > `grok-4.6` default, catalog-guarded (a
-    /// non-sampleable effective model skips the request; the session model
-    /// is never used).
+    /// Optional model hint from the client.
+    /// One tier of the shell-side resolution in `prompt_suggest::effective_suggest_model`.
     #[serde(default)]
     model: Option<String>,
 }
@@ -210,12 +192,10 @@ struct SuggestPromptResponse {
     generation: u64,
 }
 
-/// Upper bound on the suggestion round-trip. Turn-end prediction is not
-/// latency-critical (the user is reading the agent's reply — the idle window
-/// after a turn is typically long), but a hung call must not pin the oneshot
-/// forever. Reasoning models (e.g. `grok-4.6`) can take ~30s on a cold
-/// cache; a late suggestion is still useful (the pager's generation guard
-/// and empty-prompt gating discard it if the user moved on).
+/// Upper bound on the suggestion round-trip.
+/// Turn-end prediction is not latency-critical: the user is reading the agent's reply, and the idle window after a turn is typically long.
+/// But a hung call must not pin the oneshot forever. Reasoning models (e.g. `grok-4.6`) can take ~30s on a cold cache.
+/// A late suggestion is still useful; the pager's generation guard and empty-prompt gating discard it if the user moved on.
 const SUGGEST_PROMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
 async fn handle_suggest_prompt(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
@@ -345,11 +325,9 @@ fn aggregate(
         .chain(file)
         .chain(ai)
         .collect();
-    // STABLE sort — load-bearing: providers pre-rank their items and ship
-    // them at one shared priority per response (the file provider's fuzzy
-    // tier/score/dirs-first order — see its `FILE_CMD_BOOST` doc), relying
-    // on equal-priority order surviving to the wire. Do not "optimize"
-    // into `sort_unstable_by`.
+    // The STABLE sort is load-bearing: providers pre-rank their items and ship them at one shared priority per response
+    // The file provider's fuzzy tier/score/dirs-first order (see its `FILE_CMD_BOOST` doc) relies on equal-priority order surviving to the wire
+    // Do not "optimize" into `sort_unstable_by`
     all.sort_by(|a, b| b.priority.cmp(&a.priority));
 
     let ghost = all.iter().find(|s| s.is_ghost_candidate).map(|s| {
@@ -530,7 +508,7 @@ mod tests {
             ranked(4, SuggestionSource::History, false, "b"),
             ranked(3, SuggestionSource::History, false, "c"),
         ];
-        // empty prefix + 3 matches: !prefix.is_empty() is false, len >= 3 is true → false AND true → false
+        // An empty prefix never skips AI, even with 3 matches
         assert!(!should_skip_ai(&m, ""));
     }
 
@@ -607,8 +585,7 @@ mod tests {
         assert!(results.iter().all(|s| s.token_text.is_none()));
     }
 
-    /// Token-valued suggestions become the wire pair: token in `token_text`,
-    /// `insert_text` rebuilt as the full line (safe for old pagers).
+    /// Token-valued suggestions become the wire pair: token in `token_text`, `insert_text` rebuilt as the full line (safe for old pagers).
     #[test]
     fn splice_token_into_line_builds_compat_pair() {
         let mut results = vec![ranked(0, SuggestionSource::Path, false, "grep")];
@@ -617,12 +594,11 @@ mod tests {
         assert_eq!(results[0].token_text.as_deref(), Some("grep"));
     }
 
-    /// Equal-priority items must keep their provider-internal order: the
-    /// file provider ships pre-ranked rows (fuzzy tier/score/dirs-first) at
-    /// ONE shared priority and its ranking reaches the wire only through
-    /// this sort's stability. Deliberately non-alphabetical, larger than
-    /// the small-slice insertion-sort threshold, and interleaved with a
-    /// second priority class so a `sort_unstable_by` swap turns this red.
+    /// Equal-priority items must keep their provider-internal order.
+    /// The file provider ships pre-ranked rows (fuzzy tier/score/dirs-first) at ONE shared priority.
+    /// Its ranking reaches the wire only through this sort's stability.
+    /// The input is deliberately non-alphabetical, above the small-slice insertion-sort threshold, and interleaved with a second priority class.
+    /// A `sort_unstable_by` swap therefore turns this test red.
     #[test]
     fn aggregate_preserves_provider_order_within_equal_priority() {
         let file: Vec<_> = (0..32)

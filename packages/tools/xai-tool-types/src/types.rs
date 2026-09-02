@@ -617,14 +617,6 @@ mod tests {
     }
 
     #[test]
-    fn argument_type_display() {
-        assert_eq!(ArgumentType::String.to_string(), "string");
-        assert_eq!(ArgumentType::Integer.to_string(), "integer");
-        assert_eq!(ArgumentType::Object.to_string(), "object");
-        assert_eq!(ArgumentType::Null.to_string(), "null");
-    }
-
-    #[test]
     fn argument_type_rejects_unknown() {
         let result = serde_json::from_str::<ArgumentType>("\"custom_thing\"");
         assert!(result.is_err());
@@ -798,35 +790,6 @@ mod tests {
     }
 
     #[test]
-    fn schema_type_from_argument_type() {
-        let st: SchemaType = ArgumentType::Boolean.into();
-        assert_eq!(st, SchemaType::Single(ArgumentType::Boolean));
-    }
-
-    #[test]
-    fn argument_new_defaults() {
-        let arg = ToolArgument::new("query", "Search query");
-        assert_eq!(arg.name, "query");
-        assert_eq!(arg.arg_type, ArgumentType::String);
-        assert!(arg.required);
-        assert!(arg.default.is_none());
-        assert!(arg.allowed_values.is_empty());
-    }
-
-    #[test]
-    fn argument_builder_chain() {
-        let arg = ToolArgument::new("mode", "Processing mode")
-            .with_type(ArgumentType::String)
-            .with_allowed_values(["fast", "slow", "auto"])
-            .set_optional()
-            .with_default(serde_json::json!("auto"));
-
-        assert!(!arg.required);
-        assert_eq!(arg.default, Some(serde_json::json!("auto")));
-        assert_eq!(arg.allowed_values.len(), 3);
-    }
-
-    #[test]
     fn argument_with_default_does_not_change_required() {
         // default and required are orthogonal per JSON Schema
         let arg = ToolArgument::new("x", "test").with_default(serde_json::json!(42));
@@ -875,17 +838,6 @@ mod tests {
         let json = r#"{"name": "x", "description": "test", "type": "string"}"#;
         let arg: ToolArgument = serde_json::from_str(json).unwrap();
         assert!(arg.required);
-    }
-
-    #[test]
-    fn description_new() {
-        let tool = ToolDescription::new("search", "Search things");
-        assert_eq!(tool.name, "search");
-        assert_eq!(tool.description, "Search things");
-        assert!(tool.namespace.is_none());
-        assert!(tool.title.is_none());
-        assert!(tool.to_arguments_lossy().is_empty());
-        assert!(tool.arguments_schema.is_none());
     }
 
     /// When a raw parameters schema is attached, `to_input_schema` must

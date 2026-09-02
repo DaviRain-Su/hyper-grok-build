@@ -1,30 +1,23 @@
 use crate::util::config::RemoteSettings;
 use toml::Value as TomlValue;
 
-/// Env override for the **auto** permission-mode feature gate.
 pub(crate) const ENV_AUTO_PERMISSION_MODE: &str = "GROK_AUTO_PERMISSION_MODE";
 
 const AUTO_MODE_CLASSIFY_TIMEOUT_MIN_MS: u64 = 1_000;
 const AUTO_MODE_CLASSIFY_TIMEOUT_DEFAULT_MS: u64 = 30_000;
 const AUTO_MODE_CLASSIFY_TIMEOUT_MAX_MS: u64 = 120_000;
 
-/// Crate-wide serialization lock for tests that mutate
-/// `GROK_AUTO_PERMISSION_MODE`. Every test reading the gate (here and in
-/// `permissions.rs`, compiled into the same test binary) locks this so a
-/// concurrent setter can't make them flaky.
+/// Crate-wide serialization lock for tests that mutate `GROK_AUTO_PERMISSION_MODE`.
+/// Every test reading the gate locks this so a concurrent setter can't make them flaky.
+/// That includes the tests in `permissions.rs`, which compile into the same test binary.
 #[cfg(test)]
 pub(crate) static AUTO_PERMISSION_MODE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Extract the `[auto_mode] enabled` gate from one TOML layer (the local opt-in
-/// that replaced `[features] auto_permission_mode`).
 fn auto_permission_mode_from_toml(v: Option<&TomlValue>) -> Option<bool> {
     v?.get("auto_mode")?.get("enabled")?.as_bool()
 }
 
-/// Coerce a present raw remote settings `auto_mode` JSON value into the shell's typed
-/// [`AutoModeConfig`]. Coercion is all-or-nothing: any malformed field (e.g. a
-/// bad `prompt_type` enum value) drops the WHOLE object to `None` (falls through
-/// to the gate default). A present-but-malformed payload is warned.
+/// Coercion is all-or-nothing: any malformed field (e.g. a bad `prompt_type` enum value) drops the WHOLE object to `None`.
 fn coerce_auto_mode_json(value: serde_json::Value) -> Option<crate::agent::config::AutoModeConfig> {
     match serde_json::from_value(value) {
         Ok(cfg) => Some(cfg),
@@ -35,25 +28,18 @@ fn coerce_auto_mode_json(value: serde_json::Value) -> Option<crate::agent::confi
     }
 }
 
-/// Coerce the raw remote settings `auto_mode` JSON on `RemoteSettings` (absent ⇒
-/// `None`, silently; present-but-malformed ⇒ `None`, warned).
 fn coerce_remote_auto_mode(
     remote: Option<&RemoteSettings>,
 ) -> Option<crate::agent::config::AutoModeConfig> {
     coerce_auto_mode_json(remote?.auto_mode.clone()?)
 }
 
-/// Coerce a `RemoteSettings`' raw `auto_mode` JSON down to just the gate
-/// `enabled` bool, for the shell→pager `SettingsUpdateNotification` (the pager
-/// only needs the kill-switch, not the full config).
+/// The shell-to-pager `SettingsUpdateNotification` carries only the gate `enabled` bool, not the full config.
 pub(crate) fn remote_auto_mode_enabled(remote: Option<&RemoteSettings>) -> Option<bool> {
     coerce_remote_auto_mode(remote).and_then(|c| c.enabled)
 }
 
-/// Pure precedence core for the auto-permission-mode gate, shared by the
-/// `RemoteSettings`-typed resolver and the free-function disk reader so the
-/// two can't drift. Precedence: requirement > env (`GROK_AUTO_PERMISSION_MODE`)
-/// > config > managed > remote feature-flag > default (`true`).
+/// Pure precedence core for the auto-permission-mode gate, shared by the `RemoteSettings`-typed resolver and the free-function disk reader.
 fn resolve_auto_permission_mode_layers(
     requirement: Option<bool>,
     config: Option<bool>,
@@ -70,16 +56,9 @@ fn resolve_auto_permission_mode_layers(
         .resolve()
 }
 
-/// Resolve whether the **auto** permission mode feature (`PermissionMode::Auto`,
-/// the LLM/heuristic classifier) is enabled. Full chain mirroring
-/// [`resolve_zdr_access_enabled`](super::resolve_zdr_access_enabled):
-///
-/// requirements > env (`GROK_AUTO_PERMISSION_MODE`) > `[auto_mode] enabled` in
-/// `config.toml` > managed > remote settings (`auto_mode.enabled`, coerced
-/// from the raw JSON) > default (`true`).
-///
-/// Default ON: Auto is offered unless a higher layer pins it off. Returns
-/// [`Resolved`] so callers can log the winning source.
+/// Resolve whether the **auto** permission mode feature (`PermissionMode::Auto`, the LLM/heuristic classifier) is enabled.
+/// Full chain mirroring [`resolve_zdr_access_enabled`](super::resolve_zdr_access_enabled):
+/// requirements > env (`GROK_AUTO_PERMISSION_MODE`) > `[auto_mode] enabled` > managed > remote `auto_mode.enabled` > default (`true`).
 pub fn resolve_auto_permission_mode_enabled(
     requirements: Option<&TomlValue>,
     user: Option<&TomlValue>,
@@ -94,15 +73,12 @@ pub fn resolve_auto_permission_mode_enabled(
     )
 }
 
-/// Single source of truth for the remote settings `auto_mode` config at free-function
-/// call sites that don't hold a live `RemoteSettings` (gate launch decision,
-/// pager kill-switch, classifier wiring). Coerced once on cache; the gate reads
-/// `.enabled` off it. Lock poisoning is treated fail-safe (`.read().ok()` etc.).
+/// Single source of truth for the remote settings `auto_mode` config at free-function call sites that don't hold a live `RemoteSettings`.
+/// Those sites are the gate launch decision, the pager kill-switch, and the classifier wiring.
 static REMOTE_AUTO_MODE_CONFIG: std::sync::RwLock<Option<crate::agent::config::AutoModeConfig>> =
     std::sync::RwLock::new(None);
 
-/// Record the full remote settings `auto_mode` JSON (coerced once) for the
-/// free-function resolvers. Call wherever `RemoteSettings` is applied.
+/// Call wherever `RemoteSettings` is applied.
 pub fn cache_remote_auto_mode(value: Option<serde_json::Value>) {
     let coerced = value.and_then(coerce_auto_mode_json);
     if let Ok(mut guard) = REMOTE_AUTO_MODE_CONFIG.write() {
@@ -110,9 +86,7 @@ pub fn cache_remote_auto_mode(value: Option<serde_json::Value>) {
     }
 }
 
-/// Update ONLY the gate `enabled` in the cached remote config (the pager
-/// kill-switch path carries just the bool). Seeds a default config first so
-/// `prompt_type`/`classifier_model`/`reasoning_effort` are not clobbered.
+/// Update ONLY the gate `enabled` in the cached remote config (the pager kill-switch path carries just the bool).
 pub fn cache_remote_auto_permission_mode_enabled(value: Option<bool>) {
     if let Ok(mut guard) = REMOTE_AUTO_MODE_CONFIG.write() {
         guard.get_or_insert_with(Default::default).enabled = value;
@@ -126,9 +100,7 @@ fn cached_remote_auto_permission_mode_enabled() -> Option<bool> {
         .and_then(|g| g.as_ref().and_then(|c| c.enabled))
 }
 
-/// Deserialize the `[auto_mode]` table from one effective-config TOML layer into
-/// the typed [`AutoModeConfig`]. A malformed table is dropped to `None` (warned,
-/// not silently swallowed, so a bad local `[auto_mode]` is visible in logs).
+/// One malformed field drops the whole table to `None` (warned).
 fn auto_mode_config_from_toml(
     v: Option<&TomlValue>,
 ) -> Option<crate::agent::config::AutoModeConfig> {
@@ -188,8 +160,6 @@ pub fn auto_permission_mode_enabled_from_disk() -> bool {
     )
 }
 
-/// Field-wise merge of the two Auto-mode config tiers (config wins, remote fills
-/// gaps, default otherwise). Pure so the precedence is unit-testable.
 fn merge_auto_mode_config(
     config: crate::agent::config::AutoModeConfig,
     remote: crate::agent::config::AutoModeConfig,
@@ -239,14 +209,9 @@ pub(crate) fn auto_mode_classify_timeout(
     std::time::Duration::from_millis(bounded)
 }
 
-/// Apply the built-in Auto-mode classifier defaults to a resolved config (these
-/// take effect once auto mode is enabled): an unset `prompt_type` defaults to
-/// `full` (v9-traffic eval: transcript context cuts the residual block rate
-/// ~1/3 and lets explicit user authorization satisfy the prompt's
-/// confirmation clause); an unset `reasoning_effort` defaults to `low` ONLY
-/// when the effective model supports reasoning effort (else stays `None` —
-/// provider default). Explicit config/remote values always win. Returns the
-/// `(prompt_type, reasoning_effort)` the classifier wiring should use.
+/// An unset `prompt_type` defaults to `full`: transcript context cuts the residual block rate ~1/3.
+/// It also lets explicit user authorization satisfy the prompt's confirmation clause.
+/// An unset `reasoning_effort` defaults to `low` only on models that support it; `None` keeps the provider default.
 pub(crate) fn auto_mode_classifier_defaults(
     cfg: &crate::agent::config::AutoModeConfig,
     effective_supports_reasoning_effort: bool,
@@ -268,9 +233,8 @@ mod auto_permission_mode_gate_tests {
     use super::*;
     use crate::agent::config::ConfigSource;
 
-    // `GROK_AUTO_PERMISSION_MODE` is process-global; serialize every test that
-    // reads it (all of them, via `BoolFlag::env`) and force it unset at the top
-    // of each so a developer's shell value can't make these flaky.
+    // `GROK_AUTO_PERMISSION_MODE` is process-global; serialize every test that reads it (all of them, via `BoolFlag::env`)
+    // Force it unset at the top of each so a developer's shell value can't make these flaky
     fn guard() -> std::sync::MutexGuard<'static, ()> {
         let g = super::AUTO_PERMISSION_MODE_ENV_LOCK
             .lock()
@@ -323,11 +287,11 @@ mod auto_permission_mode_gate_tests {
     #[test]
     fn remote_kill_switch_reads_struct_field() {
         let _g = guard();
-        // Server explicitly disables → false from the Remote layer.
+        // Server explicitly disables, so the Remote layer yields false
         let r = resolve_auto_permission_mode_enabled(None, None, None, Some(&remote(Some(false))));
         assert!(!r.value);
         assert_eq!(r.source, ConfigSource::Remote);
-        // Absent remote field → falls through to Default ON.
+        // An absent remote field falls through to Default ON
         let r = resolve_auto_permission_mode_enabled(None, None, None, Some(&remote(None)));
         assert!(r.value);
         assert_eq!(r.source, ConfigSource::Default);
@@ -348,7 +312,7 @@ mod auto_permission_mode_gate_tests {
         let r = resolve_auto_permission_mode_enabled(None, None, None, Some(&remote));
         assert!(r.value);
         assert_eq!(r.source, ConfigSource::Remote);
-        // A non-object / malformed payload coerces to None → falls through to Default ON.
+        // A non-object / malformed payload coerces to None and falls through to Default ON
         let bad = RemoteSettings {
             auto_mode: Some(serde_json::json!("not-an-object")),
             ..RemoteSettings::default()
@@ -361,8 +325,7 @@ mod auto_permission_mode_gate_tests {
     #[test]
     fn remote_gate_malformed_field_falls_through_to_default() {
         let _g = guard();
-        // A malformed field (bad `prompt_type` enum) drops the WHOLE object →
-        // falls through to Default ON.
+        // A malformed field (bad `prompt_type` enum) drops the WHOLE object, which falls through to Default ON
         let bad = RemoteSettings {
             auto_mode: Some(serde_json::json!({ "enabled": true, "prompt_type": "typo" })),
             ..RemoteSettings::default()
@@ -518,7 +481,7 @@ mod auto_permission_mode_gate_tests {
             },
         );
         assert_eq!(remote_timeout.classify_timeout_ms, Some(60_000));
-        // Both unset ⇒ all-None (the wire fn then applies the built-in defaults).
+        // Both unset yields all-None (the wire fn then applies the built-in defaults)
         let empty = merge_auto_mode_config(AutoModeConfig::default(), AutoModeConfig::default());
         assert_eq!(empty.enabled, None);
         assert_eq!(empty.prompt_type, None);
@@ -564,15 +527,15 @@ mod auto_permission_mode_gate_tests {
         use crate::agent::config::AutoModeConfig;
         use xai_grok_sampling_types::ReasoningEffort;
         use xai_grok_workspace::permission::ClassifierPromptType;
-        // Unset + RE-supporting effective model ⇒ full (transcript) + low.
+        // With config unset and an effective model that supports reasoning effort, the defaults are full (transcript) and low
         let (pt, eff) = auto_mode_classifier_defaults(&AutoModeConfig::default(), true);
         assert_eq!(pt, ClassifierPromptType::Full);
         assert_eq!(eff, Some(ReasoningEffort::Low));
-        // Unset + non-RE model ⇒ full + None (no effort override).
+        // With config unset and a model without reasoning-effort support, the defaults are full and None (no effort override)
         let (pt, eff) = auto_mode_classifier_defaults(&AutoModeConfig::default(), false);
         assert_eq!(pt, ClassifierPromptType::Full);
         assert_eq!(eff, None);
-        // Explicit values win over the defaults, even on a RE-supporting model.
+        // Explicit values win over the defaults, even on a model that supports reasoning effort
         let cfg = AutoModeConfig {
             prompt_type: Some(ClassifierPromptType::JustCommand),
             reasoning_effort: Some(ReasoningEffort::High),
@@ -596,10 +559,10 @@ mod auto_permission_mode_gate_tests {
         assert_eq!(cfg.prompt_type, Some(ClassifierPromptType::JustCommand));
         assert_eq!(cfg.classifier_model.as_deref(), Some("m"));
         assert_eq!(cfg.classify_timeout_ms, Some(45_000));
-        // Absent [auto_mode] ⇒ None.
+        // Absent [auto_mode] yields None
         let bare: TomlValue = toml::from_str("[features]\ngoal = true\n").unwrap();
         assert!(auto_mode_config_from_toml(Some(&bare)).is_none());
-        // Malformed enum ⇒ dropped to None (warned), never a panic.
+        // A malformed enum is dropped to None (warned), never a panic
         let bad: TomlValue = toml::from_str("[auto_mode]\nprompt_type = \"bogus\"\n").unwrap();
         assert!(auto_mode_config_from_toml(Some(&bad)).is_none());
     }
@@ -608,8 +571,7 @@ mod auto_permission_mode_gate_tests {
     fn remote_cache_single_store_killswitch_preserves_fields() {
         use xai_grok_workspace::permission::ClassifierPromptType;
         let _g = guard();
-        // Seed the full remote config, then flip ONLY the gate via the pager
-        // kill-switch path — classifier fields must survive.
+        // Seed the full remote config, then flip ONLY the gate via the pager kill-switch path; classifier fields must survive
         cache_remote_auto_mode(Some(serde_json::json!({
             "enabled": true,
             "prompt_type": "bare_instructions",

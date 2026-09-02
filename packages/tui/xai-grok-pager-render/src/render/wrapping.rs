@@ -1,7 +1,4 @@
-//! Text wrapping utilities with style preservation.
-//!
-//! Provides word-aware wrapping that preserves styled spans
-//! and tracks soft vs hard line breaks (via joiners).
+//! Provides word-aware wrapping that preserves styled spans and tracks soft vs hard line breaks (via joiners).
 
 use ratatui::text::{Line, Span};
 use std::borrow::Cow;
@@ -42,19 +39,10 @@ pub struct HighlightSegment {
     pub col_end: usize,
 }
 
-/// Map a byte range in `text` to one or more `(row, col_start, col_end)`
-/// segments, given the byte ranges per wrapped row.
+/// Map `match_range` (a byte range in the flat `text`) to `(row, col_start, col_end)` segments, one per wrapped row the match overlaps.
 ///
-/// `text`        — the original flat text (needed for display-width conversion).
-/// `wrap_ranges` — byte ranges per wrapped row (from `wrap_ranges_trim`).
-/// `match_range` — the byte range of the match in the flat text.
-///
-/// `col_start` and `col_end` in the returned segments are **display columns**,
-/// not byte offsets.  This correctly handles multi-byte characters (e.g. em dash
-/// `—` is 3 bytes but 1 display column).
-///
-/// Returns segments for each wrapped row that the match overlaps.
-/// Empty if the match doesn't overlap any row.
+/// `wrap_ranges` holds the byte ranges per wrapped row, from [`wrap_ranges_trim`].
+/// `col_start` and `col_end` are **display columns**, not byte offsets: an em dash `—` is 3 bytes but 1 display column.
 pub fn byte_range_to_row_cols(
     text: &str,
     wrap_ranges: &[Range<usize>],
@@ -81,9 +69,6 @@ pub fn byte_range_to_row_cols(
 }
 
 /// Convert a byte offset within `text` to the corresponding display column.
-///
-/// Iterates characters from the start, summing their `UnicodeWidthChar` display
-/// widths until the cumulative byte count reaches `byte_offset`.
 pub(crate) fn byte_offset_to_display_col(text: &str, byte_offset: usize) -> usize {
     let mut col = 0usize;
     let mut bytes = 0usize;
@@ -97,33 +82,25 @@ pub(crate) fn byte_offset_to_display_col(text: &str, byte_offset: usize) -> usiz
     col
 }
 
-/// Compute byte ranges per wrapped row using the same wrapping options
-/// as [`word_wrap_line_with_joiners`].
+/// Compute byte ranges per wrapped row using the same wrapping options as [`word_wrap_line_with_joiners`].
 ///
-/// Uses `FirstFit` algorithm and `break_words(true)` to match
-/// [`RtOptions`] defaults — the critical invariant is that the wrap
-/// breakpoints here match the visual rendering exactly.
+/// Uses `FirstFit` algorithm and `break_words(true)` to match [`RtOptions`] defaults.
+/// The critical invariant is that the wrap breakpoints here match the visual rendering exactly.
 ///
-/// `text` is the flattened plain text (must match `search_text()` for
-/// correct highlight mapping).
+/// `text` is the flattened plain text (must match `search_text()` for correct highlight mapping).
 ///
-/// NOTE: This uses a single-pass `textwrap::wrap` rather than mirroring
-/// the two-stage (first-line + remainder) logic of `word_wrap_line_with_joiners`.
-/// With `FirstFit` (greedy), single-pass produces identical breakpoints
-/// because each line's break depends only on text from the current position
-/// forward. If a future change to the wrapping pipeline breaks this
-/// invariant, consider switching to a two-stage approach that mirrors
-/// `word_wrap_line_with_joiners` exactly.
-#[allow(clippy::single_range_in_vec_init)] // intentional: single range = full text, no wrapping
+/// NOTE: This uses a single-pass `textwrap::wrap` rather than mirroring the two-stage (first-line plus remainder) logic of `word_wrap_line_with_joiners`.
+/// With `FirstFit` (greedy), single-pass produces identical breakpoints because each line's break depends only on text from the current position forward.
+/// If a future change to the wrapping pipeline breaks this invariant, consider switching to a two-stage approach that mirrors `word_wrap_line_with_joiners` exactly.
+#[allow(clippy::single_range_in_vec_init)] // Intentional: the single range is the full text, no wrapping
 pub fn wrap_byte_ranges_matching(text: &str, width: usize) -> Vec<Range<usize>> {
     if width == 0 || text.is_empty() {
         return vec![0..text.len()];
     }
 
     // Must match the Options used by word_wrap_line_with_joiners (via RtOptions).
-    // Blockquote lines get a subsequent_indent equal to the prefix, which
-    // reduces the effective width for continuation lines. Mirror that here
-    // so search-highlight breakpoints stay in sync with the visual rendering.
+    // Blockquote lines get a subsequent_indent equal to the prefix, which reduces the effective width for continuation lines
+    // Mirror that here so search-highlight breakpoints stay in sync with the visual rendering
     let bq_len = blockquote_prefix_len(text);
     let subsequent_width = if bq_len > 0 && bq_len < text.len() {
         let prefix_display_width = text[..bq_len]
@@ -171,19 +148,14 @@ pub fn wrap_byte_ranges_matching(text: &str, width: usize) -> Vec<Range<usize>> 
 pub struct RtOptions<'a> {
     /// The width in columns at which the text will be wrapped.
     pub width: usize,
-    /// Line ending used for breaking lines.
     pub line_ending: textwrap::LineEnding,
-    /// Indentation used for the first line of output.
     pub initial_indent: Line<'a>,
-    /// Indentation used for subsequent lines of output.
     pub subsequent_indent: Line<'a>,
     /// Allow long words to be broken if they cannot fit on a line.
     pub break_words: bool,
-    /// Wrapping algorithm to use.
     pub wrap_algorithm: textwrap::WrapAlgorithm,
     /// The line breaking algorithm to use.
     pub word_separator: textwrap::WordSeparator,
-    /// The method for splitting words.
     pub word_splitter: textwrap::WordSplitter,
 }
 
@@ -311,27 +283,24 @@ fn build_wrapped_line_from_range<'a>(
 
 /// Check if a line is a table line (box-drawing border or content row).
 ///
-/// Table lines start with box-drawing characters and should never be word-wrapped,
-/// as wrapping destroys column alignment. Instead, they are passed through as-is
-/// and clipped by the terminal at the edge.
+/// Table lines start with box-drawing characters and should never be word-wrapped, as wrapping destroys column alignment.
+/// Instead, they are passed through as-is and clipped by the terminal at the edge.
 ///
-/// Blockquote lines also start with `│` (U+2502) but should NOT be treated as
-/// table lines — they need word wrapping with the prefix repeated on continuation
-/// lines.  The distinction: table content rows have interior `│` cell separators
-/// (e.g. `│ cell1 │ cell2 │`), while blockquote lines have `│` only in the
-/// leading prefix (e.g. `│ text` or `│ │ nested text`).
+/// Blockquote lines also start with `│` (U+2502) but should NOT be treated as table lines.
+/// They need word wrapping with the prefix repeated on continuation lines.
+/// The distinction: table content rows have interior `│` cell separators (e.g. `│ cell1 │ cell2 │`).
+/// Blockquote lines have `│` only in the leading prefix (e.g. `│ text` or `│ │ nested text`).
 fn is_table_line(line: &Line<'_>) -> bool {
     let mut chars = line.spans.iter().flat_map(|s| s.content.chars());
     match chars.next() {
-        // Box-drawing border characters (horizontal lines, corners, junctions)
-        // — these are unambiguously table borders, never blockquote prefixes.
+        // Box-drawing border characters (horizontal lines, corners, junctions): these are unambiguously table borders, never blockquote prefixes
         Some(ch)
             if ('\u{2500}'..='\u{257F}').contains(&ch) && ch != '\u{2502}' && ch != '\u{2503}' =>
         {
             true
         }
-        // │ (U+2502) at line start: table content row only if │ appears after
-        // the leading prefix region (blockquote prefixes are only │ and spaces).
+        // │ (U+2502) at line start is a table content row only if │ appears after the leading prefix region
+        // Blockquote prefixes are only │ and spaces
         Some('\u{2502}') => {
             let mut in_prefix = true;
             for ch in chars {
@@ -353,14 +322,11 @@ fn is_table_line(line: &Line<'_>) -> bool {
 
 /// Byte length of the blockquote prefix at the start of `flat`.
 ///
-/// A blockquote prefix is one or more `│ ` (U+2502 + space) sequences,
-/// e.g. `│ ` for a single-level quote or `│ │ ` for a nested quote.
+/// A blockquote prefix is one or more `│ ` (U+2502 followed by a space) sequences, e.g. `│ ` for a single-level quote or `│ │ ` for a nested quote.
 /// Returns 0 if the text does not start with a blockquote prefix.
 ///
-/// The selection layer's stricter, style-aware twin lives in xai-grok-pager
-/// scrollback/blocks/quote_bar.rs (`rendered_quote_prefix_len`); it relies on
-/// this wrap layer re-injecting the prefix spans (with their styles) on
-/// continuation rows, so keep the two shapes in agreement.
+/// The selection layer's stricter, style-aware twin lives in xai-grok-pager scrollback/blocks/quote_bar.rs (`rendered_quote_prefix_len`).
+/// It relies on this wrap layer re-injecting the prefix spans (with their styles) on continuation rows, so keep the two shapes in agreement.
 fn blockquote_prefix_len(flat: &str) -> usize {
     const BAR_BYTES: usize = '\u{2502}'.len_utf8(); // 3
     let mut len = 0;
@@ -375,12 +341,10 @@ fn blockquote_prefix_len(flat: &str) -> usize {
     len
 }
 
-/// Wrap a single line and also return, for each output line, the string that should be inserted
-/// when joining it to the previous output line as a *soft wrap*.
+/// Wrap a single line and also return, for each output line, the string to insert when joining it to the previous output line as a *soft wrap*.
 ///
 /// - The first output line always has `None`.
-/// - Continuation lines have `Some(joiner)` where `joiner` is the exact substring (often spaces,
-///   possibly empty) that was skipped at the wrap boundary.
+/// - Continuation lines have `Some(joiner)` where `joiner` is the exact substring (often spaces, possibly empty) skipped at the wrap boundary.
 pub fn word_wrap_line_with_joiners<'a, O>(
     line: &'a Line<'a>,
     width_or_options: O,
@@ -391,9 +355,9 @@ where
     let mut rt_opts: RtOptions<'a> = width_or_options.into();
 
     // Table lines must never be word-wrapped (it destroys column alignment).
-    // Clip+pad each row to the content width so it owns every column; trusting
-    // the terminal to clip at the edge desyncs by a column on glyphs it renders
-    // wider than measured, stranding a "ghost" cell past the trailing border.
+    // Clip and pad each row to the content width so it owns every column
+    // Trusting the terminal to clip at the edge desyncs by a column on glyphs it renders wider than measured
+    // That strands a "ghost" cell past the trailing border
     if is_table_line(line) {
         let fitted = fit_line_to_width(line.clone(), rt_opts.width);
         return (vec![fitted], vec![None]);
@@ -401,8 +365,8 @@ where
 
     let (flat, span_bounds) = flatten_line_and_bounds(line);
 
-    // Blockquote lines start with │ (U+2502) prefix(es).  Set subsequent_indent
-    // to the prefix so continuation lines repeat the quote marker.
+    // Blockquote lines start with │ (U+2502) prefix(es)
+    // Set subsequent_indent to the prefix so continuation lines repeat the quote marker
     // Skip if the caller already set a subsequent_indent (caller intent wins).
     let bq_len = blockquote_prefix_len(&flat);
     if bq_len > 0 && bq_len < flat.len() && rt_opts.subsequent_indent.width() == 0 {
@@ -432,10 +396,8 @@ where
         return (out, joiners);
     };
 
-    // Shared monotonic cursor into `span_bounds`: rows are emitted in
-    // increasing byte order, so each row resumes the span scan where the
-    // previous one stopped instead of rescanning from 0 (see
-    // `slice_line_spans`). This is what keeps wrapping one huge line linear.
+    // Rows are emitted in increasing byte order, so each row resumes the span scan where the previous one stopped instead of rescanning from 0
+    // This shared cursor (see `slice_line_spans`) is what keeps wrapping one huge line linear
     let mut span_cursor = 0usize;
 
     let first_line = build_wrapped_line_from_range(
@@ -489,8 +451,8 @@ where
     (out, joiners)
 }
 
-/// Wrap a sequence of lines, applying the initial indent only to the very first
-/// output line, and using the subsequent indent for all later wrapped pieces.
+/// Wrap a sequence of lines, applying the initial indent only to the very first output line.
+/// All later wrapped pieces use the subsequent indent.
 #[allow(private_bounds)]
 pub fn word_wrap_lines<'a, I, O, L>(lines: I, width_or_options: O) -> Vec<Line<'static>>
 where
@@ -623,24 +585,19 @@ impl<'a> IntoLineInput<'a> for Vec<Span<'a>> {
     }
 }
 
-/// Slice the spans of `original` down to byte `range`, using `cursor` as a
-/// monotonic hint of the first span that may still be relevant.
+/// Slice the spans of `original` down to byte `range`, using `cursor` as a monotonic hint of the first span that may still be relevant.
 ///
-/// `span_bounds` are contiguous, sorted, non-overlapping byte ranges (one per
-/// span in `original`, from [`flatten_line_and_bounds`]). A line is wrapped
-/// top-to-bottom, so successive `range`s have non-decreasing `start`; that lets
-/// `cursor` advance permanently past spans that end before the current row
-/// instead of rescanning from index 0 on every row.
+/// `span_bounds` are contiguous, sorted, non-overlapping byte ranges (one per span in `original`, from [`flatten_line_and_bounds`]).
+/// A line is wrapped top-to-bottom, so successive `range`s have non-decreasing `start`.
+/// That lets `cursor` advance permanently past spans that end before the current row instead of rescanning from index 0 on every row.
 ///
-/// Without the cursor this is O(rows × spans): each of the R wrapped rows
-/// rescans all S spans — quadratic on one huge line (e.g. a long streamed
-/// reasoning paragraph flattened to thousands of styled spans, the pathology
-/// behind the 100%-CPU render-thread spin). With it, wrapping a line is
-/// O(rows + spans).
+/// Without the cursor this is O(rows × spans): each of the R wrapped rows rescans all S spans.
+/// That is quadratic on one huge line, e.g. a long streamed reasoning paragraph flattened to thousands of styled spans.
+/// That was the pathology behind the 100%-CPU render-thread spin.
+/// With the cursor, wrapping a line is O(rows + spans).
 ///
-/// `cursor` must start at `0` (or any index ≤ the first relevant span) and be
-/// reused across the row sequence for one line. Issuing a `range` that starts
-/// before a previous one is unsupported — the cursor does not rewind.
+/// `cursor` must start at `0` (or any index at or before the first relevant span) and be reused across the row sequence for one line.
+/// Issuing a `range` that starts before a previous one is unsupported: the cursor does not rewind.
 fn slice_line_spans<'a>(
     original: &'a Line<'a>,
     span_bounds: &[(Range<usize>, ratatui::style::Style)],
@@ -650,9 +607,8 @@ fn slice_line_spans<'a>(
     let start_byte = range.start;
     let end_byte = range.end;
 
-    // Spans ending at/before this row's start are done for every later row too
-    // (ranges are contiguous and queries monotonic), so advance the shared
-    // cursor past them once and never revisit them.
+    // Spans ending at or before this row's start are done for every later row too (ranges are contiguous and queries monotonic)
+    // So advance the shared cursor past them once and never revisit them
     while span_bounds
         .get(*cursor)
         .is_some_and(|(r, _)| r.end <= start_byte)
@@ -692,8 +648,7 @@ fn slice_line_spans<'a>(
 
 /// Word-wrap a header line with hanging indent.
 ///
-/// First span stays on line 1; remaining content wraps with
-/// `extra_indent + prefix_width` hanging indent on continuation lines.
+/// The first span stays on line 1; remaining content wraps with `extra_indent + prefix_width` hanging indent on continuation lines.
 pub fn wrap_header_hanging(
     header: Line<'static>,
     width: usize,
@@ -731,9 +686,8 @@ pub fn wrap_header_hanging(
 
 /// Word-wrap a header line with continuation lines indented to `indent`.
 ///
-/// Unlike `wrap_header_hanging` (which indents under the content after the
-/// prefix), this indents continuation lines to a fixed column — typically
-/// the bullet width, so wrapped text aligns with the start of the header.
+/// Unlike `wrap_header_hanging` (which indents under the content after the prefix), this indents continuation lines to a fixed column.
+/// Typically that column is the bullet width, so wrapped text aligns with the start of the header.
 pub fn wrap_header_flush(header: Line<'static>, width: usize, indent: usize) -> Vec<Line<'static>> {
     let wrap_width = width.saturating_sub(indent);
     let mut wrapped = word_wrap_lines(std::iter::once(header), wrap_width);
@@ -784,7 +738,7 @@ mod tests {
         let line = Line::from(vec!["hello ".red(), "world".into()]);
         let out = word_wrap_line(&line, 6);
         assert_eq!(out.len(), 2);
-        // First line should carry the red style
+        // First line carries the red style
         assert_eq!(concat_line(&out[0]), "hello");
         assert_eq!(out[0].spans.len(), 1);
         assert_eq!(out[0].spans[0].style.fg, Some(Color::Red));
@@ -881,7 +835,6 @@ mod tests {
 
             // Dump span details for debugging.
             for (i, wline) in wrapped.iter().enumerate() {
-                // Check Line-level style
                 if !wline.style.add_modifier.is_empty() {
                     panic!(
                         "width={width}: wrapped line {i} has Line-level modifier {:?}",
@@ -914,11 +867,9 @@ mod tests {
             .subsequent_indent(Line::from("  "));
         let line = Line::from("hello world foo");
         let out = word_wrap_line(&line, opts);
-        // Expect three lines with proper prefixes
         assert!(concat_line(&out[0]).starts_with("- "));
         assert!(concat_line(&out[1]).starts_with("  "));
         assert!(concat_line(&out[2]).starts_with("  "));
-        // And content roughly segmented
         assert_eq!(concat_line(&out[0]), "- hello");
         assert_eq!(concat_line(&out[1]), "  world");
         assert_eq!(concat_line(&out[2]), "  foo");
@@ -1050,10 +1001,9 @@ mod tests {
         assert_eq!(concat_line(&out[1]), "cd");
     }
 
-    /// The monotonic `cursor` fast path must produce byte-for-byte the same
-    /// slices as a naive rescan-from-0 for the increasing, non-overlapping
-    /// (sometimes gapped) ranges that wrapping issues. This is the correctness
-    /// guard for the O(rows×spans) → O(rows+spans) optimization.
+    /// The monotonic `cursor` fast path must produce byte-for-byte the same slices as a naive rescan-from-0.
+    /// The ranges walked are increasing and non-overlapping, sometimes gapped, exactly what wrapping issues.
+    /// This is the correctness guard for the O(rows×spans) to O(rows+spans) optimization.
     #[test]
     fn slice_line_spans_cursor_matches_naive_over_monotonic_ranges() {
         use ratatui::style::{Color, Style};
@@ -1099,8 +1049,7 @@ mod tests {
             out
         }
 
-        // Walk increasing, non-overlapping ranges — some adjacent, some gapped —
-        // reusing one cursor, exactly the access pattern wrapping produces.
+        // Walk increasing, non-overlapping ranges (some adjacent, some gapped) reusing one cursor, exactly the access pattern wrapping produces
         let mut cursor = 0usize;
         let mut pos = 0usize;
         let mut step = 7usize;
@@ -1127,10 +1076,8 @@ mod tests {
         }
     }
 
-    /// End-to-end guard that the cursor is threaded correctly through
-    /// `word_wrap_line_with_joiners`: a line with hundreds of styled spans
-    /// wrapped into many rows must preserve every word, in order, with its
-    /// original colour.
+    /// End-to-end guard that the cursor is threaded correctly through `word_wrap_line_with_joiners`.
+    /// A line with hundreds of styled spans wrapped into many rows must preserve every word, in order, with its original colour.
     #[test]
     fn many_spans_many_rows_wrap_preserves_text_and_style() {
         use ratatui::style::{Color, Style};
@@ -1153,9 +1100,9 @@ mod tests {
             out.len()
         );
 
-        // Every word survives in order. Soft-wrap trims the boundary space per
-        // row (it lives in the joiner), so split each row then flatten —
-        // concatenating row texts directly would fuse the boundary words.
+        // Every word survives in order
+        // Soft-wrap trims the boundary space per row (it lives in the joiner), so split each row then flatten
+        // Concatenating row texts directly would fuse the boundary words
         let got_words: Vec<String> = out
             .iter()
             .flat_map(|l| {
@@ -1210,7 +1157,7 @@ mod tests {
         // Text wraps at column 10:
         //   Row 0: bytes 0..10  "hello worl"
         //   Row 1: bytes 10..15 "d end"
-        // Match "world" = bytes 6..11, spans rows 0 and 1.
+        // Match "world" (bytes 6..11) spans rows 0 and 1
         let text = "hello world end";
         let ranges = vec![0..10, 10..15];
         let segments = byte_range_to_row_cols(text, &ranges, 6..11);
@@ -1237,7 +1184,7 @@ mod tests {
         let text = "0123456789abcdefghij";
         let ranges = vec![0..10, 10..20];
         let segments = byte_range_to_row_cols(text, &ranges, 5..10);
-        // Should only be on row 0 (end is exclusive, so byte 10 is not included).
+        // Only row 0: the end is exclusive, so byte 10 is not included
         assert_eq!(
             segments,
             vec![HighlightSegment {
@@ -1306,9 +1253,9 @@ mod tests {
         // Byte layout: a(1) b(1) —(3) c(1) d(1) = 7 bytes total.
         // Display:     a(0) b(1) —(2) c(3) d(4) = 5 display columns.
         let text = "ab\u{2014}cd";
-        assert_eq!(text.len(), 7); // 2 + 3 + 2 bytes
+        assert_eq!(text.len(), 7);
         let ranges = vec![0..7]; // one row
-        // Match "cd" = bytes 5..7, display cols 3..5.
+        // Match "cd" (bytes 5..7) is display cols 3..5
         let segments = byte_range_to_row_cols(text, &ranges, 5..7);
         assert_eq!(
             segments,
@@ -1328,7 +1275,7 @@ mod tests {
         let text = "a\u{1F600}b";
         assert_eq!(text.len(), 6);
         let ranges = vec![0..6];
-        // Match "b" = bytes 5..6, display col 3..4.
+        // Match "b" (bytes 5..6) is display col 3..4
         let segments = byte_range_to_row_cols(text, &ranges, 5..6);
         assert_eq!(
             segments,
@@ -1362,9 +1309,8 @@ mod tests {
         assert_eq!(joiners, vec![None]);
     }
 
-    /// Regression: a table row narrower than the content width must be padded
-    /// so the app owns every column (otherwise a wide-glyph width disagreement
-    /// strands a ghost cell).
+    /// Regression: a table row narrower than the content width must be padded so the app owns every column.
+    /// Otherwise a glyph rendered wider than measured strands a ghost cell.
     #[test]
     fn table_row_padded_to_content_width() {
         use unicode_width::UnicodeWidthStr;
@@ -1388,9 +1334,8 @@ mod tests {
         );
     }
 
-    /// Faithful repro: a body row with an emoji-presentation sequence
-    /// (`⚠\u{FE0F}`) and an em-dash — the glyphs that desynced the cursor — must
-    /// be padded to exactly the content width.
+    /// Faithful repro: a body row with an emoji-presentation sequence (`⚠\u{FE0F}`) and an em-dash must be padded to exactly the content width.
+    /// Those are the glyphs that desynced the cursor.
     #[test]
     fn table_row_with_emoji_and_em_dash_fills_content_width() {
         use unicode_width::UnicodeWidthStr;
@@ -1437,7 +1382,6 @@ mod tests {
 
     #[test]
     fn normal_text_still_wraps() {
-        // Regular text should still wrap normally
         let line = Line::from("This is a normal paragraph that should wrap at word boundaries");
         let (wrapped, _) = word_wrap_line_with_joiners(&line, 20);
         assert!(wrapped.len() > 1, "Normal text should still wrap");
@@ -1445,7 +1389,7 @@ mod tests {
 
     #[test]
     fn is_table_line_detection() {
-        // Box drawing characters — table borders
+        // Box drawing characters: table borders
         assert!(is_table_line(&Line::from("┌─────┐")));
         assert!(is_table_line(&Line::from("└─────┘")));
         assert!(is_table_line(&Line::from("├─────┤")));
@@ -1522,8 +1466,7 @@ mod tests {
 
     #[test]
     fn blockquote_prefix_only_no_crash() {
-        // A line that is only the prefix (no content after it) should not
-        // set subsequent_indent and should not panic.
+        // A line that is only the prefix (no content after it) should not set subsequent_indent and should not panic
         let line = Line::from("\u{2502} ");
         let (wrapped, _) = word_wrap_line_with_joiners(&line, 80);
         assert_eq!(wrapped.len(), 1);
@@ -1537,9 +1480,8 @@ mod tests {
 
     #[test]
     fn wrap_byte_ranges_blockquote_matches_visual() {
-        // wrap_byte_ranges_matching must produce the same breakpoints as
-        // word_wrap_line_with_joiners for blockquote lines so search
-        // highlights align with the visual rendering.
+        // wrap_byte_ranges_matching must produce the same breakpoints as word_wrap_line_with_joiners for blockquote lines
+        // That keeps search highlights aligned with the visual rendering
         let text = "\u{2502} This is a blockquote that should wrap to multiple lines";
         let width = 30;
 
@@ -1547,7 +1489,6 @@ mod tests {
         let (visual, _) = word_wrap_line_with_joiners(&line, width);
         let ranges = wrap_byte_ranges_matching(text, width);
 
-        // Both should produce the same number of wrapped rows.
         assert_eq!(
             visual.len(),
             ranges.len(),

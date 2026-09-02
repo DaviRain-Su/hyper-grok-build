@@ -8,8 +8,7 @@ pub(crate) use permission::*;
 
 use xai_grok_telemetry::events::SessionHarness;
 
-/// Emit an `mcp.server_connection` span. `duration_ms` / `tool_count` /
-/// `error_type` are status-specific; pass `None` when not applicable.
+/// `duration_ms`, `tool_count`, and `error_type` are status-specific; pass `None` when not applicable.
 pub(crate) fn emit_mcp_connection_span(
     status: &str,
     server_name: &str,
@@ -41,10 +40,9 @@ pub(crate) fn emit_mcp_connection_span(
     span.in_scope(|| {});
 }
 
-/// Provenance for `skill.activated`'s `skill_source`: project (under `cwd`),
-/// user (under `$HOME`), else bundled. Paths are canonicalized (symlinked cwd
-/// like macOS `/tmp` vs `/private/tmp`); when both roots match, the deepest
-/// wins, tie (cwd == `$HOME`) → user.
+/// Provenance for `skill.activated`'s `skill_source`: project (under `cwd`), user (under `$HOME`), else bundled.
+/// Paths are canonicalized so a symlinked cwd (macOS `/tmp` vs `/private/tmp`) still matches.
+/// When both roots match, the deepest wins; a tie (cwd == `$HOME`) counts as user.
 pub(crate) fn skill_source_label(skill_path: &str, cwd: &str) -> &'static str {
     let canon = |p: &std::path::Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let p = canon(std::path::Path::new(skill_path));
@@ -88,8 +86,7 @@ pub(crate) fn format_hook_name(spec: &xai_grok_hooks::config::HookSpec) -> Strin
     }
 }
 
-/// Provenance for telemetry, mapped from the shared [`hook_origin`] classifier so
-/// this and `/hooks` inspect can't diverge.
+/// Provenance for telemetry, mapped from the shared [`hook_origin`] classifier so this and `/hooks` inspect can't diverge.
 fn format_hook_source(spec: &xai_grok_hooks::config::HookSpec) -> &'static str {
     use xai_grok_hooks::config::HookOrigin as O;
     match xai_grok_hooks::config::hook_origin(spec) {
@@ -138,8 +135,7 @@ pub(crate) struct SessionHarnessMetrics {
     pub cwd: String,
     /// Filled from the built agent's bridge so `into_event` doesn't re-walk the disk.
     pub skill_names: Vec<String>,
-    /// Resolved vendor-compat config, so recorded AGENTS.md names match
-    /// what the session actually discovers.
+    /// Resolved vendor-compat config, so recorded AGENTS.md names match what the session actually discovers.
     pub compat: xai_grok_tools::types::compat::CompatConfig,
     pub plugin_registry: Option<std::sync::Arc<xai_grok_agent::plugins::PluginRegistry>>,
     pub plugin_names: Vec<String>,
@@ -205,8 +201,7 @@ impl SessionHarnessMetrics {
             agents_md_dir_names,
             memory_enabled: self.memory_enabled,
             memory_retrieval_mode: self.memory_retrieval_mode,
-            // Same signal `SessionNew` carries; recomputed here because this
-            // event is built off-thread, after spawn (cheap: repo discovery).
+            // Same signal `SessionNew` carries; recomputed here because this event is built off-thread, after spawn (cheap: repo discovery)
             is_git_repo: xai_grok_telemetry::context::collect_git_context(&self.cwd).is_git_repo,
             auto_update: self.auto_update,
         }

@@ -1,14 +1,8 @@
-//! File state tracking for session rewind functionality.
+//! Captures and restores file states at specific points during a session.
+//! Each "rewind point" corresponds to a user prompt and stores snapshots of all files that were read or modified during that prompt's processing.
 //!
-//! This module provides the ability to capture and restore file states at specific
-//! points during a session. Each "rewind point" corresponds to a user prompt and
-//! stores snapshots of all files that were read or modified during that prompt's
-//! processing.
-//!
-//! **Path Storage**: File paths in `FileSnapshot` and `RewindPoint` are stored as
-//! `FlexiblePath` which can be either a `RelPathBuf` (relative to session CWD) for
-//! portability across machines, or a `PathBuf` for backwards compatibility with older
-//! sessions that stored absolute paths.
+//! Paths in `FileSnapshot` and `RewindPoint` are stored as `FlexiblePath`: a `RelPathBuf` relative to the session CWD, or an absolute `PathBuf`.
+//! Relative paths keep sessions portable across machines; absolute ones come from older sessions.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -19,7 +13,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::file_system::{AsyncFileSystem, AsyncFsWrapper, bytes_to_string};
-// Minimal ToolContext for Phase 1 compile (duplicated to break shell cycle; fields/methods needed by rewind logic preserved for identical public API).
+// Minimal duplicate of the shell crate's ToolContext, kept to break a dependency cycle
+// Only the fields and methods the rewind logic needs survive, with the public API unchanged
 #[derive(Clone)]
 pub struct ToolContext {
     pub cwd: std::path::PathBuf,
@@ -46,8 +41,7 @@ impl Default for ToolContext {
 }
 use xai_grok_paths::{RelPathBuf, ToAbsPath};
 
-/// A flexible path that can be either a relative path (preferred) or an absolute path
-/// (for backwards compatibility with older sessions that stored absolute paths).
+/// Either a relative path (preferred) or an absolute path kept for older sessions that stored absolute paths.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FlexiblePath {
     Relative(RelPathBuf),
@@ -55,12 +49,10 @@ pub enum FlexiblePath {
 }
 
 impl FlexiblePath {
-    /// Create a new FlexiblePath from a RelPathBuf
     pub fn from_rel(path: RelPathBuf) -> Self {
         Self::Relative(path)
     }
 
-    /// Get the path as a Path reference
     pub fn as_path(&self) -> &Path {
         match self {
             Self::Relative(p) => p.as_ref(),
@@ -68,7 +60,6 @@ impl FlexiblePath {
         }
     }
 
-    /// Convert to an absolute path using the given root.
     /// For relative paths, joins with root. For absolute paths, returns as-is.
     pub fn to_absolute(&self, root: &Path) -> PathBuf {
         match self {
@@ -77,24 +68,17 @@ impl FlexiblePath {
         }
     }
 
-    /// Try to convert this path to a relative path using the given root.
-    /// If this is already a relative path, returns a clone.
-    /// If this is an absolute path that starts with root, converts to relative.
-    /// If this is an absolute path that doesn't start with root, returns as-is.
+    /// A relative path is cloned; an absolute path under root becomes relative, any other absolute path stays as-is.
     pub fn try_to_relative(&self, root: &Path) -> FlexiblePath {
         match self {
             Self::Relative(p) => Self::Relative(p.clone()),
-            Self::Absolute(p) => {
-                // Try to convert absolute to relative
-                match RelPathBuf::from_absolute(root, p) {
-                    Ok(rel) => Self::Relative(rel),
-                    Err(_) => Self::Absolute(p.clone()),
-                }
-            }
+            Self::Absolute(p) => match RelPathBuf::from_absolute(root, p) {
+                Ok(rel) => Self::Relative(rel),
+                Err(_) => Self::Absolute(p.clone()),
+            },
         }
     }
 
-    /// Returns true if this is a relative path
     pub fn is_relative(&self) -> bool {
         matches!(self, Self::Relative(_))
     }
@@ -163,7 +147,6 @@ mod flexible_path_serde {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        // Try to parse as RelPathBuf first (preferred)
         match RelPathBuf::try_from(s.clone()) {
             Ok(rel_path) => Ok(FlexiblePath::Relative(rel_path)),
             // Fall back to PathBuf for absolute paths from older sessions
@@ -200,7 +183,6 @@ mod flexible_path_map_serde {
         let map: HashMap<String, FileSnapshot> = HashMap::deserialize(deserializer)?;
         let mut result = HashMap::with_capacity(map.len());
         for (k, v) in map {
-            // Try RelPathBuf first, fall back to PathBuf
             let path = match RelPathBuf::try_from(k.clone()) {
                 Ok(rel_path) => FlexiblePath::Relative(rel_path),
                 Err(_) => FlexiblePath::Absolute(PathBuf::from(k)),
@@ -211,23 +193,17 @@ mod flexible_path_map_serde {
     }
 }
 
-/// A snapshot of a single file's content at a specific point in time.
-///
-/// `path` is stored as a `FlexiblePath` (preferably relative to session CWD for portability,
-/// but may be absolute for backwards compatibility with older sessions).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileSnapshot {
     /// Path to the file (relative to session CWD preferred, absolute for legacy sessions).
     #[serde(with = "flexible_path_serde")]
     pub path: FlexiblePath,
-    /// The content of the file at the time of snapshot (None if file didn't exist)
+    /// None if the file didn't exist
     pub content: Option<String>,
-    /// When this snapshot was taken
     pub captured_at: DateTime<Utc>,
 }
 
 impl FileSnapshot {
-    /// Create a new file snapshot with a relative path.
     pub fn new(path: RelPathBuf, content: Option<String>) -> Self {
         Self {
             path: FlexiblePath::Relative(path),
@@ -236,7 +212,6 @@ impl FileSnapshot {
         }
     }
 
-    /// Create a new file snapshot with a flexible path.
     pub fn new_flexible(path: FlexiblePath, content: Option<String>) -> Self {
         Self {
             path,
@@ -245,20 +220,16 @@ impl FileSnapshot {
         }
     }
 
-    /// Get the path as a Path reference.
     pub fn as_path(&self) -> &Path {
         self.path.as_path()
     }
 
-    /// Convert the path to an absolute path using the given root.
     /// For relative paths, joins with root. For absolute paths, returns as-is.
     pub fn to_absolute_path(&self, root: &Path) -> PathBuf {
         self.path.to_absolute(root)
     }
 
-    /// Normalize this snapshot's path to relative using the given root.
-    /// If the path is absolute and starts with root, it will be converted to relative.
-    /// Returns a new FileSnapshot with the normalized path.
+    /// Returns a copy with the path converted to relative when it is absolute and under root.
     pub fn normalize_to_relative(&self, root: &Path) -> FileSnapshot {
         FileSnapshot {
             path: self.path.try_to_relative(root),
@@ -267,37 +238,27 @@ impl FileSnapshot {
         }
     }
 
-    /// Normalize this snapshot's path to relative in place.
     pub fn normalize_to_relative_mut(&mut self, root: &Path) {
         self.path = self.path.try_to_relative(root);
     }
 }
 
-/// A rewind point representing the state at a specific user prompt.
-///
-/// Contains snapshots of all files that were accessed (read or modified)
-/// during the processing of that prompt.
-///
-/// File paths are stored as `FlexiblePath` (preferably relative for portability,
-/// but may be absolute for backwards compatibility with older sessions).
+/// Snapshots of all files that were accessed (read or modified) while one user prompt was processed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RewindPoint {
     /// Index of the user prompt in the session (0-based)
     pub prompt_index: usize,
-    /// When this rewind point was created
     pub created_at: DateTime<Utc>,
     /// File snapshots captured BEFORE any operations for this prompt.
-    /// Key is the path to the file.
     #[serde(with = "flexible_path_map_serde")]
     pub file_snapshots: HashMap<FlexiblePath, FileSnapshot>,
     /// File snapshots captured AFTER all operations for this prompt completed.
-    /// Used to detect external modifications (if current file != after_snapshots, something else changed it).
+    /// Used to detect external modifications: if the current file differs from its after-snapshot, something else changed it.
     #[serde(default, with = "flexible_path_map_serde")]
     pub after_snapshots: HashMap<FlexiblePath, FileSnapshot>,
 }
 
 impl RewindPoint {
-    /// Create a new empty rewind point for the given prompt index
     pub fn new(prompt_index: usize) -> Self {
         Self {
             prompt_index,
@@ -320,25 +281,20 @@ impl RewindPoint {
         self.after_snapshots.insert(snapshot.path.clone(), snapshot);
     }
 
-    /// Get the snapshot for a specific file path
     pub fn get_snapshot(&self, path: &FlexiblePath) -> Option<&FileSnapshot> {
         self.file_snapshots.get(path)
     }
 
-    /// Get the snapshot for a specific relative file path
     pub fn get_snapshot_by_rel(&self, path: &RelPathBuf) -> Option<&FileSnapshot> {
         self.file_snapshots
             .get(&FlexiblePath::Relative(path.clone()))
     }
 
-    /// List all file paths that have snapshots in this rewind point
     pub fn snapshot_paths(&self) -> Vec<&FlexiblePath> {
         self.file_snapshots.keys().collect()
     }
 
-    /// Normalize all paths in this rewind point to relative using the given root.
-    /// This converts any absolute paths that start with root to relative paths.
-    /// Useful for ensuring portability when saving sessions.
+    /// Converts absolute paths under root to relative, for portability when saving sessions.
     pub fn normalize_to_relative(&mut self, root: &Path) {
         // Normalize file_snapshots
         let old_snapshots = std::mem::take(&mut self.file_snapshots);
@@ -358,9 +314,8 @@ impl RewindPoint {
     }
 }
 
-/// Lightweight metadata for a single rewind point — what the rewind picker needs
-/// (which prompts have snapshots, and when) without materializing the
-/// (potentially huge) file contents. Produced by [`scan_rewind_point_metas`].
+/// Lightweight metadata for a single rewind point: what the rewind picker needs (which prompts have snapshots, and when).
+/// It carries none of the (potentially huge) file contents. Produced by [`scan_rewind_point_metas`].
 #[derive(Debug)]
 pub struct RewindPointMeta {
     pub prompt_index: usize,
@@ -368,9 +323,8 @@ pub struct RewindPointMeta {
     pub num_file_snapshots: usize,
 }
 
-/// Open a `rewind_points.jsonl` for streaming. `NotFound` → `Ok(None)` (no file
-/// yet); other I/O errors propagate so callers can distinguish "absent" from
-/// "transiently unreadable" and avoid discarding on-disk history.
+/// Open a `rewind_points.jsonl` for streaming. `NotFound` becomes `Ok(None)` (no file yet).
+/// Other I/O errors propagate so callers can distinguish "absent" from "transiently unreadable" and avoid discarding on-disk history.
 fn open_rewind_points(path: &Path) -> io::Result<Option<io::BufReader<std::fs::File>>> {
     match std::fs::File::open(path) {
         Ok(f) => Ok(Some(io::BufReader::new(f))),
@@ -379,11 +333,9 @@ fn open_rewind_points(path: &Path) -> io::Result<Option<io::BufReader<std::fs::F
     }
 }
 
-/// Stream-parse a `rewind_points.jsonl` file line-by-line (bounded memory; the
-/// file can be hundreds of MB), skipping malformed lines with a `warn!`. Missing
-/// file → `Ok(empty)`; a transient I/O error propagates as `Err` so callers don't
-/// treat an unreadable file as empty and drop history. This is the LENIENT reader;
-/// the rewrite path uses a STRICT read (see `merge_rewind_points_from`).
+/// Stream-parse a `rewind_points.jsonl` file line-by-line (bounded memory; the file can be hundreds of MB), skipping malformed lines with a `warn!`.
+/// A missing file is `Ok(empty)`; a transient I/O error propagates as `Err` so callers don't treat an unreadable file as empty and drop history.
+/// This is the LENIENT reader; the rewrite path uses a STRICT read (see `merge_rewind_points_from`).
 fn read_rewind_jsonl_lines<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Vec<T>> {
     let Some(mut reader) = open_rewind_points(path)? else {
         return Ok(Vec::new());
@@ -441,11 +393,10 @@ impl<'de> Deserialize<'de> for MapEntryCount {
     }
 }
 
-/// Cheaply scan `rewind_points.jsonl` for per-point metadata, streaming without
-/// allocating file-content `String`s (`MapEntryCount` just counts `file_snapshots`;
-/// other fields are skipped by serde). `file_snapshots` is required — mirroring
-/// `RewindPoint` — so the picker rejects exactly the lines the on-rewind full load
-/// would (never advertising a target that won't materialize).
+/// Cheaply scan `rewind_points.jsonl` for per-point metadata, streaming without allocating file-content `String`s.
+/// `MapEntryCount` just counts `file_snapshots`; serde skips the other fields.
+/// `file_snapshots` is required, mirroring `RewindPoint`, so the picker rejects exactly the lines the on-rewind full load would.
+/// It never advertises a rewind target that won't materialize.
 fn scan_rewind_point_metas(path: &Path) -> io::Result<Vec<RewindPointMeta>> {
     #[derive(Deserialize)]
     struct MetaRow {
@@ -463,13 +414,11 @@ fn scan_rewind_point_metas(path: &Path) -> io::Result<Vec<RewindPointMeta>> {
         .collect())
 }
 
-/// Fold rewind points at indices `>= target_index` into the point at
-/// `target_index - 1` (before-snapshots keep the earliest via `or_insert`,
-/// after-snapshots the latest), drop the folded points, and return the survivors.
+/// Fold rewind points at indices `>= target_index` into the point at `target_index - 1`, drop the folded points, and return the survivors.
+/// Before-snapshots keep the earliest (via `or_insert`), after-snapshots the latest.
 /// `target_index == 0` clears everything (no predecessor).
 ///
-/// Pure (no I/O), so the in-memory tracker and the disk-authoritative persistence
-/// path share it and can't diverge.
+/// Pure (no I/O), so the in-memory tracker and the persistence path that treats the disk as authoritative share it and can't diverge.
 pub fn merge_rewind_points_from(
     mut points: Vec<RewindPoint>,
     target_index: usize,
@@ -478,8 +427,8 @@ pub fn merge_rewind_points_from(
         return Vec::new();
     }
     points.sort_by_key(|p| p.prompt_index);
-    // Enforce one point per prompt_index, guarding a corrupt/legacy file with
-    // duplicate-index lines (the normal append-once-per-prompt flow never hits this).
+    // Enforce one point per prompt_index, guarding a corrupt/legacy file with duplicate-index lines
+    // The normal append-once-per-prompt flow never hits this
     points.dedup_by_key(|p| p.prompt_index);
     let split = points.partition_point(|p| p.prompt_index < target_index);
     // Indices >= target_index, ascending (so after-snapshots keep the latest).
@@ -488,8 +437,7 @@ pub fn merge_rewind_points_from(
         .iter_mut()
         .find(|p| p.prompt_index == target_index - 1)
     {
-        // Consume `to_merge` by value — move the large file-content snapshots into
-        // `previous` instead of cloning (MEMORY.md).
+        // Consume `to_merge` by value: the large file-content snapshots move into `previous` instead of being cloned
         for merged in to_merge {
             for (path, snapshot) in merged.file_snapshots {
                 // or_insert: we own `snapshot`; earliest before-snapshot wins.
@@ -503,19 +451,13 @@ pub fn merge_rewind_points_from(
     points
 }
 
-/// Tracks file states across prompts in a session for rewind functionality.
-///
 /// The tracker maintains a list of rewind points, one per user prompt.
-/// Each rewind point captures the state of files BEFORE they are read or modified
-/// during that prompt's processing.
+/// Each rewind point captures the state of files BEFORE they are read or modified during that prompt's processing.
 ///
-/// **Lazy historical loading**: a tracker built via [`with_lazy_source`] does NOT
-/// read the (potentially huge) persisted rewind points up front, so resuming a
-/// session is cheap. They load on demand the first time a rewind *operation* needs
-/// them (see [`ensure_historical_loaded`]). Live capture and persisting the
-/// current prompt's point (`get_rewind_point`) deliberately do NOT trigger the
-/// load, so "resume then keep working" stays fast; the picker uses the
-/// metadata-only [`get_rewind_point_metas`].
+/// A tracker built via [`with_lazy_source`] does NOT read the (potentially huge) persisted rewind points up front, so resuming a session is cheap.
+/// They load on demand the first time a rewind *operation* needs them (see [`ensure_historical_loaded`]).
+/// Live capture and persisting the current prompt's point (`get_rewind_point`) deliberately skip the load, so "resume then keep working" stays fast.
+/// The picker uses the metadata-only [`get_rewind_point_metas`].
 ///
 /// [`with_lazy_source`]: FileStateTracker::with_lazy_source
 /// [`ensure_historical_loaded`]: FileStateTracker::ensure_historical_loaded
@@ -524,10 +466,8 @@ pub fn merge_rewind_points_from(
 pub struct FileStateTracker {
     /// All rewind points for this session, indexed by prompt_index
     rewind_points: Arc<Mutex<HashMap<usize, RewindPoint>>>,
-    /// Current prompt index being processed
     current_prompt_index: Arc<Mutex<Option<usize>>>,
-    /// Deferred historical source: `Some(path)` until the points are lazily
-    /// loaded (then `None`); `None` from the start without a lazy source.
+    /// Deferred historical source: `Some(path)` until the points are lazily loaded (then `None`); `None` from the start without a lazy source.
     lazy_source: Arc<Mutex<Option<PathBuf>>>,
 }
 
@@ -538,7 +478,6 @@ impl Default for FileStateTracker {
 }
 
 impl FileStateTracker {
-    /// Create a new file state tracker
     pub fn new() -> Self {
         Self {
             rewind_points: Arc::new(Mutex::new(HashMap::new())),
@@ -547,9 +486,8 @@ impl FileStateTracker {
         }
     }
 
-    /// Create a tracker that lazily loads its historical rewind points from
-    /// `lazy_path` on first rewind access (resume path). The in-memory set starts
-    /// empty and live captures win over disk on load (`or_insert`), never clobbered.
+    /// Create a tracker that lazily loads its historical rewind points from `lazy_path` on first rewind access (resume path).
+    /// The in-memory set starts empty; on load, live captures win over disk (`or_insert`).
     pub fn with_lazy_source(lazy_path: PathBuf) -> Self {
         Self {
             rewind_points: Arc::new(Mutex::new(HashMap::new())),
@@ -558,16 +496,14 @@ impl FileStateTracker {
         }
     }
 
-    /// Materialize the deferred historical rewind points (no-op if already loaded
-    /// or no lazy source). Triggered by rewind *operations* needing full file
-    /// contents; in-memory points win over disk via `or_insert`, so concurrent
-    /// live captures are never lost.
+    /// Materialize the deferred historical rewind points (no-op if already loaded or no lazy source).
+    /// Triggered by rewind *operations* that need full file contents.
+    /// In-memory points win over disk via `or_insert`, so concurrent live captures are never lost.
     ///
-    /// The `lazy_source` lock is held across the (large, blocking) read + merge:
-    /// releasing it early would let a concurrent rewind observe `lazy_source ==
-    /// None` mid-merge and skip/truncate historical points. The source is consumed
-    /// only on a SUCCESSFUL read, so a transient error leaves it set to retry
-    /// (never operating on or persisting a partial set).
+    /// The `lazy_source` lock is held across the (large, blocking) read and merge.
+    /// Releasing it early would let a concurrent rewind observe `lazy_source == None` mid-merge and skip/truncate historical points.
+    /// The source is consumed only on a SUCCESSFUL read.
+    /// A transient error leaves it set to retry (never operating on or persisting a partial set).
     async fn ensure_historical_loaded(&self) {
         let mut source = self.lazy_source.lock().await;
         // Clone the path so we can clear `source` after a successful read.
@@ -595,7 +531,6 @@ impl FileStateTracker {
         *source = None;
     }
 
-    /// Start tracking a new prompt
     pub async fn begin_prompt(&self, prompt_index: usize) {
         let mut current = self.current_prompt_index.lock().await;
         *current = Some(prompt_index);
@@ -607,11 +542,9 @@ impl FileStateTracker {
             .or_insert_with(|| RewindPoint::new(prompt_index));
     }
 
-    /// End tracking for the given prompt.
     /// This captures after-snapshots for all files that were touched during the prompt.
     ///
-    /// The caller provides the explicit `prompt_index` so that end_prompt works
-    /// even when begin_prompt was never received (e.g. RPC failure in proxy mode).
+    /// The caller passes the explicit `prompt_index` so end_prompt works even when begin_prompt was never received (e.g. RPC failure in proxy mode).
     #[tracing::instrument(name = "session.end_prompt", skip_all, fields(prompt_index = prompt_index))]
     pub async fn end_prompt(&self, fs: &AsyncFsWrapper, prompt_index: usize) {
         // Clear internal current-prompt tracking.
@@ -651,24 +584,21 @@ impl FileStateTracker {
         }
     }
 
-    /// Capture a file's current state before an operation.
     /// This should be called BEFORE reading or writing a file.
     ///
-    /// `path` is the absolute path to the file. It will be converted to a `RelPathBuf`
-    /// (using `cwd`) for storage. Files outside the CWD are silently skipped (they
-    /// don't need rewind tracking since the agent shouldn't modify them).
+    /// `path` is the absolute path to the file. It will be converted to a `RelPathBuf` (using `cwd`) for storage.
+    /// Files outside the CWD are silently skipped (they don't need rewind tracking since the agent shouldn't modify them).
     ///
-    /// NOTE: This method is similar to `capture_file_state_with_fs`. They are kept
-    /// separate due to type system constraints (`AsyncFileSystem` trait vs `AsyncFsWrapper`
-    /// concrete type). Keep them in sync when making changes.
+    /// NOTE: This method is similar to `capture_file_state_with_fs`.
+    /// They are kept separate due to type system constraints (`AsyncFileSystem` trait vs `AsyncFsWrapper` concrete type).
+    /// Keep them in sync when making changes.
     pub async fn capture_file_state<F: AsyncFileSystem + ?Sized>(
         &self,
         fs: &F,
         path: &Path,
         cwd: &Path,
     ) -> Result<(), crate::file_system::FsError> {
-        // Skip files outside the CWD - they don't need rewind tracking
-        // (e.g., /etc/hosts, system files, files in other projects)
+        // Skip files outside the CWD; they don't need rewind tracking (e.g., /etc/hosts, system files, files in other projects)
         let Ok(rel_path) = RelPathBuf::from_absolute(cwd, path) else {
             return Ok(());
         };
@@ -680,7 +610,6 @@ impl FileStateTracker {
         };
         drop(current); // Release lock before async operations
 
-        // Read current file content (or None if it doesn't exist)
         let content = fs
             .try_read_file(path)
             .await?
@@ -700,20 +629,18 @@ impl FileStateTracker {
 
     /// Capture a file's current state before an operation using `AsyncFsWrapper`.
     ///
-    /// This is a variant of `capture_file_state` that accepts `AsyncFsWrapper`.
     /// Files outside the CWD are silently skipped (they don't need rewind tracking).
     ///
-    /// NOTE: This method is similar to `capture_file_state`. They are kept separate
-    /// due to type system constraints (`AsyncFsWrapper` concrete type vs generic
-    /// `AsyncFileSystem` trait). Keep them in sync when making changes.
+    /// NOTE: This method is similar to `capture_file_state`.
+    /// They are kept separate due to type system constraints (`AsyncFsWrapper` concrete type vs generic `AsyncFileSystem` trait).
+    /// Keep them in sync when making changes.
     pub async fn capture_file_state_with_fs(
         &self,
         fs: &AsyncFsWrapper,
         path: &Path,
         cwd: &Path,
     ) -> Result<(), crate::file_system::FsError> {
-        // Skip files outside the CWD - they don't need rewind tracking
-        // (e.g., /etc/hosts, system files, files in other projects)
+        // Skip files outside the CWD; they don't need rewind tracking (e.g., /etc/hosts, system files, files in other projects)
         let Ok(rel_path) = RelPathBuf::from_absolute(cwd, path) else {
             return Ok(());
         };
@@ -725,7 +652,6 @@ impl FileStateTracker {
         };
         drop(current); // Release lock before async operations
 
-        // Read current file content (or None if it doesn't exist)
         let content = fs
             .try_read_file(path)
             .await?
@@ -743,13 +669,10 @@ impl FileStateTracker {
         Ok(())
     }
 
-    /// Add a before-snapshot with provided content for a specific prompt.
-    ///
     /// Unlike `capture_file_state`, this does NOT read from the filesystem.
-    /// The caller provides the content directly (e.g., from a `FileWritten`
-    /// notification that already carries `previous_content`).
+    /// The caller provides the content directly (e.g., from a `FileWritten` notification that already carries `previous_content`).
     ///
-    /// `path` is the absolute path. `cwd` is used for relativization.
+    /// `path` is the absolute path. `cwd` is used to convert it to a relative path.
     /// Files outside the CWD are silently skipped.
     pub async fn add_before_snapshot_for_prompt(
         &self,
@@ -782,14 +705,13 @@ impl FileStateTracker {
     }
 
     /// Lightweight metadata for every known rewind point, for the rewind picker.
-    /// Combines in-memory points with a metadata-only scan of the lazy disk source
-    /// — without materializing file contents and without consuming the source (a
-    /// later rewind still does the full load). In-memory points win on conflict.
+    /// Combines in-memory points with a metadata-only scan of the lazy disk source.
+    /// It never materializes file contents and never consumes the source, so a later rewind still does the full load.
+    /// In-memory points win on conflict.
     ///
-    /// Lock order mirrors [`ensure_historical_loaded`] (`lazy_source` outer,
-    /// `rewind_points` inner): holding `lazy_source` across both the in-memory
-    /// snapshot and the disk scan stops a concurrent rewind's take→read→merge from
-    /// interleaving and making the picker miss points.
+    /// Lock order mirrors [`ensure_historical_loaded`] (`lazy_source` outer, `rewind_points` inner).
+    /// Holding `lazy_source` across both the in-memory snapshot and the disk scan stops a concurrent rewind's load from interleaving.
+    /// An interleaved load could make the picker miss points.
     pub async fn get_rewind_point_metas(&self) -> Vec<RewindPointMeta> {
         let source = self.lazy_source.lock().await;
         let mut metas: HashMap<usize, RewindPointMeta> = {
@@ -827,15 +749,13 @@ impl FileStateTracker {
         result
     }
 
-    /// Get a specific rewind point by prompt index. Intentionally does NOT trigger
-    /// the historical load: this is the live persistence path (a just-completed
-    /// prompt's point is always in memory), so resume-then-work stays fast.
+    /// Intentionally does NOT trigger the historical load: a just-completed prompt's point is always in memory.
+    /// This is the live persistence path, so "resume then keep working" stays fast.
     pub async fn get_rewind_point(&self, prompt_index: usize) -> Option<RewindPoint> {
         let points = self.rewind_points.lock().await;
         points.get(&prompt_index).cloned()
     }
 
-    /// Get the current prompt index being tracked
     pub async fn current_prompt_index(&self) -> Option<usize> {
         *self.current_prompt_index.lock().await
     }
@@ -848,18 +768,15 @@ impl FileStateTracker {
         points.retain(|&idx, _| idx < prompt_index);
     }
 
-    /// Merge rewind points at indices >= `target_index` into the previous point
-    /// (`target_index - 1`), then remove the merged points.
+    /// Merge rewind points at indices >= `target_index` into the previous point (`target_index - 1`), then remove the merged points.
     ///
-    /// Used by ConversationOnly rewind: the conversation is rewound but files
-    /// are untouched, so the file effects of the discarded prompts must be
-    /// folded into the last surviving prompt's rewind point. This ensures:
+    /// Used by ConversationOnly rewind: the conversation is rewound but files are untouched.
+    /// The file effects of the discarded prompts must therefore be folded into the last surviving prompt's rewind point.
+    /// This ensures:
     /// - `/rewind 0` can still undo all file effects (merged into point N-1)
-    /// - A new prompt at `target_index` gets a fresh rewind point with correct
-    ///   before-snapshots (the current disk state)
+    /// - A new prompt at `target_index` gets a fresh rewind point with correct before-snapshots (the current disk state)
     ///
-    /// For `target_index == 0` there is no previous point to merge into, so all
-    /// points are simply cleared.
+    /// For `target_index == 0` there is no previous point to merge into, so all points are cleared.
     pub async fn merge_and_remove_from(&self, target_index: usize) {
         self.ensure_historical_loaded().await;
         let mut points = self.rewind_points.lock().await;
@@ -870,15 +787,13 @@ impl FileStateTracker {
         }
     }
 
-    /// Get the maximum prompt index that has a rewind point
     pub async fn max_prompt_index(&self) -> Option<usize> {
         self.ensure_historical_loaded().await;
         let points = self.rewind_points.lock().await;
         points.keys().max().copied()
     }
 
-    /// Normalize all paths in all rewind points to relative using the given root.
-    /// This should be called before saving/persisting the session to ensure portability.
+    /// Call this before saving the session so its paths are portable.
     pub async fn normalize_all_to_relative(&self, root: &Path) {
         self.ensure_historical_loaded().await;
         let mut points = self.rewind_points.lock().await;
@@ -887,8 +802,7 @@ impl FileStateTracker {
         }
     }
 
-    /// Get all rewind points, normalized to relative paths.
-    /// This is useful when saving sessions to ensure all paths are portable.
+    /// Used when saving sessions so all paths are portable.
     pub async fn get_rewind_points_normalized(&self, root: &Path) -> Vec<RewindPoint> {
         self.ensure_historical_loaded().await;
         let points = self.rewind_points.lock().await;
@@ -912,14 +826,11 @@ pub use xai_grok_workspace_types::rpc::session::{
 
 /// Rewind files to the state before `target_prompt_index`.
 ///
-/// Shared implementation used by both `hub_server.rs` (workspace-side)
-/// and potentially `acp_session.rs` (shell-side). Performs:
+/// Shared implementation used by both `hub_server.rs` (workspace-side) and potentially `acp_session.rs` (shell-side). Performs:
 /// 1. Gather earliest before-snapshot per file from points >= target
 /// 2. Detect conflicts (external modifications since the agent's writes)
 /// 3. Revert files to their before-snapshot state
 /// 4. Truncate rewind points from the target onward
-///
-/// Returns a `FileRewindResponse` with revert results.
 pub async fn rewind_files(
     tracker: &FileStateTracker,
     fs: &crate::file_system::AsyncFsWrapper,
@@ -946,7 +857,7 @@ pub async fn rewind_files(
         }
     }
 
-    // Conflict detection + revert
+    // Conflict detection and revert
     for (rel_path, content) in &files_to_revert {
         let current_content = match fs.try_read_to_string(rel_path).await {
             Ok(c) => c,
@@ -977,7 +888,7 @@ pub async fn rewind_files(
             });
         }
 
-        // Perform the revert — AsyncFsWrapper resolves FlexiblePath via ToAbsPath
+        // Perform the revert; AsyncFsWrapper resolves FlexiblePath via ToAbsPath
         match content {
             Some(data) => {
                 if let Err(e) = fs.write_file(rel_path, data.as_bytes()).await {
@@ -1021,23 +932,21 @@ pub async fn rewind_files(
     }
 }
 
-/// Handle for sending file state capture requests.
-/// This is a lightweight clone-able handle that can be passed to tools.
+/// A lightweight clone-able handle that tools use to request file state capture.
 #[derive(Clone)]
 pub struct FileStateHandle {
     tracker: Arc<FileStateTracker>,
 }
 
 impl FileStateHandle {
-    /// Create a new handle from a tracker
     pub fn new(tracker: Arc<FileStateTracker>) -> Self {
         Self { tracker }
     }
 
     /// Capture file state before an operation.
     ///
-    /// `path` is the absolute path to the file. `cwd` is used to convert it to
-    /// a relative path for portable storage.
+    /// `path` is the absolute path to the file.
+    /// `cwd` is used to convert it to a relative path for portable storage.
     pub async fn capture<F: AsyncFileSystem + ?Sized>(
         &self,
         fs: &F,
@@ -1049,8 +958,8 @@ impl FileStateHandle {
 
     /// Capture file state before an operation using `AsyncFsWrapper`.
     ///
-    /// `path` is the absolute path to the file. `cwd` is used to convert it to
-    /// a relative path for portable storage.
+    /// `path` is the absolute path to the file.
+    /// `cwd` is used to convert it to a relative path for portable storage.
     pub async fn capture_with_fs(
         &self,
         fs: &AsyncFsWrapper,
@@ -1060,7 +969,6 @@ impl FileStateHandle {
         self.tracker.capture_file_state_with_fs(fs, path, cwd).await
     }
 
-    /// Get the underlying tracker
     pub fn tracker(&self) -> &Arc<FileStateTracker> {
         &self.tracker
     }
@@ -1090,7 +998,6 @@ mod tests {
         tracker.end_prompt(&ctx.fs, 0).await;
         assert_eq!(tracker.current_prompt_index().await, None);
 
-        // Rewind point should exist
         let point = tracker.get_rewind_point(0).await;
         assert!(point.is_some());
         assert_eq!(point.unwrap().prompt_index, 0);
@@ -1110,14 +1017,11 @@ mod tests {
             tracker.end_prompt(&ctx.fs, i).await;
         }
 
-        // Verify all points exist
         let points = tracker.get_rewind_points().await;
         assert_eq!(points.len(), 5);
 
-        // Truncate from index 3
         tracker.truncate_from(3).await;
 
-        // Should only have points 0, 1, 2
         let points = tracker.get_rewind_points().await;
         assert_eq!(points.len(), 3);
         assert!(tracker.get_rewind_point(0).await.is_some());
@@ -1128,7 +1032,6 @@ mod tests {
 
     #[test]
     fn test_file_snapshot() {
-        // FileSnapshot uses FlexiblePath (preferably relative) for paths
         let snapshot = FileSnapshot::new(
             RelPathBuf::new("src/file.txt").unwrap(),
             Some("content".into()),
@@ -1146,11 +1049,10 @@ mod tests {
         let snapshot1 = FileSnapshot::new(RelPathBuf::new("src/a.txt").unwrap(), Some("v1".into()));
         point.add_snapshot(snapshot1);
 
-        // Try to add second snapshot for same file - should be ignored
+        // Adding a second snapshot for the same file is ignored
         let snapshot2 = FileSnapshot::new(RelPathBuf::new("src/a.txt").unwrap(), Some("v2".into()));
         point.add_snapshot(snapshot2);
 
-        // Should still have v1
         let retrieved = point
             .get_snapshot_by_rel(&RelPathBuf::new("src/a.txt").unwrap())
             .unwrap();
@@ -1161,19 +1063,19 @@ mod tests {
     fn test_flexible_path_try_to_relative() {
         let root = Path::new("/home/user/project");
 
-        // Already relative - should stay relative
+        // An already-relative path stays relative
         let rel = FlexiblePath::Relative(RelPathBuf::new("src/file.txt").unwrap());
         let result = rel.try_to_relative(root);
         assert!(result.is_relative());
         assert_eq!(result.as_path(), Path::new("src/file.txt"));
 
-        // Absolute path under root - should become relative
+        // An absolute path under root becomes relative
         let abs = FlexiblePath::Absolute(PathBuf::from("/home/user/project/src/file.txt"));
         let result = abs.try_to_relative(root);
         assert!(result.is_relative());
         assert_eq!(result.as_path(), Path::new("src/file.txt"));
 
-        // Absolute path NOT under root - should stay absolute
+        // An absolute path outside root stays absolute
         let abs_other = FlexiblePath::Absolute(PathBuf::from("/other/path/file.txt"));
         let result = abs_other.try_to_relative(root);
         assert!(!result.is_relative());
@@ -1202,10 +1104,8 @@ mod tests {
         // Before normalization, we have mixed paths
         assert_eq!(point.file_snapshots.len(), 2);
 
-        // Normalize
         point.normalize_to_relative(root);
 
-        // After normalization, all paths should be relative
         for (path, snapshot) in &point.file_snapshots {
             assert!(path.is_relative(), "Path {:?} should be relative", path);
             assert!(
@@ -1232,7 +1132,6 @@ mod tests {
 
         let snapshot: FileSnapshot = serde_json::from_str(json).unwrap();
 
-        // Should deserialize successfully with an absolute path
         assert!(!snapshot.path.is_relative());
         assert_eq!(
             snapshot.path.as_path(),
@@ -1240,7 +1139,7 @@ mod tests {
         );
         assert_eq!(snapshot.content, Some("fn main() {}".into()));
 
-        // Should be able to normalize it to relative
+        // It can still be normalized to relative
         let root = Path::new("/home/user/project");
         let normalized = snapshot.normalize_to_relative(root);
         assert!(normalized.path.is_relative());
@@ -1258,7 +1157,6 @@ mod tests {
 
         let snapshot: FileSnapshot = serde_json::from_str(json).unwrap();
 
-        // Should deserialize successfully with a relative path
         assert!(snapshot.path.is_relative());
         assert_eq!(snapshot.path.as_path(), Path::new("src/main.rs"));
     }
@@ -1286,11 +1184,9 @@ mod tests {
 
         let point: RewindPoint = serde_json::from_str(json).unwrap();
 
-        // Should deserialize successfully
         assert_eq!(point.prompt_index, 0);
         assert_eq!(point.file_snapshots.len(), 2);
 
-        // Paths should be absolute (from old session)
         for path in point.file_snapshots.keys() {
             assert!(
                 !path.is_relative(),
@@ -1299,7 +1195,7 @@ mod tests {
             );
         }
 
-        // After normalization, paths should be relative
+        // After normalization, all paths are relative
         let root = Path::new("/home/user/project");
         let mut normalized_point = point.clone();
         normalized_point.normalize_to_relative(root);
@@ -1313,7 +1209,7 @@ mod tests {
             );
         }
 
-        // Should be able to retrieve by relative path after normalization
+        // Retrieval by relative path works after normalization
         let main_snapshot =
             normalized_point.get_snapshot_by_rel(&RelPathBuf::new("src/main.rs").unwrap());
         assert!(main_snapshot.is_some());
@@ -1350,12 +1246,11 @@ mod tests {
         let mut normalized = point.clone();
         normalized.normalize_to_relative(root);
 
-        // All should now be relative
         for path in normalized.file_snapshots.keys() {
             assert!(path.is_relative(), "Expected relative path, got {:?}", path);
         }
 
-        // Both files should be retrievable
+        // Both files are retrievable
         assert!(
             normalized
                 .get_snapshot_by_rel(&RelPathBuf::new("src/old.rs").unwrap())
@@ -1370,7 +1265,6 @@ mod tests {
 
     #[test]
     fn test_serialize_always_produces_string_paths() {
-        // Create a snapshot with relative path
         let snapshot = FileSnapshot::new(
             RelPathBuf::new("src/file.txt").unwrap(),
             Some("content".into()),
@@ -1378,10 +1272,8 @@ mod tests {
 
         let json = serde_json::to_string(&snapshot).unwrap();
 
-        // The path should be serialized as a plain string
         assert!(json.contains("\"path\":\"src/file.txt\""));
 
-        // Create with absolute path
         let abs_snapshot = FileSnapshot::new_flexible(
             FlexiblePath::Absolute(PathBuf::from("/abs/path/file.txt")),
             Some("content".into()),
@@ -1389,7 +1281,6 @@ mod tests {
 
         let abs_json = serde_json::to_string(&abs_snapshot).unwrap();
 
-        // Absolute path should also be serialized as a string
         assert!(abs_json.contains("\"path\":\"/abs/path/file.txt\""));
     }
 
@@ -1465,8 +1356,7 @@ mod tests {
         assert_eq!(metas[1].num_file_snapshots, 1);
         assert_eq!(metas[2].num_file_snapshots, 0);
 
-        // The metadata scan must NOT consume the lazy source: a later rewind
-        // operation still gets the full file-content snapshots.
+        // The metadata scan must NOT consume the lazy source: a later rewind operation still gets the full file-content snapshots
         assert!(tracker.get_rewind_point(0).await.is_none());
         let points = tracker.get_rewind_points().await;
         assert_eq!(points.len(), 3);
@@ -1496,8 +1386,7 @@ mod tests {
         // Historical still not loaded.
         assert!(tracker.get_rewind_point(0).await.is_none());
 
-        // Rewinding to a pre-resume prompt loads the historical set and keeps the
-        // new in-memory point.
+        // Rewinding to a pre-resume prompt loads the historical set and keeps the new in-memory point
         let all = tracker.get_rewind_points().await;
         assert_eq!(all.len(), 3);
         assert_eq!(
@@ -1524,15 +1413,13 @@ mod tests {
         let file = write_rewind_file(&[point_with_files(0, &[("a.rs", "disk")])]);
         let tracker = FileStateTracker::with_lazy_source(file.path().to_path_buf());
 
-        // A LIVE capture at the same index 0 (before any historical load) adds an
-        // in-memory point 0 with different content.
+        // A LIVE capture at the same index 0 (before any historical load) adds an in-memory point 0 with different content
         let cwd = Path::new("/repo");
         tracker
             .add_before_snapshot_for_prompt(0, Path::new("/repo/a.rs"), cwd, Some("mem".into()))
             .await;
 
-        // The on-rewind historical load must NOT clobber the in-memory point 0
-        // (`or_insert` keeps the live capture).
+        // The on-rewind historical load must NOT clobber the in-memory point 0 (`or_insert` keeps the live capture)
         let points = tracker.get_rewind_points().await;
         assert_eq!(points.len(), 1);
         assert_eq!(
@@ -1585,7 +1472,7 @@ mod tests {
         let points = tracker.get_rewind_points().await;
         assert_eq!(points.len(), 1);
         assert_eq!(points[0].prompt_index, 0);
-        // Point 0 should now also carry the merged files from points 1 and 2.
+        // Point 0 now also carries the merged files from points 1 and 2
         assert!(
             points[0]
                 .get_snapshot_by_rel(&RelPathBuf::new("b.rs").unwrap())
@@ -1598,8 +1485,7 @@ mod tests {
         );
     }
 
-    /// `get_rewind_points_normalized` is a rewind op and must trigger the
-    /// historical load.
+    /// `get_rewind_points_normalized` is a rewind op and must trigger the historical load.
     #[tokio::test]
     async fn lazy_get_rewind_points_normalized_loads_historical() {
         let file = write_rewind_file(&[point_with_files(0, &[("a.rs", "h0")])]);
@@ -1619,8 +1505,7 @@ mod tests {
         assert_eq!(tracker.max_prompt_index().await, Some(4));
     }
 
-    /// Concurrent live capture + rewind query: must not deadlock, and the full set
-    /// after both complete must contain every point.
+    /// Concurrent live capture and rewind query: must not deadlock, and the full set after both complete must contain every point.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn lazy_concurrent_capture_and_rewind() {
         let file = write_rewind_file(&[
@@ -1645,7 +1530,7 @@ mod tests {
         assert!(points.iter().any(|p| p.prompt_index == 0));
         assert!(points.iter().any(|p| p.prompt_index == 1));
 
-        // After both complete, every point (historical + live) is present.
+        // After both complete, every point (historical and live) is present
         let final_all = tracker.get_rewind_points().await;
         assert_eq!(
             final_all.iter().map(|p| p.prompt_index).collect::<Vec<_>>(),
@@ -1730,8 +1615,7 @@ mod tests {
 
     #[test]
     fn merge_pure_missing_predecessor_drops_merged_effects() {
-        // points [0, 3], target 3 → predecessor index 2 is absent (gap), so the
-        // merged point 3's file effects are dropped (matches the original).
+        // points [0, 3], target 3: predecessor index 2 is absent (gap), so the merged point 3's file effects are dropped
         let merged = merge_rewind_points_from(
             vec![
                 point_with_files(0, &[("a.rs", "0")]),
@@ -1762,8 +1646,7 @@ mod tests {
         assert_eq!(merged[0].prompt_index, 0);
     }
 
-    /// Blank/whitespace and malformed lines are skipped; both readers (full load +
-    /// meta scan) recover exactly the valid points.
+    /// Blank/whitespace and malformed lines are skipped; both readers (full load and meta scan) recover exactly the valid points.
     #[tokio::test]
     async fn readers_recover_from_blank_and_malformed_lines() {
         let p0 = serde_json::to_string(&point_with_files(0, &[("a.rs", "v0")])).unwrap();
@@ -1798,9 +1681,8 @@ mod tests {
         assert!(scan_rewind_point_metas(file.path()).unwrap().is_empty());
     }
 
-    /// Missing → `Ok(empty)` (fresh session), but a real I/O error (here: a
-    /// directory) → `Err`, so the caller keeps the lazy source set rather than
-    /// treating it as empty.
+    /// A missing file is `Ok(empty)` (fresh session); a real I/O error (here: a directory) is `Err`.
+    /// The `Err` lets the caller keep the lazy source set rather than treat it as empty.
     #[test]
     fn readers_distinguish_missing_from_io_error() {
         let missing = PathBuf::from("/nonexistent/dir/rewind_points.jsonl");

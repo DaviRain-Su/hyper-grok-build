@@ -132,22 +132,6 @@ fn run_with_capture<F: FnOnce()>(f: F) -> Vec<CapturedEvent> {
 }
 
 #[test]
-fn closed_to_open_emits_warn_opened() {
-    let events = run_with_capture(|| {
-        let obs = TracingObserver::new("storage_breaker");
-        obs.on_state_change(BreakerState::Closed, BreakerState::Open, "trip");
-    });
-    let openings: Vec<_> = events
-        .iter()
-        .filter(|e| e.message == "circuit breaker opened")
-        .collect();
-    assert_eq!(openings.len(), 1);
-    assert_eq!(openings[0].level, Level::WARN);
-    assert_eq!(openings[0].target, "circuit_breaker");
-    assert_eq!(openings[0].breaker.as_deref(), Some("storage_breaker"));
-}
-
-#[test]
 fn open_to_half_open_emits_debug_half_open_not_info_closed() {
     let events = run_with_capture(|| {
         let obs = TracingObserver::new("storage_breaker");

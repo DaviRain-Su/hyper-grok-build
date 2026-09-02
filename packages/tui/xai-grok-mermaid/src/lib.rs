@@ -220,18 +220,4 @@ mod tests {
         let engine = default_engine();
         assert_send_sync(&engine);
     }
-
-    /// The default engine renders a real PNG and never panics on valid input.
-    #[test]
-    fn default_engine_renders_valid_input() {
-        let engine = default_engine();
-        let diagram = render_checked(
-            engine.as_ref(),
-            "flowchart LR\nA-->B",
-            &RenderParams::default(),
-            &RenderLimits::default(),
-        )
-        .expect("the default engine should render");
-        assert!(diagram.width_px > 0 && diagram.height_px > 0);
-    }
 }

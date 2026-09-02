@@ -5,8 +5,7 @@ use std::time::{Duration, Instant};
 
 use super::ManagedConfigError;
 
-/// Optional syntax checker. `path` is appended after `args`, matching the
-/// `bash -n FILE`, `zsh -n FILE`, and `fish -n FILE` interfaces.
+/// `path` is appended after `args`, matching the `bash -n FILE`, `zsh -n FILE`, and `fish -n FILE` interfaces.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SyntaxValidator {
     pub program: PathBuf,
@@ -66,7 +65,8 @@ fn validate_with_ops(
         .stderr(Stdio::null())
         .envs(xai_tty_utils::pager_env());
     xai_tty_utils::detach_std_command(&mut command);
-    #[allow(clippy::disallowed_methods)] // config validator, waited on with a timeout
+    #[allow(clippy::disallowed_methods)]
+    // The config validator child is waited on with a timeout below
     let mut child = command
         .spawn()
         .map_err(|source| ManagedConfigError::Validation {

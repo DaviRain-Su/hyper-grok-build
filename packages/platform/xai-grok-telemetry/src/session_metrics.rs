@@ -1,13 +1,11 @@
 //! Session lifecycle event structs.
 //!
-//! Fires in both `Enabled` and `SessionMetrics` telemetry modes via
-//! `log_session_event`.
+//! Fires in both `Enabled` and `SessionMetrics` telemetry modes via `log_session_event`.
 
 use serde::Serialize;
 
-/// The ACP method the client called, kept separate from the warm/cold
-/// mechanism (`SessionStarted::restored_from_disk`) so intent and mechanism can
-/// be queried independently.
+/// The ACP method the client called.
+/// It stays separate from the warm/cold mechanism (`SessionStarted::restored_from_disk`) so intent and mechanism can be queried independently.
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionStartKind {
@@ -21,8 +19,7 @@ pub struct SessionStarted {
     pub session_id: String,
     pub kind: SessionStartKind,
     pub setup_duration_ms: u64,
-    /// Whether setup rebuilt the session from disk (cold) rather than
-    /// reconnecting to a resident actor (warm). Mirrors `SessionLoad`.
+    /// Whether setup rebuilt the session from disk (cold) rather than reconnecting to a resident actor (warm). Mirrors `SessionLoad`.
     pub restored_from_disk: bool,
 }
 
@@ -42,10 +39,9 @@ impl SessionStarted {
     }
 }
 
-/// Itemized context occupancy once session setup (including MCP init) has
-/// finished. Category token fields are the model's tokenizer via
-/// `POST /v1/tokenize-text`. `used_tokens` / `message_tokens` stay the
-/// chat-state occupancy already shown in `/context`.
+/// Itemized context occupancy once session setup (including MCP init) has finished.
+/// Category token fields are counted with the model's tokenizer via `POST /v1/tokenize-text`.
+/// `used_tokens` / `message_tokens` stay the chat-state occupancy already shown in `/context`.
 #[derive(Serialize)]
 pub struct SessionContextSnapshot {
     pub session_id: String,
@@ -80,8 +76,7 @@ pub struct TurnCompletedLifecycle {
     pub turn_number: u64,
 }
 
-/// Server-side doom-loop detection observed this turn. Aggregated detector
-/// metadata only — never generation content or token IDs.
+/// Server-side doom-loop detection observed this turn. Aggregated detector metadata only, never generation content or token IDs.
 #[derive(Serialize)]
 pub struct DoomLoopDetected {
     pub session_id: String,
@@ -99,9 +94,9 @@ pub struct DoomLoopDetected {
     pub model: String,
 }
 
-/// Doom-loop recovery acted this turn: poisoned attempts were resampled
-/// and/or a response was accepted with confident signals after the budget
-/// was spent. Trigger labels only — never generation content.
+/// Doom-loop recovery acted this turn.
+/// Poisoned attempts were resampled and/or a response was accepted with confident signals after the budget was spent.
+/// Trigger labels only, never generation content.
 #[derive(Serialize)]
 pub struct DoomLoopRecovery {
     pub session_id: String,
@@ -153,7 +148,7 @@ pub struct TraceUploadFailed {
 /// Recorded on the `agent.prompt` span as `upload_reason` for analytics queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceUploadReason {
-    /// ZDR (zero data retention) team — all uploads disabled.
+    /// ZDR (zero data retention) team: all uploads disabled.
     ZdrTeam,
     /// `[telemetry] trace_upload = false` in config.
     FeatureOff,
@@ -235,8 +230,7 @@ mod tests {
         );
     }
 
-    /// `session_context_snapshot` property keys are a Mixpanel dashboard
-    /// contract — pin the shape so a rename cannot silently break queries.
+    /// `session_context_snapshot` property keys are a Mixpanel dashboard contract; pin the shape so a rename cannot silently break queries.
     #[test]
     fn session_context_snapshot_event_shape_is_stable() {
         use crate::events::TelemetryEvent;
@@ -290,8 +284,7 @@ mod tests {
         );
     }
 
-    /// The `grok-shell-doom_loop_recovery` Mixpanel event's name and
-    /// property keys are dashboard contracts — pin them.
+    /// The `grok-shell-doom_loop_recovery` Mixpanel event's name and property keys are dashboard contracts; pin them.
     #[test]
     fn doom_loop_recovery_event_shape_is_stable() {
         use crate::events::TelemetryEvent;
@@ -328,9 +321,8 @@ mod tests {
         assert!(no_trigger.get("top_trigger").is_none(), "None is omitted");
     }
 
-    /// `as_str` values are recorded on the `agent.prompt` span as
-    /// `upload_reason` and queried in analytics — they are a wire contract and
-    /// must not drift.
+    /// `as_str` values are recorded on the `agent.prompt` span as `upload_reason` and queried in analytics.
+    /// They are a wire contract and must not drift.
     #[test]
     fn as_str_values_are_stable() {
         assert_eq!(TraceUploadReason::ZdrTeam.as_str(), "zdr_team");
@@ -345,8 +337,7 @@ mod tests {
         );
     }
 
-    /// Each `UploadMethod` maps to its corresponding reason; `None` (no
-    /// credentials resolved) maps to `NoCredentials`.
+    /// Each `UploadMethod` maps to its corresponding reason; `None` (no credentials resolved) maps to `NoCredentials`.
     #[test]
     fn from_upload_method_maps_each_variant() {
         assert_eq!(

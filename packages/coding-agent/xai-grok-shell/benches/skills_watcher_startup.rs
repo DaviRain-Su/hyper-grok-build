@@ -1,15 +1,11 @@
-//! Skills file-watcher startup latency.
+//! Times OS watch registration for a project-tier `.claude` tree with a large `worktrees/` subtree (Bazel-like fan-out).
+//! Compares:
 //!
-//! Times OS watch registration for a project-tier `.claude` tree with a large
-//! `worktrees/` subtree (Bazel-like fan-out). Compares:
+//! - **scoped**: the current `SkillsFileWatcher::start_with_dirs` (vendor root non-recursive, skills/commands/workflows subtrees only)
+//! - **recursive_control**: full `RecursiveMode::Recursive` on `.claude`, the old project-tier behavior (on Linux, one inotify watch per directory)
 //!
-//! - **scoped** — current `SkillsFileWatcher::start_with_dirs` (vendor root
-//!   non-recursive + skills/commands/workflows only)
-//! - **recursive_control** — full `RecursiveMode::Recursive` on `.claude`
-//!   (pre-fix project-tier behavior on Linux: one inotify wd per directory)
-//!
-//! Fixture sizes stay comparable across scenarios. Medians land under
-//! `target/criterion/skills_watcher_startup/`.
+//! Fixture sizes stay comparable across scenarios.
+//! Medians land under `target/criterion/skills_watcher_startup/`.
 //!
 //! ```text
 //! cargo bench -p xai-grok-shell --bench skills_watcher_startup
@@ -17,8 +13,8 @@
 //! GROK_SKILLS_WATCHER_BENCH_DIRS=12000 cargo bench -p xai-grok-shell --bench skills_watcher_startup
 //! ```
 //!
-//! On macOS, recursive FSEvents is cheap so both arms may be close. On Linux
-//! inotify, `recursive_control` scales with directory count; `scoped` stays flat.
+//! On macOS, recursive FSEvents is cheap so both arms may be close.
+//! On Linux inotify, `recursive_control` scales with directory count; `scoped` stays flat.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,7 +26,7 @@ use notify_debouncer_mini::new_debouncer;
 use tempfile::TempDir;
 use xai_grok_shell::config::watcher::SkillsFileWatcher;
 
-/// Default dirs under `.claude/worktrees/` (override with env).
+/// Default directory count under `.claude/worktrees/` (override with `GROK_SKILLS_WATCHER_BENCH_DIRS`).
 const DEFAULT_WORKTREE_DIRS: usize = 6_000;
 
 fn worktree_dir_count() -> usize {
@@ -41,7 +37,7 @@ fn worktree_dir_count() -> usize {
         .unwrap_or(DEFAULT_WORKTREE_DIRS)
 }
 
-/// Nested groups of 100 so the tree has width and depth.
+/// Creates dirs in nested groups of 100 so the tree has width and depth.
 fn make_nested_dirs(base: &Path, count: usize) {
     for i in 0..count {
         let dir = base.join(format!("g{}", i / 100)).join(format!("d{i}"));
@@ -90,7 +86,7 @@ fn start_scoped(fixture: &Fixture) -> SkillsFileWatcher {
     watcher
 }
 
-/// Pre-fix control: one recursive watch on the whole project `.claude`.
+/// Control: one recursive watch on the whole project `.claude`, the old behavior.
 fn start_recursive_control(
     claude: &Path,
 ) -> notify_debouncer_mini::Debouncer<notify::RecommendedWatcher> {

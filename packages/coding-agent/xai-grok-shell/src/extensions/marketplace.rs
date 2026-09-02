@@ -1,7 +1,5 @@
-//! `x.ai/marketplace/*` extension handlers.
-//!
-//! Provides marketplace browsing and install endpoints for the pager modal.
-//! Delegates to `xai-grok-plugin-marketplace` crate for scanning and install logic.
+//! Marketplace browsing and install endpoints for the pager modal.
+//! Scanning and install logic live in the `xai-grok-plugin-marketplace` crate.
 
 use agent_client_protocol as acp;
 use xai_hooks_plugins_types::{
@@ -83,7 +81,7 @@ async fn handle_list() -> ExtResult {
             Some(serde_json::json!({
                 "source_index": i,
                 "source_name": sources[i].name,
-                "scan_ms": 0, // individual timing not available in parallel mode
+                "scan_ms": 0, // per-source timing is unavailable when scans run in parallel
                 "plugin_count": scan.plugins.len(),
                 "catalog_loaded": catalog_loaded,
                 "components_present": components_present,
@@ -112,9 +110,8 @@ async fn handle_action(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 
     let outcome = match req.action {
         MarketplaceAction::Refresh { source_url_or_path } => {
-            // Force re-sync git caches (local sources are re-scanned on next
-            // list). Runs on the blocking pool: git clone/fetch is sync and
-            // can stall for up to its timeout — never run it on the LocalSet.
+            // Force a re-sync of the git caches (local sources are re-scanned on the next list)
+            // Runs on the blocking pool: git clone and fetch are sync and can stall for up to their timeout, so never run them on the LocalSet
             let sources = load_filtered_marketplace_sources();
             let filter = source_url_or_path;
             match tokio::task::spawn_blocking(move || refresh_sources(&sources, filter.as_deref()))
@@ -363,7 +360,6 @@ async fn handle_install(
 
     let sources = load_filtered_marketplace_sources();
 
-    // Helper: get canonical URL/path for a source.
     let source_identity = |s: &xai_grok_plugin_marketplace::MarketplaceSource| -> String {
         match &s.kind {
             xai_grok_plugin_marketplace::SourceKind::Local { path } => path.display().to_string(),
@@ -806,8 +802,7 @@ async fn handle_add_source(url: &str) -> xai_hooks_plugins_types::ActionOutcome 
     let cwd = std::env::current_dir().unwrap_or_default();
     let input = plugin::classify_marketplace_add_input(url, &cwd);
 
-    // Fail fast on missing local paths: without this, a path input would be
-    // stored as a git URL and only error after network clone attempts.
+    // Fail fast on a missing local path: stored as a git URL, it would only error after network clone attempts
     if let MarketplaceAddInput::LocalPath(path) = &input
         && !path.is_dir()
     {
@@ -827,8 +822,7 @@ async fn handle_add_source(url: &str) -> xai_hooks_plugins_types::ActionOutcome 
         MarketplaceAddInput::LocalPath(p) => p.display().to_string(),
     };
 
-    // Local paths never match the git-URL allowlist, so a restricted
-    // strictKnownMarketplaces policy blocks them — intentionally fail-closed.
+    // Local paths never match the git-URL allowlist, so a restricted strictKnownMarketplaces policy blocks them (intentionally fail-closed)
     let allowlist =
         &xai_grok_workspace::permission::resolution::managed_settings().marketplace_allowlist;
     if allowlist.is_restricted() && !allowlist.is_url_allowed(&identity) {
@@ -866,9 +860,8 @@ async fn handle_add_source(url: &str) -> xai_hooks_plugins_types::ActionOutcome 
         };
     }
 
-    // Reject URLs that aren't reachable git repos (e.g. MCP endpoints pasted
-    // into the wrong tab) before persisting. The probe blocks on a git
-    // subprocess, so run it off the LocalSet.
+    // Reject URLs that aren't reachable git repos (e.g. MCP endpoints pasted into the wrong tab) before persisting.
+    // The probe blocks on a git subprocess, so run it off the LocalSet
     if let MarketplaceAddInput::GitUrl(git_url) = &input {
         let probe_url = git_url.clone();
         let probe = tokio::task::spawn_blocking(move || {
@@ -910,7 +903,7 @@ async fn handle_add_source(url: &str) -> xai_hooks_plugins_types::ActionOutcome 
         }
     };
 
-    // Run the write under SAVE_LOCK + flock, off the reactor.
+    // Run the write under SAVE_LOCK and the flock, off the reactor
     let config_path = xai_grok_config::grok_home().join("config.toml");
     let grok_home = xai_grok_config::grok_home();
     let _save_guard = crate::util::config::lock_config_writes().await;
@@ -950,10 +943,9 @@ async fn handle_add_source(url: &str) -> xai_hooks_plugins_types::ActionOutcome 
     }
 }
 
-/// Append a `[[marketplace.sources]]` entry (and optionally set the official
-/// flag) in one atomic `toml_edit` write, so a crash can't leave a source
-/// without its flag. Idempotent on normalized git URL / local path; preserves
-/// comments.
+/// Append a `[[marketplace.sources]]` entry, optionally setting the official flag, in one atomic `toml_edit` write.
+/// The single write means a crash can't leave a source without its flag.
+/// Idempotent on the normalized git URL or local path; preserves comments.
 fn add_marketplace_source(
     config_path: &std::path::Path,
     name: &str,
@@ -991,8 +983,7 @@ fn add_marketplace_source(
         )
     })?;
 
-    // Skip if the normalized URL / path already exists: the pre-lock dup check
-    // in handle_add_source can let two serialized adds reach here.
+    // Skip if the normalized URL or path already exists: the pre-lock dup check in handle_add_source can let two serialized adds reach here
     use crate::plugin::MarketplaceAddInput;
     let already_present = match source {
         MarketplaceAddInput::GitUrl(git_url) => {
@@ -1037,7 +1028,7 @@ fn add_marketplace_source(
 /// plugins that were installed from it.
 async fn handle_remove_source(source_url_or_path: &str) -> xai_hooks_plugins_types::ActionOutcome {
     let src = source_url_or_path.to_string();
-    // Lock + run the blocking FS work off the reactor.
+    // Lock, then run the blocking FS work off the reactor
     let _save_guard = crate::util::config::lock_config_writes().await;
     match tokio::task::spawn_blocking(move || remove_source_locked(&src)).await {
         Ok(outcome) => outcome,
@@ -1050,9 +1041,8 @@ async fn handle_remove_source(source_url_or_path: &str) -> xai_hooks_plugins_typ
     }
 }
 
-/// Sync body of [`handle_remove_source`], run on a blocking thread under the
-/// flock for the whole read-modify-write so a concurrent auto-register can't
-/// re-add the source mid-removal.
+/// Sync body of [`handle_remove_source`], run on a blocking thread.
+/// Holds the flock for the whole read-modify-write so a concurrent auto-register can't re-add the source mid-removal.
 fn remove_source_locked(source_url_or_path: &str) -> xai_hooks_plugins_types::ActionOutcome {
     use crate::plugin;
     use xai_hooks_plugins_types::{ActionOutcome, OutcomeStatus};
@@ -1062,8 +1052,7 @@ fn remove_source_locked(source_url_or_path: &str) -> xai_hooks_plugins_types::Ac
 
     let uninstalled = plugin::uninstall_marketplace_source_plugins(source_url_or_path);
 
-    // Remove the source and (if official) set the flag in ONE atomic write so a
-    // crash can't drop the flag and re-add the source next startup.
+    // Remove the source and (if official) set the flag in ONE atomic write so a crash can't drop the flag and re-add the source next startup
     let config_path = grok_home.join("config.toml");
     let is_official = xai_grok_plugin_marketplace::is_official_source_url(source_url_or_path);
     let mut removed_from_config = false;
@@ -1114,8 +1103,7 @@ fn remove_source_locked(source_url_or_path: &str) -> xai_hooks_plugins_types::Ac
         };
     }
 
-    // JSON-store-only removal: set the flag separately (the config.toml path
-    // already set it atomically above).
+    // JSON-store-only removal: set the flag separately (the config.toml path already set it atomically above)
     if is_official
         && !removed_from_config
         && let Err(e) = set_official_marketplace_auto_installed(&config_path)
@@ -1204,9 +1192,9 @@ fn read_official_marketplace_auto_installed(config_path: &std::path::Path) -> bo
     read_marketplace_bool_flag(config_path, "official_marketplace_auto_installed")
 }
 
-/// Acquire an advisory exclusive `flock` on `<grok_home>/.config-init.lock`,
-/// retrying briefly under contention, to serialize first-run auto-register
-/// across processes. Only `WouldBlock` retries; other I/O errors return early.
+/// Acquire an advisory exclusive `flock` on `<grok_home>/.config-init.lock`, retrying briefly under contention.
+/// It serializes first-run auto-register across processes.
+/// Only `WouldBlock` retries; other I/O errors return early.
 /// The lock file is intentionally never removed (flock releases on exit).
 fn acquire_init_lock(grok_home: &std::path::Path) -> std::io::Result<std::fs::File> {
     use fs2::FileExt;
@@ -1265,9 +1253,8 @@ fn read_default_skills_installs_purged(config_path: &std::path::Path) -> bool {
 }
 
 /// One-shot purge of legacy marketplace `default-skills` installs.
-///
-/// Gated by sticky `default_skills_installs_purged` in config.toml. Best-effort:
-/// errors are logged and never block startup.
+/// Gated by the sticky `default_skills_installs_purged` flag in config.toml.
+/// Best-effort: errors are logged and never block startup.
 pub(crate) fn purge_default_skills_installs(grok_home: &std::path::Path) {
     purge_default_skills_installs_impl(grok_home, || {
         xai_grok_agent::plugins::install_registry::InstallRegistry::try_load_from(
@@ -1363,11 +1350,10 @@ fn purge_default_skills_installs_impl(
 
 /// Auto-register the official xAI marketplace source on first run.
 ///
-/// Gated by the caller (`init_process`); see
-/// `Config::resolve_official_marketplace_auto_register`. No-op once
-/// `official_marketplace_auto_installed` is set. Under a process-wide flock it
-/// adds the source (or just sets the flag if it's already present in config.toml
-/// or a JSON store). Best-effort: errors are logged and never block startup.
+/// Gated by the caller (`init_process`); see `Config::resolve_official_marketplace_auto_register`.
+/// No-op once `official_marketplace_auto_installed` is set.
+/// Under a process-wide flock it adds the source (or just sets the flag if it's already present in config.toml or a JSON store).
+/// Best-effort: errors are logged and never block startup.
 pub(crate) fn ensure_official_marketplace_source(grok_home: &std::path::Path) {
     let config_path = grok_home.join("config.toml");
 
@@ -1407,10 +1393,9 @@ pub(crate) fn ensure_official_marketplace_source(grok_home: &std::path::Path) {
         }
     };
 
-    // "Already present" = official URL in config.toml sources OR a JSON store
-    // (settings.json / known_marketplaces.json) under grok_home. Scoped to
-    // grok_home only (not ~/.claude) to keep tests hermetic; a user with the URL
-    // solely in ~/.claude gets one duplicate entry that the UI dedupes by URL.
+    // "Already present" means the official URL is in the config.toml sources or in a JSON store (settings.json, known_marketplaces.json) under grok_home
+    // The scan is scoped to grok_home only (not ~/.claude) to keep tests hermetic
+    // A user with the URL solely in ~/.claude gets one duplicate entry that the UI dedupes by URL
     let toml_sources = xai_grok_plugin_marketplace::load_sources(&parsed);
     let json_sources = xai_grok_plugin_marketplace::load_extra_sources_from_settings_in(
         &toml_sources,
@@ -1510,8 +1495,7 @@ mod official_source_tests {
 
     #[test]
     fn removing_last_nonofficial_source_preserves_flag_and_blocks_readd() {
-        // Regression: removing the last (non-official) source must not wipe the
-        // sticky flag, or a gated startup would re-add the removed official source.
+        // Regression: removing the last (non-official) source must not wipe the sticky flag, or a gated startup would re-add the removed official source
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
         let config_path = home.join("config.toml");

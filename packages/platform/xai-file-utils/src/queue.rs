@@ -917,6 +917,11 @@ impl UploadQueue {
     /// sidecar like [`Self::enqueue_bytes_blocking`], so an item outliving the
     /// waiter (cancelled confirmation, process exit mid-retry) spills as a
     /// pair the next run re-enqueues.
+    ///
+    /// A full channel diverts the item to a fire-and-forget inline upload that
+    /// drops the sidecar: nothing durable remains, so `diverted_inline` (when
+    /// provided) is set before this parks on confirmation — a caller cancelling
+    /// that wait must not record the item as queue-owned.
     pub async fn enqueue_blocking(
         &self,
         content: &[u8],
@@ -925,6 +930,7 @@ impl UploadQueue {
         artifact_name: &str,
         session_id: &str,
         turn_number: u64,
+        diverted_inline: Option<&std::sync::atomic::AtomicBool>,
     ) -> anyhow::Result<String> {
         let temp_path = self.write_temp_file(content, artifact_name, session_id, turn_number)?;
         let sidecar_path = match self.write_sidecar_file(
@@ -976,6 +982,9 @@ impl UploadQueue {
                 }
                 if let Some(sidecar) = &rejected.sidecar_path {
                     try_remove_temp(sidecar, Some(&self.stats));
+                }
+                if let Some(flag) = diverted_inline {
+                    flag.store(true, Ordering::Relaxed);
                 }
                 self.stats.enqueue_fallbacks.fetch_add(1, Ordering::Relaxed);
                 self.spawn_inline_upload_owned_snapshot(

@@ -1,9 +1,5 @@
-//! Shared transport types used by workspace communication layers.
-//!
-//! The `WorkspaceChannel` trait and `MpscChannel` in-process implementation
-//! have been removed. Sessions now use `WorkspaceHandle` directly (local mode)
-//! or `ToolHarness` RPC calls (proxy mode). These shared types remain for
-//! backward compatibility with code that references them.
+//! Shared transport types kept for backward compatibility with code that still references them.
+//! Sessions use `WorkspaceHandle` directly (local mode) or `ToolHarness` RPC calls (proxy mode).
 
 use serde_json::Value;
 

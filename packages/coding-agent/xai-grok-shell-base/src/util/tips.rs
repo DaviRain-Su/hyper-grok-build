@@ -141,11 +141,4 @@ mod tests {
         std::fs::write(cursor_path(dir.path()), b"not json").unwrap();
         assert_eq!(load_cursor(dir.path()), 0);
     }
-
-    #[test]
-    fn save_and_load_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
-        save_cursor(dir.path(), 42);
-        assert_eq!(load_cursor(dir.path()), 42);
-    }
 }

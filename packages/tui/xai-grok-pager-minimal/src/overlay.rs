@@ -1,33 +1,22 @@
-//! Minimal-mode inline-overlay host (design K11 / §6.8).
-//!
-//! Renders the single active *prompt-anchored* dropdown — `@` file search, `/`
-//! slash command, or shell completion — directly above the prompt, growing the
-//! pinned live viewport to make room and shrinking + re-anchoring it to the
-//! bottom of the screen when the dropdown closes. (Modal overlays — permission,
-//! question, plan, rewind — land in PR 10; the command palette / model picker
-//! in a later PR.)
+//! Renders the single active prompt-anchored dropdown (`@` file search, `/` slash command, or shell completion) directly above the prompt.
+//! It grows the pinned live viewport to make room, then shrinks and re-anchors it to the bottom of the screen when the dropdown closes.
 //!
 //! ## Viewport sizing (the load-bearing part)
 //!
-//! The live viewport is **not bottom-pinned**: it sits
-//! directly after the committed conversation. The welcome card is committed at
-//! the top of a fresh screen (`welcome::maybe_commit_welcome` resets the
-//! viewport to row 0 + clears), and from there each committed block pushes the
-//! viewport down via `insert_before`; once it reaches the screen bottom, further
-//! commits scroll into native scrollback.
+//! The live viewport is **not bottom-pinned**: it sits directly after the committed conversation.
+//! The welcome card is committed at the top of a fresh screen (`welcome::maybe_commit_welcome` resets the viewport to row 0 and clears).
+//! From there each committed block pushes the viewport down via `insert_before`.
+//! Once the viewport reaches the screen bottom, further commits scroll into native scrollback.
 //!
-//! When idle, the viewport is sized to *exactly* its content (todo panel +
-//! status + overlay + prompt) so the prompt sits right after the conversation
-//! with no gap, and the rest of the screen below stays empty. To show a dropdown
-//! / grow for the prompt, [`Terminal::set_viewport_height`] grows the viewport's
-//! **bottom edge downward** into that empty space — so committed content is never
-//! scrolled away and closing the overlay leaves **no blank band**. Only when the
-//! growth would overflow the screen bottom does it scroll committed rows up. The
-//! shrink path keeps the top fixed, so the prompt simply moves back up. No
-//! explicit bottom re-anchoring is needed (or wanted).
+//! When idle, the viewport is sized to exactly its content (todo panel + status + overlay + prompt).
+//! The prompt then sits right after the conversation with no gap, and the rest of the screen below stays empty.
+//! To show a dropdown or grow for the prompt, [`Terminal::set_viewport_height`] grows the viewport's bottom edge downward into that empty space.
+//! Committed content is never scrolled away, and closing the overlay leaves no blank band.
+//! Only when the growth would overflow the screen bottom does it scroll committed rows up.
+//! The shrink path keeps the top fixed, so the prompt moves back up.
+//! No explicit bottom re-anchoring is needed (or wanted).
 //!
-//! `set_viewport_height` early-returns when the height is unchanged, so steady
-//! state is a no-op.
+//! `set_viewport_height` early-returns when the height is unchanged, so steady state is a no-op.
 //!
 //! [`Terminal::set_viewport_height`]: xai_ratatui_inline::Terminal::set_viewport_height
 
@@ -46,9 +35,8 @@ use xai_grok_pager::views::prompt_widget::{PromptBg, PromptInfo, PromptStyle, Pr
 use xai_grok_pager::views::question_view::{feedback_input, inline_text_width};
 
 /// Which prompt-anchored dropdown is currently shown.
-///
-/// Mirrors the coexistence order in `AgentView::draw`: `@` file search wins over
-/// `/` slash, which wins over shell completion. Only one is ever visible.
+/// Mirrors the coexistence order in `AgentView::draw`: `@` file search wins over `/` slash, which wins over shell completion.
+/// Only one is ever visible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     FileSearch,
@@ -56,18 +44,16 @@ enum Kind {
     Completion,
 }
 
-/// The active dropdown and its capped item-row count, or `None` when no
-/// prompt-anchored dropdown is open (or the open one has nothing to show).
+/// The active dropdown and its capped item-row count, or `None` when no prompt-anchored dropdown is open (or the open one has nothing to show).
 ///
-/// `items_width` is the width the rows render at (minimal is flush-left, so
-/// the prompt/viewport width); slash rows wrap, so their count is line-based.
+/// `items_width` is the width the rows render at (minimal is flush-left, so the prompt/viewport width).
+/// Slash rows wrap, so their count is line-based.
 fn active(prompt: &PromptWidget, items_width: u16) -> Option<(Kind, u16)> {
     use xai_grok_pager::views::completion_dropdown::MAX_VISIBLE_ROWS;
     use xai_grok_pager::views::file_search::dropdown::MAX_DROPDOWN_ROWS as FILE_MAX;
     use xai_grok_pager::views::slash_dropdown::desired_item_rows;
 
-    // Precedence matches `AgentView::draw`: file search is checked first and,
-    // when visible, suppresses the others even if it currently has 0 results.
+    // Precedence matches `AgentView::draw`: file search is checked first and, when visible, suppresses the others even when it has 0 results
     if prompt.file_search_visible() {
         let n = (prompt.file_search.result_count() as u16).min(FILE_MAX);
         return (n > 0).then_some((Kind::FileSearch, n));
@@ -84,46 +70,39 @@ fn active(prompt: &PromptWidget, items_width: u16) -> Option<(Kind, u16)> {
     None
 }
 
-/// Extra rows the active dropdown needs above the prompt (top border + items +
-/// bottom border), or 0 when none is open. The bottom border doubles as the gap
-/// row directly above the prompt, matching `render_dropdown_chrome`.
+/// Extra rows the active dropdown needs above the prompt (top border + items + bottom border), or 0 when none is open.
+/// The bottom border doubles as the gap row directly above the prompt, matching `render_dropdown_chrome`.
 pub fn overlay_rows(prompt: &PromptWidget, items_width: u16) -> u16 {
     active(prompt, items_width)
         .map(|(_, rows)| panel_rows(rows))
         .unwrap_or(0)
 }
 
-/// Panel height for `item_rows` rendered rows: top border + items + bottom
-/// border. `item_rows` is assumed already capped and non-zero.
+/// Panel height for `item_rows` rendered rows: top border + items + bottom border.
+/// `item_rows` is assumed already capped and non-zero.
 fn panel_rows(item_rows: u16) -> u16 {
     item_rows + 2
 }
 
-/// Moderate target height for a centered app-modal panel. Deliberately well
-/// below a full screen so closing the modal leaves only a small blank band
-/// (the band equals `target - base`); a screen-tall band was the "bunch of
-/// blank space" dogfooding complaint.
+/// Kept well below a full screen so closing the modal leaves only a small blank band (the band equals `target - base`).
+/// A screen-tall band was the "bunch of blank space" dogfooding complaint.
 const MINIMAL_APP_MODAL_ROWS: u16 = 18;
 
-/// Target live-viewport height for a centered app-modal: a moderate,
-/// bottom-anchored panel rather than the full screen. Never below the live
-/// region's `base`, never above the screen `ceiling`.
+/// Target live-viewport height for a centered app-modal: a moderate, bottom-anchored panel rather than the full screen.
+/// Never below the live region's `base`, never above the screen `ceiling`.
 fn app_modal_target(base: u16, ceiling: u16) -> u16 {
     MINIMAL_APP_MODAL_ROWS.clamp(base, ceiling)
 }
 
-/// Target live-viewport height for a prompt-replacing modal (permission /
-/// question / rewind): the `modal_h` rows of the modal, one status row, the
-/// uncommitted live `tail_h` rows **above** it, and the `sl_h` rows of the
-/// configured `[ui.status_line]` row **below** it.
+/// Target live-viewport height for a prompt-replacing modal (permission / question / rewind).
+/// It reserves the `modal_h` modal rows, one status row, and the uncommitted live `tail_h` rows above the modal.
+/// The `sl_h` rows of the configured `[ui.status_line]` sit below it.
 ///
-/// Reserving room for the tail is load-bearing: a tool blocked on a permission /
-/// question is held uncommitted in the live tail (`is_pending_user_input`), so
-/// the tail is where its diff / command preview is drawn. Sizing to `modal_h + 1`
-/// alone collapses the tail to zero rows — the "Allow Edit to …?" prompt then
-/// shows with no visible diff. Floored at `base` (and at 3) so some live region
-/// always remains; capped at `ceiling` — when tail + modal overflow the screen,
-/// `live::draw_tail` bottom-anchors and clips the top.
+/// A tool blocked on a permission or question is held uncommitted in the live tail (`is_pending_user_input`).
+/// The tail is where its diff or command preview is drawn.
+/// Sizing to `modal_h + 1` alone collapses the tail to zero rows; the "Allow Edit to …?" prompt then shows with no visible diff.
+/// Floored at `base` (and at 3) so some live region always remains.
+/// Capped at `ceiling`; when tail + modal overflow the screen, `live::draw_tail` bottom-anchors and clips the top.
 fn modal_target(tail_h: u16, modal_h: u16, sl_h: u16, base: u16, ceiling: u16) -> u16 {
     tail_h
         .saturating_add(modal_h)
@@ -134,15 +113,13 @@ fn modal_target(tail_h: u16, modal_h: u16, sl_h: u16, base: u16, ceiling: u16) -
         .max(3)
 }
 
-/// Grow / shrink the live viewport to fit its content + the active overlay.
+/// Grow or shrink the live viewport to fit its content plus the active overlay.
 ///
-/// The live region is **not** bottom-pinned: it sits
-/// directly after the committed conversation. `set_viewport_height` grows it
-/// *downward* into the empty space below when there's room — so an overlay never
-/// scrolls committed content into scrollback and closing it leaves **no blank
-/// band** — and only scrolls when the growth would overflow the screen bottom.
-/// As blocks commit, `insert_before` pushes the viewport down naturally; once it
-/// reaches the bottom, further commits scroll. A no-op when height is unchanged.
+/// The live region is **not** bottom-pinned: it sits directly after the committed conversation.
+/// `set_viewport_height` grows it downward into the empty space below, so an overlay never scrolls committed content into scrollback.
+/// Closing the overlay leaves no blank band, and it only scrolls when the growth would overflow the screen bottom.
+/// As blocks commit, `insert_before` pushes the viewport down; once it reaches the bottom, further commits scroll.
+/// A no-op when height is unchanged.
 pub fn sync_viewport(app: &mut AppView, terminal: &mut PagerTerminal) {
     let term_h = terminal.last_known_area().height;
     if term_h < 3 {
@@ -157,48 +134,37 @@ pub fn sync_viewport(app: &mut AppView, terminal: &mut PagerTerminal) {
         return;
     }
 
-    // Content-anchored, NOT bottom-pinned. `sync_viewport` runs *before*
-    // `commit_active` (see [`super::draw`]) and sizes to the POST-commit tail
-    // ([`super::live::tail_height`]). When the conversation is short the prompt
-    // sits right below the last block with blank space beneath it; once the
-    // conversation fills the screen that "right after the content" position
-    // *is* the bottom (content scrolls into native history as it grows, like a
-    // shell). We deliberately do NOT force the viewport to the bottom edge —
-    // that left a large blank gap under a short conversation (dogfood feedback).
+    // `sync_viewport` runs before `commit_active` (see [`super::draw`]) and sizes to the post-commit tail ([`super::live::tail_height`])
+    // When the conversation is short the prompt sits right below the last block with blank space beneath it
+    // Once the conversation fills the screen, the same position is the screen bottom and content scrolls into native history like a shell
+    // We deliberately do NOT force the viewport to the bottom edge: that left a large blank gap under a short conversation (dogfood feedback)
     //
     // Two resize paths, gated on whether a commit is about to run:
     if will_commit(app) {
-        // A commit follows. Only pre-set the viewport HEIGHT (to the post-commit
-        // size) and keep the current top; `commit_active`'s `insert_before` then
-        // does the rest — it prints the finalized block, scrolls the overflow
-        // into native scrollback, clears the vacated rows, and repositions the
-        // (correctly-sized) viewport to sit right after the block. We use
-        // `set_viewport_area` rather than `set_viewport_height` here to skip the
-        // latter's clear + grow-time scroll, which would be redundant work right
-        // before `insert_before` performs its own clear/scroll. (This leaves the
-        // stored `Viewport::Inline` height briefly out of sync with the area
-        // height, but that is harmless: `set_viewport_height` judges grow/shrink
-        // against the live area height, and it is resynced on the next frame.)
+        // A commit follows: only pre-set the viewport HEIGHT (to the post-commit size) and keep the current top
+        // `commit_active`'s `insert_before` prints the finalized block, scrolls the overflow into native scrollback, and clears the vacated rows
+        // It then repositions the correctly-sized viewport to sit right after the block
+        // We use `set_viewport_area` rather than `set_viewport_height` to skip the latter's clear and grow-time scroll
+        // That work would be redundant right before `insert_before` performs its own clear and scroll
+        // This leaves the stored `Viewport::Inline` height briefly out of sync with the area height, but that is harmless
+        // `set_viewport_height` judges grow/shrink against the live area height, and it is resynced on the next frame
         terminal.set_viewport_area(Rect {
             height: target,
             ..cur
         });
     } else {
         // No commit this frame (overlay open/close, idle prompt edits).
-        // `set_viewport_height` is top-fixed — which keeps the viewport anchored
-        // right after the content — and scrolls committed rows up into native
-        // scrollback on a grow (preserving them) while clearing the vacated rows
-        // on a shrink (wiping stale overlay/dropdown content).
+        // `set_viewport_height` is top-fixed, which keeps the viewport anchored right after the content
+        // On a grow it scrolls committed rows up into native scrollback, preserving them
+        // On a shrink it clears the vacated rows, wiping stale overlay/dropdown content
         let _ = terminal.set_viewport_height(target);
     }
 }
 
-/// Whether [`super::commit::commit_active`] will print at least one block into
-/// native scrollback this frame (the shared [`super::commit::scan_frontier`]
-/// projection), and no centered app-modal is holding commits. Gates the resize
-/// path in [`sync_viewport`]: a commit's `insert_before` handles clearing +
-/// repositioning itself, so the resize must NOT clear; otherwise
-/// `set_viewport_height`'s clear is needed to wipe stale rows.
+/// Whether [`super::commit::commit_active`] will print at least one block into native scrollback this frame.
+/// False while a centered app-modal is open, since app-modals hold commits.
+/// Gates the resize path in [`sync_viewport`]: a commit's `insert_before` handles clearing and repositioning itself, so the resize must NOT clear.
+/// Otherwise `set_viewport_height`'s clear is needed to wipe stale rows.
 fn will_commit(app: &AppView) -> bool {
     let ActiveView::Agent(id) = &app.active_view else {
         return false;
@@ -218,28 +184,21 @@ fn compute_target(app: &mut AppView, term_h: u16, width: u16) -> u16 {
     let minimal_live_rows = app.appearance.minimal_live_rows;
     let ceiling = term_h.saturating_sub(1).max(3);
     let base = minimal_live_rows.clamp(3, ceiling);
-    // The `[ui.status_line]` row's cap must match `live::draw_live`'s, or the
-    // viewport is sized for rows the paint drops.
+    // The `[ui.status_line]` row's cap must match `live::draw_live`'s, or the viewport is sized for rows the paint drops
     let sl_h = minimal_api::status_line_frame(app)
         .height()
         .min(ceiling.saturating_sub(2));
-    // Ctrl+T "force-show" pin; effective visibility (auto-hide) is computed per
-    // agent by `todo_panel_height`.
+    // Ctrl+T "force-show" pin; effective visibility (auto-hide) is computed per agent by `todo_panel_height`
     let force_todos = minimal_api::minimal_show_todos(app);
-    // Committed appearance (timestamps off) so the measured tail height matches
-    // exactly what `draw_tail` renders.
+    // Committed appearance (timestamps off) so the measured tail height matches exactly what `draw_tail` renders
     let commit_app = super::commit::committed_appearance(&app.appearance);
-    // Theme + prompt style: built after the agent is known so bash/feedback/
-    // remember chrome matches `draw_live` (same `prompt_style` inputs).
-    // Minimal is flush-left (W-38): prompt-replacing modals span the live
-    // region's full width (no outer horizontal padding), so measure their
-    // height at that same width — it must match `live::draw_live`'s
-    // `modal_area` or the viewport is sized for a different text wrap.
+    // Theme and prompt style are built after the agent is known so bash/feedback/remember chrome matches `draw_live` (same `prompt_style` inputs)
+    // Minimal is flush-left: prompt-replacing modals span the live region's full width with no outer horizontal padding
+    // Measure their height at that same width; it must match `live::draw_live`'s `modal_area` or the viewport is sized for a different text wrap
     let content_w = width as usize;
 
     let ActiveView::Agent(id) = &app.active_view else {
-        // No agent yet: size for the in-region sign-in / folder-trust UI so the
-        // trust question isn't clipped to the idle prompt height.
+        // No agent yet: size for the in-region sign-in / folder-trust UI so the trust question isn't clipped to the idle prompt height
         let hint = super::auth::minimal_auth_hint(
             &app.auth_state,
             &app.trust_state,
@@ -250,8 +209,7 @@ fn compute_target(app: &mut AppView, term_h: u16, width: u16) -> u16 {
         return needed.max(base).min(ceiling);
     };
     let id = *id;
-    // Snapshot mode/multiline before the mut agent borrow so `prompt_style` can
-    // still read `app.appearance` (same inputs as `draw_live`).
+    // Snapshot mode/multiline before the mut agent borrow so `prompt_style` can still read `app.appearance` (same inputs as `draw_live`)
     let (input_mode, multiline) = app
         .agents
         .get(&id)
@@ -264,45 +222,35 @@ fn compute_target(app: &mut AppView, term_h: u16, width: u16) -> u16 {
         return base;
     };
 
-    // A below-prompt list panel (resume / mcps) renders as a simple list under
-    // the input bar; size to its exact content height (capped) so the footer
-    // sits directly under the last row and the list scrolls internally past the
-    // screen. Checked before the app-modal branch since the session picker is
-    // also an `active_modal`.
+    // A below-prompt list panel (resume / mcps) renders as a simple list under the input bar
+    // Size to its exact content height (capped) so the footer sits directly under the last row and the list scrolls internally past the screen
+    // Checked before the app-modal branch since the session picker is also an `active_modal`
     if let Some(kind) = super::panel::active(agent) {
         return super::panel::panel_height(agent, kind, width, ceiling);
     }
 
-    // A centered app-modal (command palette / settings / pickers) or the
-    // extensions modal (hooks / plugins / marketplace / skills) reuses the
-    // full-TUI popup renderer, which fills whatever area it's given. Grow to a
-    // moderate, bottom-anchored height — NOT the full ceiling. Growing to the
-    // ceiling and shrinking on close left a *screen-tall* blank band above the
-    // prompt (committed rows scrolled into native scrollback can't be pulled
-    // back). A capped panel keeps that band small while still giving the
-    // list/editor room (its inner content scrolls).
+    // A centered app-modal (command palette / settings / pickers) reuses the full-TUI popup renderer, which fills whatever area it's given
+    // The extensions modal (hooks / plugins / marketplace / skills) takes the same path
+    // Grow to a moderate, bottom-anchored height, NOT the full ceiling
+    // Growing to the ceiling and shrinking on close left a screen-tall blank band above the prompt
+    // Committed rows scrolled into native scrollback can't be pulled back
+    // A capped panel keeps that band small while still giving the list/editor room (its inner content scrolls)
     if app_modal_active(agent) || minimal_api::extensions_modal(agent).is_some() {
         return app_modal_target(base, ceiling);
     }
 
-    // A prompt-replacing modal (permission / question / rewind) takes the bottom
-    // region in place of the prompt. Size to fit the uncommitted live tail
-    // ABOVE the modal too (+ the status row between them): a tool blocked on a
-    // permission / question is held in the tail (`is_pending_user_input`, see
-    // `commit::is_committable`), so the tail is exactly where its diff / command
-    // preview lives — without reserving room for it the viewport collapses to
-    // just the modal and the "Allow Edit to …?" prompt shows with no visible
-    // diff (the mid-stream permission hold of design §6.8 / risk #3). Capped at
-    // `ceiling`; when tail + modal overflow, `draw_tail` bottom-anchors and
-    // clips the top.
+    // A prompt-replacing modal (permission / question / rewind) takes the bottom region in place of the prompt
+    // Size to fit the uncommitted live tail above the modal too, plus the status row between them
+    // A tool blocked on a permission / question is held in the tail (`is_pending_user_input`, see `commit::is_committable`)
+    // Without reserving room for it, the viewport collapses to just the modal and the "Allow Edit to …?" prompt shows with no visible diff
+    // Capped at `ceiling`; when tail + modal overflow, `draw_tail` bottom-anchors and clips the top
     if let Some(modal) = active_modal(agent) {
         let modal_h = modal_height(modal, agent, term_h, content_w);
         let tail_h = super::live::tail_height(agent, width, &commit_app);
         return modal_target(tail_h, modal_h, sl_h, base, ceiling);
     }
 
-    // Otherwise size to fit the prompt (it expands as you type) plus any
-    // prompt-anchored dropdown.
+    // Otherwise size to fit the prompt (it expands as you type) plus any prompt-anchored dropdown
     let overlay_h = overlay_rows(&agent.prompt, width);
     let cap = ceiling.saturating_sub(overlay_h + 1 + sl_h).max(1);
     let prompt_h = agent
@@ -310,24 +258,19 @@ fn compute_target(app: &mut AppView, term_h: u16, width: u16) -> u16 {
         .desired_height(width, &style, false, cap)
         .max(1);
 
-    // Size the viewport to exactly its content — tail (uncommitted streaming
-    // output) + todo panel + /btw panel + status + overlay + prompt — so the
-    // prompt sits directly after the conversation with no gap, whether idle or
-    // mid-turn. When a turn is "thinking" the tail is empty, so the prompt
-    // stays right under the content instead of floating below a fixed empty
-    // region; as output streams the tail grows and the viewport grows downward
-    // with it. The region is not bottom-pinned, so the rest of the screen below
-    // stays empty (the app "owns" the window from the top down).
+    // Size the viewport to exactly its content: tail (uncommitted streaming output) + todo panel + /btw panel + status + overlay + prompt
+    // The prompt then sits directly after the conversation with no gap, whether idle or mid-turn
+    // When a turn is "thinking" the tail is empty, so the prompt stays right under the content instead of floating below a fixed empty region
+    // As output streams the tail grows and the viewport grows downward with it
+    // The region is not bottom-pinned, so the rest of the screen below stays empty (the app "owns" the window from the top down)
     let tail_h = super::live::tail_height(agent, width, &commit_app);
     let todos_h = super::todo::todo_panel_height(agent, force_todos);
-    // Below the prompt sits either the dropdown overlay or the 1-row info bar
-    // (model · context usage · turn time/tokens); reserve at least the info row
-    // when no dropdown is open so it isn't clipped / doesn't scroll content.
+    // Below the prompt sits either the dropdown overlay or the 1-row info bar (model · context usage · turn time/tokens)
+    // Reserve at least the info row when no dropdown is open so it isn't clipped and doesn't scroll content
     let below_h = overlay_h.max(1);
-    // `/btw` is a non-blocking side panel above the status/prompt (same place
-    // as the full TUI). Height is measured at full viewport width so wrap
-    // matches `live::draw_live`. Only reserve rows the shared minimal paint
-    // policy accepts, otherwise a narrow or short terminal leaves a blank strip.
+    // `/btw` is a non-blocking side panel above the status/prompt (same place as the full TUI)
+    // Height is measured at full viewport width so wrap matches `live::draw_live`
+    // Only reserve rows the shared minimal paint policy accepts, otherwise a narrow or short terminal leaves a blank strip
     let raw_btw = if minimal_api::minimal_btw_surface_available(agent) {
         xai_grok_pager::views::btw_overlay::btw_panel_height(agent.btw_state.as_ref(), width)
     } else {
@@ -342,9 +285,8 @@ fn compute_target(app: &mut AppView, term_h: u16, width: u16) -> u16 {
     content_target(tail_h, todos_h, btw_h, below_h, prompt_h, sl_h, ceiling)
 }
 
-/// Live-viewport height sized to exactly its content: tail + todo panel + /btw
-/// panel + status row + overlay + prompt + the configured `[ui.status_line]`
-/// row. Floored at 2 (status + prompt), capped at the screen.
+/// Live-viewport height sized to exactly its content: tail + todo panel + /btw panel + status row + overlay + prompt + the `[ui.status_line]` row.
+/// Floored at 2 (status + prompt), capped at the screen.
 fn content_target(
     tail_h: u16,
     todos_h: u16,
@@ -364,10 +306,10 @@ fn content_target(
         .clamp(2, ceiling)
 }
 
-/// Render the active prompt-anchored dropdown into the band directly above
-/// `prompt_area`, reusing the shared dropdown chrome + item renderers so the
-/// look matches the full TUI. `viewport_area` is the whole live region (used for
-/// panel width / horizontal padding). A no-op when no dropdown is open.
+/// Render the active prompt-anchored dropdown into the band directly above `prompt_area`.
+/// Reuses the shared dropdown chrome and item renderers so the look matches the full TUI.
+/// `viewport_area` is the whole live region (used for panel width / horizontal padding).
+/// A no-op when no dropdown is open.
 pub fn render(
     buf: &mut Buffer,
     viewport_area: Rect,
@@ -436,15 +378,14 @@ pub fn render(
 
 // ─────────────────────────── modal overlays (PR10) ───────────────────────────
 //
-// Unlike the prompt-anchored dropdowns above, these modals *replace* the prompt:
-// they occupy the bottom region and the user interacts with them directly. Keys
-// already route to the shared permission / question / rewind handlers (minimal
-// did not change input routing), so this is a render + sizing concern only.
+// Unlike the prompt-anchored dropdowns above, these modals replace the prompt
+// They occupy the bottom region and the user interacts with them directly
+// Keys already route to the shared permission / question / rewind handlers (minimal did not change input routing)
+// Hosting them here is only a render and sizing concern
 //
-// The permission, question, rewind-picker, and cancel-turn confirm modals are
-// all hosted here. Plan approval is hosted separately via [`plan`] (its full-TUI
-// surface is a fullscreen line-viewer + live prompt, so it gets its own minimal
-// treatment rather than a `render_*` reuse).
+// The permission, question, rewind-picker, and cancel-turn confirm modals are all hosted here
+// Plan approval is hosted separately via [`plan`]
+// In the full TUI it is a fullscreen line-viewer plus a live prompt, so it gets its own minimal treatment rather than a `render_*` reuse
 
 /// A prompt-replacing modal overlay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -452,25 +393,20 @@ pub enum Modal {
     Permission,
     Question,
     Rewind,
-    /// The "subagents are still running — stop them?" confirm shown when
-    /// cancelling a turn with running subagents (`AgentView::cancel_turn_view`).
+    /// The "Subagents are still running. Stop them?" confirm shown when cancelling a turn with running subagents (`AgentView::cancel_turn_view`).
     Cancel,
-    /// Plan approval (`AgentView::plan_approval_view`) — rendered compactly by
-    /// [`super::plan`] in place of the full TUI's fullscreen line viewer.
+    /// Plan approval (`AgentView::plan_approval_view`), rendered compactly by [`super::plan`] in place of the full TUI's fullscreen line viewer.
     Plan,
 }
 
-/// The active prompt-replacing modal, in the full-TUI render precedence
-/// (cancel-confirm > plan > permission > question > rewind), or `None`.
+/// The active prompt-replacing modal, in the full-TUI render precedence (cancel-confirm > plan > permission > question > rewind), or `None`.
 pub fn active_modal(agent: &AgentView) -> Option<Modal> {
-    // The cancel-turn confirm is checked first to match the input router, which
-    // intercepts keys for `cancel_turn_view` ahead of the question view
-    // (`AgentView::handle_input`).
+    // The cancel-turn confirm is checked first to match the input router
+    // The router intercepts keys for `cancel_turn_view` ahead of the question view (`AgentView::handle_input`)
     if minimal_api::cancel_turn_view(agent).is_some() {
         return Some(Modal::Cancel);
     }
-    // Plan approval routes through the line viewer (kept open in minimal) and is
-    // mutually exclusive with permission/question in practice; check it next.
+    // Plan approval routes through the line viewer (kept open in minimal) and is mutually exclusive with permission/question in practice
     if minimal_api::plan_approval_view(agent).is_some() {
         return Some(Modal::Plan);
     }
@@ -486,9 +422,8 @@ pub fn active_modal(agent: &AgentView) -> Option<Modal> {
     None
 }
 
-/// Desired modal height in rows. `screen_h` must be the **full terminal height**
-/// so the views' internal caps compute against the real screen, not the small
-/// live region (design Issue 5).
+/// Desired modal height in rows.
+/// `screen_h` must be the **full terminal height** so the views' internal caps compute against the real screen, not the small live region.
 pub fn modal_height(modal: Modal, agent: &mut AgentView, screen_h: u16, content_w: usize) -> u16 {
     match modal {
         Modal::Permission => agent
@@ -538,11 +473,9 @@ pub fn modal_height(modal: Modal, agent: &mut AgentView, screen_h: u16, content_
     }
 }
 
-/// Render the active modal into `area` (the live region's full width —
-/// flush-left, W-38). `screen_h` is the full terminal height — the same
-/// value `modal_height` sized the area with. Returns the text cursor when
-/// the modal hosts an inline editor (permission follow-up / question input
-/// mode), else `None`.
+/// Render the active modal into `area` (the live region's full width, flush-left).
+/// `screen_h` is the full terminal height, the same value `modal_height` sized the area with.
+/// Returns the text cursor when the modal hosts an inline editor (permission follow-up / question input mode), else `None`.
 pub fn render_modal(
     buf: &mut Buffer,
     area: Rect,
@@ -562,9 +495,8 @@ pub fn render_modal(
         }
         Modal::Cancel => {
             // The prompt is always focused in minimal, so the confirm is too.
-            // `cancel_turn_view` (shared) and `cancel_turn_buttons_mut` (exclusive)
-            // can't both be borrowed from the agent at once through the facade, so
-            // render the hit-test rects into a local Vec and store them back after.
+            // `cancel_turn_view` (shared) and `cancel_turn_buttons_mut` (exclusive) can't both be borrowed at once through `minimal_api`
+            // Render the hit-test rects into a local Vec and store them back after
             let mut buttons: Vec<Rect> = Vec::new();
             let drawn = if let Some(ctv) = minimal_api::cancel_turn_view(agent) {
                 xai_grok_pager::views::modal::render_cancel_turn_panel(
@@ -589,28 +521,24 @@ pub fn render_modal(
 
 // ─────────────────────────── app-modals (PR13 / PR15) ────────────────────────
 //
-// A second family of overlays lives in `AgentView::active_modal` (the full-TUI
-// `ActiveModal` enum) rather than the per-feature fields the [`Modal`]s above
-// read: the command palette, keyboard-shortcuts help, settings editor, model /
-// session / doc pickers, memory browser, etc. These are *centered popups* with
-// their own rich renderers, so — unlike the bottom-anchored modals — minimal
-// hosts them by growing the live viewport to (near) the whole screen and
-// reusing the exact full-TUI renderer ([`AgentView::draw_active_modal`]).
-// Committed scrollback scrolls up out of the way during the grow (and stays in
-// native history); the popup centers in the grown region.
+// A second family of overlays lives in `AgentView::active_modal` (the full-TUI `ActiveModal` enum), not the per-feature fields the [`Modal`]s read
+// These are the command palette, keyboard-shortcuts help, settings editor, model / session / doc pickers, memory browser, etc
+// They are centered popups with their own rich renderers, unlike the bottom-anchored modals
+// Minimal hosts them by growing the live viewport to (near) the whole screen and reusing the full-TUI renderer ([`AgentView::draw_active_modal`])
+// Committed scrollback scrolls up out of the way during the grow (and stays in native history); the popup centers in the grown region
 //
-// Input already routes to the shared `handle_modal_key` path (minimal only
-// swaps the *render* path), so hosting here is purely a render + sizing concern.
+// Input already routes to the shared `handle_modal_key` path (minimal only swaps the render path)
+// Hosting here is purely a render and sizing concern
 
-/// Whether an `AgentView::active_modal` (command palette / shortcuts help /
-/// settings / pickers / …) is open. Minimal hosts these as centered overlays.
+/// Whether an `AgentView::active_modal` (command palette / shortcuts help / settings / pickers / …) is open.
+/// Minimal hosts these as centered overlays.
 pub fn app_modal_active(agent: &AgentView) -> bool {
     agent.active_modal.is_some()
 }
 
-/// Render the active centered app-modal into `area`, reusing the exact full-TUI
-/// [`AgentView::draw_active_modal`] dispatch so look + behavior match every
-/// mode. Returns whether anything was drawn.
+/// Render the active centered app-modal into `area`.
+/// Reuses the exact full-TUI [`AgentView::draw_active_modal`] dispatch so look and behavior match every mode.
+/// Returns whether anything was drawn.
 pub fn render_app_modal(
     buf: &mut Buffer,
     area: Rect,
@@ -631,8 +559,7 @@ fn render_permission(
     theme: &Theme,
 ) -> Option<(u16, u16)> {
     let perm = agent.permission_queue.front()?;
-    // Clone so the immutable borrow of `agent.prompt` ends before the mutable
-    // `agent.prompt.draw` below.
+    // Clone so the immutable borrow of `agent.prompt` ends before the mutable `agent.prompt.draw` below
     let followup = agent.prompt.text().to_string();
     let result = xai_grok_pager::views::permission_view::render_permission_view(
         buf,
@@ -644,8 +571,7 @@ fn render_permission(
         theme,
         true,
     );
-    // Follow-up (reject-with-text) hosts an inline editor; draw it plainly
-    // (minimal skips the full TUI's accent-bar/scrollbar chrome).
+    // Follow-up (reject-with-text) hosts an inline editor; draw it plainly (minimal skips the full TUI's accent-bar/scrollbar chrome)
     let iarea = result.inline_prompt?;
     let style = inline_input_style(theme);
     let height = (area.y + area.height)
@@ -692,9 +618,8 @@ fn render_question(
     };
     let content_w = area.width.saturating_sub(QUESTION_VIEW_HPAD) as usize;
 
-    // Clamp any stale scroll offset to the rendered viewport (mirrors
-    // `AgentView::draw`). Computed in an inner scope so the immutable borrows
-    // end before the `&mut clamp_scroll`.
+    // Clamp any stale scroll offset to the rendered viewport (mirrors `AgentView::draw`)
+    // Computed in an inner scope so the immutable borrows end before the `&mut clamp_scroll`
     if let Some(qv) = minimal_api::question_view_mut(agent) {
         let vis = qv.questions.get(qv.active_tab).map(|question| {
             xai_grok_pager::views::question_view::visible_options_height(
@@ -850,8 +775,7 @@ fn render_feedback_editor(
         .cursor_pos
 }
 
-/// Height cap for the inline question editor — the full TUI's policy
-/// (`agent_view/render.rs`, `inline_prompt_max`).
+/// Height cap for the inline question editor: the full TUI's policy (`agent_view/render.rs`, `inline_prompt_max`).
 fn question_editor_cap(screen_h: u16) -> u16 {
     ((screen_h as u32) / 3).clamp(3, 15) as u16
 }
@@ -893,8 +817,7 @@ fn freeform_editor_h(agent: &AgentView, area_w: u16, cap: u16, theme: &Theme) ->
         .max(1)
 }
 
-/// Chromeless prompt style for a modal's inline editor (no prefix / accent /
-/// borders — the modal supplies its own framing).
+/// Chromeless prompt style for a modal's inline editor (no prefix / accent / borders; the modal supplies its own framing).
 fn inline_input_style(theme: &Theme) -> PromptStyle {
     PromptStyle {
         focused: true,
@@ -923,9 +846,8 @@ mod tests {
     use xai_grok_pager::views::suggestion_controller::CompletionItemParsed;
 
     fn completion_item() -> CompletionItemParsed {
-        // Functional update: only the semantic fields; new optional item
-        // fields (e.g. the replace-range pair) default without breaking
-        // this out-of-crate literal again.
+        // The functional update sets only the semantic fields
+        // New optional item fields (e.g. the replace-range pair) default without breaking this out-of-crate literal again.
         CompletionItemParsed {
             display: "item".into(),
             insert_text: "item".into(),
@@ -933,8 +855,7 @@ mod tests {
         }
     }
 
-    /// Build an agent with an active single-select question in InputMode and
-    /// the given freeform text loaded into the prompt.
+    /// Build an agent with an active single-select question in InputMode and the given freeform text loaded into the prompt.
     fn question_input_agent(text: &str) -> AgentView {
         use xai_grok_pager::views::prompt_widget::StashedPrompt;
         use xai_grok_pager::views::question_view::{Question, QuestionOption, QuestionViewState};
@@ -962,9 +883,8 @@ mod tests {
         agent
     }
 
-    /// Regression: the editor height was hardcoded to 1 row (only the last
-    /// typed line was visible) and InputMode dissolved the freeform row into
-    /// a bare text line without its `z (·) ❯` prefix.
+    /// Regression: the editor height was hardcoded to 1 row, so only the last typed line was visible.
+    /// InputMode also dissolved the freeform row into a bare text line without its `z (·) ❯` prefix.
     #[test]
     fn question_input_mode_editor_grows_and_keeps_row_prefix() {
         let screen_h = 40u16;
@@ -1019,12 +939,11 @@ mod tests {
         }
     }
 
-    /// Regression (Bugbot): the renderer used to cap the editor only by
-    /// `area.height - 1`, so with text longer than the reserved cap it drew
-    /// editor rows over the question list.
+    /// Regression: the renderer used to cap the editor only by `area.height - 1`.
+    /// With text longer than the reserved cap it drew editor rows over the question list.
     #[test]
     fn question_editor_render_cap_matches_reserved_cap() {
-        let screen_h = 40u16; // cap = 13
+        let screen_h = 40u16;
         let content_w = 80usize;
         let cap = question_editor_cap(screen_h);
         assert_eq!(cap, 13);
@@ -1065,8 +984,7 @@ mod tests {
             all_text.contains("Pick one?"),
             "question chrome must stay visible above the capped editor"
         );
-        // The editor's first row (prefix row) sits exactly `cap` rows from
-        // the bottom.
+        // The editor's first row (prefix row) sits exactly `cap` rows from the bottom
         let editor_top = capped - cap;
         let row_text: String = (0..area.width)
             .map(|x| {
@@ -1082,12 +1000,6 @@ mod tests {
     }
 
     #[test]
-    fn panel_rows_adds_borders() {
-        assert_eq!(panel_rows(1), 3);
-        assert_eq!(panel_rows(8), 10);
-    }
-
-    #[test]
     fn fresh_prompt_has_no_overlay() {
         let pw = PromptWidget::new();
         assert_eq!(overlay_rows(&pw, 80), 0);
@@ -1097,9 +1009,8 @@ mod tests {
     #[test]
     fn open_completion_dropdown_reports_rows() {
         let mut pw = PromptWidget::new();
-        // Open the shell-completion dropdown with three items. The completion
-        // dropdown's fields are crate-visible, so we can drive it directly
-        // without a full prompt key sequence.
+        // Open the shell-completion dropdown with three items
+        // The completion dropdown's fields are crate-visible, so we can drive it directly without a full prompt key sequence
         minimal_api::prompt_suggestions_mut(&mut pw).dropdown.open = true;
         minimal_api::prompt_suggestions_mut(&mut pw).dropdown.items =
             vec![completion_item(), completion_item(), completion_item()];
@@ -1107,10 +1018,8 @@ mod tests {
         assert_eq!(overlay_rows(&pw, 80), 5); // 3 items + 2 borders
     }
 
-    /// Regression (PR review): the dropdown sizes itself to its uncapped rows,
-    /// and its below-anchor guard only checks the rect it is given — so
-    /// `draw_live` must exclude the `[ui.status_line]` band from that rect, or
-    /// a height-clamped panel paints into rows the status line repaints.
+    /// Regression: the dropdown sizes itself to its uncapped rows, and its below-anchor guard only checks the rect it is given.
+    /// `draw_live` must exclude the `[ui.status_line]` band from that rect, or a height-clamped panel paints into rows the status line repaints.
     #[test]
     fn dropdown_never_paints_into_the_status_line_band() {
         let mut pw = PromptWidget::new();
@@ -1128,8 +1037,7 @@ mod tests {
             })
         };
 
-        // The 5-row panel below the prompt reaches the last viewport row, so
-        // given the full rect it paints into the band.
+        // The 5-row panel below the prompt reaches the last viewport row, so given the full rect it paints into the band
         let mut buf = Buffer::empty(full);
         render(
             &mut buf,
@@ -1182,20 +1090,18 @@ mod tests {
 
     #[test]
     fn content_target_fits_content_with_no_gap() {
-        // Viewport = tail + todos + btw + status(1) + overlay + prompt — no base
-        // floor, so the prompt sits right after the conversation. Idle (tail 0,
-        // empty prompt) is just status + prompt.
+        // Viewport = tail + todos + btw + status(1) + overlay + prompt, with no base floor, so the prompt sits right after the conversation
+        // Idle (tail 0, empty prompt) is just status + prompt
         assert_eq!(content_target(0, 0, 0, 0, 1, 0, 40), 2); // status + 1-row prompt
         assert_eq!(content_target(0, 3, 0, 0, 1, 0, 40), 5); // + 3 todo rows
         assert_eq!(content_target(0, 3, 0, 5, 2, 0, 40), 11); // + overlay(5) + 2-row prompt
         // /btw Loading is 3 rows; Done/Error grow with the content.
         assert_eq!(content_target(0, 0, 3, 0, 1, 0, 40), 5); // + btw(3)
-        // Production idle always reserves ≥1 below the prompt (info bar).
+        // Production idle always reserves at least one row below the prompt (info bar)
         assert_eq!(content_target(0, 0, 3, 1, 1, 0, 40), 6); // btw+status+info+prompt
-        // todos + btw stack without collapsing either.
+        // The todo and btw panels stack without collapsing either
         assert_eq!(content_target(0, 3, 3, 0, 1, 0, 40), 8);
-        // The streaming tail grows the viewport (no fixed empty gap while
-        // "thinking": tail 0 → just status + prompt).
+        // The streaming tail grows the viewport (no fixed empty gap while "thinking": tail 0 is just status + prompt)
         assert_eq!(content_target(6, 0, 0, 0, 1, 0, 40), 8); // tail(6) + status + prompt
         assert_eq!(content_target(0, 0, 0, 1, 1, 1, 40), 4); // + status_line row
         assert_eq!(content_target(0, 0, 0, 1, 1, 3, 40), 6); // 3-line script output
@@ -1206,8 +1112,7 @@ mod tests {
 
     #[test]
     fn app_modal_target_is_capped_not_ceiling() {
-        // Tall screen: a moderate bottom panel, never the whole screen — so the
-        // band left on close (target - base) stays small.
+        // Tall screen: a moderate bottom panel, never the whole screen, so the band left on close (target - base) stays small
         assert_eq!(app_modal_target(10, 49), MINIMAL_APP_MODAL_ROWS);
         // Short screen: clamps down to what fits.
         assert_eq!(app_modal_target(10, 14), 14);
@@ -1217,26 +1122,23 @@ mod tests {
 
     #[test]
     fn modal_target_reserves_room_for_the_pending_tail() {
-        // Regression: an edit awaiting permission is held uncommitted in the
-        // tail, so the permission modal must grow to show that diff ABOVE it,
-        // not collapse to just the prompt. tail(10) + modal(8) + status(1) = 19,
-        // which fits under the ceiling.
+        // Regression: an edit awaiting permission is held uncommitted in the tail
+        // The permission modal must grow to show that diff ABOVE it, not collapse to just the prompt
+        // tail(10) + modal(8) + status(1) = 19, which fits under the ceiling
         assert_eq!(modal_target(10, 8, 0, 6, 40), 19);
-        // No uncommitted tail (e.g. a bash permission with nothing streamed):
-        // modal + status only — identical to the pre-fix behavior, no regression.
+        // No uncommitted tail (e.g. a bash permission with nothing streamed): modal + status only.
         assert_eq!(modal_target(0, 8, 0, 6, 40), 9);
-        // A tall pending diff + modal overflow the screen → capped at the
-        // ceiling; `draw_tail` then bottom-anchors and clips the top of the diff.
+        // A tall pending diff plus the modal overflows the screen, so the target caps at the ceiling
+        // `draw_tail` then bottom-anchors and clips the top of the diff
         assert_eq!(modal_target(100, 8, 0, 6, 40), 40);
-        // Tiny modal, no tail → floored at `base` so some live region remains.
+        // Tiny modal, no tail: floored at `base` so some live region remains
         assert_eq!(modal_target(0, 1, 0, 6, 40), 6);
         assert_eq!(modal_target(10, 8, 2, 6, 40), 21); // + 2 status_line rows
     }
 
     #[test]
     fn content_target_clamps_to_screen() {
-        // Content taller than the screen clamps to the ceiling (then the tail
-        // scrolls / clips); a tiny terminal still yields at least the floor.
+        // Content taller than the screen clamps to the ceiling (then the tail scrolls / clips); a tiny terminal still yields at least the floor
         assert_eq!(content_target(30, 0, 0, 0, 1, 0, 24), 24);
         assert_eq!(content_target(5, 0, 0, 0, 1, 0, 2), 2);
         // A tall /btw Done answer still clamps rather than overflowing.

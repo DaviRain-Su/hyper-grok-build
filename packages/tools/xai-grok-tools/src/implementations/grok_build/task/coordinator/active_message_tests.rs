@@ -7,8 +7,11 @@ use tokio_util::sync::CancellationToken;
 use super::super::*;
 use super::*;
 use crate::implementations::grok_build::task::active_message::SubagentActiveMessageRequest;
+use crate::implementations::grok_build::task::coordinator_state::{
+    ACTIVE_MESSAGE_SPAWN_READY_TIMEOUT, InternalEvent, PendingChild,
+};
 use crate::implementations::grok_build::task::types::{
-    ActiveAgentMessageOperation, ActiveAgentMessageRequest,
+    ActiveAgentMessageOperation, ActiveAgentMessageRequest, SubagentResult,
 };
 
 const TEST_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
@@ -194,6 +197,48 @@ fn insert_child(
     );
 }
 
+fn insert_pending(coordinator: &mut TestCoordinator, id: &str, parent: &str) {
+    let mut request =
+        crate::implementations::grok_build::task::coordinator::tests::request(id, true);
+    request.parent_session_id = parent.to_owned();
+    request.surface_completion = false;
+    coordinator.pending.insert(
+        id.to_owned(),
+        PendingChild {
+            request,
+            started_at: std::time::Instant::now(),
+            cancellation: CancellationToken::new(),
+            spawn_reply: None,
+            foreground_deadline: None,
+            handle_only: true,
+            explicitly_killed: false,
+            launched: true,
+        },
+    );
+}
+
+fn promote_pending(
+    coordinator: &mut TestCoordinator,
+    admissions: mpsc::UnboundedSender<AdmissionCall>,
+    id: &str,
+) {
+    let (respond_to, _response) = oneshot::channel();
+    coordinator.handle_internal(InternalEvent::Started {
+        subagent_id: id.to_owned(),
+        child: StartedChild {
+            child_session_id: id.to_owned(),
+            persona: None,
+            resumed_from: None,
+            child_cwd: String::new(),
+            worktree_path: None,
+            effective_model_id: "test-model".to_owned(),
+            definition_background: false,
+            control: TestControl { admissions },
+        },
+        respond_to,
+    });
+}
+
 fn begin_send(
     coordinator: &mut TestCoordinator,
     command_tx: &crate::implementations::grok_build::task::backend::SubagentCoordinatorSender,
@@ -255,6 +300,12 @@ async fn response_outcome(
     await_with_timeout(response)
         .await
         .expect("active-message response dropped")
+}
+
+async fn response_outcome_result(response: oneshot::Receiver<SubagentResult>) -> SubagentResult {
+    await_with_timeout(response)
+        .await
+        .expect("spawn result dropped")
 }
 
 async fn finalization_outcome(response: oneshot::Receiver<bool>) -> bool {
@@ -685,7 +736,7 @@ async fn runner_panic_parks_until_uncertain_admission_terminalizes_failed() {
             );
             request.parent_session_id = "parent".to_owned();
             crate::implementations::grok_build::task::backend::SubagentBackend::spawn(
-                &backend, request,
+                &backend, request, None,
             )
             .await
         }
@@ -903,4 +954,236 @@ async fn held_admission_is_independent_per_child() {
         response_outcome(first_response).await
     );
     assert!(finalization_outcome(first_rx).await);
+}
+
+#[tokio::test]
+async fn send_to_owned_pending_waits_until_started_then_admits() {
+    let (mut coordinator, command_tx, admission_tx, mut admissions) = fixture();
+    insert_pending(&mut coordinator, "child", "parent");
+    let mut response = begin_send(&mut coordinator, &command_tx, "child", "parent");
+    assert!(response.try_recv().is_err());
+
+    promote_pending(&mut coordinator, admission_tx, "child");
+    let call = recv_with_timeout(&mut admissions).await;
+    let message_id = call.message_id.clone();
+    release_admission(&mut coordinator, call, ActiveMessageAdmission::Admitted).await;
+    assert_eq!(
+        ActiveAgentMessageOutcome::Accepted { message_id },
+        response_outcome(response).await
+    );
+}
+
+#[tokio::test]
+async fn send_to_owned_pending_that_fails_is_not_active() {
+    let (mut coordinator, command_tx, _admission_tx, mut admissions) = fixture();
+    insert_pending(&mut coordinator, "child", "parent");
+    let response = begin_send(&mut coordinator, &command_tx, "child", "parent");
+    assert!(admissions.try_recv().is_err());
+
+    finish_child(&mut coordinator, "child");
+    assert_eq!(
+        ActiveAgentMessageOutcome::NotActiveOrFinalizing,
+        response_outcome(response).await
+    );
+    assert!(admissions.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn send_to_owned_completed_is_immediate() {
+    let (mut coordinator, command_tx, admission_tx, _admissions) = fixture();
+    insert_child(&mut coordinator, admission_tx, "child", "parent");
+    finish_child(&mut coordinator, "child");
+    assert_eq!(
+        ActiveAgentMessageOutcome::NotActiveOrFinalizing,
+        response_outcome(begin_send(&mut coordinator, &command_tx, "child", "parent")).await
+    );
+}
+
+#[tokio::test]
+async fn parent_session_cancel_unblocks_parked_send() {
+    let (mut coordinator, command_tx, _admission_tx, mut admissions) = fixture();
+    let spawn_result = insert_queued(&mut coordinator, "child", "parent");
+    let mut response = begin_send(&mut coordinator, &command_tx, "child", "parent");
+    assert!(response.try_recv().is_err());
+
+    assert!(matches!(
+        coordinator.cancel_parent_session(Some("parent")),
+        crate::implementations::grok_build::task::types::SubagentCancelOutcome::Cancelled
+    ));
+    assert_eq!(
+        ActiveAgentMessageOutcome::NotActiveOrFinalizing,
+        response_outcome(response).await
+    );
+    let terminal = response_outcome_result(spawn_result).await;
+    assert!(
+        terminal.cancelled && !terminal.success,
+        "session cancel must resolve a terminal result: {terminal:?}"
+    );
+    assert!(admissions.try_recv().is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn send_to_owned_pending_hits_spawn_ready_backstop() {
+    let (mut coordinator, command_tx, _admission_tx, mut admissions) = fixture();
+    insert_pending(&mut coordinator, "child", "parent");
+    let response = begin_send(&mut coordinator, &command_tx, "child", "parent");
+    tokio::time::advance(ACTIVE_MESSAGE_SPAWN_READY_TIMEOUT).await;
+    coordinator.expire_spawn_ready_messages(tokio::time::Instant::now());
+    assert_eq!(
+        ActiveAgentMessageOutcome::NotAcceptedBeforeDeadline,
+        response_outcome(response).await
+    );
+    assert!(admissions.try_recv().is_err());
+}
+
+fn insert_queued(
+    coordinator: &mut TestCoordinator,
+    id: &str,
+    parent: &str,
+) -> oneshot::Receiver<SubagentResult> {
+    let mut request =
+        crate::implementations::grok_build::task::coordinator::tests::request(id, true);
+    request.parent_session_id = parent.to_owned();
+    request.surface_completion = false;
+    let (result_tx, result_rx) = oneshot::channel();
+    coordinator
+        .queued
+        .push_back(super::super::queue::QueuedSpawn {
+            request: Box::new(request),
+            queued_at: tokio::time::Instant::now(),
+            caller: super::super::queue::QueuedCaller::Awaiting {
+                result_tx,
+                deadline: None,
+            },
+        });
+    result_rx
+}
+
+#[tokio::test]
+async fn send_to_owned_queued_child_parks_until_started() {
+    let (mut coordinator, command_tx, admission_tx, mut admissions) = fixture();
+    let mut spawn_result = insert_queued(&mut coordinator, "child", "parent");
+    let mut response = begin_send(&mut coordinator, &command_tx, "child", "parent");
+    assert!(response.try_recv().is_err());
+    assert!(admissions.try_recv().is_err());
+
+    // Dequeue into pending, then promote — the parked send must admit.
+    let queued = coordinator.queued.pop_front().expect("queued child");
+    coordinator.start_child(
+        *queued.request,
+        queued.caller.into_spawn_reply(),
+        None,
+        super::super::queue::StartOrigin::Dequeued {
+            queued_for: std::time::Duration::ZERO,
+            deadline: None,
+        },
+    );
+    promote_pending(&mut coordinator, admission_tx, "child");
+    let call = recv_with_timeout(&mut admissions).await;
+    let message_id = call.message_id.clone();
+    release_admission(&mut coordinator, call, ActiveMessageAdmission::Admitted).await;
+    assert_eq!(
+        ActiveAgentMessageOutcome::Accepted { message_id },
+        response_outcome(response).await
+    );
+    assert!(spawn_result.try_recv().is_err(), "child still running");
+}
+
+#[tokio::test]
+async fn parked_send_is_saturated_when_admit_cannot_reacquire() {
+    let (mut coordinator, command_tx, admission_tx, mut admissions) = fixture_with_capacity(1);
+    insert_pending(&mut coordinator, "spawning", "parent");
+    let mut parked = begin_send(&mut coordinator, &command_tx, "spawning", "parent");
+    assert!(parked.try_recv().is_err());
+
+    insert_child(&mut coordinator, admission_tx, "holder", "parent");
+    let _held = begin_send(&mut coordinator, &command_tx, "holder", "parent");
+    let _call = recv_with_timeout(&mut admissions).await;
+
+    promote_pending(&mut coordinator, mpsc::unbounded_channel().0, "spawning");
+    assert_eq!(
+        ActiveAgentMessageOutcome::Saturated { max_in_flight: 1 },
+        response_outcome(parked).await
+    );
+}
+
+#[tokio::test]
+async fn send_to_cancelled_or_workflow_spawning_child_fails_fast() {
+    let (mut coordinator, command_tx, _admission_tx, mut admissions) = fixture();
+    insert_pending(&mut coordinator, "cancelled", "parent");
+    coordinator
+        .pending
+        .get("cancelled")
+        .expect("pending")
+        .cancellation
+        .cancel();
+    assert_eq!(
+        ActiveAgentMessageOutcome::NotActiveOrFinalizing,
+        response_outcome(begin_send(
+            &mut coordinator,
+            &command_tx,
+            "cancelled",
+            "parent",
+        ))
+        .await
+    );
+
+    insert_pending(&mut coordinator, "wf", "parent");
+    coordinator
+        .pending
+        .get_mut("wf")
+        .expect("pending")
+        .request
+        .owner = crate::implementations::grok_build::task::types::SubagentOwner::workflow("run-1");
+    assert_eq!(
+        ActiveAgentMessageOutcome::NotActiveOrFinalizing,
+        response_outcome(begin_send(&mut coordinator, &command_tx, "wf", "parent")).await
+    );
+    assert!(admissions.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn cancel_parent_prompt_rejects_parked_send() {
+    let (mut coordinator, command_tx, _admission_tx, mut admissions) = fixture();
+    let spawn_result = insert_queued(&mut coordinator, "child", "parent");
+    let response = begin_send(&mut coordinator, &command_tx, "child", "parent");
+    coordinator.cancel_parent_prompt("prompt", Some("parent"));
+    assert_eq!(
+        ActiveAgentMessageOutcome::NotActiveOrFinalizing,
+        response_outcome(response).await
+    );
+    let terminal = response_outcome_result(spawn_result).await;
+    assert!(
+        terminal.cancelled && !terminal.success,
+        "queued cancel must resolve a terminal result: {terminal:?}"
+    );
+    assert!(admissions.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn cancel_workflow_run_rejects_parked_send() {
+    let (mut coordinator, _command_tx, _admission_tx, mut admissions) = fixture();
+    insert_pending(&mut coordinator, "child", "parent");
+    coordinator
+        .pending
+        .get_mut("child")
+        .expect("pending")
+        .request
+        .owner = crate::implementations::grok_build::task::types::SubagentOwner::workflow("run-1");
+    let (tx, rx) = oneshot::channel();
+    coordinator
+        .spawn_ready
+        .push(super::ParkedSpawnReadyMessage {
+            subagent_id: "child".to_owned(),
+            parent_session_id: "parent".to_owned(),
+            request: ActiveAgentMessageRequest::try_new("child", "hello").unwrap(),
+            respond_to: Some(tx),
+            deadline: tokio::time::Instant::now() + ACTIVE_MESSAGE_SPAWN_READY_TIMEOUT,
+        });
+    coordinator.cancel_workflow_children("run-1", Some("parent"));
+    assert_eq!(
+        ActiveAgentMessageOutcome::NotActiveOrFinalizing,
+        response_outcome(rx).await
+    );
+    assert!(admissions.try_recv().is_err());
 }

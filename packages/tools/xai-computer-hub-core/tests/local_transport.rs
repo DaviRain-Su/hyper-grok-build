@@ -21,7 +21,7 @@ use xai_tool_protocol::{
 };
 use xai_tool_runtime::{
     SearchSnapshot, ServerSummary, Tool, ToolCallContext, ToolError, ToolProgress, ToolStream,
-    ToolStreamItem, terminal_only, with_progress,
+    ToolStreamItem, with_progress,
 };
 use xai_tool_types::ToolDescription;
 
@@ -356,12 +356,4 @@ async fn authorize_returns_bound_principal_with_invoke_scope() {
     assert!(principal.authorizes_session(&sid("sess-1")));
     assert!(principal.has_scope(xai_computer_hub_core::LOCAL_INVOKE_SCOPE));
     assert_eq!(transport.kind(), TransportKind::Local);
-}
-
-#[test]
-fn unused_helpers_silenced() {
-    // `terminal_only` is re-exported for adapter authors; touch it here so
-    // a future refactor that drops the import does not silently break the
-    // re-export surface.
-    let _: ToolStream<serde_json::Value> = terminal_only(Ok(serde_json::Value::Null));
 }

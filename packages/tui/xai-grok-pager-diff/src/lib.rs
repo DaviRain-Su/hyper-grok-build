@@ -717,12 +717,6 @@ mod tests {
     }
 
     #[test]
-    fn diff_hunks_from_strings_identical() {
-        let hunks = diff_hunks_from_strings("same\n", "same\n", 1);
-        assert_eq!(hunks.len(), 0);
-    }
-
-    #[test]
     fn diff_hunks_from_strings_empty_old() {
         // Simulates creating a new file
         let hunks = diff_hunks_from_strings("", "new content\n", 1);

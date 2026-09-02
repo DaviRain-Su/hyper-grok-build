@@ -31,16 +31,6 @@ where
 
 const TODO_ARGS: &str = r#"{"todos":[{"id":"t1","content":"poll","status":"completed"}]}"#;
 
-fn drain_gateway(mut rx: tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpClientMessage>) {
-    tokio::task::spawn_local(async move {
-        while let Some(msg) = rx.recv().await {
-            if let xai_acp_lib::AcpClientMessage::SessionNotification(args) = msg {
-                let _ = args.response_tx.send(Ok(()));
-            }
-        }
-    });
-}
-
 /// Acks like [`drain_gateway`] but keeps the hook events for the one test that asserts on them.
 fn capture_hook_events(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpClientMessage>,
@@ -174,8 +164,8 @@ async fn run_prompt(
     .expect("turn must finish within timeout")
 }
 
-/// Also the one test that drives a real turn into `StopFailure`: deleting the report in the
-/// turn's error arm leaves a host that watched the turn start waiting forever.
+/// This is also the one test that drives a real turn into `StopFailure`.
+/// Deleting the report in the turn's error arm leaves a host that watched the turn start waiting forever.
 #[test]
 fn completed_turn_flush_enospc_returns_error_and_reports_stop_failure() {
     block_on_session(|| {

@@ -1,6 +1,5 @@
-//! Data-driven scripted responses for the mock inference server: plain
-//! status/header/body triples queued per path and rendered to HTTP at serve
-//! time. Pure data — no router or handler types in the public surface.
+//! Data-driven scripted responses for the mock inference server: status/header/body triples queued per path and rendered to HTTP at serve time.
+//! Pure data: no router or handler types are public.
 
 use std::convert::Infallible;
 use std::future::Future;
@@ -24,7 +23,6 @@ pub struct SseEvent {
 }
 
 impl SseEvent {
-    /// Event with a `data:` payload only.
     pub fn data(data: impl Into<String>) -> Self {
         Self {
             event: None,
@@ -32,7 +30,6 @@ impl SseEvent {
         }
     }
 
-    /// Event with an `event:` name and a `data:` payload.
     pub fn with_event(event: impl Into<String>, data: impl Into<String>) -> Self {
         Self {
             event: Some(event.into()),
@@ -41,12 +38,11 @@ impl SseEvent {
     }
 }
 
-/// Body of a [`ScriptedResponse`].
 #[derive(Debug, Clone)]
 pub enum ScriptedBody {
     Json(Value),
     Sse(Vec<SseEvent>),
-    /// Raw body bytes, served verbatim (byte-controllable malformed SSE etc.).
+    /// Raw body bytes served verbatim, for byte-exact payloads such as malformed SSE.
     Raw(String),
 }
 
@@ -69,7 +65,6 @@ impl ScriptedResponse {
         }
     }
 
-    /// JSON body with the given status.
     pub fn json(status: u16, body: Value) -> Self {
         Self {
             status,
@@ -78,7 +73,6 @@ impl ScriptedResponse {
         }
     }
 
-    /// Raw text body with the given status.
     pub fn text(status: u16, body: impl Into<String>) -> Self {
         Self {
             status,
@@ -91,8 +85,7 @@ impl ScriptedResponse {
         matches!(self.body, ScriptedBody::Sse(_))
     }
 
-    /// Validate status and headers eagerly so a bad script panics at the
-    /// enqueue call site rather than far away at serve time.
+    /// Validate status and headers eagerly so a bad script panics at the enqueue call site rather than far away at serve time.
     pub(crate) fn validate(&self) {
         StatusCode::from_u16(self.status).expect("invalid scripted status code");
         for (name, value) in &self.headers {
@@ -101,9 +94,8 @@ impl ScriptedResponse {
         }
     }
 
-    /// Render to HTTP with SSE events paced by `delay` and optional terminal
-    /// completion gating. Non-SSE bodies wait before returning so every body
-    /// mode obeys the same release barrier.
+    /// Render to HTTP with SSE events paced by `delay` and `before_terminal` awaited before the last event.
+    /// Non-SSE bodies await `before_terminal` before returning, so every body mode waits the same way.
     pub(crate) async fn into_response_paced(
         self,
         delay: Option<std::time::Duration>,

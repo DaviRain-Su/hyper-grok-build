@@ -5,7 +5,6 @@
     unreachable_code,
     dead_code
 )]
-//! Session-support modules extracted from `xai-grok-shell`'s `session/` tree
-//! (which re-exports them at their original paths) so they build in parallel
-//! and stop rebuilding on shell edits.
+//! Session-support modules extracted from `xai-grok-shell`'s `session/` tree so they build in parallel and stop rebuilding on shell edits.
+//! Shell re-exports them at their original paths.
 pub mod managed_mcp;

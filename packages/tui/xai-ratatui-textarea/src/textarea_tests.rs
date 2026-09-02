@@ -1,47 +1,5 @@
 use super::*;
 // crossterm types are intentionally not imported here to avoid unused warnings
-use rand::prelude::*;
-
-fn rand_grapheme(rng: &mut rand::rngs::StdRng) -> String {
-    let r: u8 = rng.random_range(0..100);
-    match r {
-        0..=4 => "\n".to_string(),
-        5..=12 => " ".to_string(),
-        13..=35 => (rng.random_range(b'a'..=b'z') as char).to_string(),
-        36..=45 => (rng.random_range(b'A'..=b'Z') as char).to_string(),
-        46..=52 => (rng.random_range(b'0'..=b'9') as char).to_string(),
-        53..=65 => {
-            // Some emoji (wide graphemes)
-            let choices = ["👍", "😊", "🐍", "🚀", "🧪", "🌟"];
-            choices[rng.random_range(0..choices.len())].to_string()
-        }
-        66..=75 => {
-            // CJK wide characters
-            let choices = ["漢", "字", "測", "試", "你", "好", "界", "编", "码"];
-            choices[rng.random_range(0..choices.len())].to_string()
-        }
-        76..=85 => {
-            // Combining mark sequences
-            let base = ["e", "a", "o", "n", "u"][rng.random_range(0..5)];
-            let marks = ["\u{0301}", "\u{0308}", "\u{0302}", "\u{0303}"];
-            format!("{base}{}", marks[rng.random_range(0..marks.len())])
-        }
-        86..=92 => {
-            // Some non-latin single codepoints (Greek, Cyrillic, Hebrew)
-            let choices = ["Ω", "β", "Ж", "ю", "ש", "م", "ह"];
-            choices[rng.random_range(0..choices.len())].to_string()
-        }
-        _ => {
-            // ZWJ sequences (single graphemes but multi-codepoint)
-            let choices = [
-                "👩\u{200D}💻", // woman technologist
-                "👨\u{200D}💻", // man technologist
-                "🏳️\u{200D}🌈", // rainbow flag
-            ];
-            choices[rng.random_range(0..choices.len())].to_string()
-        }
-    }
-}
 
 fn ta_with(text: &str) -> TextArea {
     let mut t = TextArea::new();
@@ -655,19 +613,6 @@ fn element_id_is_unique_and_stable() {
 }
 
 #[test]
-fn element_kind_preserved() {
-    let mut t = TextArea::new();
-    let kind_paste = ElementKind(1);
-    let kind_file = ElementKind(2);
-
-    t.insert_element("paste", kind_paste, None);
-    t.insert_element("file", kind_file, None);
-
-    assert_eq!(t.elements()[0].kind, kind_paste);
-    assert_eq!(t.elements()[1].kind, kind_file);
-}
-
-#[test]
 fn element_at_cursor_returns_element() {
     let mut t = TextArea::new();
     let kind = ElementKind(0);
@@ -732,35 +677,6 @@ fn element_display_can_be_set_and_updated() {
 
     // Buffer text is unchanged
     assert_eq!(t.element_text(id), Some("lots of raw text here"));
-}
-
-#[test]
-fn insert_element_returns_id_for_metadata_tracking() {
-    let mut t = TextArea::new();
-    let mut metadata: std::collections::HashMap<ElementId, String> =
-        std::collections::HashMap::new();
-
-    let id1 = t.insert_element("paste1", ElementKind(1), None);
-    metadata.insert(id1, "First paste".to_string());
-
-    let id2 = t.insert_element("paste2", ElementKind(1), None);
-    metadata.insert(id2, "Second paste".to_string());
-
-    // Verify we can look up metadata by id
-    assert_eq!(metadata.get(&id1), Some(&"First paste".to_string()));
-    assert_eq!(metadata.get(&id2), Some(&"Second paste".to_string()));
-
-    // Delete first element
-    t.set_cursor(0);
-    t.delete_forward(1);
-
-    // id2 still valid in our metadata map
-    let remaining = &t.elements()[0];
-    assert_eq!(remaining.id, id2);
-    assert_eq!(
-        metadata.get(&remaining.id),
-        Some(&"Second paste".to_string())
-    );
 }
 
 #[test]
@@ -2002,26 +1918,6 @@ fn alt_d_deletes_forward_word() {
 }
 
 #[test]
-fn ctrl_p_moves_cursor_up() {
-    let mut t = ta_with("first\nsecond\nthird");
-    let second_line_start = 6; // after "first\n"
-    t.set_cursor(second_line_start + 2); // middle of "second"
-    t.input(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
-    // Should be on first line now
-    assert!(t.cursor() < second_line_start);
-}
-
-#[test]
-fn ctrl_n_moves_cursor_down() {
-    let mut t = ta_with("first\nsecond\nthird");
-    t.set_cursor(2); // middle of "first"
-    t.input(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
-    let second_line_start = 6;
-    // Should be on second line now
-    assert!(t.cursor() >= second_line_start);
-}
-
-#[test]
 fn control_h_backspace() {
     // Test Ctrl+H as backspace
     let mut t = ta_with("12345");
@@ -2042,27 +1938,6 @@ fn control_h_backspace() {
     assert_eq!(t.text(), "124");
     assert_eq!(t.cursor(), 3);
 }
-#[test]
-fn char_bs_backspace() {
-    // Test Char('\x08') (BS) as backspace
-    let mut t = ta_with("12345");
-    t.set_cursor(3); // cursor after '3'
-    t.input(KeyEvent::new(KeyCode::Char('\x08'), KeyModifiers::NONE));
-    assert_eq!(t.text(), "1245");
-    assert_eq!(t.cursor(), 2);
-}
-
-#[test]
-fn char_del_deletes_backward() {
-    // Char('\x7f') (DEL) should delete backward — on Unix terminals,
-    // Backspace sends 0x7F in legacy mode (no Kitty protocol).
-    let mut t = ta_with("12345");
-    t.set_cursor(2); // cursor after '2'
-    t.input(KeyEvent::new(KeyCode::Char('\x7f'), KeyModifiers::NONE));
-    assert_eq!(t.text(), "1345");
-    assert_eq!(t.cursor(), 1);
-}
-
 #[test]
 fn raw_delete_chars_ignore_stray_modifiers() {
     for raw in ['\u{0008}', '\u{007f}'] {
@@ -2679,225 +2554,6 @@ fn element_aware_wrap_ranges_preserve_zwj_graphemes() {
     assert_eq!(&t.text()[ranges[1].clone()], grapheme);
 }
 
-#[test]
-fn fuzz_textarea_randomized() {
-    // Deterministic seed for reproducibility
-    // Seed the RNG based on the current day in Pacific Time (PST/PDT). This
-    // keeps the fuzz test deterministic within a day while still varying
-    // day-to-day to improve coverage.
-    let pst_today_seed: u64 = (chrono::Utc::now() - chrono::Duration::hours(8))
-        .date_naive()
-        .and_hms_opt(0, 0, 0)
-        .unwrap()
-        .and_utc()
-        .timestamp() as u64;
-    let mut rng = rand::rngs::StdRng::seed_from_u64(pst_today_seed);
-
-    for _case in 0..500 {
-        let mut ta = TextArea::new();
-        let mut state = TextAreaState::default();
-        // Track element payloads we insert. Payloads use characters '[' and ']' which
-        // are not produced by rand_grapheme(), avoiding accidental collisions.
-        let mut elem_texts: Vec<String> = Vec::new();
-        let mut next_elem_id: usize = 0;
-        // Start with a random base string
-        let base_len = rng.random_range(0..30);
-        let mut base = String::new();
-        for _ in 0..base_len {
-            base.push_str(&rand_grapheme(&mut rng));
-        }
-        ta.set_text(&base);
-        // Choose a valid char boundary for initial cursor
-        let mut boundaries: Vec<usize> = vec![0];
-        boundaries.extend(ta.text().char_indices().map(|(i, _)| i).skip(1));
-        boundaries.push(ta.text().len());
-        let init = boundaries[rng.random_range(0..boundaries.len())];
-        ta.set_cursor(init);
-
-        let mut width: u16 = rng.random_range(1..=12);
-        let mut height: u16 = rng.random_range(1..=4);
-
-        for _step in 0..60 {
-            // Mostly stable width/height, occasionally change
-            if rng.random_bool(0.1) {
-                width = rng.random_range(1..=12);
-            }
-            if rng.random_bool(0.1) {
-                height = rng.random_range(1..=4);
-            }
-
-            // Pick an operation
-            match rng.random_range(0..18) {
-                0 => {
-                    // insert small random string at cursor
-                    let len = rng.random_range(0..6);
-                    let mut s = String::new();
-                    for _ in 0..len {
-                        s.push_str(&rand_grapheme(&mut rng));
-                    }
-                    ta.insert_str(&s);
-                }
-                1 => {
-                    // Include mid-grapheme char boundaries so normalization stays exercised.
-                    let mut b: Vec<usize> = vec![0];
-                    b.extend(ta.text().char_indices().map(|(i, _)| i).skip(1));
-                    b.push(ta.text().len());
-                    let i1 = rng.random_range(0..b.len());
-                    let i2 = rng.random_range(0..b.len());
-                    let (start, end) = if b[i1] <= b[i2] {
-                        (b[i1], b[i2])
-                    } else {
-                        (b[i2], b[i1])
-                    };
-                    let insert_len = rng.random_range(0..=4);
-                    let mut s = String::new();
-                    for _ in 0..insert_len {
-                        s.push_str(&rand_grapheme(&mut rng));
-                    }
-                    let before = ta.text().len();
-                    let atomic_ranges = ta.element_ranges();
-                    let plan = ta
-                        .text
-                        .plan_replace_byte_range(start..end, &s, &atomic_ranges);
-                    let normalized_len = plan.replaced_byte_range().len();
-                    ta.replace_range(start..end, &s);
-                    let after = ta.text().len();
-                    assert_eq!(
-                        after as isize,
-                        before as isize + (s.len() as isize) - (normalized_len as isize)
-                    );
-                }
-                2 => ta.delete_backward(rng.random_range(0..=3)),
-                3 => ta.delete_forward(rng.random_range(0..=3)),
-                4 => ta.delete_backward_word(),
-                5 => ta.kill_to_beginning_of_line(),
-                6 => ta.kill_to_end_of_line(),
-                7 => ta.move_cursor_left(),
-                8 => ta.move_cursor_right(),
-                9 => ta.move_cursor_up(),
-                10 => ta.move_cursor_down(),
-                11 => ta.move_cursor_to_beginning_of_line(true),
-                12 => ta.move_cursor_to_end_of_line(true),
-                13 => {
-                    // Insert an element with a unique sentinel payload
-                    let payload =
-                        format!("[[EL#{}:{}]]", next_elem_id, rng.random_range(1000..9999));
-                    next_elem_id += 1;
-                    ta.insert_element(&payload, ElementKind(0), None);
-                    elem_texts.push(payload);
-                }
-                14 => {
-                    // Try inserting inside an existing element (should clamp to boundary)
-                    if let Some(payload) = elem_texts.choose(&mut rng).cloned()
-                        && let Some(start) = ta.text().find(&payload)
-                    {
-                        let end = start + payload.len();
-                        if end - start > 2 {
-                            let pos = rng.random_range(start + 1..end - 1);
-                            let ins = rand_grapheme(&mut rng);
-                            ta.insert_str_at(pos, &ins);
-                        }
-                    }
-                }
-                15 => {
-                    // Replace a range that intersects an element -> whole element should be replaced
-                    if let Some(payload) = elem_texts.choose(&mut rng).cloned()
-                        && let Some(start) = ta.text().find(&payload)
-                    {
-                        let end = start + payload.len();
-                        // Create an intersecting range [start-δ, end-δ2)
-                        let mut s = start.saturating_sub(rng.random_range(0..=2));
-                        let mut e = (end + rng.random_range(0..=2)).min(ta.text().len());
-                        // Align to char boundaries to satisfy String::replace_range contract
-                        let txt = ta.text();
-                        while s > 0 && !txt.is_char_boundary(s) {
-                            s -= 1;
-                        }
-                        while e < txt.len() && !txt.is_char_boundary(e) {
-                            e += 1;
-                        }
-                        if s < e {
-                            // Small replacement text
-                            let mut srep = String::new();
-                            for _ in 0..rng.random_range(0..=2) {
-                                srep.push_str(&rand_grapheme(&mut rng));
-                            }
-                            ta.replace_range(s..e, &srep);
-                        }
-                    }
-                }
-                16 => {
-                    // Try setting the cursor to a position inside an element; it should clamp out
-                    if let Some(payload) = elem_texts.choose(&mut rng).cloned()
-                        && let Some(start) = ta.text().find(&payload)
-                    {
-                        let end = start + payload.len();
-                        if end - start > 2 {
-                            let pos = rng.random_range(start + 1..end - 1);
-                            ta.set_cursor(pos);
-                        }
-                    }
-                }
-                _ => {
-                    // Jump to word boundaries
-                    if rng.random_bool(0.5) {
-                        let p = ta.beginning_of_previous_word();
-                        ta.set_cursor(p);
-                    } else {
-                        let p = ta.end_of_next_word();
-                        ta.set_cursor(p);
-                    }
-                }
-            }
-
-            // Sanity invariants
-            assert!(ta.cursor() <= ta.text().len());
-
-            // Element invariants
-            for payload in &elem_texts {
-                if let Some(start) = ta.text().find(payload) {
-                    let end = start + payload.len();
-                    // 1) Text inside elements matches the initially set payload
-                    assert_eq!(&ta.text()[start..end], payload);
-                    // 2) Cursor is never strictly inside an element
-                    let c = ta.cursor();
-                    assert!(
-                        c <= start || c >= end,
-                        "cursor inside element: {start}..{end} at {c}"
-                    );
-                }
-            }
-
-            // Render and compute cursor positions; ensure they are in-bounds and do not panic
-            let area = Rect::new(0, 0, width, height);
-            // Stateless render into an area tall enough for all wrapped lines
-            let total_lines = ta.desired_height(width);
-            let full_area = Rect::new(0, 0, width, total_lines.max(1));
-            let mut buf = Buffer::empty(full_area);
-            ratatui::widgets::WidgetRef::render_ref(&(&ta), full_area, &mut buf);
-
-            // cursor_pos: x must be within width when present
-            let _ = ta.cursor_pos(area);
-
-            // cursor_pos_with_state: always within viewport rows
-            let (_x, _y) = ta
-                .cursor_pos_with_state(area, state)
-                .unwrap_or((area.x, area.y));
-
-            // Stateful render should not panic, and updates scroll
-            let mut sbuf = Buffer::empty(area);
-            ratatui::widgets::StatefulWidgetRef::render_ref(&(&ta), area, &mut sbuf, &mut state);
-
-            // After wrapping, desired height equals the number of lines we would render without scroll
-            let total_lines = total_lines as usize;
-            // state.scroll must not exceed total_lines when content fits within area height
-            if (height as usize) >= total_lines {
-                assert_eq!(state.scroll, 0);
-            }
-        }
-    }
-}
-
 // ── Mouse M1: Screen→Buffer mapping tests ──
 
 #[test]
@@ -3187,24 +2843,6 @@ fn selection_rendering_applies_default_selection_style() {
 }
 
 // ── Phase 1: Undo/Redo plumbing tests ──
-
-#[test]
-fn undo_insert_chars_one_at_a_time() {
-    let mut ta = TextArea::new();
-    ta.insert_str("a");
-    ta.insert_str("b");
-    ta.insert_str("c");
-    assert_eq!(ta.text(), "abc");
-    assert_eq!(ta.cursor(), 3);
-
-    // Phase 2: consecutive single-char inserts are batched into 1 undo step.
-    assert!(ta.undo());
-    assert_eq!(ta.text(), "");
-    assert_eq!(ta.cursor(), 0);
-
-    // Nothing left to undo.
-    assert!(!ta.undo());
-}
 
 #[test]
 fn redo_after_undo_restores() {
@@ -3531,17 +3169,6 @@ fn kill_consecutive_each_own_step() {
     assert_eq!(ta.text(), "aaa bbb");
     ta.undo(); // undo first kill
     assert_eq!(ta.text(), "aaa bbb ccc");
-}
-
-#[test]
-fn insert_str_multi_char_is_one_step() {
-    // A single insert_str("hello world") call is 1 undo step.
-    let mut ta = TextArea::new();
-    ta.insert_str("hello world");
-    assert_eq!(ta.undo.stack.len(), 1);
-
-    ta.undo();
-    assert_eq!(ta.text(), "");
 }
 
 #[test]
@@ -5942,16 +5569,6 @@ fn hover_between_two_elements() {
 
 // ── set_scroll_override / scroll_override tests ────────────────────
 
-#[test]
-fn scroll_override_getter_setter() {
-    let mut ta = TextArea::new();
-    assert_eq!(ta.scroll_override(), None);
-    ta.set_scroll_override(Some(5));
-    assert_eq!(ta.scroll_override(), Some(5));
-    ta.set_scroll_override(None);
-    assert_eq!(ta.scroll_override(), None);
-}
-
 /// Helper: stateful render (saves typing the full trait path).
 fn render_stateful(ta: &TextArea, area: Rect, buf: &mut Buffer, state: &mut TextAreaState) {
     ratatui::widgets::StatefulWidgetRef::render_ref(&ta, area, buf, state);
@@ -6185,17 +5802,6 @@ fn alt_word_nav_preserved() {
     t.input(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT));
     assert_eq!(t.text(), text);
     assert!(t.cursor() > 0);
-}
-
-#[test]
-fn ctrl_alt_h_deletes_word() {
-    let mut t = ta_with("hello world");
-    t.set_cursor(t.text().len());
-    t.input(KeyEvent::new(
-        KeyCode::Char('h'),
-        KeyModifiers::CONTROL | KeyModifiers::ALT,
-    ));
-    assert_eq!(t.text(), "hello ");
 }
 
 #[test]

@@ -116,10 +116,8 @@ async fn handle_one_job(
     );
 
     // Race the user's answer against the MCP side abandoning the job:
-    // when the server cancels `elicitation/create` (or the client is torn
-    // down), the bridge drops its receiver and `response_tx.closed()`
-    // fires. Returning drops `_pending_guard`, whose `InteractionResolved`
-    // broadcast dismisses the now-orphaned pager card.
+    // when the server cancels `elicitation/create` (or the client is torn down), the bridge drops its receiver and `response_tx.closed()` fires
+    // Returning drops `_pending_guard`, whose `InteractionResolved` broadcast dismisses the now-orphaned pager card
     let result = tokio::select! {
         response = gateway.ext_method(ext_request) => match response {
             Ok(raw) => match serde_json::from_str::<McpElicitExtResponse>(raw.0.get()) {

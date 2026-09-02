@@ -1,8 +1,5 @@
-//! Multiline preview overlay widget.
-//!
 //! Renders a bordered popup showing a preview of multiline content.
-//! Shows first N and last N lines with a `⋮` separator when content
-//! exceeds the preview limit.
+//! Shows first N and last N lines with a `⋮` separator when content exceeds the preview limit.
 //!
 //! Used for:
 //! - Paste element previews in the prompt widget
@@ -21,7 +18,6 @@ use super::safe_buf::SafeBuf;
 // PreviewStyle — configurable colors
 // ---------------------------------------------------------------------------
 
-/// Visual styling for the preview overlay.
 #[derive(Debug, Clone, Copy)]
 pub struct PreviewStyle {
     /// Background color for the entire overlay box.
@@ -33,7 +29,6 @@ pub struct PreviewStyle {
 }
 
 impl PreviewStyle {
-    /// Create a style with explicit colors.
     pub fn new(bg: Color, text_fg: Color, border_fg: Color) -> Self {
         Self {
             bg,
@@ -47,20 +42,18 @@ impl PreviewStyle {
 // PreviewConfig — layout configuration
 // ---------------------------------------------------------------------------
 
-/// Layout configuration for the preview overlay.
 #[derive(Debug, Clone)]
 pub struct PreviewConfig {
     /// Number of lines to show from the top and bottom when truncating.
-    /// If content has more than `preview_lines * 2` lines, shows first N,
-    /// dots separator, and last N lines.
+    /// If content has more than `preview_lines * 2` lines, shows first N, dots separator, and last N lines.
     pub preview_lines: usize,
 
-    /// Width of the overlay as a fraction of the available width (0.0 - 1.0).
+    /// Width of the overlay as a fraction of the available width (0.0 to 1.0).
     /// Default: 0.75 (3/4 of available width).
     pub width_ratio: f32,
 
     /// Vertical gap between the overlay's bottom border and the anchor point.
-    /// 0 = overlay sits flush against the anchor.
+    /// At 0 the overlay sits flush against the anchor.
     pub bottom_gap: u16,
 
     /// Minimum width for the overlay. Below this, the overlay won't render.
@@ -69,10 +62,9 @@ pub struct PreviewConfig {
     /// Minimum height for the overlay area. Below this, the overlay won't render.
     pub min_height: u16,
 
-    /// Optional one-line hint painted into the bottom border row, e.g.
-    /// `╰─ enter to expand ────╯`. Costs no content row; skipped when the
-    /// box is too narrow to fit readable text. `None` (the default)
-    /// leaves the plain border.
+    /// Optional one-line hint painted into the bottom border row, e.g. `╰─ enter to expand ────╯`.
+    /// It costs no content row and is skipped when the box is too narrow to fit readable text.
+    /// `None` (the default) leaves the plain border.
     pub hint: Option<Line<'static>>,
 }
 
@@ -93,24 +85,10 @@ impl Default for PreviewConfig {
 // render_preview_overlay — main rendering function
 // ---------------------------------------------------------------------------
 
-/// Render a multiline preview overlay.
+/// The overlay is anchored at the bottom of `area`, showing a bordered box with the content preview.
+/// If content exceeds `config.preview_lines * 2` lines, shows first N lines, a `⋮ (X more lines)` separator, and last N lines.
 ///
-/// The overlay is anchored at the bottom of `area`, showing a bordered box
-/// with the content preview. If content exceeds `config.preview_lines * 2`
-/// lines, shows first N lines, a `⋮ (X more lines)` separator, and last N lines.
-///
-/// # Arguments
-///
-/// * `buf` - The buffer to render into
-/// * `area` - The available area for the overlay (anchored at bottom)
-/// * `content` - The multiline text content to preview
-/// * `style` - Visual styling (colors)
-/// * `config` - Layout configuration
-///
-/// # Returns
-///
-/// The actual `Rect` where the overlay was rendered, or `None` if the overlay
-/// couldn't be rendered (area too small, content empty).
+/// Returns the `Rect` where the overlay was rendered, or `None` if the overlay couldn't be rendered (area too small, content empty).
 pub fn render_preview_overlay(
     buf: &mut Buffer,
     area: Rect,
@@ -121,7 +99,6 @@ pub fn render_preview_overlay(
     let lines: Vec<&str> = content.lines().collect();
     let total = lines.len();
 
-    // Don't render if content is empty or area is too small
     if total == 0 || area.height < config.min_height || area.width < config.min_width {
         return None;
     }
@@ -158,11 +135,10 @@ pub fn render_preview_overlay(
         .style(Style::default().bg(style.bg));
     let inner = block.inner(box_area);
 
-    // Clear background - fill every cell so underlying content doesn't bleed through
+    // Clear background: fill every cell so underlying content doesn't bleed through
     Clear.render(box_area, buf);
     buf.set_style(box_area, Style::default().bg(style.bg));
 
-    // Render the border
     block.render(box_area, buf);
 
     // Render content
@@ -179,9 +155,8 @@ pub fn render_preview_overlay(
         dots_style,
     );
 
-    // Hint lives in the bottom border row: costs no content row, and the
-    // border interruption reads as a label even when a theme aliases the
-    // hint palette to the border/content colors.
+    // The hint lives in the bottom border row, so it costs no content row
+    // The border interruption reads as a label even when a theme aliases the hint palette to the border/content colors
     if let Some(hint) = &config.hint {
         render_border_hint(buf, box_area, hint, style.bg);
     }
@@ -189,7 +164,6 @@ pub fn render_preview_overlay(
     Some(box_area)
 }
 
-/// Render the content lines into the inner area.
 fn render_content_lines(
     buf: &mut Buffer,
     inner: Rect,
@@ -247,22 +221,20 @@ fn render_content_lines(
     }
 }
 
-/// Render a single truncated line.
 #[inline]
 fn render_line(buf: &mut Buffer, x: u16, y: u16, width: u16, line: &str, style: Style) {
     let truncated = truncate_str(line, width as usize);
     buf.set_span_safe(x, y, &Span::styled(truncated, style), width);
 }
 
-/// Paint the hint into the bottom border row, left-aligned after the
-/// corner and one dash, padded with a space on each side so the text
-/// stands off the dashes: `╰─ enter to expand ────╯`. The corners and
-/// one dash per side are never overwritten. Skipped entirely when the
-/// box is too narrow for readable text.
+/// Paint the hint into the bottom border row, left-aligned after the corner and one dash: `╰─ enter to expand ────╯`.
+/// A pad space on each side stands the text off the dashes.
+/// The corners and one dash per side are never overwritten.
+/// The hint is skipped entirely when the box is too narrow for readable text.
 fn render_border_hint(buf: &mut Buffer, box_area: Rect, hint: &Line<'static>, bg: Color) {
     // Chrome around the text: corners (2) + one dash each side (2) + pads (2).
     const CHROME: u16 = 6;
-    // Below this the truncated text is noise — keep the plain border.
+    // Below this the truncated text is noise; keep the plain border
     const MIN_TEXT_WIDTH: u16 = 8;
     let text_width = box_area.width.saturating_sub(CHROME);
     if text_width < MIN_TEXT_WIDTH {
@@ -337,7 +309,7 @@ mod tests {
         );
         assert!(result.is_some());
         let rect = result.unwrap();
-        // Box should be 3 rows: border + 1 content + border
+        // 3 rows: border + 1 content + border
         assert_eq!(rect.height, 3);
     }
 
@@ -357,7 +329,7 @@ mod tests {
         // 4 lines + 2 borders = 6 rows
         assert_eq!(rect.height, 6);
 
-        // Should NOT contain dots separator (4 lines <= 6 = preview_lines * 2)
+        // 4 lines does not exceed preview_lines * 2 = 6, so no dots separator
         let buf_str = buffer_to_string(&buf);
         assert!(!buf_str.contains("⋮"), "Should not have dots: {}", buf_str);
     }
@@ -378,7 +350,7 @@ mod tests {
         );
         assert!(result.is_some());
 
-        // Should contain dots separator (10 lines > 6 = preview_lines * 2)
+        // 10 lines exceeds preview_lines * 2 = 6, so the dots separator renders
         let buf_str = buffer_to_string(&buf);
         assert!(buf_str.contains("⋮"), "Should have dots: {}", buf_str);
         assert!(
@@ -435,7 +407,7 @@ mod tests {
         );
         assert!(result.is_some());
         let rect = result.unwrap();
-        assert_eq!(rect.width, 50); // 100 * 0.5 = 50
+        assert_eq!(rect.width, 50);
     }
 
     #[test]
@@ -451,7 +423,6 @@ mod tests {
         );
         assert!(result.is_some());
 
-        // Content should be truncated with ellipsis
         let buf_str = buffer_to_string(&buf);
         assert!(
             buf_str.contains("…"),
@@ -467,7 +438,6 @@ mod tests {
         ])
     }
 
-    /// Helper: one buffer row as a string.
     fn row_to_string(buf: &Buffer, y: u16) -> String {
         (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
     }
@@ -567,8 +537,7 @@ mod tests {
 
     #[test]
     fn test_hint_skipped_when_ultra_narrow() {
-        // Box of 12 cells leaves 6 for text — below the readability floor,
-        // so the border stays plain.
+        // A box of 12 cells leaves 6 for text, below the readability floor, so the border stays plain
         let mut buf = Buffer::empty(Rect::new(0, 0, 16, 10));
         let config = PreviewConfig {
             hint: Some(test_hint()),
@@ -590,7 +559,6 @@ mod tests {
         assert_corners(&buf, rect);
     }
 
-    /// Helper: convert buffer to string for assertions.
     fn buffer_to_string(buf: &Buffer) -> String {
         let mut s = String::new();
         for y in 0..buf.area.height {

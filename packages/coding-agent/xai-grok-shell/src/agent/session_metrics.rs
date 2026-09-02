@@ -1,8 +1,7 @@
 //! Session lifecycle event structs.
 //!
-//! Re-exported from `xai-grok-telemetry` after the telemetry crate split.
-//! The structs themselves live in the telemetry crate; this module preserves
-//! the existing import path so nothing else in shell needs to change.
+//! The structs moved to `xai-grok-telemetry` in the telemetry crate split.
+//! This module re-exports them so the existing import path in shell keeps working.
 
 pub(crate) use xai_grok_telemetry::session_metrics::{
     DoomLoopDetected, DoomLoopRecovery, SessionContextSnapshot, SessionStartKind, SessionStarted,

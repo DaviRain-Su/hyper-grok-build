@@ -89,15 +89,9 @@ fn default_output_path(mode: InstrumentationMode) -> PathBuf {
     }
 }
 
-/// A wrapper layer that filters events by target name.
-///
-/// This is used instead of `.with_filter()` because `Filtered<L, F, S>` layers
-/// require `FilterId` registration with the subscriber. When boxed as
-/// `Box<dyn Layer<S>>`, the type information needed for registration is lost,
-/// causing a panic: "a Filtered layer was used, but it had no FilterId".
-///
-/// This wrapper avoids that issue by implementing filtering in the `enabled()`
-/// method directly, without using the per-layer filter mechanism.
+/// A wrapper layer that filters events by target name in `enabled()` directly rather than via `.with_filter()`.
+/// A `Filtered<L, F, S>` layer needs `FilterId` registration with the subscriber; boxing as `Box<dyn Layer<S>>` loses that.
+/// The result is a panic: "a Filtered layer was used, but it had no FilterId".
 pub struct TargetFilterLayer<L, S> {
     inner: L,
     target: &'static str,
@@ -171,8 +165,7 @@ where
     }
 }
 
-/// A no-op layer that does nothing.
-/// Used when instrumentation is disabled to avoid any overhead.
+/// Returned when instrumentation is disabled, so the subscriber stack pays no overhead.
 pub struct NoOpLayer<S>(PhantomData<fn(S)>);
 
 impl<S> Default for NoOpLayer<S> {
@@ -248,16 +241,13 @@ fn build_log_layer<S>(mode: InstrumentationMode) -> Box<dyn Layer<S> + Send + Sy
 where
     S: Subscriber + for<'span> LookupSpan<'span> + Send + Sync + 'static,
 {
-    // When disabled, return a true no-op layer that does nothing.
-    // This avoids any overhead and potential issues with complex layer types.
     if mode == InstrumentationMode::Disabled {
         return Box::new(NoOpLayer::new());
     }
 
     let writer = build_writer(resolve_log_path());
 
-    // Use TargetFilterLayer instead of .with_filter() to avoid the FilterId
-    // registration issue when the layer is boxed as Box<dyn Layer<S>>.
+    // Use TargetFilterLayer instead of .with_filter() to avoid the FilterId registration issue when the layer is boxed as Box<dyn Layer<S>>
     let fmt_layer = tracing_subscriber::fmt::layer()
         .json()
         .with_current_span(false) // `spans` array already carries the full ancestor list
@@ -313,8 +303,7 @@ where
         *slot = Some(guard);
     }
 
-    // Use TargetFilterLayer instead of .with_filter() to avoid the FilterId
-    // registration issue when the layer is boxed as Box<dyn Layer<S>>.
+    // Use TargetFilterLayer instead of .with_filter() to avoid the FilterId registration issue when the layer is boxed as Box<dyn Layer<S>>
     Box::new(TargetFilterLayer::new(layer, TARGET))
 }
 
@@ -333,9 +322,8 @@ where
     }
 }
 
-/// Install a global panic hook that emits a structured tracing event before
-/// invoking the default hook.  Call this once, early in `main`, after the
-/// tracing subscriber has been installed.
+/// Install a global panic hook that emits a structured tracing event before invoking the default hook.
+/// Call this once, early in `main`, after the tracing subscriber has been installed.
 pub fn install_panic_hook() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -349,9 +337,8 @@ pub fn install_panic_hook() {
         let location = info
             .location()
             .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()));
-        // `location` is the panic's source `file:line:col` (no user content);
-        // path-scrubbed by the redact layer. Gives the panic counter a place
-        // to point without exporting the message/stack.
+        // `location` is the panic's source `file:line:col` (no user content); the redact layer scrubs the paths
+        // It gives the panic counter a place to point without exporting the message or stack
         let err_span = tracing::info_span!(
             "internal_error",
             error_type = "panic",
@@ -361,9 +348,9 @@ pub fn install_panic_hook() {
             err_span.record("location", loc);
         }
         err_span.in_scope(|| {});
-        // External OTEL stream: error class only — no message, no location
-        // (RQ5). Synchronous queue hand-off; no-op unless the stream is
-        // active. The internal pipelines keep the richer span/event above.
+        // The external OTEL stream gets the error class only, never the message or location
+        // `emit` is a synchronous queue push and a no-op unless the stream is active
+        // The internal pipelines keep the richer span and event above
         crate::external::emit(&crate::events::InternalError {
             error_type: "panic".to_owned(),
         });
@@ -558,6 +545,7 @@ pub struct InstrumentationTimer {
     fields: Vec<(String, Value)>,
     subphase: Option<crate::startup::Subphase>,
     subphase_span: Option<tracing::Span>,
+    parent: Option<timer_parents::Guard>,
     timer_span: tracing::Span,
     mode: InstrumentationMode,
     _span_guard: Option<tracing::span::EnteredSpan>,
@@ -573,13 +561,15 @@ impl InstrumentationTimer {
         mode: InstrumentationMode,
         span_guard: Option<tracing::span::EnteredSpan>,
     ) -> Self {
-        let timer_span = if matches!(
-            mode,
-            InstrumentationMode::Disabled | InstrumentationMode::Chrome
-        ) {
-            tracing::Span::none()
+        let (timer_span, span_guard, parent) = if span_guard.is_some()
+            || matches!(
+                mode,
+                InstrumentationMode::Disabled | InstrumentationMode::Chrome
+            ) {
+            (tracing::Span::none(), span_guard, None)
         } else {
-            tracing::info_span!("timer", name = name)
+            let (timer_span, parent) = timer_parents::open(name);
+            (timer_span, None, parent)
         };
         Self {
             name,
@@ -587,6 +577,7 @@ impl InstrumentationTimer {
             fields: Vec::new(),
             subphase: None,
             subphase_span: None,
+            parent,
             timer_span,
             mode,
             _span_guard: span_guard,
@@ -603,11 +594,11 @@ impl InstrumentationTimer {
         self
     }
 
-    /// Route this timer's elapsed into a typed startup sub-phase field on drop
-    /// (while startup is active), so producer to field is checked at compile time.
+    /// Route this timer's elapsed into a typed startup sub-phase field on drop (while startup is active).
+    /// The mapping from producer to field is checked at compile time.
     pub fn with_subphase(&mut self, sp: crate::startup::Subphase) -> &mut Self {
         self.subphase = Some(sp);
-        // Gated like the drop-time field mirror: a span only when recording is.
+        // Gated like the drop-time field mirror: create the span only while startup recording is active
         if self.subphase_span.is_none() && crate::startup::is_active() {
             self.subphase_span = Some(crate::startup::subphase_span(sp, &self.timer_span));
         }
@@ -618,14 +609,15 @@ impl InstrumentationTimer {
 impl Drop for InstrumentationTimer {
     fn drop(&mut self) {
         let elapsed = self.start.elapsed();
-        // Close at the elapsed stamp, so span duration and `*_ms` agree.
+        drop(self.parent.take());
         drop(self.subphase_span.take());
+        drop(self._span_guard.take());
         drop(std::mem::replace(
             &mut self.timer_span,
             tracing::Span::none(),
         ));
-        // Mirror into `unified.jsonl` while startup is active, so a slow-launch
-        // report needs no env vars or repro; the first usable session latches this off.
+        // Mirror into `unified.jsonl` while startup is active, so a slow-launch report needs no env vars or repro
+        // The first usable session latches this off
         if crate::startup::is_active() {
             if let Some(sp) = self.subphase {
                 crate::startup::record_subphase(sp, elapsed);
@@ -645,11 +637,7 @@ impl Drop for InstrumentationTimer {
                 Some(Value::Object(ctx)),
             );
         }
-        if self.mode == InstrumentationMode::Disabled {
-            return;
-        }
-        if self.mode == InstrumentationMode::Chrome {
-            let _ = self._span_guard.take();
+        if self.mode == InstrumentationMode::Disabled || self.mode == InstrumentationMode::Chrome {
             return;
         }
         let elapsed_us = elapsed.as_micros() as u64;
@@ -681,4 +669,91 @@ impl Drop for InstrumentationTimer {
 
 pub fn timer(name: &'static str) -> InstrumentationTimer {
     InstrumentationTimer::new(name)
+}
+
+mod timer_parents {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::thread::ThreadId;
+
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    enum Key {
+        Task(tokio::task::Id),
+        Thread(ThreadId),
+    }
+
+    pub(super) struct Guard {
+        key: Key,
+        span: tracing::Span,
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let mut map = map_lock();
+            let Some(stack) = map.get_mut(&self.key) else {
+                return;
+            };
+            if let Some(index) = stack.iter().rposition(|open| same_span(open, &self.span)) {
+                stack.remove(index);
+            }
+            if stack.is_empty() {
+                map.remove(&self.key);
+            }
+        }
+    }
+
+    fn key() -> Key {
+        match tokio::task::try_id() {
+            Some(id) => Key::Task(id),
+            None => Key::Thread(std::thread::current().id()),
+        }
+    }
+
+    fn map_lock() -> std::sync::MutexGuard<'static, HashMap<Key, Vec<tracing::Span>>> {
+        static STACKS: std::sync::OnceLock<Mutex<HashMap<Key, Vec<tracing::Span>>>> =
+            std::sync::OnceLock::new();
+        STACKS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn top() -> Option<tracing::Span> {
+        let map = map_lock();
+        map.get(&key()).and_then(|stack| stack.last().cloned())
+    }
+
+    fn push(span: &tracing::Span) -> Option<Guard> {
+        if span.is_disabled() {
+            return None;
+        }
+        let key = key();
+        map_lock().entry(key).or_default().push(span.clone());
+        Some(Guard {
+            key,
+            span: span.clone(),
+        })
+    }
+
+    pub(super) fn open(name: &'static str) -> (tracing::Span, Option<Guard>) {
+        let span = if let Some(parent) = top().or_else(crate::startup::current_phase_span) {
+            tracing::info_span!(parent: &parent, "timer", name = name)
+        } else {
+            let current = tracing::Span::current();
+            if current.is_disabled() {
+                tracing::info_span!("timer", name = name)
+            } else {
+                tracing::info_span!(parent: &current, "timer", name = name)
+            }
+        };
+        let guard = push(&span);
+        (span, guard)
+    }
+
+    fn same_span(a: &tracing::Span, b: &tracing::Span) -> bool {
+        match (a.id(), b.id()) {
+            (Some(left), Some(right)) => left == right,
+            _ => false,
+        }
+    }
 }

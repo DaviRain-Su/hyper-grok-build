@@ -18,50 +18,37 @@ pub enum ConfigUpdate {
     Auth(Box<GrokAuth>),
     /// Auth scope was removed (user logged out).
     AuthCleared,
-    /// A **broadcast** MCP reload — applies to every active session
-    /// regardless of cwd. Fires for two cases:
+    /// A **broadcast** MCP reload; it applies to every active session regardless of cwd. Fires for two cases:
     ///
     /// 1. The global `[mcp_servers]` table in `~/.grok/config.toml`
     ///    changed.
     /// 2. The user's home-level `~/.claude.json` changed.
-    ///    `load_claude_json_mcp_servers_as_configs` reads this file
-    ///    for every session, so the reload cannot be narrowed by cwd.
+    ///    `load_claude_json_mcp_servers_as_configs` reads this file for every session, so the reload cannot be narrowed by cwd.
     ///
-    /// Project-scoped changes (`<cwd>/.grok/config.toml`,
-    /// `<cwd>/.mcp.json`, project-level `<cwd>/.claude.json`) emit
-    /// [`Self::ProjectMcpServersChanged`] instead so the reload can
-    /// be narrowed to matching cwds.
+    /// Project-scoped changes emit [`Self::ProjectMcpServersChanged`] instead so the reload can be narrowed to matching cwds.
+    /// Those are `<cwd>/.grok/config.toml`, `<cwd>/.mcp.json`, and the project-level `<cwd>/.claude.json`.
     ///
-    /// Deliberately kept as a unit variant.
-    /// Adding a payload here would force pattern-match updates across
-    /// (`<cwd>/.grok/config.toml`, `<cwd>/.mcp.json`, or
-    /// `mvp_agent`, `app`, `session/handle`, etc.
+    /// This stays a unit variant deliberately: adding a payload would force pattern-match updates across `mvp_agent`, `app`, `session/handle`, etc.
     McpServersChanged,
-    /// A **project-scoped** MCP config file changed
-    /// `<cwd>/.claude.json`). Agent should reload MCP only for
-    /// sessions whose cwd matches `cwd` (or sits beneath it).
+    /// A **project-scoped** MCP config file changed (`<cwd>/.grok/config.toml`, `<cwd>/.mcp.json`, or `<cwd>/.claude.json`).
+    /// The agent should reload MCP only for sessions whose cwd matches `cwd` (or sits beneath it).
     ///
-    /// Strictly additive to [`Self::McpServersChanged`] — the unit
-    /// variant continues to fire for global-config edits. The two
-    /// cases are split so per-project reloads don't
-    /// grok process sharing the home dir). The agent should consult the cache
-    /// thrash unrelated sessions.
+    /// Strictly additive to [`Self::McpServersChanged`]: the unit variant continues to fire for global-config edits.
+    /// The two cases are split so per-project reloads don't thrash unrelated sessions.
     ProjectMcpServersChanged {
-        /// The project root whose `.grok/`, `.mcp.json`, or
-        /// `.claude.json` file was edited. Sessions whose cwd equals
-        /// this path — or is a descendant of it — are the reload
-        /// targets.
+        /// The project root whose `.grok/`, `.mcp.json`, or `.claude.json` file was edited.
+        /// Sessions whose cwd equals this path, or is a descendant of it, are the reload targets.
         cwd: PathBuf,
     },
     /// Updated memory config (boxed to avoid large enum variant).
     Memory(Box<crate::config::MemoryConfig>),
     /// Updated skills discovery config.
     Skills(xai_grok_agent::prompt::skills::SkillsConfig),
-    /// Updated `[compat]` vendor-compatibility config. Applied on the
-    /// next agent (re)build, which re-resolves `compat_resolved`.
+    /// Updated `[compat]` vendor-compatibility config.
+    /// It is applied on the next agent (re)build, which re-resolves `compat_resolved`.
     Compat(Box<xai_grok_tools::types::compat::CompatConfigToml>),
-    /// The `[model.*]` entries in config.toml changed. Agent should re-resolve
-    /// its model list (BYOK models added/removed, default or surprise changed).
+    /// The `[model.*]` entries in config.toml changed.
+    /// The agent should re-resolve its model list (BYOK models added/removed, default or surprise changed).
     ModelsChanged,
     /// The `[subagents.models]` pin table in config.toml changed (typically
     /// from the TUI `/agents` modal's model-pin editor). The agent re-resolves
@@ -70,13 +57,11 @@ pub enum ConfigUpdate {
     /// baked into the built toolset and only apply on session start.
     SubagentModelsChanged,
     /// `~/.grok/models_cache.json` was rewritten on disk (possibly by another
-    /// via `ModelsManager::reload_from_disk_cache`, which content-dedupes
-    /// self-writes (`persist` / `renew_ttl`) before applying. No payload —
-    /// validation (TTL, version, auth method) requires `ModelsManager` state
-    /// drop redundant `ProjectMcpServersChanged` dispatches on
-    /// the reloader doesn't have.
+    /// grok process sharing the home dir). The agent should consult the cache via `ModelsManager::reload_from_disk_cache`.
+    /// That method content-dedupes self-writes (`persist` / `renew_ttl`) before applying.
+    /// The variant carries no payload: validation (TTL, version, auth method) requires `ModelsManager` state the reloader doesn't have.
     ModelsCacheChanged,
-    /// Updated UI settings — agent broadcasts `x.ai/config_changed` to IPC clients.
+    /// Updated UI settings; the agent broadcasts `x.ai/config_changed` to IPC clients.
     Ui {
         theme: Option<String>,
         yolo: bool,
@@ -84,16 +69,15 @@ pub enum ConfigUpdate {
     },
 }
 
-/// Runs on `tokio::spawn` (`Send`). Receives raw [`ConfigChangeEvent`]s from
-/// the file watcher, diffs against last-known state, and sends [`ConfigUpdate`]
-/// messages to the agent via an `mpsc` channel.
+/// Runs on `tokio::spawn` (`Send`).
+/// Receives raw [`ConfigChangeEvent`]s from the file watcher and diffs them against last-known state.
+/// It then sends [`ConfigUpdate`] messages to the agent via an `mpsc` channel.
 pub(crate) struct ConfigReloader {
     last_auth_key_hash: u64,
     last_global_config: toml::Value,
     last_effective_config: toml::Value,
-    /// Per-cwd content hash of the project MCP config files, used to
-    /// to diff (the dedup lives in `ModelsManager::reload_from_disk_cache`),
-    /// mtime-only touches (see `hash_project_mcp_config`).
+    /// Per-cwd content hash of the project MCP config files.
+    /// It drops redundant `ProjectMcpServersChanged` dispatches on mtime-only touches (see `hash_project_mcp_config`).
     last_project_mcp_hashes: HashMap<PathBuf, u64>,
     grok_home: PathBuf,
     auth_scope: String,
@@ -158,11 +142,9 @@ impl ConfigReloader {
             let has_project_config = batch
                 .iter()
                 .any(|e| matches!(e, ConfigChangeEvent::ProjectConfigChanged { .. }));
-            // `~/.claude.json` is loaded by every
-            // session (it does NOT live in a project root), so its
-            // reload must broadcast through the legacy unit
-            // `McpServersChanged` arm. Routing it through the per-
-            // cwd variant would silently miss sessions outside `$HOME`.
+            // `~/.claude.json` is loaded by every session (it does NOT live in a project root)
+            // Its reload must broadcast through the legacy unit `McpServersChanged` arm
+            // Routing it through the per-cwd variant would silently miss sessions outside `$HOME`
             let has_home_claude_json = batch
                 .iter()
                 .any(|e| matches!(e, ConfigChangeEvent::HomeClaudeJsonChanged));
@@ -171,11 +153,8 @@ impl ConfigReloader {
                 .any(|e| matches!(e, ConfigChangeEvent::ModelsCacheChanged));
             let has_config = has_global_config || has_project_config;
 
-            // Collect the unique cwds whose project
-            // files changed so we can emit one
-            // `ConfigUpdate::ProjectMcpServersChanged { cwd }` per
-            // project root (rather than the legacy unit
-            // `McpServersChanged` that swept every session).
+            // Collect the unique cwds whose project files changed to emit one `ConfigUpdate::ProjectMcpServersChanged { cwd }` per project root
+            // The legacy unit `McpServersChanged` swept every session instead
             let project_cwds = collect_project_cwds(&batch);
 
             if has_auth {
@@ -184,9 +163,8 @@ impl ConfigReloader {
                 match result {
                     Ok(Err(e)) => {
                         error!(error = %e, "auth hot-reload failed, keeping previous credentials");
-                        // Whole-file deletion (NotFound) and corrupt JSON
-                        // land here. The resulting memory/disk divergence
-                        // must be visible in unified.jsonl.
+                        // Whole-file deletion (NotFound) and corrupt JSON land here
+                        // The resulting memory/disk divergence must be visible in unified.jsonl
                         let path = self.grok_home.join("auth.json");
                         xai_grok_telemetry::unified_log::error(
                             "auth reload: auth.json unreadable, keeping previous credentials",
@@ -219,42 +197,30 @@ impl ConfigReloader {
                 }
             }
 
-            // NB: the legacy fall-through that emitted a unit
-            // `McpServersChanged` for any project `.mcp.json` /
-            // `.claude.json` change is replaced by the
-            // per-cwd fan-out below — `collect_project_cwds` already
-            // includes every `McpConfigChanged` path in `project_cwds`,
-            // so a separate emit here would double-dispatch. Global
-            // `[mcp_servers]` edits are dispatched inside `reload_config`.
+            // No unit `McpServersChanged` is emitted here for project `.mcp.json`/`.claude.json` changes
+            // `collect_project_cwds` already includes every `McpConfigChanged` path in `project_cwds`, so a separate emit would double-dispatch
+            // Global `[mcp_servers]` edits are dispatched inside `reload_config`
 
-            // Home-level `~/.claude.json` must
-            // broadcast to every session through the unit variant —
-            // sessions outside `$HOME` would otherwise be silently
-            // skipped by the per-cwd `cwd_matches` filter.
+            // Home-level `~/.claude.json` must broadcast to every session through the unit variant
+            // Sessions outside `$HOME` would otherwise be silently skipped by the per-cwd `cwd_matches` filter
             if has_home_claude_json {
                 info!("~/.claude.json change detected — broadcasting MCP reload");
                 let _ = self.config_update_tx.send(ConfigUpdate::McpServersChanged);
             }
 
-            // Pass-through (no toml diff possible here): the
-            // content-vs-in-memory dedup happens in
-            // `ModelsManager::reload_from_disk_cache`.
+            // Pass-through (no toml diff is possible here): `ModelsManager::reload_from_disk_cache` dedupes against the in-memory content
             if has_models_cache {
                 debug!("models_cache.json change detected — forwarding to agent");
                 let _ = self.config_update_tx.send(ConfigUpdate::ModelsCacheChanged);
             }
 
-            // Fan out one
-            // `ProjectMcpServersChanged { cwd }` per affected project
-            // root. The legacy unit `McpServersChanged` above stays
-            // for global-config edits — both variants can fire in the
+            // Fan out one `ProjectMcpServersChanged { cwd }` per affected project root
+            // The legacy unit `McpServersChanged` above stays for global-config edits; both variants can fire in the
             // same tick (e.g. `~/.grok/config.toml` AND
             // `<cwd>/.mcp.json` edited together).
             for cwd in project_cwds {
-                // Skip the dispatch when the project config bytes are
-                // unchanged (the watcher fires on mtime-only touches).
-                // On any uncertainty we dispatch; see
-                // `hash_project_mcp_config`.
+                // Skip the dispatch when the project config bytes are unchanged (the watcher fires on mtime-only touches)
+                // On any uncertainty we dispatch; see `hash_project_mcp_config`
                 let new_hash = hash_project_mcp_config(&cwd);
                 let unchanged = match (new_hash, self.last_project_mcp_hashes.get(&cwd)) {
                     (Some(new), Some(&prev)) => new == prev,
@@ -302,9 +268,8 @@ impl ConfigReloader {
                     self.last_auth_key_hash = 0;
                     let _ = self.config_update_tx.send(ConfigUpdate::AuthCleared);
                     info!("auth scope removed from auth.json, sent clear to agent");
-                    // AuthCleared makes the agent drop in-memory credentials;
-                    // record what the reloader saw so "entry removed" is
-                    // distinguishable from "file deleted" (the Err path).
+                    // AuthCleared makes the agent drop in-memory credentials
+                    // Record what the reloader saw so "entry removed" is distinguishable from "file deleted" (the Err path)
                     xai_grok_telemetry::unified_log::warn(
                         "auth reload: scope entry gone, sending AuthCleared",
                         None,
@@ -320,11 +285,8 @@ impl ConfigReloader {
     }
 
     fn reload_config(&mut self) -> anyhow::Result<()> {
-        // `has_project_config` parameter dropped —
-        // project-scoped reloads are dispatched via
-        // `ProjectMcpServersChanged { cwd }` in the caller's
-        // `collect_project_cwds` fan-out, so this function only
-        // needs to diff the global toml.
+        // Project-scoped reloads are dispatched via `ProjectMcpServersChanged { cwd }` in the caller's `collect_project_cwds` fan-out
+        // This function only needs to diff the global toml
         let new_global = match crate::config::load_from_disk() {
             Ok(v) => v,
             Err(e) => {
@@ -333,13 +295,10 @@ impl ConfigReloader {
             }
         };
 
-        // MCP servers — compare [mcp_servers] table in the **global**
+        // MCP servers: compare the [mcp_servers] table in the **global**
         // config (`~/.grok/config.toml`) via toml::Value. Project-
-        // scoped changes (`<cwd>/.grok/config.toml`,
-        // `<cwd>/.mcp.json`) are dispatched separately via
-        // `ConfigUpdate::ProjectMcpServersChanged { cwd }` (see
-        // `collect_project_cwds`) so they don't sweep
-        // unrelated sessions.
+        // scoped changes (`<cwd>/.grok/config.toml`, `<cwd>/.mcp.json`) go out separately as `ConfigUpdate::ProjectMcpServersChanged { cwd }`
+        // That per-cwd dispatch (see `collect_project_cwds`) keeps them from sweeping unrelated sessions
         let old_mcp_table = self.last_global_config.get("mcp_servers");
         let new_mcp_table = new_global.get("mcp_servers");
         let mcp_changed = old_mcp_table != new_mcp_table;
@@ -398,7 +357,7 @@ impl ConfigReloader {
                 .send(ConfigUpdate::Compat(Box::new(new_compat)));
         }
 
-        // Models — compare [model] (BYOK entries) and [models] (default, surprise) tables.
+        // Models: compare [model] (BYOK entries) and [models] (default, surprise) tables
         // Use toml::Value comparison (covers all fields including nested model entries).
         let old_model_table = self.last_global_config.get("model");
         let new_model_table = new_global.get("model");
@@ -456,11 +415,9 @@ fn changed_memory_config(
     Ok((old_mem != new_mem).then_some(new_mem))
 }
 
-/// Derive the unique project cwds whose files were touched in this
-/// debounce window. Used to fan out one
-/// [`ConfigUpdate::ProjectMcpServersChanged`] per project root rather
-/// than one legacy `McpServersChanged` that reloads every active
-/// session.
+/// Derive the unique project cwds whose files were touched in this debounce window.
+/// The run loop fans out one [`ConfigUpdate::ProjectMcpServersChanged`] per project root.
+/// Emitting one legacy `McpServersChanged` instead would reload every active session.
 ///
 /// Path-to-cwd mapping:
 ///
@@ -470,20 +427,19 @@ fn changed_memory_config(
 /// | `McpConfigChanged`         | `<cwd>/.mcp.json`         | `<cwd>`           |
 /// | `McpConfigChanged`         | `<cwd>/.claude.json`      | `<cwd>`           |
 ///
-/// Order-preserving de-dup (a `Vec` rather than a `HashSet`) so the
-/// downstream emit order is deterministic in tests.
+/// Order-preserving de-dup (a `Vec` rather than a `HashSet`) so the downstream emit order is deterministic in tests.
 fn collect_project_cwds(batch: &[ConfigChangeEvent]) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     for evt in batch {
         let cwd = match evt {
             ConfigChangeEvent::ProjectConfigChanged { path } => {
-                // <cwd>/.grok/config.toml → <cwd>
+                // <cwd>/.grok/config.toml yields <cwd>
                 path.parent()
                     .and_then(|p| p.parent())
                     .map(|p| p.to_path_buf())
             }
             ConfigChangeEvent::McpConfigChanged { path } => {
-                // <cwd>/.mcp.json or <cwd>/.claude.json → <cwd>
+                // <cwd>/.mcp.json or <cwd>/.claude.json yields <cwd>
                 path.parent().map(|p| p.to_path_buf())
             }
             _ => None,
@@ -497,18 +453,14 @@ fn collect_project_cwds(batch: &[ConfigChangeEvent]) -> Vec<PathBuf> {
     out
 }
 
-/// Content hash of the cwd-dependent MCP config files a
-/// `ProjectMcpServersChanged { cwd }` reload re-reads. Walks ancestors
-/// up to the git root exactly as the loaders do (`find_project_configs`
-/// for `.grok/config.toml`, `find_mcp_json_files` for `.mcp.json`) so
-/// the hash can't drift from the set the merge actually reads, plus
-/// `<cwd>/.claude.json` (watched at the project root). A stable hash
-/// means the reload would be a no-op. Home-level sources
+/// Content hash of the cwd-dependent MCP config files a `ProjectMcpServersChanged { cwd }` reload re-reads.
+/// It walks ancestors up to the git root as the loaders do: `find_project_configs` for `.grok/config.toml`, `find_mcp_json_files` for `.mcp.json`.
+/// That keeps the hash from drifting from the set the merge actually reads; `<cwd>/.claude.json` (watched at the project root) is hashed too.
+/// A stable hash means the reload would be a no-op. Home-level sources
 /// (`~/.grok/config.toml`, `~/.claude.json`, `~/.cursor/mcp.json`)
 /// change through their own events.
 ///
-/// Returns `None` on a non-`NotFound` read error so the caller
-/// dispatches rather than risk suppressing a real edit.
+/// Returns `None` on a non-`NotFound` read error so the caller dispatches rather than risk suppressing a real edit.
 fn hash_project_mcp_config(cwd: &Path) -> Option<u64> {
     let mut paths = crate::config::find_project_configs(cwd);
     paths.extend(crate::util::config::find_mcp_json_files(cwd));
@@ -526,7 +478,7 @@ fn hash_project_mcp_config(cwd: &Path) -> Option<u64> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 0u8.hash(&mut hasher); // absent
             }
-            Err(_) => return None, // can't read confidently → dispatch
+            Err(_) => return None, // can't read confidently, so dispatch
         }
     }
     Some(hasher.finish())
@@ -540,12 +492,10 @@ pub(crate) fn hash_auth_key(key: &str) -> u64 {
 
 /// Extract the `[skills]` table from an effective config.
 ///
-/// Consumers: the reload dispatch above (change detection →
-/// `ConfigUpdate::Skills`) and `grok inspect` (via the `crate::config`
-/// re-export), so both honor the same paths/ignore/disabled as a live
-/// session. Session spawn parses the same table separately through the typed
-/// `Config.skills` (agent/config.rs) — keep these in sync rather than adding
-/// a fourth parse path.
+/// Consumers: the reload dispatch above (change detection into `ConfigUpdate::Skills`) and `grok inspect` (via the `crate::config` re-export).
+/// Both therefore honor the same paths/ignore/disabled as a live session.
+/// Session spawn parses the same table separately through the typed `Config.skills` (agent/config.rs).
+/// Keep these in sync rather than adding a fourth parse path.
 pub(crate) fn parse_skills_config(
     config: &toml::Value,
 ) -> xai_grok_agent::prompt::skills::SkillsConfig {
@@ -657,7 +607,7 @@ mod tests {
     #[tokio::test]
     async fn reloader_detects_auth_cleared() {
         let tmp = tempfile::TempDir::new().unwrap();
-        // Write auth.json with a DIFFERENT scope — our scope is missing
+        // Write auth.json with a DIFFERENT scope; our scope is missing
         let auth = make_auth("other-key");
         let mut store = BTreeMap::new();
         store.insert("https://other.example.com".to_string(), auth);
@@ -732,10 +682,8 @@ mod tests {
         );
     }
 
-    /// `ModelsCacheChanged` is a pure pass-through: the reloader has no toml
-    /// so the event must surface as `ConfigUpdate::ModelsCacheChanged`
-    /// (walked to the git root by the loaders), not just files directly
-    /// without touching auth or config state.
+    /// `ModelsCacheChanged` is a pure pass-through: the reloader has no toml diff for it.
+    /// The event must come through as `ConfigUpdate::ModelsCacheChanged` without touching auth or config state.
     #[tokio::test]
     async fn reloader_forwards_models_cache_changed() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -769,8 +717,7 @@ mod tests {
         let _ = handle.await;
     }
 
-    /// A project event with unchanged bytes must not re-dispatch a
-    /// reload; the first event and a later real edit must both dispatch.
+    /// A project event with unchanged bytes must not re-dispatch a reload; the first event and a later real edit must both dispatch.
     #[tokio::test]
     async fn reloader_dedupes_unchanged_project_mcp_config() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -799,7 +746,7 @@ mod tests {
             path: mcp_json.clone(),
         };
 
-        // First event → dispatch (no prior hash for this cwd).
+        // The first event dispatches (no prior hash for this cwd)
         event_tx.send(evt()).unwrap();
         let update = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
             .await
@@ -810,7 +757,7 @@ mod tests {
             "first project event must dispatch"
         );
 
-        // Second event, identical bytes → must be suppressed.
+        // The second event carries identical bytes and must be suppressed
         event_tx.send(evt()).unwrap();
         let res = tokio::time::timeout(std::time::Duration::from_millis(400), rx.recv()).await;
         assert!(
@@ -818,7 +765,7 @@ mod tests {
             "unchanged project config must not re-dispatch a reload"
         );
 
-        // Real content change → dispatch again.
+        // A real content change dispatches again
         std::fs::write(
             &mcp_json,
             r#"{"mcpServers":{"x":{"url":"http://localhost"}}}"#,
@@ -838,8 +785,7 @@ mod tests {
         let _ = handle.await;
     }
 
-    /// `hash_project_mcp_config` is stable for identical content and
-    /// changes on create/edit.
+    /// `hash_project_mcp_config` is stable for identical content and changes on create/edit.
     #[test]
     fn hash_project_mcp_config_detects_create_and_change() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -858,10 +804,7 @@ mod tests {
         assert_ne!(created, changed, "editing content changes the hash");
     }
 
-    /// The hash must reflect ancestor `.grok/config.toml` and `.mcp.json`
-    /// under `cwd` — otherwise an ancestor edit would be wrongly
-    /// must be a distinct variant from the unit `McpServersChanged`
-    /// suppressed.
+    /// The hash must reflect ancestor `.grok/config.toml` and `.mcp.json` under `cwd`; otherwise an ancestor edit would be wrongly suppressed.
     #[test]
     fn hash_project_mcp_config_covers_ancestors() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1044,19 +987,16 @@ command = "/bin/test"
         assert_ne!(a.get("mcp_servers"), b.get("mcp_servers"));
     }
 
-    /// `ConfigUpdate::ProjectMcpServersChanged { cwd }`
-    /// so the two paths route through different match arms in
-    /// `app.rs`. Guards against an accidental merge that would force
-    /// fan-out — it must NOT contribute a cwd to
-    /// per-cwd reloads through the legacy sweep-all-sessions arm.
+    /// `ConfigUpdate::ProjectMcpServersChanged { cwd }` must be a distinct variant from the unit `McpServersChanged`.
+    /// The two paths then route through different match arms in `app.rs`.
+    /// This guards against an accidental merge that would force per-cwd reloads through the legacy sweep-all-sessions arm.
     #[test]
     fn project_variant_dispatches_separately() {
         let cwd = PathBuf::from("/tmp/proj-x");
         let global: ConfigUpdate = ConfigUpdate::McpServersChanged;
         let project = ConfigUpdate::ProjectMcpServersChanged { cwd: cwd.clone() };
 
-        // Each variant must be matched by its own arm — fall-through
-        // would indicate a single arm handling both.
+        // Each variant must be matched by its own arm; fall-through would indicate a single arm handling both
         let mut routed_global = false;
         let mut routed_project = None;
         for u in [global, project] {
@@ -1073,12 +1013,9 @@ command = "/bin/test"
         assert_eq!(routed_project.as_deref(), Some(cwd.as_path()));
     }
 
-    /// `HomeClaudeJsonChanged` is **not** part of the per-cwd
-    /// `collect_project_cwds` (otherwise sessions outside `$HOME`
-    /// would be silently skipped). The reloader broadcasts it via
-    /// the unit `McpServersChanged` variant; this test locks that
-    /// `ProjectConfigChanged` (`<cwd>/.grok/config.toml`) and
-    /// invariant at the helper layer.
+    /// `HomeClaudeJsonChanged` must NOT contribute a cwd to `collect_project_cwds`.
+    /// Sessions outside `$HOME` would otherwise be silently skipped.
+    /// The reloader broadcasts it via the unit `McpServersChanged` variant; this test locks that invariant at the helper layer.
     #[test]
     fn collect_project_cwds_excludes_home_claude_json() {
         let batch = vec![
@@ -1088,16 +1025,13 @@ command = "/bin/test"
             },
         ];
         let cwds = collect_project_cwds(&batch);
-        // Only the project entry contributes; the home-level `.claude.json`
-        // entry is silently dropped because it routes through the
-        // broadcast arm instead.
+        // Only the project entry contributes
+        // The home-level `.claude.json` entry is silently dropped because it routes through the broadcast arm instead
         assert_eq!(cwds, vec![PathBuf::from("/repo/x")]);
     }
 
-    /// `collect_project_cwds` extracts `<cwd>` from
-    /// `McpConfigChanged` (`<cwd>/.mcp.json`), de-duplicates while
-    /// `McpConfigChanged` (`<cwd>/.mcp.json`), de-duplicates while
-    /// preserving order.
+    /// `collect_project_cwds` extracts `<cwd>` from `ProjectConfigChanged` (`<cwd>/.grok/config.toml`) and `McpConfigChanged` (`<cwd>/.mcp.json`).
+    /// It de-duplicates while preserving order.
     #[test]
     fn collect_project_cwds_dedupes_and_extracts() {
         let batch = vec![

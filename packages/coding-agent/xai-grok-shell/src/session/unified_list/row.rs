@@ -152,8 +152,7 @@ pub struct SessionInfo {
     pub meta: RowMeta,
 }
 
-/// The ACP schema types `cwd` as an absolute path, so a row without one has no
-/// representation there.
+/// The ACP schema types `cwd` as an absolute path, so a row without one has no representation there.
 #[derive(Debug, PartialEq, Eq)]
 pub struct CwdNotAbsolute;
 

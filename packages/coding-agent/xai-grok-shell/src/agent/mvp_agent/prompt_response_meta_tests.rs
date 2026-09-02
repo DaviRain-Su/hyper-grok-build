@@ -20,6 +20,7 @@ fn args<'a>(
         cancellation_context: None,
         cancel_trigger: None,
         structured_output: None,
+        completion_kind: None,
     }
 }
 
@@ -55,16 +56,15 @@ fn enriches_meta_with_camelcase_token_keys() {
     assert_eq!(meta["inputTokens"], 1500);
     assert_eq!(meta["outputTokens"], 200);
     assert_eq!(meta["cachedReadTokens"], 1000);
-    // Reasoning tokens carried through for diagnostic visibility.
+    // Reasoning tokens are carried through so diagnostics can read them
     assert_eq!(meta["reasoningTokens"], 75);
 }
 
 #[test]
 fn preserves_zero_token_values() {
-    // Responses API hits with no cache return cached_prompt_tokens=0.
-    // The key is still emitted as 0 so the bot can distinguish "no cache
-    // hit" from "no usage data". (The bot's _merge_meta_usage requires
-    // the key to be present and integer-typed.)
+    // Responses API hits with no cache return a cached_prompt_tokens of 0
+    // The key is still emitted as 0 so the bot can tell "no cache hit" from "no usage data"
+    // The bot's _merge_meta_usage requires the key to be present and integer-typed
     let usage = TokenUsage {
         prompt_tokens: 100,
         completion_tokens: 10,
@@ -112,14 +112,14 @@ fn usage_object_lands_on_meta() {
 
 #[test]
 fn cancel_trigger_lands_as_camelcase_meta_key() {
-    // A send-now cancelled turn's PromptResponse `_meta` carries `cancelTrigger: "send_now"`.
+    // When send-now cancels a turn, the PromptResponse `_meta` carries `cancelTrigger: "send_now"`
     let meta = build_prompt_response_meta(PromptResponseMetaArgs {
         cancel_trigger: Some("send_now".to_string()),
         ..args("s", "p", 0, "m")
     });
     assert_eq!(meta["cancelTrigger"], "send_now");
 
-    // Absent for non-cancel completions — the key must not appear.
+    // When nothing was cancelled, the key must not appear
     let none = build_prompt_response_meta(args("s", "p", 0, "m"));
     assert!(none.get("cancelTrigger").is_none());
 }
@@ -170,8 +170,19 @@ fn structured_output_maps_to_camelcase_meta_keys() {
     );
     assert!(err.get("structuredOutput").is_none());
 
-    // No schema requested → neither key present.
+    // When no schema was requested, neither key is present
     let none = build_prompt_response_meta(args("s", "p", 0, "m"));
     assert!(none.get("structuredOutput").is_none());
     assert!(none.get("structuredOutputError").is_none());
+}
+
+#[test]
+fn removed_from_queue_stamps_completion_kind() {
+    let none = build_prompt_response_meta(args("s", "p", 0, "m"));
+    assert!(none.get("completionKind").is_none());
+    let meta = build_prompt_response_meta(PromptResponseMetaArgs {
+        completion_kind: Some(crate::session::commands::REMOVED_FROM_QUEUE_KIND.to_string()),
+        ..args("s", "p", 0, "m")
+    });
+    assert_eq!(meta["completionKind"], "removedFromQueue");
 }

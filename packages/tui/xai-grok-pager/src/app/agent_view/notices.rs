@@ -9,6 +9,18 @@ use crate::app::actions::Action;
 use std::time::Instant;
 
 impl AgentView {
+    /// How long after the last resize event the iTerm2 prompt image preview
+    /// stays hidden. Longer than `RESIZE_DEBOUNCE` (16ms) so mid-drag
+    /// stutters don't flash pixels back in, short enough that the preview
+    /// returns as soon as the drag visibly ends.
+    const ITERM2_RESIZE_PREVIEW_QUIET: std::time::Duration = std::time::Duration::from_millis(300);
+
+    /// Extra tick margin past the quiet window, so the draw that repaints
+    /// the preview runs *after* [`Self::resize_hides_prompt_preview`] flips —
+    /// ticking exactly to the boundary would leave the preview hidden until
+    /// some unrelated event triggered a draw.
+    const ITERM2_RESIZE_TICK_MARGIN: std::time::Duration = std::time::Duration::from_millis(100);
+
     /// Show a brief toast message (e.g., "Copied!").
     ///
     /// Displayed for ~3 seconds (90 ticks at 30fps).
@@ -168,6 +180,30 @@ impl AgentView {
     /// Resize draws are debounced (`RESIZE_DEBOUNCE`), so that window is a frame's worth of events, and a refusal burns nothing.
     pub(crate) fn note_terminal_resize(&mut self) {
         self.terminal_size_stale = true;
+        self.last_resize_at = Some(std::time::Instant::now());
+    }
+
+    /// iTerm2 only: it rescales committed pixels with the grid during a
+    /// drag (no clear primitive); hiding the preview repaints its cells —
+    /// the erase on iTerm2 — until the size has been stable for
+    /// [`Self::ITERM2_RESIZE_PREVIEW_QUIET`]. Kitty terminals drop and
+    /// re-place images cleanly on resize, so they skip the quiet window.
+    pub(crate) fn resize_hides_prompt_preview(&self) -> bool {
+        self.within_resize_quiet(std::time::Duration::ZERO)
+    }
+
+    /// Keep fast ticks alive [`Self::ITERM2_RESIZE_TICK_MARGIN`] past the
+    /// quiet window so the preview repaints without an unrelated event.
+    pub(crate) fn resize_preview_needs_tick(&self) -> bool {
+        self.within_resize_quiet(Self::ITERM2_RESIZE_TICK_MARGIN)
+    }
+
+    fn within_resize_quiet(&self, margin: std::time::Duration) -> bool {
+        use crate::terminal::image::{GraphicsProtocol, prompt_preview_graphics_protocol};
+        prompt_preview_graphics_protocol() == GraphicsProtocol::ITerm2
+            && self
+                .last_resize_at
+                .is_some_and(|at| at.elapsed() < Self::ITERM2_RESIZE_PREVIEW_QUIET + margin)
     }
 
     /// Set or clear the sticky status banner (process-wide indicators should use [`Self::set_sticky_toast_recursive`] on every agent view).

@@ -1,8 +1,5 @@
-//! Announcement tracking for MCP servers and skills: which of them were
-//! already announced via `<system-reminder>` messages, so injections and
-//! resumed sessions don't duplicate listings. Holds both the persisted
-//! form ([`AnnouncementState`]) and the live tracking with its episode
-//! state machine ([`McpAnnounced`]) plus their working types.
+//! Announcement tracking for MCP servers and skills: which of them were already announced via `<system-reminder>` messages.
+//! The tracking keeps injections and resumed sessions from duplicating listings.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -10,35 +7,28 @@ use xai_grok_tools::implementations::search_tool::ServerFingerprint;
 
 /// Persisted announcement tracking state.
 ///
-/// Restored on session resume so the fresh actor "remembers" what was
-/// already announced.  The existing delta/fingerprint comparison logic
-/// then correctly handles changes (new/removed/updated servers or skills)
-/// without creating duplicates.
+/// It is restored on session resume so the fresh actor "remembers" what was already announced.
+/// The existing delta/fingerprint comparison logic then handles changes (new/removed/updated servers or skills) without creating duplicates.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AnnouncementState {
-    /// Fingerprints of MCP servers that have been announced.
-    /// Maps server_name → `McpServerFingerprint`.
-    ///
-    /// The hash values use FNV-1a (deterministic, portable) so that
-    /// persisted fingerprints remain valid across Rust versions, build
-    /// profiles, and CPU architectures.
+    /// Maps server_name to `McpServerFingerprint`.
+    /// The hash values use FNV-1a (deterministic, portable).
+    /// Persisted fingerprints therefore remain valid across Rust versions, build profiles, and CPU architectures.
     pub mcp_server_fingerprints: HashMap<String, McpServerFingerprint>,
 
-    /// Names of skills already announced via system-reminder.
-    /// Uses the skill's `dedup_key()` (which is the skill name).
+    /// An entry is the skill's `dedup_key()`, which is the skill name.
     pub announced_skill_names: HashSet<String>,
 
-    /// Persisted form of [`McpAnnounced::failed`]: only the reason class is
-    /// stored — the config identity hash is deliberately NOT persisted, so
-    /// restored episodes adopt the current config on first sighting instead
-    /// of spuriously re-announcing after a resume.
+    /// Persisted form of [`McpAnnounced::failed`]: only the reason class is stored.
+    /// The config identity hash is deliberately NOT persisted.
+    /// Restored episodes thus adopt the current config on first sighting instead of spuriously re-announcing after a resume.
     pub announced_failed_servers: HashMap<String, AnnouncedFailure>,
 }
 
-/// Reason class a failure episode was announced with. Persisted; keep the
-/// variants add-only — unknown values deserialize as [`Self::Transport`]
-/// so newer state files still load in older binaries.
+/// Reason class a failure episode was announced with.
+/// Persisted; keep the variants add-only.
+/// Unknown values deserialize as [`Self::Transport`] so newer state files still load in older binaries.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AnnouncedFailure {
@@ -55,18 +45,14 @@ pub enum AnnouncedFailure {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct AnnouncedEpisode {
     pub(crate) class: AnnouncedFailure,
-    /// Identity hash of the server config the episode was announced under
-    /// (transport, url/command/args, header and env names — never values);
-    /// an in-place config edit (same name) starts a new episode. `None`
-    /// after a restore — the episode adopts the current config on first
-    /// sighting instead of spuriously re-announcing.
+    /// Identity hash of the server config the episode was announced under (transport, url/command/args, header and env names, never values).
+    /// An in-place config edit (same name) starts a new episode.
+    /// `None` after a restore: the episode adopts the current config on first sighting instead of spuriously re-announcing.
     pub(crate) config_identity: Option<u64>,
 }
 
-/// One currently-failed server as gathered from `McpState`, input to
-/// [`McpAnnounced::note_failures`]. Carries failure facts only; the
-/// model-facing reason line is rendered (and sanitized) at the injection
-/// site.
+/// One currently-failed server as gathered from `McpState`, input to [`McpAnnounced::note_failures`].
+/// It carries failure facts only; the model-facing reason line is rendered (and sanitized) at the injection site.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FailedServer {
     pub(crate) name: String,
@@ -79,23 +65,19 @@ pub(crate) struct FailedServer {
     pub(crate) config_identity: u64,
 }
 
-/// In-memory MCP announcement tracking, the live counterpart of the MCP
-/// half of [`AnnouncementState`]. One value so connected fingerprints and
-/// failure episodes restore and persist together.
+/// In-memory MCP announcement tracking, the live counterpart of the MCP half of [`AnnouncementState`].
+/// It is one value so connected fingerprints and failure episodes restore and persist together.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct McpAnnounced {
-    /// Connected servers already announced, keyed by name; the fingerprint
-    /// detects tool/description changes that warrant a delta announcement.
+    /// Connected servers already announced, keyed by name; the fingerprint detects tool/description changes that warrant a delta announcement.
     pub(crate) fingerprints: HashMap<String, ServerFingerprint>,
-    /// Failure episodes already announced. A failure is announced once per
-    /// episode; the entry is removed — re-arming the announcement — only
-    /// when the server connects or leaves the config, so background retries
-    /// (and their reason flip-flops) don't re-announce. Two exceptions
-    /// announce once more: escalation to
-    /// [`AnnouncedFailure::AuthRequired`] (it needs user action and
-    /// invalidates a previously announced "retries automatically" hint),
-    /// and an in-place config edit (changed fingerprint under the same
-    /// name — a fresh config failing is a new episode).
+    /// Failure episodes already announced.
+    /// A failure is announced once per episode.
+    /// The entry is removed, allowing a new announcement, only when the server connects or leaves the config.
+    /// Background retries (and their reason flip-flops) therefore don't re-announce.
+    /// Two exceptions announce once more.
+    /// One is escalation to [`AnnouncedFailure::AuthRequired`]: it needs user action and invalidates the announced "retries automatically" hint.
+    /// The other is an in-place config edit (changed fingerprint under the same name): a fresh config failing is a new episode.
     pub(crate) failed: HashMap<String, AnnouncedEpisode>,
 }
 
@@ -119,8 +101,7 @@ impl McpAnnounced {
         }
     }
 
-    /// Persisted form of [`Self::failed`] (classes only; see
-    /// [`AnnouncementState::announced_failed_servers`]).
+    /// Persisted form of [`Self::failed`] (classes only; see [`AnnouncementState::announced_failed_servers`]).
     pub(crate) fn persisted_failed(&self) -> HashMap<String, AnnouncedFailure> {
         self.failed
             .iter()
@@ -128,20 +109,17 @@ impl McpAnnounced {
             .collect()
     }
 
-    /// End every failure episode and let the next injection re-announce
-    /// still-down servers (used when reminders were dropped from context).
+    /// End every failure episode and let the next injection re-announce still-down servers (used when reminders were dropped from context).
     pub(crate) fn rearm_failed(&mut self) {
         self.failed.clear();
     }
 
-    /// One reconcile pass of the failure-episode state machine (semantics on
-    /// [`Self::failed`]): drops episodes whose server connected or left the
-    /// config, then returns the servers to announce now — new episodes plus
-    /// `Transport` → `AuthRequired` escalations — and whether the announced
-    /// map changed (callers persist on change).
+    /// One reconcile pass of the failure-episode state machine (the rules live on [`Self::failed`]).
+    /// It drops episodes whose server connected or left the config.
+    /// It then returns the servers to announce now: new episodes plus `Transport` to `AuthRequired` escalations.
+    /// It also returns whether the announced map changed (callers persist on change).
     ///
-    /// A handshaking server is absent from `currently_failed` but present in
-    /// `unconnected_configured`, so its episode survives the retry attempt.
+    /// A handshaking server is absent from `currently_failed` but present in `unconnected_configured`, so its episode survives the retry attempt.
     pub(crate) fn note_failures(
         &mut self,
         mut currently_failed: Vec<FailedServer>,
@@ -151,8 +129,7 @@ impl McpAnnounced {
         self.failed
             .retain(|name, _| unconnected_configured.contains(name));
         let recovered = self.failed.len() != before;
-        // Restored episodes carry no config identity; adopt the current one
-        // rather than treating the restore itself as a config edit.
+        // Restored episodes carry no config identity; adopt the current one rather than treating the restore itself as a config edit
         for f in &currently_failed {
             if let Some(ep) = self.failed.get_mut(&f.name)
                 && ep.config_identity.is_none()
@@ -182,10 +159,7 @@ impl McpAnnounced {
     }
 }
 
-/// Serializable MCP server fingerprint for persistence.
-///
-/// This is the serializable counterpart of the in-memory
-/// `ServerFingerprint` type alias `(usize, u64, u64)`.
+/// The serializable counterpart of the in-memory `ServerFingerprint` type alias `(usize, u64, u64)`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpServerFingerprint {
     pub tool_count: usize,
@@ -193,7 +167,6 @@ pub struct McpServerFingerprint {
     pub tool_names_hash: u64,
 }
 
-/// Convert from in-memory fingerprint map to persistable map.
 pub(crate) fn to_persisted_fingerprints(
     in_memory: &HashMap<String, ServerFingerprint>,
 ) -> HashMap<String, McpServerFingerprint> {
@@ -212,7 +185,6 @@ pub(crate) fn to_persisted_fingerprints(
         .collect()
 }
 
-/// Convert from persisted fingerprint map to in-memory map.
 pub(crate) fn from_persisted_fingerprints(
     persisted: &HashMap<String, McpServerFingerprint>,
 ) -> HashMap<String, ServerFingerprint> {
@@ -361,7 +333,7 @@ mod tests {
         assert_eq!(to_announce.len(), 1, "escalation announces once");
         assert!(changed);
 
-        // Flips back and forth stay silent: the episode is sticky-auth.
+        // Flips back and forth stay silent: once escalated to `AuthRequired` the episode stays there
         for class in [AnnouncedFailure::Transport, AnnouncedFailure::AuthRequired] {
             let (to_announce, changed) =
                 announced.note_failures(vec![failed("dead", class)], &unconnected);
@@ -381,8 +353,7 @@ mod tests {
             ..Default::default()
         });
 
-        // First sighting after a resume: the restored episode adopts the
-        // current config instead of treating the restore as a config edit.
+        // First sighting after a resume: the restored episode adopts the current config instead of treating the restore as a config edit
         let (to_announce, changed) = announced.note_failures(
             vec![failed("dead", AnnouncedFailure::Transport)],
             &unconnected,
@@ -406,8 +377,7 @@ mod tests {
             &unconnected,
         );
 
-        // Same name, changed config identity: the edited server failing
-        // is a fresh episode and announces again.
+        // Same name, changed config identity: the edited server failing is a fresh episode and announces again
         let mut edited = failed("dead", AnnouncedFailure::Transport);
         edited.config_identity = 1;
         let (to_announce, changed) = announced.note_failures(vec![edited.clone()], &unconnected);
@@ -429,15 +399,13 @@ mod tests {
             &unconnected,
         );
 
-        // Mid-retry: absent from currently_failed but still configured and
-        // unconnected — the episode survives.
+        // Mid-retry: absent from currently_failed but still configured and unconnected; the episode survives
         let (to_announce, changed) = announced.note_failures(vec![], &unconnected);
         assert!(to_announce.is_empty());
         assert!(!changed);
         assert!(announced.failed.contains_key("dead"));
 
-        // Connected (or removed from config): the episode ends and a later
-        // failure announces again.
+        // Connected (or removed from config): the episode ends and a later failure announces again
         let (_, changed) = announced.note_failures(vec![], &HashSet::new());
         assert!(changed, "recovery removal must trigger a persist");
         let (to_announce, _) = announced.note_failures(

@@ -1,13 +1,10 @@
 //! WebSocket server for remote agent connections.
 //!
-//! This module provides a WebSocket server that allows remote TUI clients to
-//! connect to a grok agent running on a different machine.
+//! Remote TUI clients connect here to a grok agent running on a different machine.
 //!
-//! The agent persists across WebSocket reconnections: a single MvpAgent instance
-//! is created on first connection and reused for all subsequent connections. This
-//! ensures that session actors (and any in-flight prompts) survive client
-//! disconnects — when a client reconnects and loads an existing session, ongoing
-//! work continues to stream to the new connection.
+//! The agent persists across WebSocket reconnections: a single MvpAgent instance is created on first connection and reused for all later ones.
+//! Session actors (and any in-flight prompts) therefore survive client disconnects.
+//! When a client reconnects and loads an existing session, ongoing work continues to stream to the new connection.
 
 use std::cell::RefCell;
 use std::net::SocketAddr;
@@ -48,10 +45,8 @@ use indexmap::IndexMap;
 
 /// Swappable destination for the relay task.
 ///
-/// Points at the current ACP connection's gateway sender. When no client is
-/// connected, the value is `None` and outbound messages are silently dropped
-/// (matching the old behaviour where the gateway channel's receiver was simply
-/// gone).
+/// Points at the current ACP connection's gateway sender.
+/// When no client is connected, the value is `None` and outbound messages are silently dropped.
 type RelayDest = Rc<RefCell<Option<mpsc::UnboundedSender<AcpClientMessage>>>>;
 
 const MAX_BUFFER_SIZE: usize = 8 * 1024 * 1024;
@@ -70,11 +65,11 @@ pub struct ServerConfig {
 struct ServerState {
     agent_config: AgentConfig,
     secret: String,
-    /// Persistent agent slot. Lazily initialised on first connection; protected
-    /// by a tokio Mutex so the axum handler (which is `Send`) can acquire it.
+    /// Persistent agent slot.
+    /// Lazily initialised on first connection; protected by a tokio Mutex so the axum handler (which is `Send`) can acquire it.
     agent_slot: tokio::sync::Mutex<AgentSlot>,
-    /// Monotonic id for each boot attempt. Reclaim/fail/drop must match it
-    /// or a stale waiter can clobber a newer `Booting` and spawn a second agent.
+    /// Monotonic id for each boot attempt.
+    /// Reclaim/fail/drop must match it or a stale waiter can clobber a newer `Booting` and spawn a second agent.
     boot_gen: AtomicU64,
 }
 
@@ -99,7 +94,6 @@ struct NewConnectionChannels {
     to_ws_tx: mpsc::UnboundedSender<String>,
 }
 
-/// Query parameters for WebSocket connection.
 #[derive(Debug, serde::Deserialize, Default)]
 pub(crate) struct WsQueryParams {
     #[serde(rename = "server-key")]
@@ -108,7 +102,6 @@ pub(crate) struct WsQueryParams {
 
 /// Validate the bearer token from request headers or query parameters.
 fn validate_auth(headers: &HeaderMap, query: &WsQueryParams, expected_secret: &str) -> bool {
-    // Try Authorization header
     if let Some(token) = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
@@ -117,7 +110,6 @@ fn validate_auth(headers: &HeaderMap, query: &WsQueryParams, expected_secret: &s
         return token == expected_secret;
     }
 
-    // Fall back to query parameter for browser connections
     if let Some(ref key) = query.server_key {
         return key == expected_secret;
     }
@@ -133,7 +125,6 @@ async fn ws_handler(
     headers: HeaderMap,
     Query(query): Query<WsQueryParams>,
 ) -> Response {
-    // Validate secret token from header or query param
     if !validate_auth(&headers, &query, &state.secret) {
         warn!("Unauthorized connection attempt from {}", addr);
         return (
@@ -179,8 +170,7 @@ async fn ensure_persistent_agent(
                 };
                 let agent_config = state.agent_config.clone();
                 drop(slot);
-                // Drop of this future (client gone mid-ready) must leave the
-                // slot, or later callers spin forever on a dead watch.
+                // Drop of this future (client gone mid-ready) must leave the slot, or later callers spin forever on a dead watch
                 let mut boot = BootSlotGuard::new(&state.agent_slot, boot_tx, boot_id);
                 if let Err(e) = thread::Builder::new()
                     .name("agent-persistent".into())
@@ -199,8 +189,7 @@ async fn ensure_persistent_agent(
                             info!("Persistent agent thread spawned");
                             return Some(conn_tx);
                         }
-                        // Another attempt owns the slot; drop conn_tx so this
-                        // thread's receiver closes instead of going live.
+                        // Another attempt owns the slot; drop conn_tx so this thread's receiver closes instead of going live
                         drop(slot);
                         boot.notify_waiters();
                     }
@@ -220,8 +209,7 @@ async fn ensure_persistent_agent(
 
 /// Resets a `Booting` slot whose watch sender vanished (cancel / panic).
 ///
-/// `changed()` then returns immediately; without reclaim, waiters loop on
-/// `Booting` forever and the agent can never start again.
+/// `changed()` then returns immediately; without reclaim, waiters loop on `Booting` forever and the agent can never start again.
 async fn reclaim_abandoned_boot(
     slot: &tokio::sync::Mutex<AgentSlot>,
     mut rx: tokio::sync::watch::Receiver<()>,
@@ -235,9 +223,8 @@ async fn reclaim_abandoned_boot(
     }
 }
 
-/// Best-effort revert of `Booting` if `ensure_persistent_agent` is dropped
-/// before it stores `Up` or `Down`. `try_lock` is enough: a waiter that
-/// holds the mutex will see the dropped sender and reclaim.
+/// Best-effort revert of `Booting` if `ensure_persistent_agent` is dropped before it stores `Up` or `Down`.
+/// `try_lock` is enough: a waiter that holds the mutex will see the dropped sender and reclaim.
 #[must_use]
 struct BootSlotGuard<'a> {
     slot: &'a tokio::sync::Mutex<AgentSlot>,
@@ -299,8 +286,7 @@ fn persistent_agent_thread(
     let rt = match xai_tty_utils::runtime::build_with_blocking_pool(builder.enable_all()) {
         Ok(rt) => {
             if ready_tx.send(Ok(())).is_err() {
-                // Booter cancelled; drop `rt` so its keep-alive pool does
-                // not overlap a respawn's 16-wide pre-warm (EAGAIN).
+                // The boot was cancelled; drop `rt` so its keep-alive pool does not overlap a respawn's 16-wide pre-warm (EAGAIN)
                 return Ok(());
             }
             rt
@@ -312,7 +298,7 @@ fn persistent_agent_thread(
         }
     };
 
-    // Same abandon after a successful ack: cancel drops `conn_tx`.
+    // The boot can still be abandoned after a successful ack: cancel drops `conn_tx`, which closes this receiver
     if conn_rx.is_closed() {
         return Ok(());
     }
@@ -346,14 +332,12 @@ fn persistent_agent_thread(
 /// Handle an authenticated WebSocket connection.
 ///
 /// On first connection, spawns a persistent agent thread that owns the MvpAgent.
-/// On subsequent connections (reconnects), sends new WS channels to the existing
-/// agent thread so that session actors can continue streaming to the new client.
+/// On subsequent connections (reconnects), sends new WS channels to the existing agent thread so session actors keep streaming to the new client.
 async fn handle_connection(ws: WebSocket, state: Arc<ServerState>, peer_addr: SocketAddr) {
     info!("New WebSocket connection from {}", peer_addr);
 
     let (mut ws_write, mut ws_read) = ws.split();
 
-    // Channels for bridging WS <-> Agent thread
     let (to_agent_tx, to_agent_rx) = mpsc::unbounded_channel::<String>();
     let (from_agent_tx, mut from_agent_rx) = mpsc::unbounded_channel::<String>();
 
@@ -382,8 +366,7 @@ async fn handle_connection(ws: WebSocket, state: Arc<ServerState>, peer_addr: So
         }
     };
     if !attached {
-        // Do not start the ping loop: the client would see a live socket
-        // that never reaches the agent.
+        // Do not start the ping loop: the client would see a live socket that never reaches the agent
         let _ = ws_write
             .send(Message::Close(Some(CloseFrame {
                 code: close_code::AGAIN,
@@ -393,7 +376,6 @@ async fn handle_connection(ws: WebSocket, state: Arc<ServerState>, peer_addr: So
         return;
     }
 
-    // Task: Read from WS, send to agent thread
     let read_task = tokio::spawn(async move {
         while let Some(msg) = ws_read.next().await {
             match msg {
@@ -437,7 +419,6 @@ async fn handle_connection(ws: WebSocket, state: Arc<ServerState>, peer_addr: So
         }
     });
 
-    // Task: Read from agent thread, send to WS (with keepalive)
     let write_task = tokio::spawn(async move {
         let mut keepalive = tokio::time::interval(Duration::from_secs(KEEPALIVE_INTERVAL_SECS));
 
@@ -458,7 +439,6 @@ async fn handle_connection(ws: WebSocket, state: Arc<ServerState>, peer_addr: So
         }
     });
 
-    // Wait for either task to complete
     tokio::select! {
         _ = read_task => {}
         _ = write_task => {}
@@ -470,26 +450,21 @@ async fn handle_connection(ws: WebSocket, state: Arc<ServerState>, peer_addr: So
 /// Run the persistent agent on a dedicated thread with LocalSet.
 ///
 /// The MvpAgent is created **once** and reused across WebSocket reconnections.
-/// A persistent gateway channel ensures that session actors (which hold cloned
-/// `GatewaySender` handles) can always send notifications. A relay task forwards
-/// messages from the persistent channel to the *current* ACP connection's channel,
-/// so notifications reach whichever client is currently connected.
+/// Session actors hold cloned `GatewaySender` handles onto a persistent gateway channel, so they can always send notifications.
+/// A relay task forwards those messages to the *current* ACP connection's channel, so they reach whichever client is connected.
 async fn run_persistent_agent(
     agent_config: AgentConfig,
     mut connection_rx: mpsc::UnboundedReceiver<NewConnectionChannels>,
     prefetched_models: Option<IndexMap<String, ModelEntry>>,
 ) {
-    // Persistent gateway channel — the MvpAgent and all session actors hold
-    // clones of `gw_tx`. This channel survives across reconnections.
     let (gw_tx, mut gw_rx) = tokio::sync::mpsc::unbounded_channel::<AcpClientMessage>();
     let gateway = GatewaySender::new(gw_tx);
 
-    // Create MvpAgent ONCE -- it persists for the lifetime of the server.
     let auth_manager = Arc::new(agent_config.create_auth_manager());
-    // Proactive token refresh; runs until process exit.
-    auth_manager.start_proactive_refresh(tokio_util::sync::CancellationToken::new());
-    // Restore managed policy right before bootstrap reads it — the agent is created lazily here,
-    // so an earlier restore could go stale before the gate.
+    let agent_cancel = tokio_util::sync::CancellationToken::new();
+    // Covers unwind; the explicit cancel below keeps its teardown ordering.
+    let _cancel_on_exit = agent_cancel.clone().drop_guard();
+    auth_manager.start_proactive_refresh(agent_cancel.clone());
     crate::managed_config::ensure_managed_policy_present(&auth_manager).await;
     crate::agent::app::apply_otel_config(&auth_manager, &agent_config.grok_com_config);
     let agent = Rc::new(
@@ -500,8 +475,6 @@ async fn run_persistent_agent(
 
     let relay_dest: RelayDest = Rc::new(RefCell::new(None));
 
-    // Relay task: reads from the persistent gateway channel and forwards to
-    // whichever ACP connection is currently active.
     let relay_dest_for_task = relay_dest.clone();
     tokio::task::spawn_local(async move {
         while let Some(msg) = gw_rx.recv().await {
@@ -509,27 +482,22 @@ async fn run_persistent_agent(
             if let Some(tx) = maybe_tx
                 && tx.send(msg).is_err()
             {
-                // Connection's gateway receiver was dropped — clear it.
                 *relay_dest_for_task.borrow_mut() = None;
             }
-            // If no connection, the message (and its response_tx) is dropped.
-            // The caller (session actor) gets a send error which is already
-            // handled with `let _ = ...`.
         }
     });
 
-    // Accept new connections in a loop
     while let Some(channels) = connection_rx.recv().await {
         info!("Agent thread: setting up new ACP connection (reconnect)");
         setup_acp_connection(agent.clone(), channels, relay_dest.clone());
     }
 
     info!("Agent thread: connection channel closed, exiting");
+    agent_cancel.cancel();
 }
 
-/// Set up a new ACP connection for a WebSocket connection, reusing the existing
-/// MvpAgent. The relay destination is updated so that session actor notifications
-/// flow to the new client.
+/// Set up a new ACP connection for a WebSocket connection, reusing the existing MvpAgent.
+/// The relay destination is updated so that session actor notifications flow to the new client.
 fn setup_acp_connection(
     agent: Rc<MvpAgent>,
     channels: NewConnectionChannels,
@@ -540,21 +508,16 @@ fn setup_acp_connection(
         to_ws_tx,
     } = channels;
 
-    // Create new simplex IO streams for this ACP connection
     let (agent_read_rx, mut agent_read_tx) = simplex(MAX_BUFFER_SIZE);
     let (agent_write_rx, agent_write_tx) = simplex(MAX_BUFFER_SIZE);
 
     let incoming = agent_read_rx.compat();
     let outgoing = agent_write_tx.compat_write();
 
-    // Create a per-connection gateway channel for the GatewayReceiver.
-    // The relay task will forward persistent-channel messages here.
     let (conn_gw_tx, conn_gw_rx) = tokio::sync::mpsc::unbounded_channel::<AcpClientMessage>();
 
-    // Point the relay at this new connection's channel
     *relay_dest.borrow_mut() = Some(conn_gw_tx);
 
-    // Create new ACP connection reusing the same MvpAgent (via Rc clone).
     // `Agent` is implemented for `Rc<T: Agent>` so this works.
     let incoming = LineBufferedRead::spawn_local(incoming);
     let (conn, handle_io) = acp::AgentSideConnection::new(agent, outgoing, incoming, |fut| {
@@ -566,12 +529,10 @@ fn setup_acp_connection(
             .run(),
     );
 
-    // Task: Forward WS messages → agent (incoming ACP bytes)
     tokio::task::spawn_local(async move {
         while let Some(msg) = from_ws_rx.recv().await {
-            // Log messages that lack both `id` and `method` — the ACP layer
-            // only prints "received message with neither id nor method" without
-            // the payload, making debugging impossible.
+            // Log messages that lack both `id` and `method`
+            // The ACP layer only prints "received message with neither id nor method" without the payload, making debugging impossible
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&msg)
                 && v.get("id").is_none()
                 && v.get("method").is_none()
@@ -588,13 +549,11 @@ fn setup_acp_connection(
                 break;
             }
         }
-        // WS disconnected — the simplex writer is dropped, causing `handle_io`
-        // to complete. The GatewayReceiver for this connection will also stop.
-        // But the MvpAgent and session actors stay alive, ready for the next
-        // connection.
+        // WS disconnected: the simplex writer is dropped, causing `handle_io` to complete
+        // The GatewayReceiver for this connection will also stop
+        // But the MvpAgent and session actors stay alive, ready for the next connection
     });
 
-    // Task: Forward agent messages → WS (outgoing ACP bytes)
     tokio::task::spawn_local(async move {
         let mut reader = BufReader::new(agent_write_rx);
         let mut line = String::new();
@@ -614,8 +573,8 @@ fn setup_acp_connection(
         }
     });
 
-    // Run the ACP IO handler — fire-and-forget since we don't block the
-    // connection loop. It completes when the WS disconnects.
+    // Run the ACP IO handler fire-and-forget so the connection loop is not blocked
+    // It completes when the WS disconnects
     tokio::task::spawn_local(async move {
         let _ = handle_io.await;
         info!("ACP connection IO handler completed");
@@ -624,14 +583,12 @@ fn setup_acp_connection(
 
 /// Run the agent WebSocket server.
 ///
-/// This starts a WebSocket server that accepts authenticated connections from
-/// remote TUI clients. A single agent instance is shared across all connections
-/// (persisted across reconnections) so that in-flight session work survives
-/// client disconnects.
+/// This starts a WebSocket server that accepts authenticated connections from remote TUI clients.
+/// A single agent instance is shared across all connections (persisted across reconnections) so in-flight session work survives client disconnects.
 ///
 /// # Arguments
-/// * `config` - Server configuration (bind address and secret)
-/// * `agent_config` - Agent configuration to use for each connection
+/// * `config`: Server configuration (bind address and secret)
+/// * `agent_config`: Agent configuration to use for each connection
 ///
 /// # Example
 /// ```ignore

@@ -11,9 +11,8 @@ use xai_file_utils::queue::{EnqueueOutcome, TraceExportSource, UploadQueue, Uplo
 use xai_grok_workspace::permission::PermissionEvent;
 /// Upload the canonical tool definitions trace and wait for completion.
 ///
-/// `ToolDefinition` serializes in Chat Completions format:
-/// `{ "type": "function", "function": { ... } }`, which is the shape
-/// downstream ingest/enrichment expects to read from `tool_definitions.json`.
+/// `ToolDefinition` serializes in Chat Completions format: `{ "type": "function", "function": { ... } }`.
+/// That is the shape downstream ingest/enrichment expects to read from `tool_definitions.json`.
 pub(crate) async fn upload_tool_definitions(
     gcs_config: TraceExportConfig,
     auth_manager: Option<Arc<crate::auth::AuthManager>>,
@@ -70,6 +69,10 @@ pub(crate) async fn upload_tool_definitions(
         }
     }
 }
+/// Floor for every [`blocking_attempt_budget`]-bounded wait on this path: the
+/// attempt must still happen after earlier uploads fully consumed the shared
+/// deadline.
+const DIRECT_ATTEMPT_FLOOR: std::time::Duration = std::time::Duration::from_secs(10);
 /// `restorable_turn_number` is not advanced without a cloud archive.
 pub(crate) async fn upload_session_state(
     _ctx: &PromptTraceContext,
@@ -77,9 +80,16 @@ pub(crate) async fn upload_session_state(
     session_copy_rx: oneshot::Receiver<
         anyhow::Result<crate::session::persistence::SessionStateCopy>,
     >,
-    _wait: UploadWait,
+    wait: UploadWait,
 ) -> super::turn::UploadOutcome {
-    let _ = session_copy_rx.await;
+    match wait {
+        UploadWait::Confirm => {
+            let _ = session_copy_rx.await;
+        }
+        UploadWait::Defer { deadline } => {
+            let _ = tokio::time::timeout(blocking_attempt_budget(deadline), session_copy_rx).await;
+        }
+    }
     super::turn::UploadOutcome::Failed {
         reason: "session_state_upload_unavailable",
         status_code: None,
@@ -87,8 +97,8 @@ pub(crate) async fn upload_session_state(
 }
 /// Truth for a Defer-timeout of the blocking session-state upload: `Enqueued`
 /// only while the cancellation left the item parked on queue confirmation (the
-/// live worker still owns it); a cancelled direct attempt queued nothing
-/// durable and must record the loss.
+/// live worker still owns it); a cancelled direct attempt or full-channel
+/// inline divert queued nothing durable and must record the loss.
 #[cfg(test)]
 fn confirm_timeout_artifact_result(
     direct_attempt_started: bool,
@@ -103,14 +113,14 @@ fn confirm_timeout_artifact_result(
     }
 }
 #[derive(Default)]
-struct UploadFailure<'a> {
-    artifact: &'a str,
-    reason: &'static str,
-    error: &'a str,
-    phase: Option<&'a str>,
-    gcs_path: Option<&'a str>,
-    status_code: Option<u16>,
-    bytes: Option<usize>,
+pub(super) struct UploadFailure<'a> {
+    pub(super) artifact: &'a str,
+    pub(super) reason: &'static str,
+    pub(super) error: &'a str,
+    pub(super) phase: Option<&'a str>,
+    pub(super) gcs_path: Option<&'a str>,
+    pub(super) status_code: Option<u16>,
+    pub(super) bytes: Option<usize>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UploadFailureLogLevel {
@@ -118,9 +128,8 @@ enum UploadFailureLogLevel {
     Warn,
     Debug,
 }
-/// ERROR is what logging / alerting treat as a first-party incident, so it is
-/// reserved for first-party backends (proxy, cloud storage); a failing
-/// customer-managed S3 bucket is the customer's outage and logs at WARN.
+/// ERROR is what logging / alerting treat as a first-party incident, so it is reserved for first-party backends (proxy, cloud storage).
+/// A failing customer-managed S3 bucket is the customer's outage and logs at WARN.
 /// Repeats within one failure episode drop to DEBUG.
 fn upload_failure_log_level(method: &UploadMethod, prior_failures: u64) -> UploadFailureLogLevel {
     if prior_failures > 0 {
@@ -141,18 +150,17 @@ fn upload_method_label(method: &UploadMethod) -> &'static str {
     }
     .as_str()
 }
-/// A confirmed upload ends the session's failure episode; the next failure
-/// logs at full detail again.
+/// A confirmed upload ends the session's failure episode; the next failure logs at full detail again.
 fn record_upload_success(ctx: &PromptTraceContext) {
     use std::sync::atomic::Ordering::Relaxed;
     ctx.session_handle
         .upload_failures_since_success
         .store(0, Relaxed);
 }
-/// Full detail (and the unified-log mirror) for the first failure of a
-/// session's episode, split on `artifact` + `reason`; repeats log at debug
-/// with `suppressed_count`. Only logging is suppressed, never the uploads.
-fn record_upload_failure(ctx: &PromptTraceContext, f: UploadFailure<'_>) {
+/// Full detail (and the unified-log mirror) for the first failure of a session's episode, split on `artifact` and `reason`.
+/// Repeats log at debug with `suppressed_count`.
+/// Only logging is suppressed, never the uploads.
+pub(super) fn record_upload_failure(ctx: &PromptTraceContext, f: UploadFailure<'_>) {
     use std::sync::atomic::Ordering::Relaxed;
     let prior_failures = ctx
         .session_handle
@@ -205,7 +213,6 @@ fn record_upload_failure(ctx: &PromptTraceContext, f: UploadFailure<'_>) {
     }
 }
 /// Increment when making breaking changes to PromptMetadata structure.
-/// Re-exported from the shared types crate.
 pub(crate) use prod_mc_cli_chat_proxy_types::{
     GCS_SCHEMA_VERSION, LocalSandboxTelemetry, PromptMetadata, PromptMetadataParams,
 };
@@ -216,10 +223,7 @@ pub(crate) fn local_sandbox_telemetry() -> Option<LocalSandboxTelemetry> {
         applied: xai_grok_sandbox::is_active(),
     })
 }
-/// Strip username/password credentials from a git remote URL.
-///
-/// In CI environments, git config may inject access tokens via URL rewriting
-/// (e.g., `url."https://x-access-token:TOKEN@github.com/".insteadOf`).
+/// In CI environments, git config may inject access tokens via URL rewriting (e.g., `url."https://x-access-token:TOKEN@github.com/".insteadOf`).
 /// We strip these to avoid leaking credentials in metadata.
 pub(crate) fn strip_url_credentials(url_str: &str) -> String {
     if let Ok(mut parsed) = Url::parse(url_str) {
@@ -283,11 +287,29 @@ async fn fill_git_fields(metadata: &mut PromptMetadata, cwd: &str) {
         metadata.remote_url = remote_url;
     }
 }
-/// Fill in `repo_root`, `remote_url`, and `workspace_type` on a
-/// [`PromptMetadata`].
 pub(crate) async fn enrich_git_metadata(ctx: &PromptTraceContext, metadata: &mut PromptMetadata) {
     fill_git_fields(metadata, &ctx.session_info.cwd).await;
 }
+/// Bounds the pre-upload git enrichment for Defer callers (child teardown,
+/// blocking turn end): discovery walks the repo tree on `spawn_blocking` (a
+/// hung NFS/FUSE mount never returns) and the visibility check rides a client
+/// with no request timeout, so the enrichment must not park teardown ahead of
+/// the bounded upload attempt. On timeout the metadata uploads unenriched.
+async fn bounded_enrichment(enrich: impl std::future::Future<Output = ()>, wait: UploadWait) {
+    match wait {
+        UploadWait::Confirm => enrich.await,
+        UploadWait::Defer { deadline } => {
+            if tokio::time::timeout(blocking_attempt_budget(deadline), enrich)
+                .await
+                .is_err()
+            {
+                tracing::warn!("git metadata enrichment timed out; uploading unenriched metadata");
+            }
+        }
+    }
+}
+const METADATA_ARTIFACT: &str = "metadata.json";
+const FULL_PROMPT_ARTIFACT: &str = "full_prompt.txt";
 /// Metadata about the prompt turn, uploaded as JSON for tracing/debugging.
 ///
 /// Note: Session state is uploaded as an archive by `upload_session_state()`.
@@ -296,9 +318,13 @@ pub(crate) async fn enrich_git_metadata(ctx: &PromptTraceContext, metadata: &mut
 ///
 /// Uploads prompt metadata to cloud storage as JSON.
 /// Path format: {session_id}/turn_{N}/metadata.json
-pub(crate) async fn upload_metadata(ctx: &PromptTraceContext, metadata: PromptMetadata) {
+pub(crate) async fn upload_metadata(
+    ctx: &PromptTraceContext,
+    metadata: PromptMetadata,
+    wait: UploadWait,
+) {
     let mut metadata = metadata;
-    enrich_git_metadata(ctx, &mut metadata).await;
+    bounded_enrichment(enrich_git_metadata(ctx, &mut metadata), wait).await;
     let metadata_json = match serde_json::to_vec_pretty(&metadata) {
         Ok(json) => json,
         Err(e) => {
@@ -310,7 +336,7 @@ pub(crate) async fn upload_metadata(ctx: &PromptTraceContext, metadata: PromptMe
             );
             super::manifest::record_artifact(
                 &ctx.artifact_tracker,
-                "metadata.json",
+                METADATA_ARTIFACT,
                 super::manifest::ArtifactResult::Failed {
                     reason: "serialize_failed",
                     error: Some(&format!("{e:#}")),
@@ -320,7 +346,7 @@ pub(crate) async fn upload_metadata(ctx: &PromptTraceContext, metadata: PromptMe
         }
     };
     let gcs_path = format!(
-        "{}/metadata.json",
+        "{}/{METADATA_ARTIFACT}",
         ctx.gcs_config.gcs_prefix.as_deref().unwrap_or("")
     );
     upload_small_artifact(
@@ -329,16 +355,21 @@ pub(crate) async fn upload_metadata(ctx: &PromptTraceContext, metadata: PromptMe
         &gcs_path,
         "application/json",
         "metadata",
-        UploadWait::Confirm,
+        wait,
     )
     .await;
 }
+/// Bound on one detached `subagent.json` upload: the direct storage clients
+/// carry no request timeout, so without this every spawn/completion against a
+/// tarpit endpoint leaks a parked task pinning an `AuthManager` Arc.
+const SUBAGENT_METADATA_UPLOAD_BOUND: std::time::Duration = std::time::Duration::from_secs(60);
 /// Uploads subagent session metadata to cloud storage as `subagent.json`.
 ///
 /// Path format: `{child_session_id}/subagent.json` (session-root, not turn-scoped).
 ///
 /// Called at spawn (`status = running`) and again at completion with final
-/// status/duration/tool-calls/turns.
+/// status/duration/tool-calls/turns, always as a detached task; bounded by
+/// [`SUBAGENT_METADATA_UPLOAD_BOUND`].
 pub(crate) async fn upload_subagent_metadata(
     metadata: &crate::agent::subagent::SubagentSessionMetadata,
     bucket_url: &str,
@@ -368,22 +399,32 @@ pub(crate) async fn upload_subagent_metadata(
     };
     use crate::upload::gcs::WithAuth as _;
     let config = base_config.with_auth(Some(auth_manager));
-    if let Err(e) =
-        xai_file_utils::gcs::upload_bytes(&config, &gcs_path, &json, "application/json").await
+    match tokio::time::timeout(
+        SUBAGENT_METADATA_UPLOAD_BOUND,
+        xai_file_utils::gcs::upload_bytes(&config, &gcs_path, &json, "application/json"),
+    )
+    .await
     {
-        tracing::warn!(
-            session_id = %metadata.child_session_id,
-            gcs_path = %gcs_path,
-            error = %e,
-            "Failed to upload subagent.json to GCS"
-        );
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            tracing::warn!(
+                session_id = %metadata.child_session_id,
+                gcs_path = %gcs_path,
+                error = %e,
+                "Failed to upload subagent.json to GCS"
+            );
+        }
+        Err(_) => {
+            tracing::warn!(
+                session_id = %metadata.child_session_id,
+                gcs_path = %gcs_path,
+                "subagent.json upload timed out"
+            );
+        }
     }
 }
 /// Uploads prompt images to cloud storage as standalone files.
 /// Path format: {session_id}/turn_{N}/images/image_{i}.{ext}
-///
-/// Each image from the user prompt is decoded from base64 and uploaded
-/// as a separate file. The file extension is derived from the MIME type.
 pub(crate) async fn upload_images(
     ctx: &PromptTraceContext,
     images: &[agent_client_protocol::ImageContent],
@@ -436,23 +477,23 @@ pub(crate) fn mime_type_to_extension(mime_type: &str) -> &str {
         _ => "bin",
     }
 }
-pub(crate) async fn upload_full_prompt_txt(ctx: &PromptTraceContext, _full_prompt: &str) {
+pub(crate) async fn upload_full_prompt_txt(
+    ctx: &PromptTraceContext,
+    _full_prompt: &str,
+    _wait: UploadWait,
+) {
     super::manifest::skip_artifact(
         &ctx.artifact_tracker,
-        "full_prompt.txt",
+        FULL_PROMPT_ARTIFACT,
         "prompt_content_upload_disabled",
     );
 }
-/// Plugin state snapshot for cloud storage trace upload.
-///
-/// Captures which plugins are loaded, their enabled/trusted status, and basic metadata.
 /// Uploaded as `plugins.json` alongside other per-turn trace artifacts.
 pub(crate) async fn upload_plugin_state(
     ctx: &PromptTraceContext,
     registry: Option<&xai_grok_agent::plugins::PluginRegistry>,
 ) {
     use xai_grok_agent::plugins::discovery::PluginScope;
-    /// Serializable plugin entry for trace upload.
     #[derive(serde::Serialize)]
     struct PluginEntry {
         name: String,
@@ -533,7 +574,6 @@ pub(crate) async fn upload_plugin_state(
 }
 use super::gcs::WithAuth as _;
 use xai_file_utils::gcs::upload_bytes;
-/// Uploads bytes to cloud storage, logging start/finish and tracing success or failure.
 pub(crate) async fn upload_artifact_to_gcs(
     ctx: &PromptTraceContext,
     gcs_path: &str,
@@ -576,13 +616,11 @@ pub(crate) async fn upload_artifact_to_gcs(
         }
     }
 }
-/// One-shot artifact upload + manifest recording.
+/// One-shot artifact upload and manifest recording.
 ///
-/// `Confirm` (detached/interactive contexts) keeps the direct awaited upload:
-/// the recorded status reflects the actual result, and an interactive turn's
-/// manifest never races a queue it does not flush. `Defer` (blocking turn
-/// end) routes through the durable queue accept so the prompt response stays
-/// fast and a process exit cannot lose the artifact.
+/// `Confirm` (detached/interactive contexts) keeps the direct awaited upload.
+/// The recorded status reflects the actual result, and an interactive turn's manifest never races a queue it does not flush.
+/// `Defer` (blocking turn end) routes through the durable queue accept so the prompt response stays fast and a process exit cannot lose the artifact.
 pub(crate) async fn upload_small_artifact(
     ctx: &PromptTraceContext,
     content: &[u8],
@@ -630,9 +668,8 @@ pub(crate) struct SubagentSpawnedRef {
     pub(crate) subagent_id: String,
     pub(crate) child_session_id: String,
     pub(crate) subagent_type: String,
-    /// Human-readable spawn description; see
-    /// [`crate::agent::subagent::SubagentSessionMetadata::description`] for
-    /// why goal-role subagents need it serialized.
+    /// Human-readable spawn description.
+    /// See [`crate::agent::subagent::SubagentSessionMetadata::description`] for why goal-role subagents need it serialized.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) description: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -641,18 +678,14 @@ pub(crate) struct SubagentSpawnedRef {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) resumed_from: Option<String>,
 }
-/// Metadata about the prompt turn outcome, uploaded as JSON.
-///
 /// Path format: {session_id}/turn_{N}/turn_result.json
 #[derive(serde::Serialize)]
 pub(crate) struct TurnResultMetadata {
-    /// Schema version for this metadata format
     pub(crate) schema_version: &'static str,
     /// Request ID for this prompt (UUID generated by the agent)
     pub(crate) request_id: String,
     /// Whether the turn completed successfully (i.e., not cancelled and no error)
     pub(crate) completed: bool,
-    /// Stop reason (if available)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) stop_reason: Option<String>,
     /// Total tokens accumulated for the session (best-effort)
@@ -667,7 +700,6 @@ pub(crate) struct TurnResultMetadata {
     /// Last-turn output tokens (includes reasoning; reasoning also tracked in signals delta).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) output_tokens: Option<u64>,
-    /// Error message (if available)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
     /// RFC3339 timestamp when this record was written
@@ -724,18 +756,14 @@ pub(crate) async fn upload_turn_result(
 /// Uploads the out-of-band streaming-turn capture to cloud storage as JSON.
 /// Path format: `{session_id}/turn_N/streaming_partial.json`
 ///
-/// Called when a turn ended without `record_assistant_response` committing
-/// the canonical assistant turn — user-cancel mid-stream, a sampler terminal
-/// error such as `MaxTokensTruncation`, or a doomloop where every generation
-/// returns reasoning-only. The artifact carries every uncommitted generation
-/// of the turn as `segments[]` (cancel/error mid-response partials included,
-/// regardless of whether they were reasoning, response text, or a tool call),
-/// plus a flat joined `reasoning_text`/`response_text` view of them for the
-/// currently-deployed trace viewer.
+/// Called when a turn ended without `record_assistant_response` committing the canonical assistant turn.
+/// That happens on a user cancel mid-stream or a sampler terminal error such as `MaxTokensTruncation`.
+/// It also happens in a doomloop where every generation returns only reasoning.
+/// The artifact carries every uncommitted generation of the turn as `segments[]`.
+/// Partials cut off mid-response by a cancel or an error are included, whether they were reasoning, response text, or a tool call.
+/// It also carries a flat joined `reasoning_text`/`response_text` view of the segments for the currently-deployed trace viewer.
 ///
-/// This artifact is intentionally separate from `chat.jsonl` /
-/// `turn_messages.json` so the model never sees the partial on
-/// subsequent turns (no conversation-history pollution).
+/// This artifact is intentionally separate from `chat.jsonl` / `turn_messages.json` so the model never sees the partial on subsequent turns.
 pub(crate) async fn upload_streaming_partial(
     ctx: &PromptTraceContext,
     capture: &crate::session::acp_session::StreamingTurnCapture,
@@ -767,18 +795,15 @@ pub(crate) async fn upload_streaming_partial(
     )
     .await;
 }
-/// Metadata uploaded when a session is shared.
 #[derive(serde::Serialize)]
 struct ShareMetadata {
     session_id: String,
     turn_number: u64,
     shared_at: String,
 }
-/// Type of session metadata to upload
 pub(crate) enum SessionMetadataType {
     Share,
 }
-/// Uploads session metadata (share) to cloud storage.
 /// Path format: share/{session_id}_{timestamp}_share.json
 pub(crate) async fn upload_session_metadata(
     ctx: &PromptTraceContext,
@@ -810,51 +835,13 @@ pub(crate) async fn upload_session_metadata(
     };
     upload_artifact_to_gcs(ctx, &gcs_path, &metadata_json, "application/json", artifact).await;
 }
-/// Upload memory .md files as `memory.tar.gz` alongside the per-turn trace.
-/// Only runs when session registry is enabled via remote settings or config.toml.
-pub(crate) async fn upload_memory_state(ctx: &PromptTraceContext) {
-    if !ctx.session_registry_enabled {
-        tracing::debug!("memory upload skipped: session_registry_enabled=false");
-        super::manifest::skip_artifact(
-            &ctx.artifact_tracker,
-            "memory.tar.gz",
-            "session_registry_disabled",
-        );
-        return;
-    }
-    let storage = crate::session::memory::MemoryStorage::new(
-        std::path::Path::new(&ctx.session_info.cwd),
-        None,
-    );
-    let archive = match crate::session::memory::archive::build_memory_archive(&storage) {
-        Ok(a) => a,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to build memory archive, skipping");
-            return;
-        }
-    };
-    if archive.is_empty() || archive.len() < 30 {
-        return;
-    }
-    let prefix = ctx.gcs_config.gcs_prefix.as_deref().unwrap_or("");
-    let gcs_path = format!("{prefix}/memory.tar.gz");
-    upload_trace_artifact(
-        ctx,
-        &archive,
-        &gcs_path,
-        "application/gzip",
-        "memory_archive",
-    )
-    .await;
-}
 /// Uploads the session-scoped unified log to cloud storage.
 /// Path format: {session_id}/turn_{N}/unified_log.jsonl
 ///
 /// Called only from 401/404 auth-failure diagnostics, never per turn.
 ///
 /// Only entries belonging to the current session (matching `sid`) are included.
-/// The snapshot runs on a blocking thread since `snapshot_session_log` reads
-/// and parses the on-disk log file.
+/// The snapshot runs on a blocking thread since `snapshot_session_log` reads and parses the on-disk log file.
 pub(crate) async fn upload_unified_log(ctx: &PromptTraceContext, wait: UploadWait) {
     let session_id = ctx.session_info.id.0.to_string();
     let log_bytes = match tokio::task::spawn_blocking(move || {
@@ -912,7 +899,6 @@ pub(crate) async fn upload_unified_log(ctx: &PromptTraceContext, wait: UploadWai
         .await;
     }
 }
-/// Uploads permission events to cloud storage.
 /// Path format: {session_id}/turn_{N}/permission_decisions.json
 pub(crate) async fn upload_permission_events(
     ctx: &PromptTraceContext,
@@ -957,9 +943,8 @@ pub(crate) async fn upload_turn_messages(
     );
     true
 }
-/// A failed `chat_history.jsonl` archive build, tagged with the manifest
-/// `reason` so the caller records the matching artifact-failure category
-/// (`serialize_failed` vs `archive_failed`), mirroring `upload_turn_messages`.
+/// A failed `chat_history.jsonl` archive build, tagged with the manifest `reason`.
+/// The caller records the matching artifact-failure category (`serialize_failed` vs `archive_failed`), mirroring `upload_turn_messages`.
 #[derive(Debug)]
 #[allow(dead_code)]
 pub(crate) struct SessionStateBuildError {
@@ -1014,16 +999,13 @@ fn compress_chat_history_archive(jsonl: Vec<u8>) -> Result<Vec<u8>, SessionState
     }
     Ok(archive_data)
 }
-/// Build a gzipped tar holding a single `chat_history.jsonl` entry from the
-/// in-memory conversation `messages`.
+/// Build a gzipped tar holding a single `chat_history.jsonl` entry from the in-memory conversation `messages`.
 ///
-/// The trace viewer renders a turn's conversation only from the
-/// `chat_history.jsonl` entry inside a session-state archive, parsed as JSONL.
-/// Harness sub-turns upload no other session state, so we emit that shape from
-/// the same items that feed `turn_messages.json`: each `ConversationItem`
-/// serialized compactly, one per `\n`-terminated line. Empty `messages` yield a
-/// zero-byte payload the viewer treats as "no history" (harness pairs always
-/// carry ≥1 message, so this is only a safety floor).
+/// The trace viewer renders a turn's conversation only from the `chat_history.jsonl` entry inside a session-state archive, parsed as JSONL.
+/// Harness sub-turns upload no other session state, so we emit that shape from the same items that feed `turn_messages.json`.
+/// Each `ConversationItem` is serialized compactly, one per `\n`-terminated line.
+/// Empty `messages` yield a zero-byte payload the viewer treats as "no history".
+/// Harness pairs always carry at least one message, so this is only a safety floor.
 pub(crate) async fn build_chat_history_session_state(
     messages: &[xai_grok_sampling_types::conversation::ConversationItem],
 ) -> Result<Vec<u8>, SessionStateBuildError> {
@@ -1048,22 +1030,16 @@ pub(crate) async fn upload_harness_session_archive(
 ) -> bool {
     false
 }
-/// Credential resolver for the queue worker that supplies a refresh-aware
-/// [`ShellAuthCredentialProvider`] and a [`StorageClientAttributionBridge`]
-/// via [`TraceExportSource::proxy_credentials`] /
-/// [`TraceExportSource::proxy_attribution`]. The queue worker stitches
-/// both onto the resolved config before constructing the per-attempt
-/// `StorageClient`, which is what closes the buffer-window 401 leak and
-/// makes upload-queue 401s show up in the `auth_401_attribution` event
-/// stream.
+/// Credential resolver for the queue worker.
+/// [`TraceExportSource::proxy_credentials`] supplies a refresh-aware [`ShellAuthCredentialProvider`].
+/// [`TraceExportSource::proxy_attribution`] supplies a [`StorageClientAttributionBridge`].
+/// The queue worker attaches both to the resolved config before constructing the per-attempt `StorageClient`.
+/// That closes the buffer-window 401 leak and makes upload-queue 401s show up in the `auth_401_attribution` event stream.
 ///
-/// The `proxy_*` methods delegate to [`crate::upload::gcs::WithAuth`] so
-/// the wiring stays in one place (the `TraceExportConfigWithAuth`
-/// adapter). `resolve()` returns the bare `base_config` -- the static
-/// `user_token` snapshot it carries is unused at the wire level (the
-/// provider returned by `proxy_credentials` always drives the bearer)
-/// but the queue worker still reads other fields like `gcs_prefix` /
-/// `bucket_url` off the resolved config.
+/// The `proxy_*` methods delegate to [`crate::upload::gcs::WithAuth`] so the wiring stays in one place (the `TraceExportConfigWithAuth` adapter).
+/// `resolve()` returns the bare `base_config`.
+/// The static `user_token` snapshot it carries is unused at the wire level (the provider returned by `proxy_credentials` always drives the bearer).
+/// The queue worker still reads other fields like `gcs_prefix` / `bucket_url` off the resolved config.
 pub(crate) struct DynamicResolver {
     auth_manager: Arc<crate::auth::AuthManager>,
     base_config: TraceExportConfig,
@@ -1113,10 +1089,8 @@ impl TraceExportSource for DynamicResolver {
         }
         self.auth_manager.has_usable_token()
     }
-    /// Defers to the `AuthManager` token-rotation notifier (same mechanism
-    /// the signals sync loop waits on, so parking adds no refresh paths).
-    /// `None` after an IdP-confirmed permanent failure: the queue drops
-    /// instead of parking for an unrecoverable credential.
+    /// Defers to the `AuthManager` token-rotation notifier (same mechanism the signals sync loop waits on, so parking adds no refresh paths).
+    /// `None` after an IdP-confirmed permanent failure: the queue drops instead of parking for an unrecoverable credential.
     fn wait_for_auth_recovery(
         &self,
         failed_bearer: Option<&str>,
@@ -1165,18 +1139,16 @@ impl TraceExportSource for DynamicResolver {
         })
     }
 }
-/// The spill dir is shared by every session's queue in the process, so the
-/// reconcile runs at most once per verdict class: one recovery, and one purge
-/// that may escalate over it if data collection is disabled later in the same
-/// process (re-auth to a ZDR account, a leader session carrying an opt-out).
+/// The spill dir is shared by every session's queue in the process, so the reconcile runs at most once per verdict class.
+/// That is one recovery, and one purge that may escalate over it if data collection is disabled later in the same process.
+/// Re-auth to a ZDR account or a leader session carrying an opt-out can disable it mid-process.
 static SPILL_RECONCILE_STATE: std::sync::atomic::AtomicU8 =
     std::sync::atomic::AtomicU8::new(SPILL_NOT_RUN);
 const SPILL_NOT_RUN: u8 = 0;
 const SPILL_RAN_RECOVERY: u8 = 1;
 const SPILL_RAN_PURGE: u8 = 2;
 /// Claim the reconcile transition for the caller's collection verdict.
-/// Enabled runs only from a fresh state (a purge is never resurrected);
-/// disabled runs from fresh OR escalates exactly once over a prior recovery.
+/// Enabled runs only from a fresh state (a purge is never resurrected); disabled runs from fresh OR escalates exactly once over a prior recovery.
 fn claim_spill_reconcile(state: &std::sync::atomic::AtomicU8, collection_enabled: bool) -> bool {
     use std::sync::atomic::Ordering::Relaxed;
     if collection_enabled {
@@ -1192,10 +1164,9 @@ fn claim_spill_reconcile(state: &std::sync::atomic::AtomicU8, collection_enabled
                 .is_ok()
     }
 }
-/// Reconcile upload-queue spill pairs left by a prior process life:
-/// re-enqueue them when uploads are enabled (`queue` present), purge them
-/// when data collection is disabled (`None`). Detached so session setup
-/// never waits on disk or cloud I/O.
+/// Reconcile upload-queue spill pairs left by a prior process life.
+/// Re-enqueue them when uploads are enabled (`queue` present); purge them when data collection is disabled (`None`).
+/// This runs detached so session setup never waits on disk or cloud I/O.
 pub(crate) fn spawn_startup_spill_reconcile(
     grok_home: std::path::PathBuf,
     queue: Option<UploadQueue>,
@@ -1228,10 +1199,8 @@ pub(crate) fn spawn_startup_spill_reconcile(
         }
     });
 }
-/// Bounded, non-terminal flush of the session's upload queue: wait until
-/// every queued item settles or the deadline passes. The worker stays alive
-/// either way, so later turns (and the flush-timeout stragglers themselves)
-/// keep uploading in the background.
+/// Bounded, non-terminal flush of the session's upload queue: wait until every queued item settles or the deadline passes.
+/// The worker stays alive either way, so later turns (and the flush-timeout stragglers themselves) keep uploading in the background.
 pub(crate) async fn flush_upload_queue(
     ctx: &PromptTraceContext,
     deadline: tokio::time::Instant,
@@ -1251,18 +1220,17 @@ pub(crate) async fn flush_upload_queue(
 }
 /// Budget for one awaited attempt on the blocking path (a non-durable-accept
 /// direct upload, or the manifest write): whatever remains of the flush
-/// deadline, floored at 10s (the attempt must still happen after a fully
-/// consumed deadline — the manifest is the ingestion trigger) and capped at
-/// 30s (no storage client on this path has a request timeout, so this cap is
-/// the only bound against a tarpit endpoint).
+/// deadline, floored at [`DIRECT_ATTEMPT_FLOOR`] (the attempt must still
+/// happen after a fully consumed deadline — the manifest is the ingestion
+/// trigger) and capped at 30s (no storage client on this path has a request
+/// timeout, so this cap is the only bound against a tarpit endpoint).
 pub(crate) fn blocking_attempt_budget(deadline: tokio::time::Instant) -> std::time::Duration {
     deadline
         .saturating_duration_since(tokio::time::Instant::now())
-        .max(std::time::Duration::from_secs(10))
+        .max(DIRECT_ATTEMPT_FLOOR)
         .min(std::time::Duration::from_secs(30))
 }
-/// Blocking error path: bounded queue flush, then the error manifest under
-/// its own budget so the prompt response cannot hang on the final write.
+/// Blocking error path: bounded queue flush, then the error manifest under its own budget so the prompt response cannot hang on the final write.
 pub(crate) async fn flush_then_write_error_manifest(
     ctx: &PromptTraceContext,
     deadline: tokio::time::Instant,
@@ -1276,8 +1244,8 @@ pub(crate) async fn flush_then_write_error_manifest(
         tracing::warn!("error manifest write timed out");
     }
 }
-/// Delete `upload_queue/scratch` (staging copies only). Does not touch the
-/// durable queue worker's spill files under `upload_queue/` root.
+/// Delete `upload_queue/scratch` (staging copies only).
+/// Does not touch the durable queue worker's spill files under `upload_queue/` root.
 pub(crate) fn purge_stale_upload_scratch_dir(scratch_dir: &Path) -> std::io::Result<bool> {
     if !scratch_dir.exists() {
         return Ok(false);
@@ -1293,11 +1261,10 @@ pub(crate) fn purge_stale_upload_scratch_dir(scratch_dir: &Path) -> std::io::Res
     std::fs::remove_dir_all(scratch_dir)?;
     Ok(true)
 }
-/// Once-per-process: best-effort removal of leftover `upload_queue/scratch`
-/// staging written by other builds of the shell — this build never writes it,
-/// so anything found there is stale. Never touches the durable queue itself.
-/// Skipped under cargo test so unit/integration helpers cannot wipe a
-/// developer's real home.
+/// Once-per-process: best-effort removal of leftover `upload_queue/scratch` staging written by other builds of the shell.
+/// This build never writes it, so anything found there is stale.
+/// Never touches the durable queue itself.
+/// Skipped under cargo test so unit/integration helpers cannot wipe a developer's real home.
 pub(crate) fn spawn_purge_stale_upload_scratch() {
     {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -1357,11 +1324,9 @@ pub(crate) fn spawn_upload_queue(
         queue
     }
 }
-/// Only these accept shapes are durably owned by the queue (temp + recovery
-/// sidecar on disk, flushed by the turn-end wait or recovered next run).
-/// `FellBackToInline` is a fire-and-forget task the flush cannot see and
-/// `Failed` was never handed off, so both need a real awaited attempt before
-/// the manifest may claim anything.
+/// Only these accept shapes are durably owned by the queue (temp and recovery sidecar on disk, flushed by the turn-end wait or recovered next run).
+/// `FellBackToInline` is a fire-and-forget task the flush cannot see, and `Failed` was never handed off.
+/// Both need a real awaited attempt before the manifest may claim anything.
 fn enqueue_outcome_is_durable(outcome: &EnqueueOutcome) -> bool {
     match outcome {
         EnqueueOutcome::Enqueued | EnqueueOutcome::Deduplicated => true,
@@ -1370,14 +1335,12 @@ fn enqueue_outcome_is_durable(outcome: &EnqueueOutcome) -> bool {
         | EnqueueOutcome::Skipped { .. } => false,
     }
 }
-/// Durable-accept a trace artifact for the flush-bounded blocking path: the
-/// bytes and a recovery sidecar are on local disk once this returns and the
-/// queue owns the upload (recorded `Enqueued`; the caller runs one bounded
-/// queue flush). Non-durable accept shapes and queue-less contexts get one
-/// awaited direct attempt — bounded by `blocking_attempt_budget(deadline)`,
-/// since the storage clients carry no request timeout — so the recorded
-/// status is the real result. `Ok` means durably accepted or directly
-/// uploaded.
+/// Durable-accept a trace artifact for the flush-bounded blocking path.
+/// The bytes and a recovery sidecar are on local disk once this returns, and the queue owns the upload.
+/// The artifact is recorded `Enqueued`; the caller runs one bounded queue flush.
+/// Non-durable accept shapes and queue-less contexts get one awaited direct attempt, so the recorded status is the real result.
+/// The attempt is bounded by `blocking_attempt_budget(deadline)`, since the storage clients carry no request timeout.
+/// `Ok` means durably accepted or directly uploaded.
 pub(crate) async fn upload_trace_artifact_deferred(
     ctx: &PromptTraceContext,
     content: &[u8],
@@ -1527,14 +1490,14 @@ fn sort_session_files_by_priority(files: &mut [crate::session::persistence::Copi
 }
 #[cfg(test)]
 #[derive(Clone, Copy)]
-enum ArchiveBuildFault {
+pub(super) enum ArchiveBuildFault {
     Panic = 1,
     Io = 2,
 }
 #[cfg(test)]
 static ARCHIVE_BUILD_FAULT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 #[cfg(test)]
-struct ArchiveFaultGuard;
+pub(super) struct ArchiveFaultGuard;
 #[cfg(test)]
 impl Drop for ArchiveFaultGuard {
     fn drop(&mut self) {
@@ -1542,12 +1505,12 @@ impl Drop for ArchiveFaultGuard {
     }
 }
 #[cfg(test)]
-fn set_archive_build_fault(fault: ArchiveBuildFault) -> ArchiveFaultGuard {
+pub(super) fn set_archive_build_fault(fault: ArchiveBuildFault) -> ArchiveFaultGuard {
     ARCHIVE_BUILD_FAULT.store(fault as u8, std::sync::atomic::Ordering::SeqCst);
     ArchiveFaultGuard
 }
 #[cfg(test)]
-fn apply_test_archive_fault() -> std::io::Result<()> {
+pub(super) fn apply_test_archive_fault() -> std::io::Result<()> {
     match ARCHIVE_BUILD_FAULT.swap(0, std::sync::atomic::Ordering::SeqCst) {
         1 => panic!("test-forced archive panic"),
         2 => Err(std::io::Error::other("test-forced archive io failure")),
@@ -1592,7 +1555,7 @@ fn build_session_state_archive(
     Ok(archive_data)
 }
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::session::persistence::CopiedSessionFile;
     use prod_mc_cli_chat_proxy_types::PromptMetadata;
@@ -1835,9 +1798,8 @@ mod tests {
             "snapshot should pick up disk-refreshed token, not stale base_config"
         );
     }
-    /// When both memory and disk tokens are expired and no refresher is
-    /// configured, `resolve_async()` falls back gracefully: `get_valid_token()`
-    /// returns an error and the resolver keeps the stale `base_config` token.
+    /// When both memory and disk tokens are expired and no refresher is configured, `resolve_async()` falls back gracefully.
+    /// `get_valid_token()` returns an error and the resolver keeps the stale `base_config` token.
     /// This verifies the error path doesn't panic.
     #[tokio::test]
     async fn resolve_async_falls_back_when_no_refresher() {
@@ -1886,8 +1848,7 @@ mod tests {
             other => panic!("expected Proxy, got {:?}", other),
         }
     }
-    /// `resolve_async()` picks up a fresh token from disk when the in-memory
-    /// token is expired and a valid one exists on disk (written by another flow).
+    /// `resolve_async()` picks up a fresh disk token (written by another flow) when the in-memory token is expired.
     #[tokio::test]
     async fn resolve_async_picks_up_disk_refreshed_token() {
         use crate::auth::{GrokAuth, GrokComConfig};
@@ -1938,10 +1899,8 @@ mod tests {
             other => panic!("expected Proxy, got {:?}", other),
         }
     }
-    /// `resolve_async()` drives `refresh_chain` when the in-memory OIDC
-    /// token is expired and no fresh disk token exists. The refresher fires
-    /// and the resolved config carries the fresh token — not the stale
-    /// `base_config` snapshot.
+    /// `resolve_async()` drives `refresh_chain` when the in-memory OIDC token is expired and no fresh disk token exists.
+    /// The refresher fires and the resolved config carries the fresh token, not the stale `base_config` snapshot.
     #[tokio::test]
     async fn resolve_async_drives_refresh_chain_when_token_expired() {
         use crate::auth::{GrokAuth, GrokComConfig};
@@ -2009,10 +1968,8 @@ mod tests {
             other => panic!("expected Proxy, got {:?}", other),
         }
     }
-    /// Proactive refresh keeps the cache hot so `resolve_async` on the
-    /// trace upload path is a cache hit — the refresher fires once
-    /// (proactive), then `resolve_async` picks up the cached token
-    /// without calling the refresher again.
+    /// Proactive refresh keeps the cache hot so `resolve_async` on the trace upload path is a cache hit.
+    /// The refresher fires once (proactive), then `resolve_async` picks up the cached token without calling the refresher again.
     #[tokio::test]
     async fn proactive_refresh_makes_trace_resolve_a_cache_hit() {
         use crate::auth::{GrokAuth, GrokComConfig};
@@ -2171,13 +2128,9 @@ mod tests {
             other => panic!("expected Direct, got {:?}", other),
         }
     }
-    /// `DynamicResolver` must supply `proxy_credentials` and
-    /// `proxy_attribution` so the queue worker's per-attempt
-    /// `StorageClient` gets a refresh-aware credential provider AND emits
-    /// `auth_401_attribution` on 401. Without these, the worker falls back
-    /// to the static `user_token` snapshot baked into `TraceExportConfig`
-    /// and emits no attribution -- the exact gap in production that this
-    /// PR fixes.
+    /// `DynamicResolver` must supply `proxy_credentials` and `proxy_attribution`.
+    /// The queue worker's per-attempt `StorageClient` then gets a refresh-aware credential provider AND emits `auth_401_attribution` on 401.
+    /// Without these, the worker falls back to the static `user_token` snapshot baked into `TraceExportConfig` and emits no attribution.
     #[test]
     fn dynamic_resolver_supplies_proxy_credentials_and_attribution() {
         use crate::session::repo_changes::UploadMethod;
@@ -2218,8 +2171,7 @@ mod tests {
             "expected tuned HTTP client"
         );
     }
-    /// A rotation that lands between park wait slices is invisible to the
-    /// notifier; the bearer comparison must wake the parked item immediately.
+    /// A rotation that lands between park wait slices is invisible to the notifier; the bearer comparison must wake the parked item immediately.
     #[tokio::test]
     async fn dynamic_resolver_auth_recovery_wakes_on_already_rotated_token() {
         use crate::session::repo_changes::UploadMethod;
@@ -2260,9 +2212,8 @@ mod tests {
             .expect("recovery hook available");
         assert!(!wait.await, "unchanged token falls through to the notifier");
     }
-    /// With a deployment key on the wire, the session token in `AuthManager`
-    /// always differs from `failed_bearer` — the wake comparison must use the
-    /// deployment key (wire precedence) or parking becomes a hot retry loop.
+    /// With a deployment key on the wire, the session token in `AuthManager` always differs from `failed_bearer`.
+    /// The wake comparison must use the deployment key (wire precedence) or parking becomes a hot retry loop.
     #[tokio::test]
     async fn dynamic_resolver_auth_recovery_ignores_session_token_for_deployment_key() {
         use crate::session::repo_changes::UploadMethod;
@@ -2386,9 +2337,9 @@ mod tests {
             vec!["summary.json", "z_call.jsonl", "a_call.jsonl"]
         );
     }
-    /// Gunzip + untar `archive`, returning `(entry_name, raw_bytes)` for every
-    /// entry. Mirrors how the trace viewer extracts `chat_history.jsonl`.
-    fn read_tar_gz_entries(archive: &[u8]) -> Vec<(String, Vec<u8>)> {
+    /// Gunzip and untar `archive`, returning `(entry_name, raw_bytes)` for every entry.
+    /// Mirrors how the trace viewer extracts `chat_history.jsonl`.
+    pub(crate) fn read_tar_gz_entries(archive: &[u8]) -> Vec<(String, Vec<u8>)> {
         use std::io::Read as _;
         let decoder = flate2::read::GzDecoder::new(archive);
         let mut tar = tar::Archive::new(decoder);
@@ -2402,6 +2353,129 @@ mod tests {
         }
         out
     }
+    /// Minimal [`PromptTraceContext`] for upload-path unit tests.
+    pub(crate) fn test_prompt_trace_ctx() -> crate::upload::turn::PromptTraceContext {
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use tokio::sync::mpsc;
+        use tokio_util::sync::CancellationToken;
+        use xai_grok_paths::AbsPathBuf;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let auth_manager = Arc::new(crate::auth::AuthManager::new_test_isolated(
+            dir.path(),
+            crate::auth::GrokComConfig::default(),
+        ));
+        std::mem::forget(dir);
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+        let (hunk_event_tx, _hunk_event_rx) = mpsc::unbounded_channel();
+        let hunk_tracker_handle = xai_hunk_tracker::HunkTrackerActor::spawn(
+            "test".to_string(),
+            PathBuf::from("/tmp"),
+            hunk_event_tx,
+            xai_hunk_tracker::TrackingMode::AllDirty,
+            CancellationToken::new(),
+        );
+        let (signals_handle, _signals_actor) = crate::session::signals::SessionSignalsActor::new();
+        let session_handle = crate::session::SessionHandle {
+            cmd_tx,
+            persistence_tx,
+            current_prompt_id: Arc::new(std::sync::Mutex::new(None)),
+            active_work: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            pending_interactions: Arc::new(std::sync::Mutex::new(Default::default())),
+            info: crate::session::info::Info {
+                id: agent_client_protocol::SessionId::new("test-session"),
+                cwd: "/tmp".to_string(),
+            },
+            max_turns: None,
+            resolved_tool_overrides: Arc::new(arc_swap::ArcSwapOption::empty()),
+            spawn_snapshot: crate::session::SpawnSnapshot {
+                applied_tool_overrides: None,
+                scheduler_background_loops: false,
+            },
+            hunk_tracker_handle,
+            chat_state_handle: xai_chat_state::ChatStateHandle::noop(),
+            signals_handle,
+            gateway_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            status_line_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            mcp_servers: vec![],
+            initial_client_mcp_servers: vec![],
+            display_cwd: None,
+            feedback_manager: Arc::new(
+                crate::session::feedback_manager::FeedbackManager::local_only("test"),
+            ),
+            upload_queue: Arc::new(std::sync::OnceLock::new()),
+            upload_failures_since_success: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            tool_context: crate::tools::ToolContext::new_local_context(
+                AbsPathBuf::new(PathBuf::from("/tmp")).unwrap(),
+                Arc::new(xai_grok_workspace::file_system::LocalFs::new(PathBuf::from(
+                    "/tmp",
+                ))),
+                Arc::new(crate::terminal::LocalTerminalRunner),
+            ),
+            model_id: agent_client_protocol::ModelId::new("test-model"),
+            reasoning_effort: None,
+            yolo_mode: false,
+            origin_client: None,
+            code_nav_enabled: false,
+            ask_user_question_enabled: false,
+            non_interactive: true,
+            plan_mode: Arc::new(parking_lot::Mutex::new(
+                crate::session::plan_mode::PlanModeTracker::new(PathBuf::from("/tmp")),
+            )),
+            force_compact: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            permission_handle: xai_grok_workspace::permission::PermissionHandle::allow_all(),
+            attribution_callback: None,
+            agent_name: "grok-build".to_string(),
+            managed_mcp_proxy_base_url: String::new(),
+            session_default_agent_profile: None,
+            allowed_subagent_types: None,
+            hook_registry: None,
+            workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),
+            terminal_backend: None,
+            tools_notification_handle: None,
+            scheduler_handle: None,
+        };
+        crate::upload::turn::PromptTraceContext {
+            gcs_config: crate::session::repo_changes::TraceExportConfig {
+                bucket_url: None,
+                service_account_key: None,
+                prefix_dir: None,
+                gcs_prefix: Some("test-session/turn_1".into()),
+                absolute_paths: false,
+                archive_name_override: None,
+                upload_method: crate::session::repo_changes::UploadMethod::Proxy {
+                    proxy_base_url: "https://proxy.example.com".into(),
+                    user_token: "test-token".into(),
+                    deployment_key: None,
+                    alpha_test_key: None,
+                },
+            },
+            session_info: session_handle.info.clone(),
+            turn_number: 1,
+            session_handle,
+            session_registry_enabled: true,
+            upload_queue: None,
+            artifact_tracker: crate::upload::manifest::new_artifact_tracker(),
+            auth_manager,
+        }
+    }
+    /// Assert `filename` was recorded as a failed artifact on `ctx`.
+    pub(crate) fn assert_artifact_failed(
+        ctx: &crate::upload::turn::PromptTraceContext,
+        filename: &str,
+    ) {
+        let inner = ctx.artifact_tracker.lock();
+        assert!(
+            matches!(
+                inner.statuses.get(filename),
+                Some(crate::upload::manifest::ArtifactStatus::Failed)
+            ),
+            "expected {filename} to be Failed, statuses={:?}",
+            inner.statuses
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     #[serial_test::serial(archive_build_fault)]
     async fn chat_history_session_state_empty_messages_yields_valid_empty_archive() {
@@ -2608,9 +2682,8 @@ mod tests {
         }
         tempfile::tempdir_in(home).ok()
     }
-    /// Customer-managed S3 failures stay below the ERROR alerting threshold,
-    /// repeats within an episode drop to debug, and the `method` log field
-    /// keeps the structured upload-method vocabulary.
+    /// Customer-managed S3 failures stay below the ERROR alerting threshold.
+    /// Repeats within an episode drop to debug, and the `method` log field keeps the structured upload-method vocabulary.
     #[test]
     fn upload_failure_log_level_splits_on_backend_and_repeats() {
         use crate::session::repo_changes::UploadMethod;
@@ -2652,10 +2725,8 @@ mod tests {
         assert_eq!(upload_method_label(&proxy), "proxy");
         assert_eq!(upload_method_label(&gcs), "direct_gcs");
     }
-    /// The manifest may claim `enqueued` (queue-owned: flushable and
-    /// sidecar-recoverable) only for these accept shapes; an inline fallback
-    /// or a failed enqueue must take the awaited direct attempt so the
-    /// recorded status is a real outcome.
+    /// The manifest may claim `enqueued` (queue-owned: flushable and sidecar-recoverable) only for these accept shapes.
+    /// An inline fallback or a failed enqueue must take the awaited direct attempt so the recorded status is a real outcome.
     #[test]
     fn deferred_enqueue_durability_mapping() {
         assert!(enqueue_outcome_is_durable(&EnqueueOutcome::Enqueued));
@@ -2670,9 +2741,8 @@ mod tests {
             reason: "collect_deadline".to_owned(),
         }));
     }
-    /// A disabled verdict escalates exactly once over a prior recovery (pairs
-    /// it re-enqueued must not outlive a no-collection verdict); a purge is
-    /// never resurrected by a later enabled verdict.
+    /// A disabled verdict escalates exactly once over a prior recovery (pairs it re-enqueued must not outlive a no-collection verdict).
+    /// A purge is never resurrected by a later enabled verdict.
     #[test]
     fn spill_reconcile_escalates_to_purge_but_never_resurrects() {
         use std::sync::atomic::AtomicU8;
@@ -2702,9 +2772,8 @@ mod tests {
         );
         assert!(!claim_spill_reconcile(&state, false));
     }
-    /// A Defer-timeout may claim `enqueued` only when the cancelled future was
-    /// parked on queue confirmation; a timeout that cancelled a direct attempt
-    /// queued nothing and must record the loss.
+    /// A Defer-timeout may claim `enqueued` only when the cancelled future was parked on queue confirmation.
+    /// A timeout that cancelled a direct attempt queued nothing and must record the loss.
     #[test]
     fn confirm_timeout_is_enqueued_only_when_queue_owned() {
         use crate::upload::manifest::ArtifactResult;
@@ -2719,5 +2788,90 @@ mod tests {
                 ..
             }
         ));
+    }
+    /// Regression: the pre-upload git enrichment (spawn_blocking discovery
+    /// over a possibly hung mount, visibility check with no request timeout)
+    /// must not park a Defer-mode caller ahead of the bounded upload attempt.
+    #[tokio::test(start_paused = true)]
+    async fn metadata_enrichment_is_bounded_under_defer() {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(600);
+        let start = tokio::time::Instant::now();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3600),
+            bounded_enrichment(std::future::pending(), UploadWait::Defer { deadline }),
+        )
+        .await
+        .expect("Defer-mode enrichment must be bounded");
+        assert!(
+            start.elapsed() <= std::time::Duration::from_secs(31),
+            "enrichment must ride the capped attempt budget"
+        );
+    }
+    /// Regression: the detached spawn-/completion-time `subagent.json` uploads
+    /// must be bounded — unbounded, every child against a tarpit endpoint
+    /// leaked one parked task (and its `AuthManager` Arc) for the process
+    /// lifetime.
+    #[tokio::test(start_paused = true)]
+    async fn upload_subagent_metadata_is_bounded_against_a_tarpit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let auth = std::sync::Arc::new(crate::auth::AuthManager::new(
+            tmp.path(),
+            crate::auth::GrokComConfig::default(),
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        let metadata = crate::agent::subagent::SubagentSessionMetadata {
+            schema_version: 1,
+            session_id: "child-1".into(),
+            session_kind: "subagent".into(),
+            subagent_id: "sa-1".into(),
+            child_session_id: "child-1".into(),
+            parent_session_id: "parent-1".into(),
+            parent_prompt_id: None,
+            subagent_type: "general-purpose".into(),
+            description: String::new(),
+            role: None,
+            persona: None,
+            context_normalized: false,
+            capability_mode: None,
+            reasoning_effort: None,
+            model_id: None,
+            cwd: None,
+            worktree_path: None,
+            isolation_mode: None,
+            depth: 0,
+            started_at: "2026-01-01T00:00:00Z".into(),
+            completed_at: None,
+            status: "running".into(),
+            duration_ms: None,
+            tool_calls: None,
+            turns: None,
+            error: None,
+            fork_copy_error: None,
+            resumed_from: None,
+        };
+        let start = tokio::time::Instant::now();
+        upload_subagent_metadata(
+            &metadata,
+            "gs://unused",
+            UploadMethod::Proxy {
+                proxy_base_url: format!("http://{addr}"),
+                user_token: "test-token".into(),
+                deployment_key: None,
+                alpha_test_key: None,
+            },
+            auth,
+        )
+        .await;
+        assert!(
+            start.elapsed() <= SUBAGENT_METADATA_UPLOAD_BOUND + std::time::Duration::from_secs(1),
+            "detached subagent.json upload must be bounded"
+        );
     }
 }

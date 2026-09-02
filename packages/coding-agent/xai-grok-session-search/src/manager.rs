@@ -1,10 +1,8 @@
-//! Session search orchestration: querying and background indexing.
+//! Answers session search queries and keeps the index updated in the background.
 //!
-//! The FTS index is bootstrapped on first search and updated per session via
-//! [`SearchIndexManager::enqueue`]. The SQLite DB is shared with other grok
-//! processes (older binaries may wipe or downgrade it on open), so every
-//! search re-verifies the on-disk completed-bootstrap marker, and the
-//! bootstrap itself is cross-process single-flight.
+//! The FTS index is bootstrapped on first search and updated per session via [`SearchIndexManager::enqueue`].
+//! The SQLite DB is shared with other grok processes (older binaries may wipe or downgrade it on open).
+//! So every search re-verifies the on-disk completed-bootstrap marker, and the bootstrap itself is cross-process single-flight.
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -52,8 +50,7 @@ pub struct SessionSearchResponse {
     pub next_offset: Option<usize>,
     pub total_estimate: Option<usize>,
     /// True while the index is still bootstrapping; callers should re-query.
-    /// Also true when a live claim exists without a completion marker, so a
-    /// peer mid-rebuild or a dead claimant within its lease is visible.
+    /// Also true when a live claim exists without a completion marker, so a peer mid-rebuild or a dead claimant within its lease is visible.
     pub bootstrapping: bool,
 }
 
@@ -85,8 +82,7 @@ struct SessionSearchKey {
 enum SearchIndexJob {
     Upsert(SessionSearchKey),
     BootstrapAll,
-    /// Re-verify the on-disk completed-bootstrap marker; re-run the full
-    /// bootstrap when it is missing.
+    /// Re-verify the on-disk completed-bootstrap marker; re-run the full bootstrap when it is missing.
     RecheckBootstrap,
 }
 
@@ -100,8 +96,7 @@ struct SearchManagerState {
     bootstrapped: HashSet<PathBuf>,
 }
 
-/// What a spawned per-root worker needs: the session store binding and a way
-/// to re-enqueue itself (a heal mid-bootstrap asks for another run).
+/// What a spawned per-root worker needs: the session store binding and a way to re-enqueue itself (a heal mid-bootstrap asks for another run).
 struct WorkerContext {
     tx: mpsc::UnboundedSender<SearchManagerCmd>,
     progress: Arc<BootstrapProgress>,
@@ -117,8 +112,7 @@ impl WorkerContext {
     }
 }
 
-/// Manages background session indexing for every grok home this process
-/// touches.
+/// Manages background session indexing for every grok home this process touches.
 ///
 /// Requires an active tokio runtime on construction (spawns tasks).
 pub struct SearchIndexManager {
@@ -139,8 +133,8 @@ pub struct SearchIndexStatus {
 }
 
 impl SearchIndexManager {
-    /// Start the dispatcher. `source_factory` opens the session store for a grok home and
-    /// `extract` pulls searchable text out of one transcript.
+    /// Start the dispatcher.
+    /// `source_factory` opens the session store for a grok home and `extract` pulls searchable text out of one transcript.
     pub fn start(source_factory: SessionSourceFactory, extract: ContentExtractor) -> Self {
         let progress = Arc::new(BootstrapProgress::default());
         let (tx, mut rx) = mpsc::unbounded_channel::<SearchManagerCmd>();
@@ -170,8 +164,7 @@ impl SearchIndexManager {
                                 SearchIndexJob::BootstrapAll,
                             );
                         } else {
-                            // The DB is shared: re-verify the on-disk marker,
-                            // sequenced after any in-flight BootstrapAll.
+                            // The DB is shared: re-verify the on-disk marker, sequenced behind any BootstrapAll still running on this worker
                             Self::dispatch(
                                 &mut state,
                                 &context,
@@ -187,9 +180,8 @@ impl SearchIndexManager {
         Self { tx, progress }
     }
 
-    /// Queue a bootstrap of all sessions (idempotent per root; repeat calls re-verify the
-    /// on-disk marker). Sets `bootstrapping` eagerly so pollers see `true` before the background
-    /// task starts.
+    /// Queue a bootstrap of all sessions (idempotent per root; repeat calls re-verify the on-disk marker).
+    /// Sets `bootstrapping` eagerly so pollers see `true` before the background task starts.
     #[tracing::instrument(name = "session_search.bootstrap", skip_all)]
     pub fn bootstrap_once(&self, root: PathBuf) {
         self.progress.begin_bootstrapping();
@@ -236,8 +228,7 @@ impl SearchIndexManager {
     }
 }
 
-/// Execute a session search query, waiting up to [`BOOTSTRAP_WAIT_TIMEOUT`]
-/// for a first-call bootstrap so the query runs against a populated index.
+/// Execute a search query, waiting up to [`BOOTSTRAP_WAIT_TIMEOUT`] for a first-call bootstrap so the query runs against a populated index.
 #[tracing::instrument(name = "session_search.query", skip_all)]
 pub async fn execute_search(
     manager: Option<&SearchIndexManager>,
@@ -294,8 +285,8 @@ pub async fn execute_search(
     })
 }
 
-/// Remove one session from an index built earlier, whether or not this process
-/// indexes. Best effort: a failure is logged, not returned.
+/// Remove one session from an index built earlier, whether or not this process indexes.
+/// Best effort: a failure is logged, not returned.
 pub async fn evict_session(root_dir: &Path, session_id: &str) {
     if !search_index_exists(root_dir) {
         return;
@@ -401,8 +392,7 @@ async fn handle_job(
                         ),
                     }
                 }
-                // Transient read failure: rebuilding on every one would be a
-                // reindex storm; the next search retries the probe.
+                // Transient read failure: rebuilding on every one would mean constant full reindexes; the next search retries the probe
                 None => {
                     tracing::debug!(
                         "session search bootstrap marker unreadable; skipping re-bootstrap"
@@ -443,8 +433,7 @@ async fn upsert_by_key(
     context: &WorkerContext,
     key: &SessionSearchKey,
 ) -> io::Result<()> {
-    // `None` is a deleted session; a read failure surfaces as `Err` and
-    // leaves the existing index row alone.
+    // `None` is a deleted session; a read failure comes back as `Err` and leaves the existing index row alone
     match source.load_session(&key.session_id, &key.cwd).await? {
         Some(session) => upsert_session(root_dir, &session, context.extract)
             .await
@@ -498,8 +487,7 @@ mod tests {
         std::fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
-    /// A store with no sessions: enough for every test here, which exercise
-    /// the query and bootstrap-flag paths rather than indexing.
+    /// A store with no sessions: enough for every test here, which exercise the query and bootstrap-flag paths rather than indexing.
     struct EmptySource;
 
     #[async_trait::async_trait]
@@ -581,9 +569,8 @@ mod tests {
 
     #[test]
     fn test_execute_search_returns_empty_on_fresh_db() {
-        // Test the index directly instead of via `execute_search()` to avoid
-        // a race with a manager's bootstrap worker that concurrently opens
-        // the same SQLite DB (flaky "database is locked").
+        // Query the index directly instead of via `execute_search()`
+        // The manager's bootstrap worker opens the same SQLite DB concurrently, which made this flaky with "database is locked"
         let tmp = tempfile::TempDir::new().unwrap();
         let db_path = search_db_path(tmp.path());
         let index = SessionSearchIndex::open_or_create(&db_path).expect("open fresh DB");
@@ -617,10 +604,8 @@ mod tests {
         assert!(json.contains("\"bootstrapping\":true"));
     }
 
-    // NOTE: the `bootstrapping` flag is per-manager but shared across every
-    // root a manager serves, so tests that depend on it transitioning to
-    // `false` are racy. Only the eager-set test is reliable, because the
-    // store is synchronous before the channel send.
+    // The `bootstrapping` flag is per-manager but shared across every root a manager serves, so tests that depend on it going `false` are racy
+    // Only the eager-set test is reliable, because the flag is set synchronously before the channel send
 
     #[tokio::test]
     async fn test_bootstrap_once_sets_flag_eagerly() {
@@ -650,8 +635,7 @@ mod tests {
         assert!(resp.results.is_empty());
     }
 
-    /// End-to-end recheck healing: `RecheckBootstrap` on a marker-less index
-    /// re-runs the full bootstrap, which rewrites the marker on completion.
+    /// End-to-end recheck healing: `RecheckBootstrap` on a marker-less index re-runs the full bootstrap, which rewrites the marker on completion.
     #[tokio::test]
     async fn test_recheck_bootstrap_reruns_reindex_when_marker_missing() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -683,12 +667,9 @@ mod tests {
         );
     }
 
-    /// Regression shape: a v3-era indexer silently extracted "" for
-    /// sessions with JSON escapes but still recorded a content hash, so at
-    /// the *same* schema version the hash dedup keeps skipping identical
-    /// (buggy) re-extractions forever. Pins that the v4 upgrade drop removes
-    /// the stub row and its hash, so the next bootstrap re-indexes from
-    /// scratch instead of being blocked by the stale hash.
+    /// A v3-era indexer silently extracted "" for sessions with JSON escapes but still recorded a content hash.
+    /// At the *same* schema version the hash dedup would keep skipping those identical (buggy) re-extractions forever.
+    /// Pins that the v4 upgrade drop removes the stub row and its hash, so the next bootstrap re-indexes from scratch.
     #[test]
     fn test_upgrade_drop_clears_stub_docs_and_hashes() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -699,8 +680,7 @@ mod tests {
         {
             let index = SessionSearchIndex::open_or_create(&db_path).unwrap();
             index.upsert_doc(&stub).unwrap();
-            // The empty-content stub still records a hash — re-extracting
-            // the same (empty) content would dedup to Unchanged.
+            // The empty-content stub still records a hash: re-extracting the same (empty) content would dedup to Unchanged
             assert_eq!(
                 index.get_content_hash("stub").unwrap().as_deref(),
                 Some(stub.content_hash.as_str())

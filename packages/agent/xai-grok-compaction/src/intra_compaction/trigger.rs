@@ -96,6 +96,11 @@ pub enum IntraCompactionError {
     #[error("compaction sampler error: {0}")]
     SamplerStream(String),
 
+    /// Size overflow of the compaction input. Deterministic and terminal —
+    /// intra has no input ladder.
+    #[error("compaction input exceeds size limits: {0}")]
+    ContextOverflow(String),
+
     /// `apply_steps_compaction` failed for a parser-specific reason
     /// (e.g. SglangEngine rebuild error).
     #[error("apply failed: {0}")]

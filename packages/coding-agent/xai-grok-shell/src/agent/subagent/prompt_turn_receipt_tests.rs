@@ -22,13 +22,16 @@ fn receipt_for_turn(
         PromptTurnReceipt {
             prompt_id: prompt_id.to_owned(),
             result,
-            telemetry: crate::session::telemetry::ActiveAgentMessageAdmissionTelemetry {
-                admitted_at: std::time::Instant::now(),
-                parent_ctx: xai_grok_telemetry::TelemetryCtx::new(
+            telemetry: crate::session::telemetry::ActiveAgentMessageAdmissionTelemetry::new(
+                std::time::Instant::now(),
+                xai_grok_telemetry::TelemetryCtx::new(
                     "parent".to_owned(),
                     std::sync::Arc::new(tokio::sync::Mutex::new(turn)),
                 ),
-            },
+                xai_grok_tools::implementations::grok_build::task::types::ActiveAgentMessageOperation::Queue,
+                xai_grok_tools::implementations::grok_build::task::types::ActiveAgentMessageOperation::Queue,
+                None,
+            ),
         },
     )
 }
@@ -123,6 +126,230 @@ async fn active_drain_accepts_more_than_handoff_capacity() {
     assert_eq!(settled.disposition, PromptTurnReceiptDisposition::Completed);
 }
 
+fn dropped_oneshot_error() -> oneshot::error::RecvError {
+    let (tx, rx) = oneshot::channel::<crate::session::commands::PromptTurnResult>();
+    drop(tx);
+    futures::FutureExt::now_or_never(rx)
+        .expect("closed oneshot is immediately ready")
+        .expect_err("dropped sender yields RecvError")
+}
+
+#[test]
+fn completed_settlement_preserves_successful_followup_for_parent_wake() {
+    let cases = [
+        (
+            Some(Ok(crate::session::commands::ok_end_turn(1, None))),
+            false,
+            true,
+            false,
+            None,
+            "follow-up result",
+            false,
+        ),
+        (
+            Some(Ok(crate::session::commands::ok_end_turn(1, None))),
+            true,
+            true,
+            false,
+            None,
+            "follow-up result",
+            false,
+        ),
+        (
+            Some(Err(dropped_oneshot_error())),
+            false,
+            false,
+            false,
+            Some("Child session dropped unexpectedly"),
+            "follow-up result",
+            true,
+        ),
+        (
+            Some(Err(dropped_oneshot_error())),
+            true,
+            false,
+            true,
+            Some("Subagent was cancelled"),
+            "follow-up result",
+            true,
+        ),
+        (None, false, false, true, None, "kept", false),
+        (None, true, false, true, None, "kept", false),
+    ];
+
+    for (
+        final_receipt,
+        was_cancelled,
+        success,
+        cancelled,
+        error,
+        output,
+        cancellation_may_hide_usage,
+    ) in cases
+    {
+        let folded = reduce_prompt_turn_settlement(PromptTurnSettlementInput {
+            result: SubagentResult {
+                cancelled: true,
+                output: std::sync::Arc::from("kept"),
+                ..Default::default()
+            },
+            disposition: PromptTurnReceiptDisposition::Completed,
+            final_receipt,
+            final_text: "follow-up result".to_string(),
+            was_cancelled,
+        });
+
+        assert_eq!(
+            (
+                folded.result.success,
+                folded.result.cancelled,
+                folded.result.error.as_deref(),
+                folded.result.output.as_ref(),
+                folded.cancellation_may_hide_usage,
+            ),
+            (
+                success,
+                cancelled,
+                error,
+                output,
+                cancellation_may_hide_usage,
+            ),
+        );
+    }
+}
+
+#[test]
+fn unclean_settlement_dispositions_map_to_cancelled_results() {
+    let cases = [
+        (
+            PromptTurnReceiptDisposition::Cancelled,
+            "Subagent was cancelled",
+        ),
+        (
+            PromptTurnReceiptDisposition::AdmissionUncertain,
+            "Active-message admission could not be proven settled",
+        ),
+        (
+            PromptTurnReceiptDisposition::TimedOut,
+            "Subagent receipt settlement timed out",
+        ),
+    ];
+
+    for (disposition, expected_error) in cases {
+        let folded = reduce_prompt_turn_settlement(PromptTurnSettlementInput {
+            result: SubagentResult {
+                success: true,
+                ..Default::default()
+            },
+            disposition,
+            final_receipt: None,
+            final_text: "partial".to_string(),
+            was_cancelled: false,
+        });
+
+        assert_eq!(
+            (
+                folded.result.success,
+                folded.result.cancelled,
+                folded.result.error.as_deref(),
+                folded.result.output.as_ref(),
+                folded.result.output_usage_incomplete,
+                folded.cancellation_may_hide_usage,
+            ),
+            (false, true, Some(expected_error), "partial", true, true),
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn clean_settlement_waits_past_legacy_timeout_without_shutdown() {
+    let (handoff_tx, drain, mut cmd_rx) = start_drain(1, CancellationToken::new());
+    let (receipt_tx, pending) = receipt("parent-message-long-running");
+    await_with_timeout(handoff_tx.send(pending))
+        .await
+        .expect("receipt handoff");
+
+    let settlement = tokio::spawn(drain.settle(AdmissionSettlement::Settled));
+    await_with_timeout(handoff_tx.closed()).await;
+    drop(handoff_tx);
+    assert!(!settlement.is_finished());
+
+    tokio::time::advance(std::time::Duration::from_secs(10 * 60 + 1)).await;
+    tokio::task::yield_now().await;
+
+    assert!(
+        !settlement.is_finished(),
+        "clean settlement must remain pending while the admitted turn runs"
+    );
+    assert!(cmd_rx.try_recv().is_err());
+
+    receipt_tx
+        .send(crate::session::commands::ok_end_turn(1, None))
+        .expect("receipt settles");
+    let settled = await_with_timeout(settlement)
+        .await
+        .expect("settlement task completes");
+
+    assert_eq!(settled.disposition, PromptTurnReceiptDisposition::Completed);
+    assert!(matches!(
+        settled.final_receipt,
+        Some(FinalPromptTurnReceipt {
+            prompt_id,
+            outcome: PromptTurnReceiptOutcome::Settled(receipt),
+            ..
+        }) if prompt_id == "parent-message-long-running"
+            && matches!(receipt.as_ref(), Ok(Ok(_)))
+    ));
+    assert!(cmd_rx.try_recv().is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancellation_after_clean_settlement_arms_grace_deadline() {
+    let cancel_token = CancellationToken::new();
+    let (handoff_tx, drain, mut cmd_rx) = start_drain(1, cancel_token.clone());
+    let (_receipt_tx, pending) = receipt("parent-message-cancelled-late");
+    await_with_timeout(handoff_tx.send(pending))
+        .await
+        .expect("receipt handoff");
+
+    let settlement = tokio::spawn(drain.settle(AdmissionSettlement::Settled));
+    await_with_timeout(handoff_tx.closed()).await;
+    drop(handoff_tx);
+    assert!(!settlement.is_finished());
+
+    tokio::time::advance(std::time::Duration::from_secs(10 * 60 + 1)).await;
+    tokio::task::yield_now().await;
+    assert!(cmd_rx.try_recv().is_err());
+
+    let cancelled_at = tokio::time::Instant::now();
+    cancel_token.cancel();
+    assert!(matches!(
+        await_with_timeout(cmd_rx.recv()).await,
+        Some(SessionCommand::Cancel(_))
+    ));
+    assert!(cmd_rx.try_recv().is_err());
+
+    tokio::time::advance(CANCELLED_RECEIPT_SETTLEMENT_GRACE - std::time::Duration::from_millis(1))
+        .await;
+    tokio::task::yield_now().await;
+    assert!(cmd_rx.try_recv().is_err());
+
+    tokio::time::advance(std::time::Duration::from_millis(1)).await;
+    assert!(matches!(
+        await_with_timeout(cmd_rx.recv()).await,
+        Some(SessionCommand::Shutdown(ShutdownKind::CancelRunningTurn))
+    ));
+    assert_eq!(
+        tokio::time::Instant::now(),
+        cancelled_at + CANCELLED_RECEIPT_SETTLEMENT_GRACE
+    );
+
+    let settled = await_with_timeout(settlement)
+        .await
+        .expect("settlement task completes");
+    assert_eq!(settled.disposition, PromptTurnReceiptDisposition::TimedOut);
+}
+
 #[tokio::test]
 async fn cancellation_drains_two_receipts_and_cancels_the_child_turn() {
     let cancel_token = CancellationToken::new();
@@ -166,6 +393,46 @@ async fn cancellation_drains_two_receipts_and_cancels_the_child_turn() {
             ..
         }) if prompt_id == "parent-message-second"
             && matches!(receipt.as_ref(), Ok(Ok(_)))
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn uncertain_settlement_deadline_forces_turn_shutdown() {
+    let (handoff_tx, drain, mut cmd_rx) = start_drain(1, CancellationToken::new());
+    let (_receipt_tx, pending) = receipt("parent-message-uncertain");
+    await_with_timeout(handoff_tx.send(pending))
+        .await
+        .expect("receipt handoff");
+    drop(handoff_tx);
+
+    let settlement = tokio::spawn(drain.settle(AdmissionSettlement::Uncertain));
+    assert!(matches!(
+        await_with_timeout(cmd_rx.recv()).await,
+        Some(SessionCommand::Cancel(_))
+    ));
+
+    tokio::time::advance(CANCELLED_RECEIPT_SETTLEMENT_GRACE - std::time::Duration::from_millis(1))
+        .await;
+    tokio::task::yield_now().await;
+    assert!(!settlement.is_finished());
+    assert!(cmd_rx.try_recv().is_err());
+
+    tokio::time::advance(std::time::Duration::from_millis(1)).await;
+    assert!(matches!(
+        await_with_timeout(cmd_rx.recv()).await,
+        Some(SessionCommand::Shutdown(ShutdownKind::CancelRunningTurn))
+    ));
+    let settled = await_with_timeout(settlement)
+        .await
+        .expect("settlement task completes");
+    assert_eq!(settled.disposition, PromptTurnReceiptDisposition::TimedOut);
+    assert!(matches!(
+        settled.final_receipt,
+        Some(FinalPromptTurnReceipt {
+            prompt_id,
+            outcome: PromptTurnReceiptOutcome::TimedOut,
+            ..
+        }) if prompt_id == "parent-message-uncertain"
     ));
 }
 

@@ -145,18 +145,48 @@ impl SessionActor {
         }
         Ok(model_id)
     }
+    /// Set the reasoning effort on the live sampling config, applying the same
+    /// support check and per-effort model routing as `apply_supported_effort`.
+    pub(super) async fn handle_set_reasoning_effort(
+        self: &std::sync::Arc<Self>,
+        effort: xai_grok_sampling_types::ReasoningEffort,
+    ) -> Result<acp::ModelId, acp::Error> {
+        let Some(mut cfg) = self.chat_state_handle.get_sampling_config().await else {
+            return Err(acp::Error::internal_error().data("session has no sampling config"));
+        };
+        if !self
+            .models_manager
+            .model_supports_reasoning_effort(&cfg.model)
+        {
+            return Err(acp::Error::invalid_params()
+                .data("the session's current model does not support reasoning effort"));
+        }
+        if let Some(routed) = self.models_manager.model_for_effort(&cfg.model, effort) {
+            cfg.model = routed;
+        }
+        cfg.reasoning_effort = Some(effort);
+        let model_id = acp::ModelId::new(cfg.model.clone());
+        self.chat_state_handle.update_sampling_config(cfg);
+        let agent_name = self.agent.borrow().definition().name.clone();
+        let _ = self
+            .notifications
+            .persistence_tx
+            .send(PersistenceMsg::CurrentModel {
+                model_id: model_id.clone(),
+                agent_name: Some(agent_name),
+                reasoning_effort: Some(Some(effort)),
+            });
+        self.emit_status_snapshot_detached();
+        Ok(model_id)
+    }
     /// Handle [`SessionCommand::RebuildAgentForDefinition`].
     ///
-    /// Builds a fresh [`xai_grok_agent::Agent`] from the cached
-    /// [`crate::session::agent_rebuild::AgentRebuildSpec`] + the supplied
-    /// [`xai_grok_agent::AgentDefinition`], replaces `self.agent`,
-    /// rewrites the system message in the conversation, persists the
-    /// new prompt artifacts, and updates `active_agent_type`.
+    /// Builds a fresh [`xai_grok_agent::Agent`] from the cached [`crate::session::agent_rebuild::AgentRebuildSpec`] and the supplied definition.
+    /// Replaces `self.agent`, rewrites the system message in the conversation, persists the new prompt artifacts, and updates `active_agent_type`.
     ///
-    /// Triggered from `MvpAgent::set_session_model` only when the new
-    /// model's `agent_type` differs from the session's current
-    /// `active_agent_type` AND `turn_count == 0` (no user message has
-    /// been sent yet). Defense-in-depth: rejects if a turn is in flight.
+    /// Triggered from `MvpAgent::set_session_model` only when the new model's `agent_type` differs from the session's `active_agent_type`.
+    /// The trigger also requires `turn_count == 0` (no user message has been sent yet).
+    /// Defense-in-depth: rejects if a turn is in flight.
     pub(super) async fn handle_rebuild_agent_for_definition(
         &self,
         definition: xai_grok_agent::AgentDefinition,
@@ -319,14 +349,10 @@ impl SessionActor {
         );
         Ok(())
     }
-    /// Apply a client-supplied `systemPromptOverride` on session attach without
-    /// wiping user/assistant history: swap only the leading `System` message,
-    /// atomically inside the `ChatStateActor` (see
-    /// `ChatStateCommand::ReplaceSystemHead` for the serialization guarantees).
-    /// `system_prompt.txt` (not owned by the persistence actor) is saved
-    /// directly, even on a head no-op, so a previously-diverged secondary
-    /// artifact self-heals. Skipped entirely on a verbatim mirror-fork
-    /// (`preserve_inherited_system`).
+    /// Apply a client-supplied `systemPromptOverride` on attach without wiping user/assistant history: swap only the leading `System` message.
+    /// The swap happens atomically inside the `ChatStateActor` (see `ChatStateCommand::ReplaceSystemHead` for the serialization guarantees).
+    /// `system_prompt.txt` (not owned by the persistence actor) is saved directly, even on a head no-op, so a diverged secondary artifact self-heals.
+    /// Skipped entirely on a verbatim mirror-fork (`preserve_inherited_system`).
     pub(super) async fn handle_replace_system_prompt(&self, system_prompt: String) {
         if self.startup_hints.preserve_inherited_system {
             tracing::debug!(

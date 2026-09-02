@@ -602,10 +602,8 @@ fn build_restore_decision_checkout_failed_carries_stash_skipped_reason() {
     assert!(s.contains("restore aborted"));
     assert!(s.contains("; stash skipped: MERGE_HEAD present"));
 }
-/// Passing the dedicated `CheckoutFailed` variant must yield the
-/// same failure decision as the `!outcome.checked_out` short-circuit
-/// — but the variant carries explicit semantic intent at the call
-/// site.
+/// The dedicated `CheckoutFailed` variant must yield the same failure decision as the `!outcome.checked_out` short-circuit.
+/// The variant states the failure explicitly at the call site.
 #[test]
 fn build_restore_decision_checkout_failed_variant_produces_failure() {
     let d = build_restore_decision(
@@ -744,9 +742,8 @@ async fn capture_git_state_records_head_and_staged() {
         "captured staged set must list the staged path"
     );
 }
-/// Safety-critical invariant: a soft restore rewinds HEAD but never destroys a
-/// turn-local commit — its content survives on disk (proving `--soft`) and the
-/// commit stays reachable via the reflog.
+/// A soft restore rewinds HEAD but never destroys a turn-local commit.
+/// Its content survives on disk (proving `--soft`) and the commit stays reachable via the reflog.
 #[tokio::test]
 async fn soft_restore_preserves_turn_local_commit() {
     if bazel_skip("soft_restore_preserves_turn_local_commit") {
@@ -869,8 +866,7 @@ async fn git_checkpoint_claim_attempt_is_once_per_prompt_until_truncate() {
         "after truncate the prompt index can be re-claimed"
     );
 }
-/// A session cwd may be a repo subdirectory: capture and restore must both
-/// anchor on the repo root so staged paths re-stage correctly (subdir-cwd regression).
+/// A session cwd may be a repo subdirectory: capture and restore must both anchor on the repo root so staged paths re-stage correctly.
 #[tokio::test]
 async fn capture_and_restore_anchor_on_repo_root_from_subdir_cwd() {
     if bazel_skip("capture_and_restore_anchor_on_repo_root_from_subdir_cwd") {
@@ -921,8 +917,7 @@ async fn capture_and_restore_anchor_on_repo_root_from_subdir_cwd() {
         "both staged paths must be re-staged from a subdir cwd"
     );
 }
-/// The abort path leaves git untouched: an unstashable dirty tree (in-progress
-/// merge) returns `restored: false` with a reason and HEAD unchanged.
+/// The abort path leaves git untouched: an unstashable dirty tree (in-progress merge) returns `restored: false` with a reason and HEAD unchanged.
 #[tokio::test]
 async fn soft_restore_aborts_on_unstashable_dirty_tree_without_touching_git() {
     if bazel_skip("soft_restore_aborts_on_unstashable_dirty_tree_without_touching_git") {
@@ -954,8 +949,8 @@ async fn soft_restore_aborts_on_unstashable_dirty_tree_without_touching_git() {
     let head_now = git_cli(tmp.path(), &["rev-parse", "HEAD"]).await.unwrap();
     assert_eq!(head_now.trim(), head_b, "HEAD must be unchanged on abort");
 }
-/// When `reset --soft` fails after dirty work was stashed, the stash is popped
-/// back (not stranded): `restored: false`, no leftover stash, dirty content back.
+/// When `reset --soft` fails after dirty work was stashed, the stash is popped back (not stranded).
+/// The call reports `restored: false`, leaves no stash entry, and puts the dirty content back.
 #[tokio::test]
 async fn soft_restore_restores_stash_when_reset_fails() {
     if bazel_skip("soft_restore_restores_stash_when_reset_fails") {
@@ -991,8 +986,8 @@ async fn soft_restore_restores_stash_when_reset_fails() {
 fn skip_without_git_cli() -> bool {
     std::env::var("BAZEL_TEST").is_ok()
 }
-/// `origin.git` (bare, HEAD → main) plus a work clone on `conv/t` forked
-/// from a pushed `main`. Returns (tempdir, work path).
+/// `origin.git` (bare, HEAD points at main) plus a work clone on `conv/t` forked from a pushed `main`.
+/// Returns (tempdir, work path).
 async fn conv_repo_with_origin() -> (tempfile::TempDir, PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
     let bare = tmp.path().join("origin.git");

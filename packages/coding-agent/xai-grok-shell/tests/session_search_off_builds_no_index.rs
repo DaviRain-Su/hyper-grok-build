@@ -56,8 +56,8 @@ async fn saved_session_is_neither_indexed_nor_found_with_search_off() {
     .unwrap();
 
     assert!(resp.results.is_empty(), "a search must find nothing");
-    // Prefix, not the plain name: on a network home the journal mode picks a per-host sibling,
-    // which is why the operator doc says to delete `session_search*`.
+    // Prefix, not the plain name: on a network home the journal mode picks a per-host sibling file
+    // That is why the operator doc says to delete `session_search*`
     let index_files: Vec<String> = std::fs::read_dir(root.join("sessions"))
         .into_iter()
         .flatten()

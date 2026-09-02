@@ -7,10 +7,9 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Wire code for "the target session has an active turn" rejections of
-/// toolset mutations (`workspace.update_tool_config`). Retryable at the
-/// turn boundary. Shared so clients can recognise the retryable class
-/// without depending on the workspace crate's error enum.
+/// Wire code for "the target session has an active turn" rejections of toolset mutations (`workspace.update_tool_config`).
+/// Retryable at the turn boundary.
+/// Shared so clients can recognise the retryable class without depending on the workspace crate's error enum.
 pub const TURN_ACTIVE: &str = "turn_active";
 
 pub const HUB_ERROR: &str = "hub_error";
@@ -35,8 +34,7 @@ pub struct RpcError {
 }
 
 impl RpcError {
-    /// Whether this error is a [`TURN_ACTIVE`] rejection, retryable at the
-    /// turn boundary.
+    /// Whether this error is a [`TURN_ACTIVE`] rejection, retryable at the turn boundary.
     pub fn is_turn_active(&self) -> bool {
         self.code == TURN_ACTIVE
     }
@@ -94,32 +92,6 @@ mod tests {
             json,
             serde_json::json!({"err": {"code": "session_not_found", "message": "ghost"}})
         );
-    }
-
-    #[test]
-    fn serde_round_trip_ok() {
-        let env: RpcEnvelope<String> = RpcEnvelope::ok("hello".into());
-        let json = serde_json::to_value(&env).unwrap();
-        let recovered: RpcEnvelope<String> = serde_json::from_value(json).unwrap();
-        assert_eq!(recovered.into_result().unwrap(), "hello");
-    }
-
-    #[test]
-    fn serde_round_trip_err() {
-        let env: RpcEnvelope<String> = RpcEnvelope::err_parts("hub_error", "boom");
-        let json = serde_json::to_value(&env).unwrap();
-        let recovered: RpcEnvelope<String> = serde_json::from_value(json).unwrap();
-        let err = recovered.into_result().unwrap_err();
-        assert_eq!(err.code, "hub_error");
-        assert_eq!(err.message, "boom");
-    }
-
-    #[test]
-    fn is_turn_active_matches_only_the_turn_active_code() {
-        let env: RpcEnvelope<String> = RpcEnvelope::err_parts(TURN_ACTIVE, "busy");
-        assert!(env.into_result().unwrap_err().is_turn_active());
-        let env: RpcEnvelope<String> = RpcEnvelope::err_parts("hub_error", "boom");
-        assert!(!env.into_result().unwrap_err().is_turn_active());
     }
 
     #[test]

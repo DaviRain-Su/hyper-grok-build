@@ -312,8 +312,7 @@ async fn acquire_succeeds_over_leftover_lock_file_of_dead_process() {
 const LOCK_HOLDER_READY: &str = "__GROK_LOCK_HOLDER_READY__";
 
 /// Inert unless `GROK_TEST_LOCK_HOLDER` holds `"<lock_path>|<pid|dead_pid|empty>|<age_secs>"`:
-/// flocks with backdated info (or a dead recorded PID, or an empty file), prints ready,
-/// then blocks on stdin.
+/// flocks with backdated info (or a dead recorded PID, or an empty file), prints ready, then blocks on stdin.
 #[cfg(unix)]
 #[test]
 #[ignore = "spawned as a subprocess by the cross-process lock tests"]

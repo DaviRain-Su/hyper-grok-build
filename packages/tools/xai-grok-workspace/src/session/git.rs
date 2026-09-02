@@ -58,11 +58,10 @@ pub struct DiffSizeExceededFile {
 }
 /// Run a git CLI command and return stdout on success, or error with stderr.
 ///
-/// All invocations use `--no-optional-locks` to prevent background stat-cache
-/// refreshes from creating `index.lock`.  This flag only suppresses *optional*
-/// sub-operations (e.g. refreshing stat info after `status`); locks that are
-/// *required* for the requested operation (e.g. `git add`, `git commit`) are
-/// unaffected.  See `git(1)` and `GIT_OPTIONAL_LOCKS`.
+/// All invocations use `--no-optional-locks` to prevent background stat-cache refreshes from creating `index.lock`.
+/// This flag only suppresses *optional* sub-operations (e.g. refreshing stat info after `status`).
+/// Locks that are *required* for the requested operation (e.g. `git add`, `git commit`) are unaffected.
+/// See `git(1)` and `GIT_OPTIONAL_LOCKS`.
 pub async fn git_cli(cwd: &Path, args: &[&str]) -> Result<String> {
     tracing::debug!(cwd = %cwd.display(), args = ?args, "git_cli");
     let mut cmd = Command::new("git");
@@ -105,9 +104,8 @@ pub async fn git_cli(cwd: &Path, args: &[&str]) -> Result<String> {
         ))
     }
 }
-/// Mutating [`git_cli`]: bump the gate epoch after the attempt. Failed
-/// commands can still change the repo (`pull --rebase` conflicts, partial
-/// checkout); skipping invalidate would keep pre-mutation snapshots.
+/// Mutating [`git_cli`]: bump the gate epoch after the attempt.
+/// Failed commands can still change the repo (`pull --rebase` conflicts, partial checkout); skipping invalidate would keep pre-mutation snapshots.
 async fn git_cli_mut(cwd: &Path, args: &[&str]) -> Result<String> {
     let result = git_cli(cwd, args).await;
     super::git_gate::invalidate(cwd);
@@ -115,17 +113,16 @@ async fn git_cli_mut(cwd: &Path, args: &[&str]) -> Result<String> {
 }
 /// Run a jj CLI command and return stdout on success, or error with stderr.
 ///
-/// Passes `--ignore-working-copy` to skip the automatic working-copy snapshot
-/// that jj performs at the start of every command. This is safe for read-only
-/// queries and avoids unnecessary I/O. For mutating commands (`describe`,
-/// `new`, `restore`, `workspace add`) use [`jj_cli_mut`] instead.
+/// Passes `--ignore-working-copy` to skip the automatic working-copy snapshot that jj performs at the start of every command.
+/// This is safe for read-only queries and avoids unnecessary I/O.
+/// For mutating commands (`describe`, `new`, `restore`, `workspace add`) use [`jj_cli_mut`] instead.
 pub async fn jj_cli(cwd: &Path, args: &[&str]) -> Result<String> {
     jj_cli_inner(cwd, args, true).await
 }
 /// Run a mutating jj CLI command (no `--ignore-working-copy`).
 ///
-/// Use this for commands that modify state: `describe`, `new`, `restore`,
-/// `workspace add/forget`. The working copy will be snapshotted and updated.
+/// Use this for commands that modify state: `describe`, `new`, `restore`, `workspace add/forget`.
+/// The working copy will be snapshotted and updated.
 pub async fn jj_cli_mut(cwd: &Path, args: &[&str]) -> Result<String> {
     jj_cli_inner(cwd, args, false).await
 }
@@ -196,18 +193,15 @@ pub enum GitDiscoveryResult {
     Found(PathBuf),
     /// The path is definitively not inside a git repository.
     NotARepo,
-    /// libgit2 failed for a reason other than "not found" (e.g. permissions,
-    /// unsupported extensions, corrupt repo). The user may or may not be in a
-    /// git repo — we can't tell.
+    /// libgit2 failed for a reason other than "not found" (e.g. permissions, unsupported extensions, corrupt repo).
+    /// The user may or may not be in a git repo; we can't tell.
     DiscoveryFailed(anyhow::Error),
 }
 /// Discover whether `path` is inside a git repository.
 ///
-/// Returns [`GitDiscoveryResult::Found`] with the worktree root on success,
-/// [`GitDiscoveryResult::NotARepo`] when the path is definitively outside any
-/// repo, or [`GitDiscoveryResult::DiscoveryFailed`] when libgit2 errors for
-/// an unexpected reason (so callers can avoid false-positive "not a repo"
-/// decisions).
+/// Returns [`GitDiscoveryResult::Found`] with the worktree root on success.
+/// [`GitDiscoveryResult::NotARepo`] means the path is definitively outside any repo.
+/// [`GitDiscoveryResult::DiscoveryFailed`] means libgit2 errored unexpectedly, so callers can avoid false-positive "not a repo" decisions.
 pub fn discover_git_root(path: &Path) -> GitDiscoveryResult {
     match Repository::discover(path) {
         Ok(repo) => match repo.workdir() {
@@ -240,12 +234,11 @@ pub(crate) fn strip_url_credentials(url_str: &str) -> String {
     }
     url_str.to_string()
 }
-/// Scrub credentials from any URL embedded in free-form git output before it is
-/// returned to a caller or logged. A `github` remote may carry
-/// `https://x-access-token:TOKEN@host/...`, and git echoes the remote URL in
-/// push/fetch errors — so the token would otherwise leak to the FE and logs.
-/// Rewrites `scheme://<userinfo>@` → `scheme://` in place, preserving the rest
-/// (line structure, quotes, trailing punctuation) so diagnostics stay readable.
+/// Scrub credentials from any URL embedded in free-form git output before it is returned to a caller or logged.
+/// A `github` remote may carry `https://x-access-token:TOKEN@host/...`, and git echoes the remote URL in push/fetch errors.
+/// The token would otherwise leak to the FE and logs.
+/// Rewrites `scheme://<userinfo>@` to `scheme://` in place.
+/// The rest (line structure, quotes, trailing punctuation) is preserved so diagnostics stay readable.
 pub(crate) fn scrub_git_output(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut remaining = text;
@@ -270,12 +263,10 @@ pub(crate) fn scrub_git_output(text: &str) -> String {
 }
 /// Normalize a git remote URL to a transport-agnostic canonical form.
 ///
-/// Produces `host/path` (lowercase host, no scheme, no `.git` suffix,
-/// no credentials, no port). Both SSH and HTTPS URLs for the same repo
-/// produce identical output.
+/// Produces `host/path` (lowercase host, no scheme, no `.git` suffix, no credentials, no port).
+/// Both SSH and HTTPS URLs for the same repo produce identical output.
 ///
-/// Returns `None` for URLs that cannot be meaningfully normalized
-/// (e.g. `file://` paths, empty strings).
+/// Returns `None` for URLs that cannot be meaningfully normalized (e.g. `file://` paths, empty strings).
 ///
 /// # Examples
 ///
@@ -305,7 +296,7 @@ pub fn normalize_repo_url(url: &str) -> Option<String> {
     }
     None
 }
-/// `git@host:path` or `host:path` → `host/path`
+/// Turns `git@host:path` or `host:path` into `host/path`
 fn normalize_scp_url(url: &str) -> Option<String> {
     let after_user = match url.find('@') {
         Some(pos) => &url[pos + 1..],
@@ -324,7 +315,7 @@ fn normalize_scp_url(url: &str) -> Option<String> {
     }
     Some(format!("{}/{}", host.to_ascii_lowercase(), path))
 }
-/// Standard URL (`https://`, `ssh://`, `git://`, `http://`) → `host/path`
+/// Turns a standard URL (`https://`, `ssh://`, `git://`, `http://`) into `host/path`
 fn normalize_parsed_url(parsed: &Url) -> Option<String> {
     if parsed.scheme() == "file" {
         return None;
@@ -368,9 +359,8 @@ pub struct PersistedGitMetadata {
     pub head_commit: Option<String>,
     pub head_branch: Option<String>,
 }
-/// Resolve session-persistence git metadata: worktree root, HEAD, and
-/// deduplicated, credential-stripped remotes. Reads refs and config only, via
-/// the repo's commondir so linked worktrees resolve like the main repo.
+/// Resolve session-persistence git metadata: worktree root, HEAD, and deduplicated, credential-stripped remotes.
+/// Reads refs and config only, via the repo's commondir so linked worktrees resolve like the main repo.
 pub fn resolve_persisted_session_git_metadata_sync(cwd: &Path) -> PersistedGitMetadata {
     let git_root = match discover_git_root(cwd) {
         GitDiscoveryResult::Found(root) => root,
@@ -517,8 +507,8 @@ pub async fn get_branch(cwd: &Path) -> Option<String> {
         .ok()
         .filter(|b| !b.is_empty())
 }
-/// Path-component tilde collapse (`~/src/repo`). String prefix matching would
-/// treat `HOME=/Users/u` as a prefix of `/Users/user/xai`.
+/// Path-component tilde collapse (`~/src/repo`).
+/// String prefix matching would treat `HOME=/Users/u` as a prefix of `/Users/user/xai`.
 fn collapse_home_path(path: &Path, home: Option<&Path>) -> String {
     let Some(home) = home else {
         return path.display().to_string();
@@ -533,8 +523,8 @@ fn collapse_home_path(path: &Path, home: Option<&Path>) -> String {
         .unwrap_or_else(|_| path.display().to_string())
 }
 /// Returns (is_worktree, main_repo_display_name) if this is a git checkout.
-/// `None` when `cwd` is not inside a repo. The display name is the main repo
-/// path, preferably relative to $HOME as ~...
+/// `None` when `cwd` is not inside a repo.
+/// The display name is the main repo path, preferably relative to $HOME as ~...
 pub async fn get_worktree_info(cwd: &Path) -> Option<(bool, Option<String>)> {
     let cwd = cwd.to_path_buf();
     tokio::task::spawn_blocking(move || {
@@ -584,8 +574,8 @@ pub async fn get_worktree_info(cwd: &Path) -> Option<(bool, Option<String>)> {
 }
 /// Switch the working tree to a different branch, optionally creating it.
 ///
-/// Refuses to switch if the working tree is dirty (staged or unstaged changes)
-/// to avoid losing work. The dirty check uses `git2` (no subprocess).
+/// Refuses to switch if the working tree is dirty (staged or unstaged changes) to avoid losing work.
+/// The dirty check uses `git2` (no subprocess).
 pub async fn checkout_branch(git_root: &Path, branch: &str, create: bool) -> Result<()> {
     let root = git_root.to_path_buf();
     let has_changes = tokio::task::spawn_blocking(move || -> Result<bool> {
@@ -631,12 +621,11 @@ fn compute_ahead_behind(repo: &Repository) -> Option<(usize, usize)> {
     let upstream_oid = upstream.get().target()?;
     repo.graph_ahead_behind(local_oid, upstream_oid).ok()
 }
-/// HEAD resolved from refs only. `None` before the first commit; other failures
-/// are logged and also `None`.
+/// HEAD resolved from refs only.
+/// `None` before the first commit; other failures are logged and also `None`.
 ///
-/// Never peel to the commit: on a huge or corrupt pack that read can hang,
-/// allocating until the process dies — it hung session startup, and the file
-/// watcher hits this on every git event.
+/// Never peel to the commit: on a huge or corrupt pack that read can hang, allocating until the process dies.
+/// It hung session startup, and the file watcher hits this on every git event.
 fn head_reference(repo: &Repository) -> Option<Reference<'_>> {
     match repo.head() {
         Ok(head) => Some(head),
@@ -652,8 +641,8 @@ fn head_reference(repo: &Repository) -> Option<Reference<'_>> {
         }
     }
 }
-/// The hash stored in HEAD, as `git rev-parse HEAD` prints it. Never loads the
-/// object, so it may name one this repo does not have (see [`head_reference`]).
+/// The hash stored in HEAD, as `git rev-parse HEAD` prints it.
+/// Never loads the object, so it may name one this repo does not have (see [`head_reference`]).
 fn head_sha(repo: &Repository) -> Option<String> {
     Some(head_reference(repo)?.target()?.to_string())
 }
@@ -903,7 +892,7 @@ pub struct GitHeadChanged {
     pub main_repo: Option<String>,
 }
 /// Discover the git root, current branch, and remote URLs.
-/// Uses `git2` — no subprocess.
+/// Uses `git2` (no subprocess).
 pub async fn git_info(cwd: &Path) -> Result<GitInfoData> {
     let cwd = cwd.to_path_buf();
     tokio::task::spawn_blocking(move || {
@@ -939,8 +928,7 @@ pub async fn git_info(cwd: &Path) -> Result<GitInfoData> {
 /// Detect the default branch for this repository.
 ///
 /// Priority:
-/// 1. `refs/remotes/origin/HEAD` symbolic ref (set by `git clone` or
-///    `git remote set-head origin --auto`).
+/// 1. `refs/remotes/origin/HEAD` symbolic ref (set by `git clone` or `git remote set-head origin --auto`).
 /// 2. `init.defaultBranch` git config value (user/system preference).
 fn detect_default_branch(repo: &Repository) -> Option<String> {
     if let Some(branch) = detect_remote_default_branch(repo) {
@@ -967,8 +955,8 @@ fn detect_remote_default_branch(repo: &Repository) -> Option<String> {
         .and_then(|t| t.strip_prefix(prefix))
         .map(|b| b.to_string())
 }
-/// List all local + remote branches.
-/// Uses `git2` — no subprocess, no `git status`.
+/// List all local and remote branches.
+/// Uses `git2` (no subprocess, no `git status`).
 pub async fn list_branches(git_root: &Path) -> Result<GitBranchListData> {
     let root = git_root.to_path_buf();
     tokio::task::spawn_blocking(move || {
@@ -1004,8 +992,8 @@ pub async fn list_branches(git_root: &Path) -> Result<GitBranchListData> {
     })
     .await?
 }
-/// HEAD's commit hash for cache validation and `--restore-code` (see
-/// [`head_sha`]). `None` outside a git repo or before the first commit.
+/// HEAD's commit hash for cache validation and `--restore-code` (see [`head_sha`]).
+/// `None` outside a git repo or before the first commit.
 pub async fn get_current_commit(git_root: &Path) -> Option<String> {
     let cwd = git_root.to_path_buf();
     tokio::task::spawn_blocking(move || -> Option<String> {
@@ -1045,11 +1033,10 @@ fn change_type_from_porcelain(ch: char, staged: bool) -> ChangeType {
         _ => ChangeType::Edit,
     }
 }
-/// Parse `git diff --numstat` output into a map of path → (additions, deletions).
+/// Parse `git diff --numstat` output into a map of path to (additions, deletions).
 ///
-/// We intentionally omit `-M` from our `git diff --numstat` invocations, so rename
-/// entries won't appear in practice. The format is simply `ADDS\tDELS\tPATH`
-/// (or `-\t-\tPATH` for binary files).
+/// We intentionally omit `-M` from our `git diff --numstat` invocations, so rename entries won't appear in practice.
+/// The format is `ADDS\tDELS\tPATH` (or `-\t-\tPATH` for binary files).
 fn parse_numstat(output: &str) -> HashMap<String, (u64, u64)> {
     let mut map = HashMap::new();
     for line in output.lines() {
@@ -1190,13 +1177,11 @@ fn parse_porcelain_v2(
     }
     (staged, unstaged)
 }
-/// Full git-status via CLI only — used as fallback when libgit2 cannot read the
-/// index (e.g. split-index `link` extension).
+/// Full git-status via CLI only, used as fallback when libgit2 cannot read the index (e.g. split-index `link` extension).
 ///
-/// **Limitation:** patch content (`patch`, `patch_bytes`, `patch_lines`) is not
-/// populated — all entries return `None` for these fields. Currently no caller
-/// passes `include_patches=true` via the extension API. If that changes, add
-/// `git diff --cached -p` / `git diff -p` parsing here.
+/// **Limitation:** patch content (`patch`, `patch_bytes`, `patch_lines`) is not populated; all entries return `None` for these fields.
+/// Currently no caller passes `include_patches=true` via the extension API.
+/// If that changes, add `git diff --cached -p` / `git diff -p` parsing here.
 async fn status_via_cli(
     git_root: &Path,
     include_untracked: bool,
@@ -1881,13 +1866,11 @@ pub async fn stash(git_root: &Path, include_untracked: bool) -> Result<()> {
     tracing::debug!(include_untracked, elapsed = ?start.elapsed(), "git.stash");
     Ok(())
 }
-/// Tracing target used by all `--restore-code` log lines that are NOT
-/// scoped to a specific worktree subsystem. Operators filter on this to
-/// find restore-code-related warnings.
+/// Tracing target used by all `--restore-code` log lines that are NOT scoped to a specific worktree subsystem.
+/// Operators filter on this to find restore-code-related warnings.
 pub const RESTORE_CODE_LOG: &str = "xai_restore_code";
-/// Emit the "session registry disabled" warning shared by both the
-/// worktree and non-worktree `--restore-code` paths. Centralised so a
-/// future refactor cannot silently downgrade one site to `debug!`.
+/// Emit the "session registry disabled" warning shared by both the worktree and non-worktree `--restore-code` paths.
+/// Centralised so a future refactor cannot silently downgrade one site to `debug!`.
 pub fn warn_registry_disabled_restore(session_id: &str) {
     tracing::warn!(
         target: RESTORE_CODE_LOG,
@@ -1895,32 +1878,29 @@ pub fn warn_registry_disabled_restore(session_id: &str) {
         "session registry disabled — staged/unstaged/untracked will not be restored"
     );
 }
-/// Gate for [`warn_registry_disabled_restore`]: the warn should fire
-/// only when the working tree is a real git repo (jj has its own
-/// changeset model that bypasses the staged/unstaged/untracked concept)
-/// AND the registry is unavailable. Exposed so the production gate and
-/// its regression test share the same predicate.
+/// Gate for [`warn_registry_disabled_restore`]: the warn should fire only when the working tree is a real git repo AND the registry is unavailable.
+/// (jj has its own changeset model that bypasses the staged/unstaged/untracked concept.)
+/// Exposed so the production gate and its regression test share the same predicate.
 pub fn should_warn_registry_disabled(is_jj: bool, registry_present: bool) -> bool {
     !is_jj && !registry_present
 }
 /// Outcome of a [`checkout_session_commit`] call.
 ///
-/// `checked_out: true` means HEAD is at the requested commit after this
-/// call returned — including the no-op early-return where HEAD was
-/// already at the target.
+/// `checked_out: true` means HEAD is at the requested commit after this call returned.
+/// That includes the no-op early-return where HEAD was already at the target.
 #[derive(Debug, Default, Clone)]
 pub struct CheckoutSessionOutcome {
     pub checked_out: bool,
     pub stash_ref: Option<String>,
-    /// Set when the working tree was dirty but no stash was created (e.g.
-    /// an in-progress merge/rebase/cherry-pick blocked it, or `git stash`
-    /// itself failed). Callers surface this to the user.
+    /// Set when the working tree was dirty but no stash was created.
+    /// Causes: an in-progress merge/rebase/cherry-pick blocked it, or `git stash` itself failed.
+    /// Callers surface this to the user.
     pub stash_skipped_reason: Option<String>,
 }
 /// Result of attempting to stash dirty working-tree state.
 #[derive(Debug, Clone)]
 pub enum StashOutcome {
-    /// Working tree was already clean — no stash needed.
+    /// Working tree was already clean; no stash needed.
     Clean,
     /// Stash created; carries the captured stash ref (commit SHA).
     Stashed(String),
@@ -1946,21 +1926,15 @@ fn in_progress_state_reason(git_root: &Path) -> Option<String> {
     }
     None
 }
-/// Stash dirty working-tree state (including untracked files) before a
-/// destructive operation like `git checkout`.
+/// Stash dirty working-tree state (including untracked files) before a destructive operation like `git checkout`.
 ///
-/// Best-effort: returns [`StashOutcome::Skipped`] (with a reason) when an
-/// in-progress merge/rebase/cherry-pick/bisect blocks the stash, or when
-/// `git stash` itself fails. Returns [`StashOutcome::Clean`] when the
-/// tree was already clean.
+/// Best-effort: an in-progress merge/rebase/cherry-pick/bisect or a failed `git stash` returns [`StashOutcome::Skipped`] with a reason.
+/// Returns [`StashOutcome::Clean`] when the tree was already clean.
 ///
-/// `stash push` + `rev-parse stash@{0}` is mostly atomic in practice (the
-/// only racer is another concurrent stash in the same repo). The truly
-/// atomic `git stash create + stash store` flow is not viable here
-/// because `git stash create` does not support `--include-untracked` —
-/// using it would silently lose untracked files from the snapshot. On
-/// `rev-parse` failure we return `Skipped` rather than a misleading
-/// `stash@{0}` literal.
+/// `stash push` then `rev-parse stash@{0}` is mostly atomic in practice (the only racer is another concurrent stash in the same repo).
+/// The truly atomic `git stash create` then `stash store` flow is not viable because `git stash create` does not support `--include-untracked`.
+/// Using it would silently lose untracked files from the snapshot.
+/// On `rev-parse` failure we return `Skipped` rather than a misleading `stash@{0}` literal.
 pub async fn stash_before_destructive_op(
     git_root: &Path,
     label: &str,
@@ -2035,14 +2009,12 @@ pub async fn stash_before_destructive_op(
 ///
 /// Gracefully degrades: logs warnings but never returns an error.
 ///
-/// Contract: `outcome.checked_out` is `true` when HEAD is at `target_sha`
-/// after this call returned, including the no-op early-return where HEAD
-/// was already at the target. Callers should rely on this flag when
-/// gating user-visible "restored" banners.
+/// Contract: `outcome.checked_out` is `true` when HEAD is at `target_sha` after this call returned.
+/// That includes the no-op early-return where HEAD was already at the target.
+/// Callers should rely on this flag when gating user-visible "restored" banners.
 ///
-/// If a fetch is required it runs on `spawn_blocking` and is **not** cancelled
-/// when this future is dropped. The helper still kills the git process group
-/// when [`crate::restore_fetch::RESTORE_FETCH_BUDGET`] elapses.
+/// If a fetch is required it runs on `spawn_blocking` and is **not** cancelled when this future is dropped.
+/// The helper still kills the git process group when [`crate::restore_fetch::RESTORE_FETCH_BUDGET`] elapses.
 pub async fn checkout_session_commit(
     git_root: &Path,
     target_sha: &str,
@@ -2304,8 +2276,7 @@ pub(crate) async fn checkout_commit_with_fetch(
         Err(e) => pop_checkout_auto_stash(git_root, stashed, fetched, e.to_string()).await,
     }
 }
-/// Restore a pre-checkout auto-stash on failure so callers that only inspect
-/// `error` are not left on a clean tree with a hidden stash entry.
+/// Restore a pre-checkout auto-stash on failure so callers that only inspect `error` are not left on a clean tree with a hidden stash entry.
 async fn pop_checkout_auto_stash(
     git_root: &Path,
     stashed: bool,
@@ -2322,25 +2293,18 @@ async fn pop_checkout_auto_stash(
         error: Some(error),
     }
 }
-/// Decide whether a `--restore-code` HEAD checkout is safe to run against
-/// `supplied_cwd`.
+/// Decide whether a `--restore-code` HEAD checkout is safe to run against `supplied_cwd`.
 ///
-/// The restore-code path may run a targeted
-/// `git fetch --no-tags [--depth=1] origin <sha>` + `git checkout <sha>`,
-/// which *detaches HEAD*. `--depth=1` is only added when the repo is already
-/// shallow. That is only acceptable in two situations:
+/// The restore-code path may run a targeted `git fetch --no-tags [--depth=1] origin <sha>` then `git checkout <sha>`, which *detaches HEAD*.
+/// `--depth=1` is only added when the repo is already shallow.
+/// That is only acceptable in two situations:
 ///
 /// 1. `supplied_cwd` is a grok-managed worktree (`~/.grok/worktrees/...`).
-///    These are disposable snapshots that exist precisely to carry a
-///    detached session HEAD.
-/// 2. `supplied_cwd` is exactly the cwd the session was persisted with
-///    (`persisted_cwd`) — the original "same-directory restore" intent.
+///    These are disposable snapshots that exist precisely to carry a detached session HEAD.
+/// 2. `supplied_cwd` is exactly the cwd the session was persisted with (`persisted_cwd`), the original "same-directory restore" intent.
 ///
-/// In every other case — notably a forked-worktree session that was
-/// persisted with `git_ref = origin/main` but is later loaded with
-/// `cwd = <source repo>` — running the checkout would silently detach the
-/// user's real repository and leave their active branch behind, so we
-/// refuse.
+/// In every other case running the checkout would silently detach the user's real repository and leave their active branch behind, so we refuse.
+/// The notable case: a forked-worktree session persisted with `git_ref = origin/main` but later loaded with `cwd = <source repo>`.
 pub fn restore_code_checkout_allowed(supplied_cwd: &Path, persisted_cwd: Option<&str>) -> bool {
     let worktrees_dir = xai_grok_tools::util::grok_home::grok_home().join("worktrees");
     restore_code_checkout_allowed_in(supplied_cwd, persisted_cwd, &worktrees_dir)
@@ -2362,40 +2326,38 @@ fn restore_code_checkout_allowed_in(
 }
 /// Env var backing the `workspace_rewind_git` flag. See [`git_rewind_enabled`].
 const REWIND_GIT_ENV: &str = "GROK_WORKSPACE_REWIND_GIT";
-/// Whether the git rewind domain (capture + soft restore) is enabled. Default
-/// OFF: git is the only domain that moves `HEAD`, so it is gated behind
-/// `workspace_rewind_git`.
+/// Whether the git rewind domain (capture and soft restore) is enabled.
+/// Default OFF: git is the only domain that moves `HEAD`, so it is gated behind `workspace_rewind_git`.
 pub fn git_rewind_enabled() -> bool {
     xai_grok_config::env_bool(REWIND_GIT_ENV).unwrap_or(false)
 }
-/// Lightweight, in-memory git state captured at a turn boundary. `staged` holds
-/// repo-root-relative paths (from `git diff --cached --name-only`), matching what
-/// [`restage_git_paths`] re-stages via root-anchored `git add`.
+/// Lightweight, in-memory git state captured at a turn boundary.
+/// `staged` holds repo-root-relative paths (from `git diff --cached --name-only`).
+/// That matches what [`restage_git_paths`] re-stages via root-anchored `git add`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitStateRef {
     /// HEAD commit SHA at capture time.
     pub head: String,
-    /// Repo-root-relative paths with staged (HEAD→index) changes at capture time.
+    /// Repo-root-relative paths with staged (HEAD to index) changes at capture time.
     pub staged: Vec<PathBuf>,
 }
-/// Per-prompt, in-memory store of captured [`GitStateRef`]s keyed by
-/// `prompt_index`. Capture is first-wins (matching `FileStateTracker::begin_prompt`);
+/// Per-prompt, in-memory store of captured [`GitStateRef`]s keyed by `prompt_index`.
+/// Capture is first-wins (matching `FileStateTracker::begin_prompt`).
 /// [`truncate_from`](Self::truncate_from) drops indices `>= target` after a rewind.
 #[derive(Debug, Default)]
 pub struct GitCheckpointStore {
     by_prompt: Mutex<HashMap<usize, GitStateRef>>,
-    /// Prompt indices whose pre-turn capture was already attempted. A re-delivered
-    /// begin skips capture (even if the first attempt recorded nothing), so it
-    /// can't replace the pre-turn checkpoint with mid-turn state.
+    /// Prompt indices whose pre-turn capture was already attempted.
+    /// A re-delivered begin skips capture (even if the first attempt recorded nothing).
+    /// So it can't replace the pre-turn checkpoint with mid-turn state.
     attempted: Mutex<HashSet<usize>>,
 }
 impl GitCheckpointStore {
     pub fn new() -> Self {
         Self::default()
     }
-    /// Record the git state for `prompt_index`, first-wins: a re-delivered begin
-    /// must not overwrite the pre-turn state with mid-turn state. Mirrors
-    /// `FileStateTracker::begin_prompt`'s `or_insert_with`.
+    /// Record the git state for `prompt_index`, first-wins: a re-delivered begin must not overwrite the pre-turn state with mid-turn state.
+    /// Mirrors `FileStateTracker::begin_prompt`'s `or_insert_with`.
     pub async fn record(&self, prompt_index: usize, state: GitStateRef) {
         self.by_prompt
             .lock()
@@ -2403,9 +2365,9 @@ impl GitCheckpointStore {
             .entry(prompt_index)
             .or_insert(state);
     }
-    /// Claim the one-time pre-turn capture for `prompt_index`, returning `true`
-    /// only for the first caller; later begins get `false` and must skip capture
-    /// (even if the first attempt recorded nothing). Once-per-prompt, like the FS begin.
+    /// Claim the one-time pre-turn capture for `prompt_index`, returning `true` only for the first caller.
+    /// Later begins get `false` and must skip capture (even if the first attempt recorded nothing).
+    /// Once-per-prompt, like the FS begin.
     pub async fn claim_attempt(&self, prompt_index: usize) -> bool {
         self.attempted.lock().await.insert(prompt_index)
     }
@@ -2413,17 +2375,15 @@ impl GitCheckpointStore {
     pub async fn get(&self, prompt_index: usize) -> Option<GitStateRef> {
         self.by_prompt.lock().await.get(&prompt_index).cloned()
     }
-    /// Whether a git state is recorded for `prompt_index`. Cheaper than
-    /// [`get`](Self::get) — no clone of the `GitStateRef`.
+    /// Whether a git state is recorded for `prompt_index`.
+    /// Cheaper than [`get`](Self::get): no clone of the `GitStateRef`.
     pub async fn contains(&self, prompt_index: usize) -> bool {
         self.by_prompt.lock().await.contains_key(&prompt_index)
     }
-    /// Get the checkpoint with the greatest captured index `<= target`, returned
-    /// with that index. An exact match at `target` is returned as-is; otherwise
-    /// the nearest earlier checkpoint is returned so rewind can still land HEAD
-    /// on the closest known-good git state when capture was skipped at the target
-    /// or git-rewind was enabled mid-session. `None` only when no checkpoint at
-    /// or before `target` exists.
+    /// Get the checkpoint with the greatest captured index `<= target`, returned with that index.
+    /// An exact match at `target` is returned as-is; otherwise the nearest earlier checkpoint is returned.
+    /// That lets rewind land HEAD on the closest known-good git state when capture was skipped at the target or git-rewind was enabled mid-session.
+    /// `None` only when no checkpoint at or before `target` exists.
     pub async fn get_at_or_before(&self, target: usize) -> Option<(usize, GitStateRef)> {
         self.by_prompt
             .lock()
@@ -2445,17 +2405,16 @@ impl GitCheckpointStore {
             .retain(|&idx| idx < prompt_index);
     }
 }
-/// Capture the current git state (HEAD + staged paths) for a rewind checkpoint.
-/// `cwd` may be a subdirectory; the repo root is resolved so staged paths are
-/// repo-root-relative (matching restore's root-anchored `git add`). Best-effort:
-/// `None` outside a repo or with an unresolvable `HEAD` — capture must never fail a turn.
+/// Capture the current git state (HEAD and staged paths) for a rewind checkpoint.
+/// `cwd` may be a subdirectory; the repo root is resolved so staged paths are repo-root-relative (matching restore's root-anchored `git add`).
+/// Best-effort: `None` outside a repo or with an unresolvable `HEAD`; capture must never fail a turn.
 pub async fn capture_git_state(cwd: &Path) -> Option<GitStateRef> {
     let git_root = resolve_git_root(cwd).await?;
     let head = get_current_commit(&git_root).await?;
     let staged = staged_paths(&git_root).await?;
     Some(GitStateRef { head, staged })
 }
-/// Real git commit at a turn boundary. Best-effort — never fails the turn.
+/// Real git commit at a turn boundary. Best-effort: never fails the turn.
 /// Stages the worktree and commits on the current branch with `turn {n}`.
 pub async fn commit_turn_if_dirty(cwd: &Path, turn_number: u64) -> Option<String> {
     let git_root = resolve_git_root(cwd).await?;
@@ -2553,17 +2512,16 @@ pub async fn commit_turn_if_dirty(cwd: &Path, turn_number: u64) -> Option<String
     }
 }
 /// Resolve the worktree root for `cwd` via `git rev-parse --show-toplevel`.
-/// Path-sensitive index ops must run from the root so repo-root-relative paths
-/// are consistent — a session `cwd` may be a subdirectory.
+/// Path-sensitive index ops must run from the root so repo-root-relative paths are consistent; a session `cwd` may be a subdirectory.
 async fn resolve_git_root(cwd: &Path) -> Option<PathBuf> {
     let out = git_cli(cwd, &["rev-parse", "--show-toplevel"]).await.ok()?;
     let root = out.trim();
     (!root.is_empty()).then(|| PathBuf::from(root))
 }
-/// List repo-root-relative paths with staged (HEAD→index) changes via
-/// `git diff --cached --name-only -z`. `Some(empty)` means nothing staged;
-/// `None` means the diff failed, so callers can tell that apart from "nothing
-/// staged" instead of recording a lossy empty set. `git_root` must be the worktree root.
+/// List repo-root-relative paths with staged (HEAD to index) changes via `git diff --cached --name-only -z`.
+/// `Some(empty)` means nothing staged; `None` means the diff failed.
+/// Callers can tell those apart instead of recording a lossy empty set.
+/// `git_root` must be the worktree root.
 async fn staged_paths(git_root: &Path) -> Option<Vec<PathBuf>> {
     let out = match git_cli(git_root, &["diff", "--cached", "--name-only", "-z"]).await {
         Ok(out) => out,
@@ -2584,36 +2542,30 @@ async fn staged_paths(git_root: &Path) -> Option<Vec<PathBuf>> {
             .collect(),
     )
 }
-/// Outcome of [`soft_restore_git_state`]. Mirrors [`CheckoutSessionOutcome`] (a
-/// success flag + optional stash bookkeeping) plus an `aborted_reason` for the
-/// dirty-but-unstashable guard.
+/// Outcome of [`soft_restore_git_state`].
+/// Mirrors [`CheckoutSessionOutcome`] (a success flag and optional stash bookkeeping) plus an `aborted_reason` for the dirty-but-unstashable guard.
 #[derive(Debug, Default, Clone)]
 pub struct GitRestoreOutcome {
     /// `true` when HEAD is at the recorded commit after this call returned.
     pub restored: bool,
-    /// `true` when the index was reset to the new HEAD (`git reset -- .`). The
-    /// caller should drop checkpoints only after HEAD reset + index reset +
-    /// re-stage all succeed, so a partial failure keeps them for retry.
+    /// `true` when the index was reset to the new HEAD (`git reset -- .`).
+    /// The caller should drop checkpoints only after HEAD reset, index reset, and re-stage all succeed, so a partial failure keeps them for retry.
     pub index_reset: bool,
-    /// Set when restore was refused without touching git (e.g. unstashable dirty
-    /// tree, in-progress merge/rebase).
+    /// Set when restore was refused without touching git (e.g. unstashable dirty tree, in-progress merge/rebase).
     pub aborted_reason: Option<String>,
     /// Stash ref holding pre-rewind uncommitted work, when one was created.
     pub stash_ref: Option<String>,
 }
-/// Soft-restore git state to a recorded [`GitStateRef`]. `cwd` may be a
-/// subdirectory; the repo root is resolved so index ops match the recorded
-/// root-relative paths.
+/// Soft-restore git state to a recorded [`GitStateRef`].
+/// `cwd` may be a subdirectory; the repo root is resolved so index ops match the recorded root-relative paths.
 ///
 /// SOFT-ONLY and non-destructive to commits:
-/// 1. **Stash-or-abort** uncommitted work via [`stash_before_destructive_op`];
-///    if it can't be stashed (in-progress merge/rebase, stash failure), abort
-///    without touching git.
-/// 2. **`git reset --soft <head>`** moves HEAD back, leaving tree + index intact
-///    so turn-local commits survive (never `--hard`, never drops a commit).
-/// 3. **Unstage to the new HEAD** (`git reset -- .`); the recorded staged *paths*
-///    are re-applied later by [`restage_git_paths`] AFTER the FS revert, so blobs
-///    reflect the reverted tree.
+/// 1. **Stash-or-abort** uncommitted work via [`stash_before_destructive_op`].
+///    If it can't be stashed (in-progress merge/rebase, stash failure), abort without touching git.
+/// 2. **`git reset --soft <head>`** moves HEAD back, leaving tree and index intact so turn-local commits survive.
+///    (Never `--hard`, never drops a commit.)
+/// 3. **Unstage to the new HEAD** (`git reset -- .`).
+///    The recorded staged *paths* are re-applied later by [`restage_git_paths`] AFTER the FS revert, so blobs reflect the reverted tree.
 ///
 /// Returns a [`GitRestoreOutcome`]; never errors. Phase 2 re-stage is not done here.
 pub async fn soft_restore_git_state(
@@ -2712,11 +2664,10 @@ pub async fn soft_restore_git_state(
         stash_ref,
     }
 }
-/// Re-stage the recorded staged path set — phase 2 of a soft git rewind, run
-/// AFTER the FS revert (phase 1 is [`soft_restore_git_state`]) so blobs reflect
-/// the reverted tree. Per-path best-effort: a path removed during the turn is
-/// skipped, not fatal. Never errors; returns `true` when the full set was
-/// re-applied (nothing-to-do counts as success) so the caller can gate truncate on it.
+/// Re-stage the recorded staged path set, phase 2 of a soft git rewind.
+/// Runs AFTER the FS revert (phase 1 is [`soft_restore_git_state`]) so blobs reflect the reverted tree.
+/// Per-path best-effort: a path removed during the turn is skipped, not fatal.
+/// Never errors; returns `true` when the full set was re-applied (nothing-to-do counts as success) so the caller can gate truncate on it.
 pub async fn restage_git_paths(cwd: &Path, git_ref: &GitStateRef, session_id: &str) -> bool {
     if git_ref.staged.is_empty() {
         return true;
@@ -2768,10 +2719,9 @@ pub async fn restage_git_paths(cwd: &Path, git_ref: &GitStateRef, session_id: &s
     }
     failed_adds == 0
 }
-/// Run a git CLI command returning `(success, combined stdout+stderr)` instead
-/// of collapsing failure into an error. `LC_ALL=C` pins git's message locale so
-/// callers can classify output (e.g. non-fast-forward push rejections) by
-/// string-match. Errors only on spawn failure.
+/// Run a git CLI command returning `(success, combined stdout+stderr)` instead of collapsing failure into an error.
+/// `LC_ALL=C` pins git's message locale so callers can classify output (e.g. non-fast-forward push rejections) by string-match.
+/// Errors only on spawn failure.
 async fn git_cli_raw(cwd: &Path, args: &[&str]) -> Result<(bool, String)> {
     tracing::debug!(cwd = %cwd.display(), args = ?args, "git_cli_raw");
     let mut cmd = Command::new("git");
@@ -2824,13 +2774,11 @@ async fn git_cli_raw_mut(cwd: &Path, args: &[&str]) -> Result<(bool, String)> {
     }
     result
 }
-/// Marker line guarding the default-exclude seed. Environments may pre-seed
-/// the same block at provision time under this marker; whichever side seeds
-/// first wins and the other becomes a no-op.
+/// Marker line guarding the default-exclude seed.
+/// Environments may pre-seed the same block at provision time under this marker; whichever side seeds first wins and the other becomes a no-op.
 const DEFAULT_EXCLUDES_MARKER: &str = "grok default excludes";
-/// Local-only default excludes (`.git/info/exclude` — never enters the repo's
-/// history) so `stage_all` can't sweep in dependency trees, build output, or
-/// env files. `git add -f` still overrides.
+/// Local-only default excludes so `stage_all` can't sweep in dependency trees, build output, or env files.
+/// Lives in `.git/info/exclude`, which never enters the repo's history. `git add -f` still overrides.
 const DEFAULT_EXCLUDES_BLOCK: &str = "\
 # grok default excludes (local-only; seeded by the workspace git_commit op)
 .grok/
@@ -2857,10 +2805,8 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 ";
-/// Seed [`DEFAULT_EXCLUDES_BLOCK`] into the repo's `info/exclude` unless the
-/// marker is already present. Resolves the real file via `--git-path` so
-/// gitfile and linked-worktree checkouts seed the common dir, not a dead
-/// `.git/info` path.
+/// Seed [`DEFAULT_EXCLUDES_BLOCK`] into the repo's `info/exclude` unless the marker is already present.
+/// Resolves the real file via `--git-path` so gitfile and linked-worktree checkouts seed the common dir, not a dead `.git/info` path.
 async fn seed_default_excludes(git_root: &Path) -> Result<()> {
     let exclude_rel = git_cli(git_root, &["rev-parse", "--git-path", "info/exclude"]).await?;
     let exclude_path = {
@@ -2889,8 +2835,8 @@ async fn seed_default_excludes(git_root: &Path) -> Result<()> {
     tracing::debug!(path = %exclude_path.display(), "seeded default git excludes");
     Ok(())
 }
-/// Push HEAD to origin, classifying the failure mode. Never forces. Returns
-/// the combined output alongside the [`PushStatus`].
+/// Push HEAD to origin, classifying the failure mode. Never forces.
+/// Returns the combined output alongside the [`PushStatus`].
 async fn push_classified(git_root: &Path) -> Result<(PushStatus, String)> {
     let (ok, out) = git_cli_raw_mut(git_root, &["push", "-u", "origin", "HEAD"]).await?;
     if ok {
@@ -2904,8 +2850,8 @@ async fn push_classified(git_root: &Path) -> Result<(PushStatus, String)> {
     };
     Ok((status, out))
 }
-/// Refuse unless the workspace is on exactly `expected`. Detached HEAD
-/// reports "HEAD" and so never matches.
+/// Refuse unless the workspace is on exactly `expected`.
+/// Detached HEAD reports "HEAD" and so never matches.
 async fn ensure_on_branch(git_root: &Path, expected: Option<&str>) -> Result<()> {
     let Some(expected) = expected else {
         return Ok(());
@@ -3006,9 +2952,8 @@ pub async fn commit(git_root: &Path, req: &GitCommitReq) -> Result<CommitResult>
     })
 }
 /// Merge the base branch into the current branch (`workspace.git_sync_base`).
-/// Merge, never rebase: conv-branch history must not be rewritten. On
-/// conflicts the merge is left in progress for resolution; `abort` rolls it
-/// back.
+/// Merge, never rebase: conv-branch history must not be rewritten.
+/// On conflicts the merge is left in progress for resolution; `abort` rolls it back.
 pub async fn sync_base(
     git_root: &Path,
     base_ref: Option<&str>,
@@ -3076,10 +3021,9 @@ pub async fn sync_base(
     }
     anyhow::bail!("merge of base ref '{base}' failed: {merge_out}")
 }
-/// Reject a ref/branch value that could be parsed as a git option (leading `-`)
-/// or that carries whitespace/control characters or `..`. A boundary guard for
-/// client-influenced refs (notably `base_ref`) so they cannot be smuggled in as
-/// flags; combined with `--end-of-options` at each call site.
+/// Reject a ref/branch value that could be parsed as a git option (leading `-`) or that carries whitespace/control characters or `..`.
+/// A boundary guard for client-influenced refs (notably `base_ref`) so they cannot be smuggled in as flags.
+/// Combined with `--end-of-options` at each call site.
 fn ensure_ref_arg_safe(value: &str, what: &str) -> Result<()> {
     anyhow::ensure!(!value.is_empty(), "{what} must not be empty");
     anyhow::ensure!(
@@ -3096,12 +3040,10 @@ fn ensure_ref_arg_safe(value: &str, what: &str) -> Result<()> {
     );
     Ok(())
 }
-/// Seed a committed `.gitignore` (secrets never enter git)
-/// when a fresh conversation branch is created and the repo has none. Distinct
-/// from [`seed_default_excludes`], which seeds the *local-only* `info/exclude`
-/// as a `stage_all` backstop; this file is meant to be committed, so it also
-/// protects explicit user commits and BYO-remote exports. Never overwrites an
-/// existing `.gitignore`.
+/// Seed a committed `.gitignore` (secrets never enter git) when a fresh conversation branch is created and the repo has none.
+/// Distinct from [`seed_default_excludes`], which seeds the *local-only* `info/exclude` as a `stage_all` backstop.
+/// This file is meant to be committed, so it also protects explicit user commits and BYO-remote exports.
+/// Never overwrites an existing `.gitignore`.
 async fn seed_default_gitignore(git_root: &Path) -> Result<()> {
     let path = git_root.join(".gitignore");
     if tokio::fs::metadata(&path).await.is_ok() {
@@ -3123,11 +3065,11 @@ async fn seed_default_gitignore(git_root: &Path) -> Result<()> {
     tracing::debug!(path = %path.display(), "seeded and committed default .gitignore");
     Ok(())
 }
-/// `EnsureBinding` (`workspace.git_ensure_binding`): make the conversation
-/// branch exist and be checked out. Resolution order: already-current → local
-/// branch → remote `conv/<id>` (resume in a fresh sandbox: check it out, do not
-/// re-fork) → fork off `base_ref`. The base is never written directly. On a
-/// genuine fresh fork a committed `.gitignore` is seeded if absent.
+/// `EnsureBinding` (`workspace.git_ensure_binding`): make the conversation branch exist and be checked out.
+/// Resolution order: already-current, then local branch, then remote `conv/<id>`, then fork off `base_ref`.
+/// A remote `conv/<id>` hit is a resume in a fresh sandbox: check it out, do not re-fork.
+/// The base is never written directly.
+/// On a genuine fresh fork a committed `.gitignore` is seeded if absent.
 pub async fn ensure_binding(
     git_root: &Path,
     session_branch: &str,
@@ -3222,14 +3164,12 @@ pub async fn ensure_binding(
         head_sha,
     })
 }
-/// `MergeToMain` (`workspace.git_merge_to_main`): merge the conversation branch
-/// into its target. Merge, never rebase; never force. On conflicts the merge
-/// is aborted and HEAD is restored to `conv_branch` (never leave `MERGE_HEAD`
-/// on the integration branch).
+/// `MergeToMain` (`workspace.git_merge_to_main`): merge the conversation branch into its target.
+/// Merge, never rebase; never force.
+/// On conflicts the merge is aborted and HEAD is restored to `conv_branch` (never leave `MERGE_HEAD` on the integration branch).
 ///
-/// Fetch `origin/<target>` *before* checkout, then fast-forward the local
-/// target so the deployed SHA can never be behind the durable remote tip; a
-/// target that has *diverged* from origin is an error (never a force).
+/// Fetch `origin/<target>` *before* checkout, then fast-forward the local target so the deployed SHA can never be behind the durable remote tip.
+/// A target that has *diverged* from origin is an error (never a force).
 pub async fn merge_to_main(
     git_root: &Path,
     conv_branch: &str,
@@ -3316,8 +3256,7 @@ pub async fn merge_to_main(
         scrub_git_output(&merge_out)
     )
 }
-/// Push the merged target to origin when `push` is set, failing loudly (never
-/// forcing) so publish never records a deploy against an unpushed target.
+/// Push the merged target to origin when `push` is set, failing loudly (never forcing) so publish never records a deploy against an unpushed target.
 async fn push_merged_target_if_requested(
     git_root: &Path,
     target_branch: &str,
@@ -3334,8 +3273,8 @@ async fn push_merged_target_if_requested(
     );
     Ok(())
 }
-/// `Push` (`workspace.git_push`): push a branch (or current `HEAD`) to `origin`,
-/// classifying the outcome. Never forces. Output is credential-scrubbed.
+/// `Push` (`workspace.git_push`): push a branch (or current `HEAD`) to `origin`, classifying the outcome.
+/// Never forces. Output is credential-scrubbed.
 pub async fn push_branch(git_root: &Path, branch: Option<&str>) -> Result<GitPushResult> {
     let refspec = branch.unwrap_or("HEAD");
     if let Some(branch) = branch {
@@ -3430,9 +3369,8 @@ pub enum GitRepoResponse {
     NotGitRepo,
     GitRepo(GitRepoPathResponse),
 }
-/// Strip `root` from `child`, canonicalizing both sides to handle symlinks
-/// (e.g. `/tmp` → `/private/tmp` on macOS). Falls back through partial and
-/// raw `strip_prefix` when one side can't be resolved (deleted files, etc.).
+/// Strip `root` from `child`, canonicalizing both sides to handle symlinks (e.g. `/tmp` resolves to `/private/tmp` on macOS).
+/// Falls back through partial and raw `strip_prefix` when one side can't be resolved (deleted files, etc.).
 ///
 /// Returns `None` when `child` is not under `root` or they are the same path.
 pub fn strip_prefix_canonicalized(child: &Path, root: &Path) -> Option<PathBuf> {
@@ -3457,15 +3395,12 @@ pub fn strip_prefix_canonicalized(child: &Path, root: &Path) -> Option<PathBuf> 
 }
 /// Compute the subdirectory offset and git root for worktree creation.
 ///
-/// When a user's session cwd is a subdirectory of the git root (e.g.
-/// `/repo/packages/foo`), worktrees are always created at the repo root
-/// level.  Forked sessions must have their cwd set to the corresponding
-/// subdirectory inside the new worktree so that tool calls (search, terminal,
-/// file operations) behave the same as in the original session.
+/// When a user's session cwd is a subdirectory of the git root (e.g. `/repo/packages/foo`), worktrees are always created at the repo root level.
+/// Forked sessions must have their cwd set to the corresponding subdirectory inside the new worktree.
+/// That way tool calls (search, terminal, file operations) behave the same as in the original session.
 ///
 /// Returns `(subdir_offset, git_root)`:
-/// - `subdir_offset`: relative path from the git root to `source_cwd`
-///   (empty when `source_cwd == git_root`).
+/// - `subdir_offset`: relative path from the git root to `source_cwd` (empty when `source_cwd == git_root`).
 /// - `git_root`: the resolved git root directory.
 ///
 /// If the git root cannot be resolved, both values fall back to `source_cwd`.
@@ -3479,13 +3414,11 @@ pub fn compute_subdir_offset(source_cwd: &str) -> (PathBuf, String) {
         Err(_) => (PathBuf::new(), source_cwd.to_string()),
     }
 }
-/// Like [`compute_subdir_offset`] + [`effective_worktree_cwd`] combined, but
-/// for callers that already have the source git root (e.g. from an ACP
-/// response) instead of discovering it on disk.
+/// Like [`compute_subdir_offset`] and [`effective_worktree_cwd`] combined.
+/// For callers that already have the source git root (e.g. from an ACP response) instead of discovering it on disk.
 ///
-/// Returns `worktree_root` joined with the subdirectory offset from
-/// `source_git_root` to `source_cwd`, or `worktree_root` unchanged when
-/// there is no offset or `source_git_root` is `None`.
+/// Returns `worktree_root` joined with the subdirectory offset from `source_git_root` to `source_cwd`.
+/// Returns `worktree_root` unchanged when there is no offset or `source_git_root` is `None`.
 pub fn effective_worktree_path(
     worktree_root: &Path,
     source_cwd: &Path,
@@ -3499,12 +3432,10 @@ pub fn effective_worktree_path(
         None => worktree_root.to_path_buf(),
     }
 }
-/// Compute the effective cwd for a forked session by joining a worktree root
-/// with a subdirectory offset.
+/// Compute the effective cwd for a forked session by joining a worktree root with a subdirectory offset.
 ///
 /// When `subdir_offset` is empty this returns `worktree_root` unchanged.
-/// When it is non-empty the result is `worktree_root/subdir_offset` (using
-/// native path separators).
+/// When it is non-empty the result is `worktree_root/subdir_offset` (using native path separators).
 pub fn effective_worktree_cwd(worktree_root: &str, subdir_offset: &Path) -> String {
     if subdir_offset.as_os_str().is_empty() {
         worktree_root.to_string()
@@ -3578,26 +3509,23 @@ pub fn format_restore_summary(
         None => format!("staged: {staged}, unstaged: {unstaged}, untracked: {untracked}"),
     }
 }
-/// Append a "; saved your dirty changes to stash <ref>" suffix when a
-/// stash was created. Uses `;` (not parenthesised) so the suffix
-/// composes cleanly with summaries that already end in `)`. No-op when
-/// `stash_ref` is `None`.
+/// Append a "; saved your dirty changes to stash <ref>" suffix when a stash was created.
+/// Uses `;` (not parenthesised) so the suffix composes cleanly with summaries that already end in `)`.
+/// No-op when `stash_ref` is `None`.
 pub fn append_stash_suffix(summary: &mut String, stash_ref: Option<&str>) {
     use std::fmt::Write as _;
     if let Some(r) = stash_ref {
         let _ = write!(summary, "; saved your dirty changes to stash {r}");
     }
 }
-/// Append "; stash skipped: <reason>" when a stash was needed but could
-/// not be created (in-progress merge, `git stash` failure, etc.).
+/// Append "; stash skipped: <reason>" when a stash was needed but could not be created (in-progress merge, `git stash` failure, etc.).
 pub fn append_stash_skipped_suffix(summary: &mut String, reason: Option<&str>) {
     use std::fmt::Write as _;
     if let Some(r) = reason {
         let _ = write!(summary, "; stash skipped: {r}");
     }
 }
-/// Short (8-char) representation of a SHA, returning a placeholder when
-/// the input is empty.
+/// Short (8-char) representation of a SHA, returning a placeholder when the input is empty.
 pub fn short_sha(sha: &str) -> &str {
     if sha.is_empty() {
         "unknown"
@@ -3607,55 +3535,46 @@ pub fn short_sha(sha: &str) -> &str {
 }
 /// Depth of a `--restore-code` restoration.
 ///
-/// Serialised to `"full"` / `"head_only"` on the wire (camelCase /
-/// snake_case agnostic — the variants are themselves snake_case-style).
+/// Serialised to `"full"` / `"head_only"` on the wire (camelCase / snake_case agnostic; the variants are themselves snake_case-style).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RestoreDegree {
-    /// HEAD checkout + staged/unstaged/untracked applied from GCS archive.
+    /// HEAD checkout plus staged/unstaged/untracked applied from GCS archive.
     Full,
-    /// HEAD checkout only — no archive applied.
+    /// HEAD checkout only; no archive applied.
     HeadOnly,
 }
-/// Why a restore decision is being made — drives the summary string and
-/// degree. Shared by the non-worktree (`mvp_agent.rs`) and worktree
-/// (`session/worktree.rs`) call sites.
+/// Why a restore decision is being made; drives the summary string and degree.
+/// Shared by the non-worktree (`mvp_agent.rs`) and worktree (`session/worktree.rs`) call sites.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RestoreKind {
-    /// Local `git checkout` failed — archive must not be applied; caller
-    /// should pass this variant directly rather than relying on the
-    /// `!outcome.checked_out` short-circuit so the intent is explicit.
+    /// Local `git checkout` failed; the archive must not be applied.
+    /// Callers should pass this variant directly rather than relying on the `!outcome.checked_out` short-circuit, so the intent is explicit.
     CheckoutFailed,
-    /// Session registry disabled — only HEAD was checked out. Also used
-    /// when repository-snapshot restore is unavailable in this build.
+    /// Session registry disabled; only HEAD was checked out.
+    /// Also used when repository-snapshot restore is unavailable in this build.
     RegistryOff,
 }
 /// Neutral restore-outcome description shared by both restore code-paths.
 ///
-/// Each caller wraps it into its own wire shape (JSON meta for the
-/// non-worktree path, struct fields for the worktree path).
+/// Each caller wraps it into its own wire shape (JSON meta for the non-worktree path, struct fields for the worktree path).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestoreDecision {
-    /// `true` iff the working tree is at the requested commit after the
-    /// restore. `false` when `checkout_session_commit` failed; in that
-    /// case `summary` describes the failure and `degree` is `None`.
+    /// `true` iff the working tree is at the requested commit after the restore.
+    /// `false` when `checkout_session_commit` failed; in that case `summary` describes the failure and `degree` is `None`.
     pub restored: bool,
-    /// Human-readable summary line. Always populated when a restore was
-    /// attempted (even on failure) so the UI can render a banner.
+    /// Human-readable summary line.
+    /// Always populated when a restore was attempted (even on failure) so the UI can render a banner.
     pub summary: Option<String>,
     /// `Some` when `restored == true`; `None` on failure.
     pub degree: Option<RestoreDegree>,
 }
-/// Build a [`RestoreDecision`] from the checkout outcome and the policy
-/// kind. Pure function — no I/O. The single source of truth shared by
-/// the agent (`build_code_restore_meta`) and worktree
-/// (`build_worktree_restore_outcome`) wire-format adapters.
+/// Build a [`RestoreDecision`] from the checkout outcome and the policy kind. Pure function, no I/O.
+/// The single source of truth shared by the agent (`build_code_restore_meta`) and worktree (`build_worktree_restore_outcome`) wire-format adapters.
 ///
-/// Callers should pass [`RestoreKind::CheckoutFailed`] explicitly when
-/// `!outcome.checked_out`; the `!outcome.checked_out` fast-path is
-/// retained as a defensive fallback so a caller that picks any kind
-/// without checking the outcome still cannot apply the archive on top
-/// of arbitrary state.
+/// Callers should pass [`RestoreKind::CheckoutFailed`] explicitly when `!outcome.checked_out`.
+/// The `!outcome.checked_out` fast-path is retained as a defensive fallback.
+/// A caller that picks any kind without checking the outcome still cannot apply the archive on top of arbitrary state.
 pub fn build_restore_decision(
     head_commit: Option<&str>,
     outcome: &CheckoutSessionOutcome,

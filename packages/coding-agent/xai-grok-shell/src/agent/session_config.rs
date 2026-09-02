@@ -12,6 +12,9 @@ pub(crate) const SELECTABLE_REASONING_EFFORTS: [ReasoningEffort; 5] = [
     ReasoningEffort::Xhigh,
 ];
 
+pub(crate) const CONFIG_ID_MODEL: &str = "model";
+pub(crate) const CONFIG_ID_REASONING_EFFORT: &str = "reasoning_effort";
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SessionConfigOption {
@@ -80,6 +83,14 @@ pub(crate) fn legacy_session_effort_options() -> Vec<ReasoningEffortOption> {
         .collect()
 }
 
+fn model_display_name(model: &acp::ModelInfo) -> String {
+    if model.name.is_empty() {
+        model.model_id.0.to_string()
+    } else {
+        model.name.clone()
+    }
+}
+
 pub(crate) fn build_session_config_options(
     available_models: &[acp::ModelInfo],
     current_model_id: &acp::ModelId,
@@ -89,19 +100,12 @@ pub(crate) fn build_session_config_options(
     let mut options = Vec::with_capacity(available_models.len() + effort_options.len());
 
     for model in available_models {
-        let label = if model.name.is_empty() {
-            model.model_id.0.to_string()
-        } else {
-            model.name.clone()
-        };
-        // Locked BYOK platform models carry their setup hint so clients
-        // rendering these options can show why the row is gated.
         let description = parse_platform_lock_meta(model.meta.as_ref())
             .map(|lock| format!("🔒 {}", lock.setup_hint));
         options.push(SessionConfigOption {
             id: model.model_id.0.to_string(),
             category: "model".to_string(),
-            label,
+            label: model_display_name(model),
             description,
             selected: model.model_id == *current_model_id,
         });
@@ -115,6 +119,73 @@ pub(crate) fn build_session_config_options(
             description: effort.description.clone(),
             selected: Some(effort.value) == current_effort,
         });
+    }
+
+    options
+}
+
+pub(crate) fn build_acp_config_options(
+    available_models: &[acp::ModelInfo],
+    current_model_id: &acp::ModelId,
+    effort_options: &[ReasoningEffortOption],
+    current_effort: Option<ReasoningEffort>,
+) -> Vec<acp::SessionConfigOption> {
+    let mut options = Vec::new();
+
+    if !available_models.is_empty() {
+        let values: Vec<acp::SessionConfigSelectOption> = available_models
+            .iter()
+            .map(|model| {
+                acp::SessionConfigSelectOption::new(
+                    model.model_id.0.to_string(),
+                    model_display_name(model),
+                )
+            })
+            .collect();
+        // Keep the real model even if the catalog doesn't list it.
+        let current_value = current_model_id.0.to_string();
+        options.push(
+            acp::SessionConfigOption::select(CONFIG_ID_MODEL, "Model", current_value, values)
+                .category(acp::SessionConfigOptionCategory::Model),
+        );
+    }
+
+    if !effort_options.is_empty() {
+        // Keep the real effort even if it isn't a listed option (e.g. none/max);
+        // fall back to the model default when none is set.
+        let current_value = match current_effort {
+            Some(effort) => effort_options
+                .iter()
+                .find(|option| option.value == effort)
+                .map(|option| option.id.clone())
+                .unwrap_or_else(|| effort.as_str().to_string()),
+            None => effort_options
+                .iter()
+                .find(|option| option.default)
+                .unwrap_or(&effort_options[0])
+                .id
+                .clone(),
+        };
+        let values: Vec<acp::SessionConfigSelectOption> = effort_options
+            .iter()
+            .map(|option| {
+                let mut value =
+                    acp::SessionConfigSelectOption::new(option.id.clone(), option.label.clone());
+                if let Some(description) = &option.description {
+                    value = value.description(description.clone());
+                }
+                value
+            })
+            .collect();
+        options.push(
+            acp::SessionConfigOption::select(
+                CONFIG_ID_REASONING_EFFORT,
+                "Reasoning Effort",
+                current_value,
+                values,
+            )
+            .category(acp::SessionConfigOptionCategory::ThoughtLevel),
+        );
     }
 
     options
@@ -220,5 +291,96 @@ mod tests {
         assert_eq!(v["cwd"], "/Users/me/xai");
         assert_eq!(v["currentModelId"], "grok-build");
         assert!(v.get("title").is_none());
+    }
+
+    #[test]
+    fn acp_config_options_map_model_and_effort_selectors() {
+        let models = [
+            model("grok-build", "Grok Build"),
+            model("grok-4.5", "Grok 4.5"),
+        ];
+        let efforts = [ReasoningEffortOption {
+            id: "high".to_string(),
+            value: ReasoningEffort::High,
+            label: "High".to_string(),
+            description: None,
+            default: false,
+        }];
+
+        let options = build_acp_config_options(
+            &models,
+            &acp::ModelId::from("grok-4.5"),
+            &efforts,
+            Some(ReasoningEffort::High),
+        );
+
+        let expected = vec![
+            acp::SessionConfigOption::select(
+                CONFIG_ID_MODEL,
+                "Model",
+                "grok-4.5",
+                vec![
+                    acp::SessionConfigSelectOption::new("grok-build", "Grok Build"),
+                    acp::SessionConfigSelectOption::new("grok-4.5", "Grok 4.5"),
+                ],
+            )
+            .category(acp::SessionConfigOptionCategory::Model),
+            acp::SessionConfigOption::select(
+                CONFIG_ID_REASONING_EFFORT,
+                "Reasoning Effort",
+                "high",
+                vec![acp::SessionConfigSelectOption::new("high", "High")],
+            )
+            .category(acp::SessionConfigOptionCategory::ThoughtLevel),
+        ];
+        assert_eq!(options, expected);
+    }
+
+    #[test]
+    fn acp_config_options_effort_current_preserves_unlisted_value() {
+        let models = [model("grok-4.5", "Grok 4.5")];
+        let efforts = [ReasoningEffortOption {
+            id: "high".to_string(),
+            value: ReasoningEffort::High,
+            label: "High".to_string(),
+            description: None,
+            default: false,
+        }];
+        let options = build_acp_config_options(
+            &models,
+            &acp::ModelId::from("grok-4.5"),
+            &efforts,
+            Some(ReasoningEffort::Low),
+        );
+        let effort = options
+            .iter()
+            .find(|o| o.id.0.as_ref() == CONFIG_ID_REASONING_EFFORT)
+            .expect("effort selector present when the model supports effort");
+        match &effort.kind {
+            acp::SessionConfigKind::Select(select) => {
+                assert_eq!(select.current_value.0.as_ref(), "low");
+            }
+            _ => panic!("effort must be a select"),
+        }
+    }
+
+    #[test]
+    fn acp_config_options_model_current_preserves_unlisted_value() {
+        let models = [
+            model("grok-build", "Grok Build"),
+            model("grok-4.5", "Grok 4.5"),
+        ];
+        let options =
+            build_acp_config_options(&models, &acp::ModelId::from("stale-model"), &[], None);
+        let model = options
+            .iter()
+            .find(|o| o.id.0.as_ref() == CONFIG_ID_MODEL)
+            .expect("model selector present");
+        match &model.kind {
+            acp::SessionConfigKind::Select(select) => {
+                assert_eq!(select.current_value.0.as_ref(), "stale-model");
+            }
+            _ => panic!("model must be a select"),
+        }
     }
 }

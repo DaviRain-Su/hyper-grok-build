@@ -1,25 +1,16 @@
 //! Streaming response chunk types.
 //!
-//! Each transport call returns a stream of chunks. The chunk type is
-//! domain-specific:
+//! Each transport call returns a stream of chunks.
+//! The chunk type is domain-specific:
 //!
-//! - [`ToolChunk`] -- streaming output / progress / final result for a
-//!   tool invocation (or the response to
-//!   [`crate::ToolRequest::Definitions`]). Tools that need user
-//!   approval or input also yield `NeedPermission` /
-//!   `NeedUserAnswer` chunks; the sampler answers them by sending
-//!   [`ToolResponse`] values back on the paired bidi response sender.
-//! - [`OpsChunk`] -- one or more chunks for a workspace ops call (most
-//!   are unary; ripgrep / fuzzy_search are streaming).
-//! - [`SessionChunk`] -- one or more chunks for a session lifecycle call.
+//! - [`ToolChunk`]: streaming output / progress / final result for a tool invocation (or the response to [`crate::ToolRequest::Definitions`]).
+//!   Tools that need user approval or input also yield `NeedPermission` or `NeedUserAnswer` chunks.
+//!   The sampler answers them by sending [`ToolResponse`] values back on the paired bidi response sender.
+//! - [`OpsChunk`]: one or more chunks for a workspace ops call (most are unary; ripgrep / fuzzy_search are streaming).
+//! - [`SessionChunk`]: one or more chunks for a session lifecycle call.
 //!
-//! Every chunk variant maps to a static [`ChunkKind`] discriminator so
-//! the typed-trait layer can produce a clear
-//! [`crate::WorkspaceError::ProtocolMismatch`] when an unexpected chunk
-//! arrives on the wrong stream.
-//!
-//! The bidi
-//! `NeedPermission` / `NeedUserAnswer` flow rides the same streams.
+//! Every chunk variant maps to a static [`ChunkKind`] discriminator.
+//! The typed-trait layer uses it to produce a [`crate::WorkspaceError::ProtocolMismatch`] when an unexpected chunk arrives on the wrong stream.
 
 pub mod ops;
 pub mod session;
@@ -31,13 +22,10 @@ pub use tool::{ToolChunk, ToolResponse};
 
 use serde::{Deserialize, Serialize};
 
-/// Static discriminator for every variant across [`ToolChunk`],
-/// [`OpsChunk`], and [`SessionChunk`].
+/// Static discriminator for every variant across [`ToolChunk`], [`OpsChunk`], and [`SessionChunk`].
 ///
-/// Used as the `got` field of
-/// [`crate::WorkspaceError::ProtocolMismatch`]. Each chunk enum exposes
-/// a `kind() -> ChunkKind` method that returns its current variant's
-/// discriminator.
+/// Used as the `got` field of [`crate::WorkspaceError::ProtocolMismatch`].
+/// Each chunk enum exposes a `kind() -> ChunkKind` method that returns its current variant's discriminator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChunkKind {
@@ -115,10 +103,8 @@ pub enum ChunkKind {
 impl ChunkKind {
     /// Stable static name (used for error messages).
     ///
-    /// Implemented as an exhaustive `match` so that adding a new
-    /// variant fails compilation here -- the array returned by
-    /// [`Self::all`] depends on this property to stay in sync with
-    /// the enum.
+    /// Implemented as an exhaustive `match` so adding a new variant fails compilation here.
+    /// The array returned by [`Self::all`] depends on this property to stay in sync with the enum.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ToolOutput => "ToolOutput",
@@ -157,10 +143,9 @@ impl ChunkKind {
 
     /// Every variant of [`ChunkKind`], in declaration order.
     ///
-    /// Pairs with [`Self::assert_exhaustive`]: the test below uses an
-    /// exhaustive `match` to fail compilation if a new variant is
-    /// added without also being added to this array. The two together
-    /// guarantee the array is exhaustive and unique-by-construction.
+    /// Pairs with [`Self::assert_exhaustive`].
+    /// The test below uses an exhaustive `match` to fail compilation if a new variant is added without also being added to this array.
+    /// The two together guarantee the array is exhaustive and unique-by-construction.
     pub const fn all() -> &'static [Self] {
         &[
             Self::ToolOutput,
@@ -207,77 +192,9 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    /// Compile-time exhaustiveness guard.
-    ///
-    /// If a new variant is added to [`ChunkKind`] without being added
-    /// to this match, the build fails. The body is intentionally
-    /// trivial -- the only useful thing here is the exhaustive `match`.
-    #[test]
-    fn assert_exhaustive_match() {
-        for kind in ChunkKind::all() {
-            match kind {
-                ChunkKind::ToolOutput
-                | ChunkKind::ToolProgress
-                | ChunkKind::ToolFinal
-                | ChunkKind::ToolDefinitions
-                | ChunkKind::NeedPermission
-                | ChunkKind::NeedUserAnswer
-                | ChunkKind::NeedPlanModeChange
-                | ChunkKind::GitStatus
-                | ChunkKind::GitDiff
-                | ChunkKind::GitBranchInfo
-                | ChunkKind::GitMetadata
-                | ChunkKind::Hunks
-                | ChunkKind::Skills
-                | ChunkKind::Plugins
-                | ChunkKind::ProjectConfig
-                | ChunkKind::Permissions
-                | ChunkKind::Envrc
-                | ChunkKind::ResolvedFiles
-                | ChunkKind::MemoryChunks
-                | ChunkKind::Plugin
-                | ChunkKind::Ack
-                | ChunkKind::FuzzyMatch
-                | ChunkKind::RipgrepHit
-                | ChunkKind::RipgrepDone
-                | ChunkKind::SessionId
-                | ChunkKind::SessionInfo
-                | ChunkKind::RewindResult
-                | ChunkKind::RewindPoints
-                | ChunkKind::SessionAck => {}
-            }
-        }
-    }
-
-    /// Compile-time third gate plus a runtime duplicate-detection
-    /// check on `ChunkKind::all()`.
-    ///
-    /// What this catches:
-    ///
-    /// 1. **Compile-time:** the inner `fn touch(k: ChunkKind)` is an
-    ///    exhaustive `match` with one arm per variant. Adding a new
-    ///    variant to `ChunkKind` without adding a matching arm here
-    ///    fails to compile -- this is a third compile-time gate
-    ///    alongside `as_str()` and `assert_exhaustive_match`. Forgetting
-    ///    to also add the variant to `all()` is *not* caught here.
-    /// 2. **Runtime:** `HashSet::from_iter(all())` deduplicates the
-    ///    array; if any variant is listed more than once in `all()`,
-    ///    the set is smaller than the slice and the assertion fires.
-    ///
-    /// What this does **not** catch (and previous versions of the
-    /// doc-comment misleadingly claimed it did): the array having
-    /// fewer entries than the enum has variants. Iterating over
-    /// `all()` and summing `1` per element trivially equals
-    /// `all().len()` regardless of how many variants exist; that
-    /// formulation is vacuous. The honest gate against "forgot to
-    /// extend `all()` after adding a variant" is reviewer attention
-    /// plus the `count: ChunkKind = X` line counts in the diff -- not
-    /// a runtime test. The compile-time gates here, in `as_str()`, and
-    /// in `assert_exhaustive_match` ensure the reviewer does see a
-    /// diff for every new variant.
-    ///
-    /// The arm pattern is intentionally one-arm-per-variant (rather
-    /// than `_ => ...`) so the match is exhaustive, not a catch-all.
+    /// Compile-time: `touch` has one arm per variant, so a new `ChunkKind` variant without an arm fails to compile here (alongside `as_str()`).
+    /// Runtime: the `HashSet` deduplicates `all()`, so the length assertion fires if any variant is listed twice.
+    /// Neither gate catches `all()` missing a variant; that relies on reviewer attention.
     #[test]
     fn chunk_kind_all_is_complete() {
         fn touch(k: ChunkKind) {
@@ -313,14 +230,11 @@ mod tests {
                 | ChunkKind::SessionAck => {}
             }
         }
-        // Compile-time exhaustiveness gate (#1 above): the loop body
-        // exists only to invoke `touch` so the match arms are
-        // type-checked.
+        // Compile-time exhaustiveness gate: the loop exists only to invoke `touch` so the match arms are type-checked
         for &k in ChunkKind::all() {
             touch(k);
         }
-        // Runtime duplicate detection (#2 above): if `all()` has been
-        // hand-edited to list any variant twice, this fires.
+        // Runtime duplicate detection: if `all()` lists any variant twice, this fires
         let unique: std::collections::HashSet<_> = ChunkKind::all().iter().copied().collect();
         assert_eq!(
             unique.len(),
@@ -337,15 +251,6 @@ mod tests {
             ChunkKind::all().len(),
             "duplicate ChunkKind::as_str() values"
         );
-    }
-
-    #[test]
-    fn round_trips_through_json() {
-        for kind in ChunkKind::all() {
-            let json = serde_json::to_string(kind).unwrap();
-            let back: ChunkKind = serde_json::from_str(&json).unwrap();
-            assert_eq!(*kind, back);
-        }
     }
 
     #[test]

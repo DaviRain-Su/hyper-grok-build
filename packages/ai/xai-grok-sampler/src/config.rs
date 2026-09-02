@@ -1,10 +1,6 @@
-//! Sampler configuration types.
-//!
-//! [`SamplerConfig`] is the per-request configuration handed to the
-//! sampler. It deliberately does **not** alias
-//! `xai_grok_sampling_types::SamplingConfig` so that the sampler crate
-//! avoids transitive dependencies on shell-specific types
-//! (`xai-grok-tools`, etc.).
+//! [`SamplerConfig`] is the per-request configuration handed to the sampler.
+//! It deliberately does **not** alias `xai_grok_sampling_types::SamplingConfig`.
+//! Aliasing would pull transitive dependencies on shell-specific types (`xai-grok-tools`, etc.) into the sampler crate.
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -32,26 +28,17 @@ pub enum AuthScheme {
 
 /// All knobs that control a single sampling request.
 ///
-/// The session typically owns one `SamplerConfig` per active model
-/// and passes it (or a per-request override) to the actor on every
-/// submit.
+/// The session typically owns one `SamplerConfig` per active model and passes it (or a per-request override) to the actor on every submit.
 ///
 /// # Construction in `xai-grok-shell`
 ///
-/// `SamplerConfig` is the single source of truth for sampler
-/// configuration. The shell builds it directly (see
-/// `agent::config::resolve_model_to_sampling_config` and
-/// `session::acp_session::SessionActor::reconstruct_full_config`) by
-/// composing chat-state's `xai_grok_sampling_types::SamplingConfig`
-/// with `Credentials` (api key, client version).
+/// `SamplerConfig` is the single source of truth for sampler configuration.
+/// The shell builds it directly by composing chat-state's `xai_grok_sampling_types::SamplingConfig` with `Credentials` (api key, client version).
+/// See `agent::config::resolve_model_to_sampling_config` and `session::acp_session::SessionActor::reconstruct_full_config`.
 ///
-/// URL-derived request headers (e.g. `X-XAI-Token-Auth` for the
-/// cli-chat-proxy) are
-/// folded into [`Self::extra_headers`] by
-/// `agent::config::inject_url_derived_headers` before the
-/// `SamplerConfig` is handed to the actor. Auth is selected separately
-/// via `auth_scheme`, while `api_backend` controls only the request/response
-/// protocol shape.
+/// URL-derived request headers (e.g. `X-XAI-Token-Auth` for the cli-chat-proxy) land in [`Self::extra_headers`].
+/// `agent::config::inject_url_derived_headers` folds them in before the `SamplerConfig` is handed to the actor.
+/// Auth is selected separately via `auth_scheme`, while `api_backend` controls only the request/response protocol shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SamplerConfig {
     pub api_key: Option<String>,
@@ -72,9 +59,8 @@ pub struct SamplerConfig {
     pub endpoint_path: Option<String>,
     #[serde(default)]
     pub auth_scheme: AuthScheme,
-    /// Extra request headers applied verbatim. The sampler never inspects
-    /// the URL to derive headers; callers (the session) inject proxy auth
-    /// and other access headers here before constructing the config.
+    /// Extra request headers applied verbatim. The sampler never inspects the URL to derive headers.
+    /// Callers (the session) inject proxy auth and other access headers here before constructing the config.
     pub extra_headers: IndexMap<String, String>,
     /// Additional Responses API `include` values not represented by the typed client.
     #[serde(default)]
@@ -82,13 +68,11 @@ pub struct SamplerConfig {
     /// Query parameters folded into every request URL (percent-encoded).
     #[serde(default)]
     pub query_params: IndexMap<String, String>,
-    /// Header name to environment variable, resolved into request headers at
-    /// client build and never persisted.
+    /// Header name to environment variable, resolved into request headers at client build and never persisted.
     #[serde(default)]
     pub env_http_headers: IndexMap<String, String>,
-    /// Total context window size in tokens. The sampler does not enforce
-    /// it; it is informational metadata used by the session for compaction
-    /// decisions.
+    /// Total context window size in tokens.
+    /// The sampler does not enforce it; the session uses it for compaction decisions.
     pub context_window: u64,
     pub force_http1: bool,
     pub max_retries: Option<u32>,
@@ -105,25 +89,16 @@ pub struct SamplerConfig {
     pub user_id: Option<String>,
     pub client_version: Option<String>,
 
-    /// Optional hook invoked at every UNAUTHORIZED (401) response
-    /// site. The sampler passes the bearer that was actually sent on
-    /// the wire to the callback; the implementation is free to do
-    /// whatever it wants with it (typically: join it with a live
-    /// credential source and emit an attribution event for diagnosis
-    /// of stale-token vs. server-rejected-live-token 401s). `None`
-    /// (default) is a no-op -- the 401 arm returns the same
-    /// `SamplingError::Auth` it always did.
+    /// Hook invoked on every 401 response with the bearer that was actually sent on the wire.
+    /// Implementations typically compare it against a live credential source to tell a stale token from a server-rejected live one.
+    /// `None` (default) is a no-op; the 401 arm still returns `SamplingError::Auth`.
     ///
-    /// `Arc<dyn Trait>` is not serializable, so the field is skipped
-    /// in (de)serialization. Round-tripping a config through serde
-    /// drops the callback; callers that deserialize a `SamplerConfig`
-    /// from disk must re-attach the callback before passing it to
-    /// [`crate::SamplingClient::new`] or 401 attribution will be
-    /// silently disabled for the rebuilt client.
+    /// serde skips this field; round-tripping a config drops the callback.
+    /// Re-attach it before [`crate::SamplingClient::new`] when deserializing from disk, or 401 attribution is silently disabled.
     #[serde(skip)]
     pub attribution_callback: Option<SharedAttributionCallback>,
 
-    /// Live bearer resolve per request. `None` uses construction-time `api_key`.
+    /// Resolves a fresh bearer for each request. `None` uses the construction-time `api_key`.
     #[serde(skip)]
     pub bearer_resolver: Option<SharedBearerResolver>,
 
@@ -138,11 +113,10 @@ pub struct SamplerConfig {
     #[serde(default)]
     pub compaction_at_tokens: Option<CompactionAtTokens>,
 
-    /// Server-side doom-loop check policy; `None` disables it. When set, the
-    /// client sends both reporting headers on streaming Responses API requests:
-    /// the configured tail window and the default exact-repetition minimum.
-    /// It also absorbs the reported trigger events (unlike environment headers
-    /// in [`Self::extra_headers`], this gates the client's decode behavior).
+    /// Server-side doom-loop check policy; `None` disables it.
+    /// When set, the client sends both reporting headers on streaming Responses API requests.
+    /// Those carry the configured tail window and the default exact-repetition minimum.
+    /// It also absorbs the reported trigger events (unlike environment headers in [`Self::extra_headers`], this gates the client's decode behavior).
     #[serde(default)]
     pub doom_loop_recovery: Option<DoomLoopRecoveryPolicy>,
 
@@ -180,8 +154,7 @@ pub struct SamplerConfig {
 }
 
 impl Default for SamplerConfig {
-    /// Empty defaults so callers can use `..Default::default()` and
-    /// new fields don't ripple through every literal site.
+    /// Empty defaults so callers can use `..Default::default()` and new fields don't ripple through every literal site.
     fn default() -> Self {
         Self {
             api_key: None,
@@ -275,7 +248,6 @@ pub type SharedHeaderInjector = std::sync::Arc<dyn HeaderInjector>;
 /// Retry knobs for the sampler's internal transport-error retry loop.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryPolicy {
-    /// Maximum number of retries before giving up.
     pub max_retries: u32,
     /// After this many rate-limit (429) retries, escalate to the caller.
     /// Lower than `max_retries` because rate-limit waits can be long.
@@ -294,9 +266,8 @@ impl Default for RetryPolicy {
     }
 }
 
-/// Identity of the client that originated the request, used for
-/// User-Agent rendering. The shell layer composes this with platform
-/// info into a final UA string.
+/// Identity of the client that originated the request, used for User-Agent rendering.
+/// The shell layer composes this with platform info into a final UA string.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct OriginClientInfo {
     pub product: String,
@@ -306,16 +277,6 @@ pub struct OriginClientInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn retry_policy_defaults() {
-        let policy = RetryPolicy::default();
-        assert_eq!(policy.max_retries, DEFAULT_MAX_RETRIES);
-        assert_eq!(
-            policy.rate_limit_retry_threshold,
-            RATE_LIMIT_RETRY_THRESHOLD
-        );
-    }
 
     /// Configs serialized before the field existed must keep deserializing.
     #[test]

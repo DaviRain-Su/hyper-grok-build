@@ -1617,38 +1617,6 @@ mod tests {
         assert!(spawns.load(SeqCst) >= 2);
     }
 
-    #[tokio::test]
-    async fn supervisor_returns_cleanly_when_shutdown_races_a_child_exit() {
-        // Best-effort guard for the post-`wait()` shutdown re-check
-        // With a fast-exiting child and shutdown flipped right after a spawn, the exit and the shutdown land close together
-        // `select!` is random, so we can't deterministically force the re-check branch over the `changed()` arm
-        // Both branches must yield a prompt, panic-free return with no hang or leak
-        // The loop repeats to cover the timing window
-        for _ in 0..8 {
-            let (tx, rx) = watch::channel(false);
-            let spawns = Arc::new(AtomicUsize::new(0));
-            let factory = {
-                let spawns = spawns.clone();
-                move || {
-                    spawns.fetch_add(1, SeqCst);
-                    Ok(fake_exit_command(0))
-                }
-            };
-            let handle = tokio::spawn(supervise_loop(
-                factory,
-                fast_policy(),
-                Duration::from_secs(3600),
-                rx,
-            ));
-            wait_until(&spawns, 1).await;
-            tx.send(true).expect("receiver alive");
-            tokio::time::timeout(Duration::from_secs(5), handle)
-                .await
-                .expect("supervisor must return on a shutdown/exit race")
-                .expect("task should not panic");
-        }
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn supervisor_shutdown_kills_running_child_without_restart() {

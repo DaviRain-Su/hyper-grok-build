@@ -1,6 +1,5 @@
-//! Binds the `xai-grok-session-search` index to this crate's JSONL session
-//! store. A process that keeps no index holds no manager, so these entry
-//! points take the handle rather than reach for a global.
+//! Binds the `xai-grok-session-search` index to this crate's JSONL session store.
+//! A process that keeps no index holds no manager, so these entry points take the handle rather than reach for a global.
 
 use std::io;
 use std::path::Path;
@@ -18,8 +17,8 @@ pub use xai_grok_session_search::{
     SearchIndexManager, SearchIndexStatus, SessionSearchRequest, SessionSearchResponse,
 };
 
-/// Private on purpose: [`start_if_enabled`] is the only way to a manager, so the
-/// feature cannot be bypassed. One live manager per grok home, at most.
+/// Private on purpose: [`start_if_enabled`] is the only way to a manager, so the feature cannot be bypassed.
+/// One live manager per grok home, at most.
 fn start_search_index() -> SearchIndexManager {
     SearchIndexManager::start(
         |root| -> Box<dyn SessionSource> {
@@ -58,14 +57,13 @@ impl SearchIndex {
     }
 }
 
-/// The process's one index decision, shared rather than copied, so a session
-/// created while the remote settings are in flight reads the answer that lands
-/// later. `OnceLock` not `OnceCell`: the persistence actor's clone is `Send`.
+/// The process's one index decision, shared rather than copied.
+/// Sharing means a session created while the remote settings are in flight reads the answer that lands later.
+/// `OnceLock` not `OnceCell`: the persistence actor's clone is `Send`.
 #[derive(Clone, Default)]
 pub struct SharedSearchIndex(Arc<OnceLock<Option<Arc<SearchIndexManager>>>>);
 
-/// Three states, because collapsing the first two is a bug a reader cannot see:
-/// an empty answer from `Pending` is not final, and one from `Off` is.
+/// Three states, because collapsing the first two is a bug a reader cannot see: an empty answer from `Pending` is not final, and one from `Off` is.
 #[derive(Clone, Copy)]
 pub enum IndexDecision<'a> {
     Pending,
@@ -84,8 +82,8 @@ impl std::fmt::Debug for IndexDecision<'_> {
 }
 
 impl<'a> IndexDecision<'a> {
-    /// The manager to write through. Treats `Pending` and `Off` alike on purpose:
-    /// it skips, and the bootstrap after the decision backfills what was missed.
+    /// The manager to write through.
+    /// Treats `Pending` and `Off` alike on purpose: it skips, and the bootstrap after the decision backfills what was missed.
     /// A read must not, which is why this is not `decision`.
     pub fn writer(self) -> Option<&'a SearchIndexManager> {
         match self {
@@ -94,8 +92,8 @@ impl<'a> IndexDecision<'a> {
         }
     }
 
-    /// For a caller with no pending window, as a CLI has. Takes the resolution,
-    /// not its contents, which would let a pending `writer()` read back as `Off`.
+    /// For a caller with no pending window, as a CLI has.
+    /// Takes the resolution, not its contents, which would let a pending `writer()` read back as `Off`.
     pub fn settled(index: &'a SearchIndex) -> Self {
         match index {
             SearchIndex::Started(index) => Self::On(index),
@@ -137,8 +135,7 @@ pub fn start_if_enabled(cfg: &crate::agent::config::Config) -> SearchIndex {
     SearchIndex::Started(start_search_index())
 }
 
-/// Projects the JSONL store's `Summary` down to the handful of fields the
-/// index reads, so the index never sees the full session record.
+/// Projects the JSONL store's `Summary` down to the handful of fields the index reads, so the index never sees the full session record.
 struct JsonlSessionSource(JsonlStorageAdapter);
 
 impl JsonlSessionSource {
@@ -171,8 +168,8 @@ impl SessionSource for JsonlSessionSource {
         };
         match self.0.load_summary(&info).await {
             Ok(summary) => Ok(Some(self.to_indexable(&summary))),
-            // A missing session is a delete, not a failure: the index drops
-            // its row. Every other error leaves the row alone.
+            // A missing session is a delete, not a failure: the index drops its row
+            // Every other error leaves the row alone
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
@@ -219,8 +216,7 @@ mod tests {
         .to_indexable(summary)
     }
 
-    /// The index stores one title; the store decides which one, and a
-    /// generated title outranks the session summary.
+    /// The index stores one title; the store decides which one, and a generated title outranks the session summary.
     #[test]
     fn indexable_prefers_generated_title() {
         let mut summary = test_summary("s1", "/workspace", "session summary");

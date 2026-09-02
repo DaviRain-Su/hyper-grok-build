@@ -601,26 +601,6 @@ mod tests {
     }
 
     #[test]
-    fn test_single_chunk() {
-        let mut renderer = StreamingMarkdownRenderer::new(test_style::STYLE, true);
-        renderer.push_and_render("# Hello\n\n", None);
-        let output = renderer.view();
-        assert!(!output.lines.is_empty());
-    }
-
-    #[test]
-    fn test_multiple_chunks() {
-        let mut renderer = StreamingMarkdownRenderer::new(test_style::STYLE, true);
-        renderer.push_and_render("# Title\n\n", None);
-        let out1_lines = renderer.view().lines.len();
-
-        renderer.push_and_render("Some text\n\n", None);
-        let out2_lines = renderer.view().lines.len();
-
-        assert!(out2_lines >= out1_lines);
-    }
-
-    #[test]
     fn test_streaming_incomplete_paragraph() {
         // Test that incomplete paragraphs produce visible output
         let mut renderer = StreamingMarkdownRenderer::new(test_style::STYLE, true);

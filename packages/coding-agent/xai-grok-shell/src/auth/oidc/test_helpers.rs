@@ -1,8 +1,4 @@
-//! Shared test helpers for `oidc::protocol::tests` and `oidc::login::tests`.
-//! Both test modules need a mock IdP server (`start_mock_idp`), JWT
-//! signing primitives (`generate_test_rsa_key`, `mock_idp_token`), and
-//! the same constants. Extracted here so neither test mod has to
-//! re-implement them.
+//! Test helpers shared by `oidc::protocol::tests` and `oidc::login::tests`: a mock IdP server and JWT signing primitives.
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;

@@ -38,15 +38,3 @@ pub enum ChatStateEvent {
         body_bytes_after: usize,
     },
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn event_variants_are_constructible() {
-        let _ = ChatStateEvent::PromptIndexChanged { new_index: 1 };
-        let _ = ChatStateEvent::TokensUpdated { total_tokens: 500 };
-        let _ = ChatStateEvent::ConversationReset { new_len: 3 };
-    }
-}

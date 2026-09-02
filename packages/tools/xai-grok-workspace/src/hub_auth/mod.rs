@@ -1,10 +1,8 @@
 //! Hub [`AuthProvider`] from `~/.grok/auth.json` for the standalone
-//! `workspace_server` binary: loopback `ws://` uses a plain bearer, otherwise
-//! an auto-refreshing OIDC provider that persists rotated tokens to disk.
+//! `workspace_server` binary: loopback `ws://` uses a plain bearer, otherwise an auto-refreshing OIDC provider that persists rotated tokens.
 //!
-//! The in-leader `grok workspace` exposure does NOT use this path — it sources
-//! an in-memory provider from the leader's `AuthManager` (see
-//! `LeaderAuthProvider`) to avoid racing the leader's own auth.json writer.
+//! The in-leader `grok workspace` exposure does NOT use this path.
+//! It gets an in-memory provider from the leader's `AuthManager` (see `LeaderAuthProvider`) so it never races the leader's own auth.json writer.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -26,10 +24,8 @@ pub(crate) fn init_metrics() {
     proactive::init_metrics();
 }
 
-/// Plain bearer provider that also carries the owner identity parsed from the
-/// same auth.json entry. Used for the loopback / local-dev path (no OIDC
-/// refresh) so the workspace can still derive `WorkspaceIdentity` from the auth
-/// provider — without a second auth.json read.
+/// Plain bearer for the loopback / local-dev path (no OIDC refresh).
+/// Carries the owner identity from the same auth.json entry so the workspace can derive `WorkspaceIdentity` without a second read.
 struct BearerWithIdentity {
     token: String,
     identity: AuthIdentity,
@@ -37,7 +33,7 @@ struct BearerWithIdentity {
 
 impl std::fmt::Debug for BearerWithIdentity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Never log the bearer token; surface only the (non-secret) identity.
+        // Never log the bearer token; Debug shows only the (non-secret) identity
         f.debug_struct("BearerWithIdentity")
             .field("identity", &self.identity)
             .finish_non_exhaustive()
@@ -54,8 +50,7 @@ impl AuthProvider for BearerWithIdentity {
     }
 }
 
-/// Owner identity parsed from an auth.json entry, for the [`AuthProvider`]s
-/// built here to surface via [`AuthProvider::identity`].
+/// Owner identity parsed from an auth.json entry, which the [`AuthProvider`]s built here return from [`AuthProvider::identity`].
 fn identity_from_entry(entry: &AuthEntry) -> AuthIdentity {
     AuthIdentity {
         user_id: entry.user_id.clone(),
@@ -89,13 +84,11 @@ pub fn default_auth_path() -> anyhow::Result<PathBuf> {
     Ok(grok.join("auth.json"))
 }
 
-/// Read the active OIDC entry and its scope key. The key is threaded to the
-/// refresh write so rotation updates exactly the entry that was read.
+/// Read the active OIDC entry and its scope key.
+/// The key is threaded to the refresh write so rotation updates exactly the entry that was read.
 ///
-/// When several OIDC entries qualify, pick the **latest `expires_at`** — the
-/// entry the shell is actively refreshing. The previous first-key selection
-/// was alphabetical and could rotate a *different principal's* RT chain than
-/// the one the user's sessions use.
+/// When several OIDC entries qualify, the latest `expires_at` wins: that is the entry the shell is actively refreshing.
+/// Picking any other entry could rotate a different principal's refresh-token chain out from under the user's sessions.
 fn read_auth_entry(path: &Path) -> anyhow::Result<(String, AuthEntry)> {
     if !path.exists() {
         anyhow::bail!(
@@ -112,9 +105,7 @@ fn read_auth_entry(path: &Path) -> anyhow::Result<(String, AuthEntry)> {
     entries
         .into_iter()
         .filter(|(_, e)| e.refresh_token.is_some() && e.oidc_issuer.is_some())
-        // Strictly-greater comparison: ties (including all-`None`) keep the
-        // first candidate in BTreeMap (alphabetical) order, so single-entry
-        // and legacy no-`expires_at` files behave exactly as before.
+        // Strictly-greater comparison: ties (including all-`None`) keep the first candidate in BTreeMap (alphabetical) order
         .fold(None::<(String, AuthEntry)>, |best, cand| match best {
             Some(b) if cand.1.expires_at <= b.1.expires_at => Some(b),
             _ => Some(cand),
@@ -133,10 +124,9 @@ enum OidcProviderKind {
     Proactive,
 }
 
-/// Writes `auth.json` on the calling thread. The proactive provider already
-/// offloads this onto its seq-guarded persist worker; a nested spawn here
-/// would run `write_refreshed_token` *after* the seq check and reopen the
-/// stale-clobber race.
+/// Writes `auth.json` on the calling thread.
+/// The proactive provider already offloads this onto its persist worker, whose seq check drops stale writes.
+/// A nested spawn here would run `write_refreshed_token` after that check and let a stale write land over a newer one.
 pub(crate) fn persist_on_refresh(auth_path: PathBuf, scope_key: String) -> OnRefreshCallback {
     Arc::new(move |event: &RefreshEvent| {
         if let Err(e) = write_refreshed_token(&auth_path, &scope_key, event) {
@@ -145,9 +135,8 @@ pub(crate) fn persist_on_refresh(auth_path: PathBuf, scope_key: String) -> OnRef
     })
 }
 
-/// SDK `on_refresh` is invoked from the async refresh path, which has no
-/// PersistGate. Offload the same write so a contended flock cannot stall
-/// the runtime.
+/// SDK `on_refresh` is invoked from the async refresh path, which has no PersistGate.
+/// Offload the same write so a contended flock cannot stall the runtime.
 fn persist_on_refresh_off_thread(auth_path: PathBuf, scope_key: String) -> OnRefreshCallback {
     let persist = persist_on_refresh(auth_path, scope_key);
     Arc::new(move |event: &RefreshEvent| {
@@ -191,8 +180,7 @@ fn build_oidc_provider(
 
     let mut builder = OidcAuthProviderBuilder::new(&entry.key, refresh_token, issuer, client_id);
 
-    // Owner identity is surfaced via `AuthProvider::identity()` so the workspace
-    // derives `WorkspaceIdentity` from this provider — no separate auth.json read.
+    // The workspace derives `WorkspaceIdentity` from `AuthProvider::identity()`, so pass the owner identity along (no separate auth.json read)
     builder = builder.user_id(&entry.user_id);
     if let Some(ref pt) = entry.principal_type {
         builder = builder.principal_type(pt);
@@ -208,18 +196,14 @@ fn build_oidc_provider(
     Ok((Arc::new(builder.build()), OidcProviderKind::Sdk))
 }
 
-/// How long [`lock_auth_file`] polls for the shared `auth.json.lock` before
-/// skipping the persist. Covers the shell's normal refresh hold (~1 s); its
-/// worst-case 45 s budget is deliberately not waited out — losing one persist
-/// is recoverable (see [`write_refreshed_token`]), stalling the persist thread
-/// for a minute is not worth it.
+/// How long [`lock_auth_file`] polls for the shared `auth.json.lock` before skipping the persist.
+/// Covers the shell's normal refresh hold (~1 s); the shell's worst-case 45 s budget is deliberately not waited out.
+/// Losing one persist is recoverable (see [`write_refreshed_token`]); stalling the persist thread for a minute is not worth it.
 const AUTH_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// RAII flock on the sibling `auth.json.lock` — the same advisory lock every
-/// grok-shell `auth.json` writer takes. Polling `try_lock` rather than a
-/// blocking `flock` to bound the wait; never breaks a held lock (a stale
-/// holder here would be the shell mid-refresh, exactly the writer we must not
-/// race).
+/// RAII flock on the sibling `auth.json.lock`, the same advisory lock every grok-shell `auth.json` writer takes.
+/// Polls `try_lock` rather than a blocking `flock` to bound the wait.
+/// Never breaks a held lock: a stale holder here would be the shell mid-refresh, exactly the writer we must not race.
 struct AuthFileLockGuard {
     _file: std::fs::File,
 }
@@ -230,11 +214,9 @@ fn lock_auth_file(auth_json_path: &Path) -> Option<AuthFileLockGuard> {
     let lock_path = auth_json_path.with_file_name("auth.json.lock");
     let deadline = std::time::Instant::now() + AUTH_LOCK_TIMEOUT;
     loop {
-        // The shell's stale-lock recovery breaks locks by unlink+recreate, so
-        // only a flock on the live inode counts (mirrors the shell's own
-        // acquire path). A dead inode falls through to the same deadline and
-        // sleep as a busy lock — retrying without them spins this thread for
-        // as long as the check keeps failing.
+        // The shell's stale-lock recovery breaks locks by unlinking and recreating the file, so only a flock on the live inode counts
+        // The shell's own acquire path does the same inode check
+        // A dead inode falls through to the same deadline and sleep as a busy lock; retrying immediately would spin while the check keeps failing
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -244,8 +226,7 @@ fn lock_auth_file(auth_json_path: &Path) -> Option<AuthFileLockGuard> {
             && file.try_lock_exclusive().is_ok()
             && lock_inode_is_live(&file, &lock_path)
         {
-            // Holder info (`PID:TS`) through the locked fd, so the shell can
-            // identify (and, if this process dies, break) our hold.
+            // Write holder info (`PID:TS`) through the locked fd so the shell can identify (and, if this process dies, break) our hold
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -262,8 +243,7 @@ fn lock_auth_file(auth_json_path: &Path) -> Option<AuthFileLockGuard> {
     }
 }
 
-/// `fstat(fd)` vs `stat(path)`: `false` when the locked file was concurrently
-/// unlinked and recreated (our flock would be on the dead inode).
+/// `fstat(fd)` vs `stat(path)`: `false` when the locked file was concurrently unlinked and recreated (our flock would be on the dead inode).
 #[cfg(unix)]
 fn lock_inode_is_live(file: &std::fs::File, path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
@@ -283,14 +263,12 @@ pub(crate) fn write_refreshed_token(
     scope_key: &str,
     event: &RefreshEvent,
 ) -> anyhow::Result<()> {
-    // Read-modify-write under the shared advisory lock. Writing unlocked here
-    // raced the shell's own refresh writer: whichever wrote second silently
-    // rolled back the other's freshly rotated refresh token on disk — a
-    // guaranteed future `invalid_grant` for every session sharing the file.
+    // Read-modify-write under the shared advisory lock
+    // An unlocked write races the shell's own refresh writer: whichever writes second rolls back the other's freshly rotated refresh token on disk
+    // That guarantees a future `invalid_grant` for every session sharing the file
     let Some(_lock) = lock_auth_file(path) else {
-        // The rotated token still serves this process from memory, so warn
-        // rather than fail — but disk now trails the IdP by one rotation, and
-        // a fresh process that picks it up will present a spent token.
+        // The rotated token still serves this process from memory, so warn rather than fail
+        // Disk now trails the IdP by one rotation; a fresh process that picks it up will present a spent token
         tracing::warn!(
             timeout = ?AUTH_LOCK_TIMEOUT,
             "auth.json.lock busy; skipping refreshed-token persist (disk left one rotation behind)"
@@ -305,10 +283,9 @@ pub(crate) fn write_refreshed_token(
         anyhow::bail!("auth entry '{scope_key}' not found while persisting refreshed token");
     };
 
-    // Never roll disk back to an older token. Each refresh persists on its own
-    // thread and a sibling shell writes the same file, so writes can arrive out
-    // of order; the loser would replace a live refresh token with a spent one
-    // and guarantee a future `invalid_grant`.
+    // Never roll disk back to an older token
+    // Each refresh persists on its own thread and a sibling shell writes the same file, so writes can arrive out of order
+    // The loser would replace a live refresh token with a spent one and guarantee a future `invalid_grant`
     if let Some(new_expiry) = event.expires_at
         && let Some(disk_expiry) = obj
             .get("expires_at")
@@ -342,9 +319,8 @@ pub(crate) fn write_refreshed_token(
     Ok(())
 }
 
-/// Atomically replace `path`: temp file (0600 on Unix) + fsync + rename. Avoids
-/// the truncate-in-place corruption window when the long-lived binary rewrites
-/// auth.json.
+/// Atomically replace `path`: temp file (0600 on Unix), fsync, then rename.
+/// Avoids the window where a truncate-in-place rewrite would leave auth.json partially written.
 fn write_json_atomic(path: &Path, value: &serde_json::Value) -> anyhow::Result<()> {
     use std::io::Write;
 
@@ -379,9 +355,9 @@ fn write_json_atomic(path: &Path, value: &serde_json::Value) -> anyhow::Result<(
 /// Build a hub auth provider for `hub_url`. `auth_config` overrides
 /// the default credential path (`~/.grok/auth.json`).
 ///
-/// `refresh_cfg.enabled` selects the workspace-owned proactive refresher;
-/// when off (the default) this is the SDK `OidcAuthProvider`. Loopback
-/// `ws://` ignores the flag and stays on a static bearer.
+/// `refresh_cfg.enabled` selects the workspace-owned proactive refresher (the default).
+/// The SDK `OidcAuthProvider` is the explicit kill-switch path (`GROK_WORKSPACE_OIDC_PROACTIVE_REFRESH_ENABLED=false`).
+/// Loopback `ws://` ignores the flag and stays on a static bearer.
 pub fn provider(
     hub_url: &Url,
     auth_config: Option<&Path>,
@@ -573,7 +549,10 @@ mod tests {
             "oidc".into(),
             &entry,
             PathBuf::from("/tmp/x"),
-            &ProactiveRefreshConfig::default(),
+            &ProactiveRefreshConfig {
+                enabled: false,
+                ..ProactiveRefreshConfig::default()
+            },
         )
         .unwrap();
         assert_eq!(kind, OidcProviderKind::Sdk);
@@ -584,7 +563,7 @@ mod tests {
             }
             _ => panic!("expected Bearer"),
         }
-        // Identity is surfaced from the parsed entry (no second auth.json read).
+        // Identity comes from the parsed entry (no second auth.json read)
         let id = provider.identity().expect("identity present");
         assert_eq!(id.user_id, "u1");
         assert_eq!(id.principal_type.as_deref(), Some("Team"));
@@ -613,14 +592,11 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(updated["oidc"]["key"], "eyJ.new");
         assert_eq!(updated["oidc"]["refresh_token"], "rt-new");
-        assert_eq!(updated["legacy"]["key"], "xai-old"); // untouched
+        assert_eq!(updated["legacy"]["key"], "xai-old");
     }
 
-    /// With several OIDC entries (personal + enterprise login), the one with
-    /// the latest `expires_at` wins — that's the entry the user's grok
-    /// sessions actively refresh. Alphabetical-order selection could adopt a
-    /// different principal's refresh token and rotate it out from under the
-    /// shell.
+    /// With several OIDC entries (personal and enterprise login), the latest `expires_at` wins; the user's grok sessions refresh that entry.
+    /// Alphabetical selection could adopt a different principal's refresh token and rotate it out from under the shell.
     #[test]
     fn read_auth_entry_prefers_latest_expiry() {
         let dir = tempfile::tempdir().unwrap();
@@ -650,8 +626,7 @@ mod tests {
 
     #[test]
     fn write_refreshed_token_targets_exact_scope_key() {
-        // Non-sorted order: refresh must update the read-selected key ("aaa"),
-        // not the first in file order ("zzz").
+        // Non-sorted order: refresh must update the read-selected key ("aaa"), not the first in file order ("zzz")
         let dir = tempfile::tempdir().unwrap();
         let path = write_auth_json(
             dir.path(),
@@ -679,9 +654,8 @@ mod tests {
         assert_eq!(updated["zzz"]["refresh_token"], "rt-z");
     }
 
-    /// Persists run on detached threads and race a sibling shell writing the
-    /// same file, so a late write must not replace a live refresh token with
-    /// the one it already rotated away.
+    /// Persists run on detached threads and race a sibling shell writing the same file.
+    /// A late write must not replace a live refresh token with the one it already rotated away.
     #[test]
     fn write_refreshed_token_does_not_roll_back_a_newer_token() {
         let dir = tempfile::tempdir().unwrap();
@@ -741,7 +715,7 @@ mod tests {
             AuthCredential::Bearer { token } => assert_eq!(token, "eyJ.tok"),
             _ => panic!("expected Bearer"),
         }
-        // Loopback still surfaces identity from the same entry.
+        // Loopback still returns the identity from the same entry
         let id = auth.identity().expect("loopback identity present");
         assert_eq!(id.user_id, "u1");
     }
@@ -765,7 +739,10 @@ mod tests {
             "oidc".into(),
             &complete_oidc_entry(),
             PathBuf::from("/tmp/x"),
-            &ProactiveRefreshConfig::default(),
+            &ProactiveRefreshConfig {
+                enabled: false,
+                ..ProactiveRefreshConfig::default()
+            },
         )
         .unwrap();
         assert_eq!(kind, OidcProviderKind::Sdk);
@@ -814,7 +791,6 @@ mod tests {
         }
         let id = auth.identity().expect("loopback identity present");
         assert_eq!(id.user_id, "u1");
-        // Loopback never calls `build_oidc_provider`, so the proactive
-        // flag cannot change the static-bearer path.
+        // Loopback never calls `build_oidc_provider`, so the proactive flag cannot change the static-bearer path
     }
 }

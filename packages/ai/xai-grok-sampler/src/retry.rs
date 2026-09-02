@@ -191,7 +191,8 @@ pub fn classify_error(
         return RetryDecision::Fatal(clone_error(err));
     }
 
-    if err.is_payload_too_large() {
+    // Token overflows fail fast via the retry veto below; byte-coded rejections (413 or a byte-size code) strip images and retry
+    if err.is_payload_too_large() || err.is_byte_size_overflow_coded() {
         return RetryDecision::RetryWithImageStrip;
     }
 
@@ -645,6 +646,36 @@ mod tests {
     }
 
     #[test]
+    fn tpm_429_with_retry_after_backs_off_despite_size_text() {
+        // A TPM 429 often carries size wording ("Request too large for model...") plus a Retry-After promising capacity later
+        // The size veto must not fast-fail it
+        let err = SamplingError::Api {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: "Request too large for model: Limit 30000, Requested 50000 tokens per min"
+                .to_string(),
+            model_metadata: None,
+            retry_after_secs: Some(7),
+            should_retry: None,
+            error_code: None,
+        };
+        match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::RetryWithBackoff {
+                is_rate_limited, ..
+            } => assert!(is_rate_limited),
+            other => panic!("expected RetryWithBackoff, got {other:?}"),
+        }
+        // Without Retry-After the same message fast-fails: the request exceeds the per-minute cap outright and retrying is futile
+        let no_retry_after = api_err(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Request too large for model: Limit 30000, Requested 50000 tokens per min",
+        );
+        assert!(matches!(
+            classify_error(&no_retry_after, 0, 5, RATE_LIMIT_RETRY_THRESHOLD),
+            RetryDecision::Fatal(_)
+        ));
+    }
+
+    #[test]
     fn rate_limit_retry_layer_splits_by_threshold() {
         let err = api_err_with_retry_after(StatusCode::TOO_MANY_REQUESTS, 5);
         assert!(
@@ -967,6 +998,69 @@ mod tests {
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
             RetryDecision::Fatal(_)
         ));
+    }
+
+    #[test]
+    fn drifted_size_overflow_wordings_are_fatal_on_turn_path() {
+        // Size-worded errors with no code must fail fast, not burn the retry budget
+        let api_500 = SamplingError::Api {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: "exceed_context_size_error: request (300000 tokens) exceeds the model \
+                      context size"
+                .into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            error_code: None,
+        };
+        assert!(matches!(
+            classify_error(&api_500, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
+            RetryDecision::Fatal(_)
+        ));
+
+        let stream = SamplingError::StreamError {
+            error_type: "BAD_REQUEST".into(),
+            message: "Input length (300000 tokens) exceeds the maximum allowed length \
+                      (200000 tokens)"
+                .into(),
+            code: None,
+        };
+        assert!(matches!(
+            classify_error(&stream, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
+            RetryDecision::Fatal(_)
+        ));
+
+        // Token-tier code with an opaque message: fatal, no strip.
+        let coded = SamplingError::StreamError {
+            error_type: "BAD_REQUEST".into(),
+            message: "request rejected".into(),
+            code: Some(xai_grok_sampling_types::ApiErrorCode::parse(
+                "exceed_context_size_error",
+            )),
+        };
+        assert!(matches!(
+            classify_error(&coded, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
+            RetryDecision::Fatal(_)
+        ));
+    }
+
+    #[test]
+    fn byte_size_coded_errors_get_image_strip_before_the_veto() {
+        // Byte-size codes get the 413 remedy: strip images and retry once; the caller upgrades to Fatal when nothing is left to strip
+        for code in ["413", "payload_too_large", "request_too_large"] {
+            let coded = SamplingError::StreamError {
+                error_type: "BAD_REQUEST".into(),
+                message: "request rejected".into(),
+                code: Some(xai_grok_sampling_types::ApiErrorCode::parse(code)),
+            };
+            assert!(
+                matches!(
+                    classify_error(&coded, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
+                    RetryDecision::RetryWithImageStrip
+                ),
+                "expected image strip for coded {code}"
+            );
+        }
     }
 
     #[test]

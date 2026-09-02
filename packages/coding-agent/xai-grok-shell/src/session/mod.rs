@@ -29,9 +29,8 @@ pub use prod_mc_cli_chat_proxy_types::feedback_types::{
     validate_feedback_images,
 };
 pub use xai_fsnotify::{FsConfig, FsEvent, FsEventKind, FsEventSource, FsNotifyError, GitMetaKind};
-/// `false` twin: this template is not compiled into this build, so no
-/// template matches. Keeps ungated call sites compiling in both
-/// configurations.
+/// `false` twin: this template is not compiled into this build, so no template matches.
+/// Keeps ungated call sites compiling in both configurations.
 pub(crate) fn is_cursor_user_template(
     _template: &xai_grok_agent::prompt::user_message::UserMessageTemplate,
 ) -> bool {
@@ -65,9 +64,7 @@ pub(crate) fn is_cursor_system_template(
 ) -> bool {
     false
 }
-/// Pull the `ContentBlock::Image`s out of a block list — the single spelling
-/// of "only Image blocks ride structurally" (interject parse + queue-interject
-/// harvest).
+/// The single spelling of "only Image blocks are carried structurally" (interject parse and queue-interject harvest).
 pub(crate) fn image_blocks(
     blocks: impl IntoIterator<Item = agent_client_protocol::ContentBlock>,
 ) -> Vec<agent_client_protocol::ImageContent> {
@@ -83,10 +80,8 @@ pub use xai_agent_lifecycle::{
     AnalyticsClass, CompactionClass, InputAuthority, InputPolicy, QueuePolicy, ShutdownPolicy,
     TurnBoundary,
 };
-/// Describes who originated a prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptOrigin {
-    /// A normal user-initiated prompt.
     User,
     /// Auto-wake prompt injected when a background terminal task completed.
     TaskCompleted {
@@ -106,30 +101,22 @@ pub enum PromptOrigin {
     WorkflowCompleted {
         completion_id: String,
     },
-    /// Server-initiated prompt from the idle-gated notification drain
-    /// (`maybe_drain_notifications`). Batches one or more monitor-event
-    /// or bash-task-completed notifications into a single turn while the
-    /// user is idle.
+    /// Server-initiated prompt from the idle-gated notification drain (`maybe_drain_notifications`).
+    /// Batches one or more monitor-event or bash-task-completed notifications into a single turn while the user is idle.
     NotificationDrain,
-    /// Orchestrator-initiated summary turn. The goal orchestrator injects a
-    /// system reminder into context and then triggers a model turn so the
-    /// model can print a visible progress update.
+    /// The goal orchestrator injects a system reminder into context and then triggers a model turn so the model can print a visible progress update.
     GoalSummary,
-    /// Verification-stage nudge injected after the verification stage
-    /// achieved — keep working" system-reminder body alongside the
-    /// path to the persisted details file. The variant name retains
-    /// the `Classifier` prefix for wire stability.
+    /// Nudge injected when the verification stage rejects an `update_goal(completed: true)` attempt.
+    /// Carries the "not yet achieved — keep working" system-reminder body alongside the path to the persisted details file.
+    /// The variant name retains the `Classifier` prefix for wire stability.
     GoalClassifierNudge,
     /// Scheduled task (`/loop`) prompt fired by the scheduler via the pager.
     SchedulerFired,
-    /// Turn injected after a resumed plan-approval decision: the
-    /// shell re-parked `exit_plan_mode` on resume, the user approved/revised,
-    /// and the shell injects the follow-up turn. Synthetic so the user never
-    /// typed it — kept out of prompt history — but it still runs a real turn.
+    /// The shell re-parked `exit_plan_mode` on resume, the user approved/revised, and the shell injects the follow-up turn.
+    /// Synthetic: the user never typed it, so it stays out of prompt history, but it still runs a real turn.
     PlanResume,
 }
 impl PromptOrigin {
-    /// Parse a prompt_id string into a `PromptOrigin`.
     pub fn from_prompt_id(prompt_id: &str) -> Self {
         if let Some(task_id) = prompt_id.strip_prefix("task-completed-") {
             Self::TaskCompleted {
@@ -208,12 +195,20 @@ impl PromptOrigin {
     pub fn is_synthetic(&self) -> bool {
         !matches!(self, Self::User)
     }
-    /// Whether a `UserMessageChunk` echo for this origin must stay out of
-    /// client scrollback (live and on resume). Model-only / side-channel
-    /// content — UI already surfaces it via task pane, monitor gutter, etc.
-    ///
-    /// Cron (`SchedulerFired`) and plan-resume follow-ups still render;
-    /// real user turns always render.
+    /// A queued user follow-up must wait for these to finish; Steer must not
+    /// promote into them.
+    pub fn is_auto_wake(&self) -> bool {
+        matches!(
+            self,
+            Self::TaskCompleted { .. }
+                | Self::SubagentCompleted { .. }
+                | Self::WorkflowCompleted { .. }
+                | Self::ParentAgentMessage { .. }
+                | Self::NotificationDrain
+        )
+    }
+    /// Whether a `UserMessageChunk` echo for this origin must stay out of client scrollback (live and on resume).
+    /// The hidden origins carry model-only, side-channel content the UI already shows elsewhere (task pane, monitor gutter, etc.).
     pub fn hide_user_echo_from_scrollback(&self) -> bool {
         match self {
             Self::User
@@ -264,7 +259,9 @@ mod tests {
             }
         );
         assert!(origin.is_synthetic());
+        assert!(origin.is_auto_wake());
         assert_eq!(origin.completion_id(), Some("abc-123"));
+        assert!(!PromptOrigin::from_prompt_id("my-prompt").is_auto_wake());
     }
     #[test]
     fn from_prompt_id_parent_message() {
@@ -409,29 +406,23 @@ mod tests {
         );
     }
 }
-/// Client-requested fs notification mode (was xai_fsnotify::FsNotifyMode).
-/// Determines whether the session sends an initial file index to the client
-/// or just streams raw file events.
+/// Determines whether the session sends an initial file index to the client or just streams raw file events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub(crate) enum ClientFsMode {
     #[default]
     Events,
     Index,
 }
-/// Client-side fs notification config: fs source settings + mode.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ClientFsConfig {
     pub fs: FsConfig,
     pub mode: ClientFsMode,
 }
-/// Share session request/response types
 pub mod share {
-    /// Request to share a session via URL
     #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
     pub struct ShareSessionRequest {
         pub session_id: String,
     }
-    /// Response containing the shareable URL
     #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
     pub struct ShareSessionResponse {
         pub share_url: String,
@@ -498,7 +489,9 @@ pub mod result;
 pub mod signals;
 pub(crate) mod slash_authority;
 pub(crate) mod slash_commands;
+pub mod usage_file;
 pub use slash_commands::PAGER_COMMAND_KEYS;
+pub(crate) mod repo_status_prefix;
 pub mod storage;
 pub(crate) mod streaming_capture;
 pub(crate) mod ttsr;
@@ -517,4 +510,5 @@ pub mod wasm_tools;
 pub(crate) mod wire_tags;
 pub(crate) mod workflow;
 pub mod worktree;
+pub(crate) mod worktree_cleanup;
 pub mod worktree_pool;

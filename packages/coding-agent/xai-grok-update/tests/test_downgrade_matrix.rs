@@ -4,12 +4,10 @@
 //!   - user's current version vs. channel pointer target
 //!   - installer type (internal, npm, gh-release)
 //!   - channel (stable, alpha, enterprise)
-//!   - pointer-flip scenarios (stable bumped after user upgraded, alpha
-//!     pointer rolled back, etc.)
+//!   - pointer-flip scenarios (stable bumped after user upgraded, alpha pointer rolled back, etc.)
 //!
-//! Also includes wiremock-based installation tests that verify the GCS
-//! internal installer actually downloads and symlinks an older binary
-//! when the stable pointer is rolled back.
+//! Also includes wiremock-based installation tests.
+//! They verify the GCS internal installer actually downloads and symlinks an older binary when the stable pointer is rolled back.
 
 #![cfg(all(unix, not(feature = "community-build")))]
 
@@ -87,11 +85,10 @@ async fn mount_gcs_with_channels(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Scenario matrix: GCS internal installer — downgrade via install
+// Scenario matrix: GCS internal installer, downgrade via install
 //
-// Each test simulates a user on version X, with the stable/alpha pointer
-// now pointing to version Y. The internal installer should install Y
-// regardless of whether Y < X (rollback) or Y > X (upgrade).
+// Each test simulates a user on version X, with the stable/alpha pointer now pointing to version Y
+// The internal installer should install Y regardless of whether Y < X (rollback) or Y > X (upgrade)
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -144,17 +141,15 @@ async fn internal_install_stable_upgrade_0_2_5_to_0_2_7() {
 #[tokio::test]
 #[serial]
 async fn internal_install_rollback_then_upgrade_sequence() {
-    // Simulates: install 0.2.7 → rollback to 0.2.5 → fix ships as 0.2.8.
+    // Simulates: install 0.2.7, roll back to 0.2.5, then the fix ships as 0.2.8
     // All three installs must succeed sequentially.
     let _ = test_home();
     reset_home();
     let platform = host_platform();
 
     for version in ["0.2.7", "0.2.5", "0.2.8"] {
-        // Age the previous installs: cleanup deliberately never deletes a
-        // freshly-written binary (it may be a concurrent racer's just-renamed
-        // download), so the retention assertions below need the earlier
-        // installs to look like real leftovers from past releases.
+        // Age the previous installs: cleanup never deletes a freshly-written binary (it may be a concurrent racer's just-renamed download)
+        // The retention assertions below need the earlier installs to look like real leftovers from past releases
         common::backdate_downloads();
         let server = mount_gcs_with_channels(version, None, version, &platform).await;
         let cfg = make_config("stable");
@@ -169,7 +164,7 @@ async fn internal_install_rollback_then_upgrade_sequence() {
         "final symlink must point to 0.2.8: {target:?}"
     );
 
-    // Cleanup retains current + highest-semver non-current (N-1 by version, not install order).
+    // Cleanup retains the current and the highest-semver non-current binary (N-1 by version, not install order)
     let downloads = test_home().join("downloads");
     assert!(
         downloads.join(format!("grok-0.2.8-{platform}")).exists(),
@@ -188,8 +183,8 @@ async fn internal_install_rollback_then_upgrade_sequence() {
 #[tokio::test]
 #[serial]
 async fn internal_install_alpha_rollback_pointer_resolves_correctly() {
-    // Alpha user on 0.2.8-alpha.3. Alpha pointer rolled back to 0.2.8-alpha.1,
-    // stable pointer is 0.2.7. Alpha channel returns max(alpha, stable) = 0.2.8-alpha.1.
+    // Alpha user on 0.2.8-alpha.3. Alpha pointer rolled back to 0.2.8-alpha.1, stable pointer is 0.2.7.
+    // Alpha channel returns max(alpha, stable) = 0.2.8-alpha.1
     let _ = test_home();
     reset_home();
     let platform = host_platform();
@@ -206,7 +201,7 @@ async fn internal_install_alpha_rollback_pointer_resolves_correctly() {
         .mount(&server)
         .await;
     // The resolved version is max(0.2.7, 0.2.8-alpha.1) = 0.2.8-alpha.1.
-    // Note: semver considers 0.2.8-alpha.1 < 0.2.8 but > 0.2.7.
+    // Semver considers 0.2.8-alpha.1 < 0.2.8 but > 0.2.7
     Mock::given(method("GET"))
         .and(path(format!("/grok-0.2.8-alpha.1-{platform}")))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(b"#!/bin/sh\nexit 0\n".to_vec()))
@@ -271,9 +266,8 @@ async fn internal_install_alpha_user_gets_newer_stable_after_stable_passes_alpha
 // Scenario matrix: check_update_status across installer × version direction
 //
 // Uses check_update_status end-to-end with fake npm/gh binaries.
-// The internal (GCS) path can't be end-to-end tested via check_update_status
-// (hardcoded URLs), so its update-detection logic is covered by the
-// needs_update unit tests and the install tests above.
+// The internal (GCS) path can't be end-to-end tested via check_update_status (hardcoded URLs)
+// Its update-detection logic is covered by the needs_update unit tests and the install tests above
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn setup_npm(current_version: &str) -> FakeBinGuard {
@@ -320,8 +314,8 @@ async fn npm_same_version_no_update() {
 #[tokio::test]
 #[serial]
 async fn npm_rollback_does_not_report_update() {
-    // Stable pointer rolled back 0.2.7 → 0.2.5. npm user on 0.2.7 must NOT
-    // see an update — stale registries make this path unsafe.
+    // Stable pointer rolled back from 0.2.7 to 0.2.5
+    // npm user on 0.2.7 must NOT see an update; stale registries make this path unsafe
     let g = setup_npm("0.2.7");
     g.set_stdout("\"0.2.5\"");
 
@@ -336,7 +330,7 @@ async fn npm_rollback_does_not_report_update() {
 #[tokio::test]
 #[serial]
 async fn npm_drastically_old_registry_does_not_report_update() {
-    // Corporate registry returns ancient version.
+    // The corporate registry returns an ancient version
     let g = setup_npm("0.2.7");
     g.set_stdout("\"0.1.4\"");
 
@@ -360,8 +354,8 @@ async fn gh_release_upgrade_reports_update() {
 #[tokio::test]
 #[serial]
 async fn gh_release_rollback_not_advertised_by_check() {
-    // `update --check` advertises upgrades only; a rollback still converges via
-    // the auto-install path (covered by the internal_install_* tests), not here.
+    // `update --check` advertises upgrades only
+    // A rollback still converges via the auto-install path (covered by the internal_install_* tests), not here
     let g = setup_gh("0.2.7");
     g.set_stable_only_stdout("v0.2.5\n");
 
@@ -387,10 +381,9 @@ async fn gh_release_same_version_no_update() {
 // ─────────────────────────────────────────────────────────────────────────────
 // auto_update_target: the leader/background auto-install decision
 //
-// Unlike the upgrade-only `check_update_status` report, this is the
-// downgrade-aware convergence decision. It gates on the installer, so
-// authoritative installers (gh-release/internal) follow a rolled-back pointer
-// while npm never downgrades. `fetch_latest_version` keeps these hermetic.
+// Unlike the upgrade-only `check_update_status` report, this is the downgrade-aware convergence decision
+// It gates on the installer, so authoritative installers (gh-release/internal) follow a rolled-back pointer while npm never downgrades
+// `fetch_latest_version` keeps these hermetic
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -430,7 +423,7 @@ async fn auto_update_target_gh_release_same_version_returns_none() {
 #[tokio::test]
 #[serial]
 async fn auto_update_target_npm_rollback_returns_none() {
-    // npm registries can serve stale versions — never downgrade npm installs.
+    // npm registries can serve stale versions, so never downgrade npm installs
     let g = setup_npm("0.2.26");
     g.set_stdout("\"0.2.22\"");
 
@@ -442,18 +435,14 @@ async fn auto_update_target_npm_rollback_returns_none() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Disk-aware convergence: ensure_latest_on_disk + installed_on_disk_version
+// Disk-aware convergence: ensure_latest_on_disk and installed_on_disk_version
 //
-// Concurrent updaters (TUI background download, leader hourly checker,
-// explicit `grok update`) must decide staleness from the on-disk install, not
-// their own compiled-in version — a binary another process already installed
-// is never downloaded a second time, but a stale running process still gets
-// the relaunch signal.
+// The TUI background download, the leader hourly checker, and explicit `grok update` can run concurrently
+// Each must decide staleness from the on-disk install, not its own compiled-in version
+// A binary another process already installed is never downloaded a second time, but a stale running process still gets the relaunch signal
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Lay down a managed-install layout in the test GROK_HOME:
-/// `bin/grok -> ../downloads/grok-<version>-<platform>` (what
-/// `install_internal_from_base` produces).
+/// Lay down what `install_internal_from_base` produces in the test GROK_HOME: `bin/grok -> ../downloads/grok-<version>-<platform>`.
 fn fake_managed_install(version: &str) {
     let home = test_home();
     let downloads = home.join("downloads");
@@ -483,8 +472,7 @@ async fn installed_on_disk_version_reads_symlink_target() {
 #[tokio::test]
 #[serial]
 async fn ensure_latest_skips_download_when_disk_current_but_still_relaunches() {
-    // Running 0.2.5, pointer 0.2.7, disk already at 0.2.7 (another process
-    // downloaded it): no download, but the stale running process must relaunch.
+    // Running 0.2.5, pointer 0.2.7, disk already at 0.2.7 (another process downloaded it): no download, but the stale running process must relaunch
     let g = setup_gh("0.2.5");
     g.set_stable_only_stdout("v0.2.7\n");
     fake_managed_install("0.2.7");
@@ -514,9 +502,8 @@ async fn ensure_latest_noop_when_running_and_disk_current() {
 #[tokio::test]
 #[serial]
 async fn ensure_latest_relaunches_onto_rolled_back_disk() {
-    // Pointer rolled back to 0.2.22 and the disk already converged; a running
-    // 0.2.26 leader must relaunch onto the older binary (gh-release is an
-    // authoritative installer → downgrades allowed).
+    // Pointer rolled back to 0.2.22 and the disk already converged
+    // A running 0.2.26 leader must relaunch onto the older binary (gh-release is an authoritative installer, so downgrades are allowed)
     let g = setup_gh("0.2.26");
     g.set_stable_only_stdout("v0.2.22\n");
     fake_managed_install("0.2.22");
@@ -529,18 +516,15 @@ async fn ensure_latest_relaunches_onto_rolled_back_disk() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Pointer-flip timing scenarios
 //
-// These test the race between a user opening grok (which caches the version)
-// and a pointer flip happening. The 30-min TTL means the user won't see the
-// new pointer until the cache expires, but once it does, the correct behavior
-// must kick in.
+// These test the race between a user opening grok (which caches the version) and a pointer flip happening
+// The 30-min TTL means the user won't see the new pointer until the cache expires, but once it does, the correct behavior must kick in
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 #[serial]
 async fn npm_user_upgraded_then_stable_rolled_back_stays_on_newer() {
-    // User ran `grok update` and got 0.2.7. Then stable was rolled back to
-    // 0.2.5. Next check_update_status sees 0.2.5 from npm. npm installer
-    // must NOT report a downgrade.
+    // User ran `grok update` and got 0.2.7. Then stable was rolled back to 0.2.5.
+    // Next check_update_status sees 0.2.5 from npm. npm installer must NOT report a downgrade.
     let g = setup_npm("0.2.7");
     g.set_stdout("\"0.2.5\"");
 
@@ -552,8 +536,7 @@ async fn npm_user_upgraded_then_stable_rolled_back_stays_on_newer() {
 #[tokio::test]
 #[serial]
 async fn gh_release_user_ahead_of_pointer_check_reports_no_update() {
-    // User manually installed 0.2.26 (ahead of the stable pointer 0.2.22);
-    // `update --check` must not present the older pointer as a new version.
+    // User manually installed 0.2.26 (ahead of the stable pointer 0.2.22); `update --check` must not present the older pointer as a new version
     let g = setup_gh("0.2.26");
     g.set_stable_only_stdout("v0.2.22\n");
 
@@ -569,13 +552,12 @@ async fn gh_release_user_ahead_of_pointer_check_reports_no_update() {
 #[tokio::test]
 #[serial]
 async fn npm_alpha_user_upgrade_after_stable_surpasses_alpha() {
-    // Alpha user on 0.2.6-alpha.2. Stable ships 0.2.7. npm returns 0.2.7
-    // for the @latest tag. User should upgrade.
+    // Alpha user on 0.2.6-alpha.2. Stable ships 0.2.7. npm returns 0.2.7 for the @latest tag.
     let g = setup_npm("0.2.6-alpha.2");
     g.set_stdout("\"0.2.7\"");
 
     let status = check_update_status(&make_config("stable")).await;
-    // Pre-release current on stable channel forces install.
+    // A pre-release current version on the stable channel forces the install
     assert!(
         status.update_available,
         "alpha user should upgrade to stable when stable surpasses alpha"
@@ -589,7 +571,7 @@ async fn npm_alpha_user_upgrade_after_stable_surpasses_alpha() {
 #[tokio::test]
 #[serial]
 async fn internal_install_double_rollback() {
-    // Ship 0.2.7 → rollback to 0.2.5 → rollback further to 0.2.3.
+    // Ship 0.2.7, roll back to 0.2.5, then roll back further to 0.2.3
     // The installer must handle multiple sequential downgrades.
     let _ = test_home();
     reset_home();

@@ -1,6 +1,4 @@
-//! Unit tests for [`super::AcpTerminalAdapter`]. Extracted from
-//! `adapter.rs` so the implementation reads top-to-bottom; wired in
-//! via `#[path = "adapter_tests.rs"] mod tests;` in adapter.rs.
+//! Wired into adapter.rs via `#[path = "adapter_tests.rs"] mod tests;` so the implementation there reads top-to-bottom.
 
 use super::*;
 use xai_grok_tools::notification::types::ToolNotificationHandle;
@@ -66,8 +64,7 @@ fn to_snapshot_derives_completed_and_end_time() {
     assert!(signaled.end_time.is_some());
 }
 
-/// Scripted client side of the terminal protocol: each `terminal/output`
-/// serves the next snapshot; `wait_for_exit` resolves after the last one.
+/// Scripted client side of the terminal protocol: each `terminal/output` serves the next snapshot; `wait_for_exit` resolves after the last one.
 fn scripted_gateway(outputs: Vec<(String, bool)>) -> GatewaySender {
     use xai_acp_lib::AcpClientMessage;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -183,8 +180,7 @@ async fn run_background_records_snapshots_and_threads_task_kind() {
     );
 }
 
-/// A gateway whose `terminal/output` never replies, so live polls fail and
-/// `get_task` exercises its offline fallback.
+/// A gateway whose `terminal/output` never replies, so live polls fail and `get_task` exercises its offline fallback.
 fn output_unavailable_gateway() -> GatewaySender {
     use xai_acp_lib::AcpClientMessage;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -229,9 +225,8 @@ async fn get_task_completed_keeps_completion_buffer_over_log() {
     assert!(snap.completed);
 }
 
-/// A scripted client for the kill/wait paths: `terminal/output` and
-/// `terminal/kill` each answer from a fixed script, and every request's
-/// method is recorded so tests can assert which round trips happened.
+/// A scripted client for the kill/wait paths: `terminal/output` and `terminal/kill` each answer from a fixed script.
+/// Every request's method is recorded so tests can assert which round trips happened.
 fn kill_wait_gateway(
     output_reply: Option<Option<u32>>,
     kill_ok: bool,
@@ -278,9 +273,7 @@ fn kill_wait_gateway(
     GatewaySender::new(tx)
 }
 
-/// A task id this adapter never started, against a client
-/// whose kill is lenient, must answer `NotFound` — not ride the lenient
-/// kill into a fabricated "terminated successfully".
+/// A kill for a task id this adapter never started must answer `NotFound`, even against a client whose kill succeeds for any id.
 #[tokio::test]
 async fn kill_task_unknown_id_answers_not_found_despite_lenient_client_kill() {
     let sent = std::sync::Arc::new(Mutex::new(Vec::new()));
@@ -295,10 +288,8 @@ async fn kill_task_unknown_id_answers_not_found_despite_lenient_client_kill() {
     assert_eq!(*sent.lock().unwrap(), vec!["output"]);
 }
 
-/// A probe that dies at the transport level (the client dropped the response
-/// channel without answering) proves nothing about the terminal's existence,
-/// so the kill must proceed exactly as it did before the probe existed —
-/// `NotFound` is reserved for a client that answered and disowned the id.
+/// A probe that dies at the transport level (the client dropped the response channel) proves nothing about the terminal's existence.
+/// The kill proceeds; `NotFound` is reserved for a client that answered and disowned the id.
 #[tokio::test]
 async fn kill_task_unknown_id_probe_transport_failure_still_kills() {
     use xai_acp_lib::AcpClientMessage;
@@ -511,9 +502,8 @@ async fn wait_for_completion_live_waiter_makes_client_ui_kill_delivered() {
     );
 }
 
-/// A waiter dropped while the kill RPC is in flight must not count as
-/// delivered: ACP has no oneshot, so we re-sample `live_waiters` after
-/// the await (local backend uses `reply.send().is_ok()`).
+/// A waiter dropped while the kill RPC is in flight must not count as delivered.
+/// ACP has no oneshot, so we re-sample `live_waiters` after the await (local backend uses `reply.send().is_ok()`).
 #[tokio::test]
 async fn client_ui_kill_does_not_mark_delivered_if_waiter_drops_during_kill() {
     use xai_acp_lib::AcpClientMessage;
@@ -580,8 +570,7 @@ async fn client_ui_kill_does_not_mark_delivered_if_waiter_drops_during_kill() {
     );
 }
 
-/// ModelTool must mark delivered *before* the kill RPC returns, so an
-/// exit-watcher TaskCompleted in that window still suppresses auto-wake.
+/// ModelTool must mark delivered *before* the kill RPC returns, so an exit-watcher TaskCompleted in that window still suppresses auto-wake.
 #[tokio::test]
 async fn model_tool_kill_marks_delivered_before_kill_rpc_returns() {
     use xai_acp_lib::AcpClientMessage;
@@ -645,9 +634,8 @@ async fn kill_task_tracked_completed_answers_already_exited_without_round_trips(
     assert!(!adapter.tasks.lock().unwrap()["t-done"].explicitly_killed);
 }
 
-/// A resumed session rebuilds the adapter with an empty map while the
-/// client still holds live terminals: an untracked id whose probe answers
-/// without an exit status is genuinely running, and the kill proceeds.
+/// A resumed session rebuilds the adapter with an empty map while the client still holds live terminals.
+/// An untracked id whose probe answers without an exit status is genuinely running, and the kill proceeds.
 #[tokio::test]
 async fn kill_task_untracked_live_terminal_still_kills() {
     let sent = std::sync::Arc::new(Mutex::new(Vec::new()));
@@ -676,10 +664,8 @@ async fn kill_task_untracked_exited_terminal_answers_already_exited() {
     assert_eq!(*sent.lock().unwrap(), vec!["output"]);
 }
 
-/// A blocking wait on a task the exit watcher already
-/// stamped complete answers immediately from the tracked snapshot — it must
-/// not send a gateway wait for the released terminal and burn the full
-/// requested budget polling it.
+/// A blocking wait on a task the exit watcher already stamped complete answers immediately from the tracked snapshot.
+/// It must not send a gateway wait for the released terminal and burn the full requested budget polling it.
 #[tokio::test]
 async fn wait_for_completion_answers_a_completed_task_immediately() {
     let sent = std::sync::Arc::new(Mutex::new(Vec::new()));
@@ -730,8 +716,8 @@ async fn wait_for_completion_answers_a_killed_task_immediately() {
     assert_eq!(*sent.lock().unwrap(), vec!["output"]);
 }
 
-/// An id this adapter is not tracking is not-found-as-running: probe once
-/// and return. Must not send WaitForTerminalExit and burn a 600s budget.
+/// An id this adapter is not tracking gets one probe, then the wait returns.
+/// It must not send WaitForTerminalExit and burn a 600s budget.
 #[tokio::test]
 async fn wait_for_completion_untracked_exited_terminal_returns_immediately() {
     let sent = std::sync::Arc::new(Mutex::new(Vec::new()));
@@ -811,8 +797,7 @@ async fn wait_for_completion_untracked_live_terminal_stays_pending() {
     );
 }
 
-/// A probe that dies at the transport level (the client dropped the response
-/// channel without answering) proves nothing about the terminal's existence.
+/// A probe that dies at the transport level (the client dropped the response channel) proves nothing about the terminal's existence.
 /// Same as kill: do not treat it as not-found and skip WaitForTerminalExit.
 #[tokio::test]
 async fn wait_for_completion_untracked_probe_transport_failure_still_waits() {
@@ -848,10 +833,8 @@ async fn wait_for_completion_untracked_probe_transport_failure_still_waits() {
     assert_eq!(*sent.lock().unwrap(), vec!["output", "wait"]);
 }
 
-/// The wait can lose a race with the exit watcher: the task completes and
-/// its terminal is released between the entry check and the gateway send.
-/// A stamped completion is an answer — the fallback must not poll the
-/// released terminal until the deadline.
+/// The wait can lose a race with the exit watcher: the task completes and its terminal is released between the entry check and the gateway send.
+/// A stamped completion is an answer: the fallback must not poll the released terminal until the deadline.
 #[tokio::test]
 async fn wait_for_completion_race_with_exit_watcher_skips_the_polling_fallback() {
     use xai_acp_lib::AcpClientMessage;

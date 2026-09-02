@@ -432,6 +432,8 @@ settings.contextual_hints.word_select.label: "詞語選擇"
 settings.contextual_hints.word_select.description: "當「文字選擇」處於摺疊/導覽模式時雙擊對話文字,提醒你「詞語選擇」在設定中。"
 settings.contextual_hints.ssh_wrap.label: "SSH 包裝"
 settings.contextual_hints.ssh_wrap.description: "SSH 工作階段載入時,推薦使用 `grok wrap ssh` 以獲得剪貼簿轉發和終端恢復。"
+settings.contextual_hints.export_copy.label: "複製和匯出"
+settings.contextual_hints.export_copy.description: "在附近連續三次拖曳複製對話文字後,提醒你可以使用 /copy 和 /export。"
 settings.fork_secondary_model.label: "分叉次要模型"
 settings.fork_secondary_model.description: "分叉時次要代理使用的模型。選擇「(未覆蓋)」可清除。"
 

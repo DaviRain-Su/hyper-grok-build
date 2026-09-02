@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 use tokio::sync::oneshot;
 
 use super::super::types::{SubagentRequest, SubagentResult};
+
 use super::{ChildRunner, SubagentCoordinator};
 
 /// Cancelling a queued spawn's token schedules no wake of its own; sweeps
@@ -29,6 +30,11 @@ impl SpawnQueue {
 
     pub(super) fn push_back(&mut self, entry: QueuedSpawn) {
         self.entries.push_back(entry);
+    }
+
+    #[cfg(test)]
+    pub(super) fn pop_front(&mut self) -> Option<QueuedSpawn> {
+        self.entries.pop_front()
     }
 
     pub(super) fn contains_id(&self, id: &str) -> bool {
@@ -136,6 +142,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 self.start_child(
                     *request,
                     spawn_reply,
+                    None,
                     StartOrigin::Dequeued {
                         queued_for: queued_at.elapsed(),
                         deadline,
@@ -162,6 +169,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         self.queued.entries = kept.into();
         let count = removed.len();
         for queued in removed {
+            let id = queued.request.id.clone();
+            self.reject_spawn_ready_messages(
+                &id,
+                crate::implementations::grok_build::task::types::ActiveAgentMessageOutcome::NotActiveOrFinalizing,
+            );
             self.finish_cancelled_queued(queued);
         }
         count

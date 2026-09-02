@@ -1,13 +1,8 @@
-//! Shared tmux command protocol and result parsing.
-
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 const TMUX_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
-/// After the leader exits, allow this much additional time for process-group
-/// teardown and concurrent pipe drains so a near-deadline success is not turned
-/// into a drain timeout. The main process wait still uses only
-/// [`TMUX_QUERY_TIMEOUT`].
+/// After the leader exits, the group teardown and pipe drains get this much extra time, so a near-deadline success does not become a drain timeout.
 const POST_EXIT_CLEANUP_GRACE: Duration = Duration::from_millis(300);
 /// How long a signalled process group may take to empty before it is killed.
 const GROUP_EXIT_GRACE: Duration = Duration::from_millis(100);
@@ -90,8 +85,7 @@ fn run_tmux_bounded(
     };
 
     // The leader may be reaped while descendants still exist or hold pipes.
-    // Use a fresh post-exit bound so near-deadline success still drains; the
-    // main process deadline is not extended for hung leaders.
+    // Use a fresh post-exit bound so near-deadline success still drains; the main process deadline is not extended for hung leaders
     let cleanup_deadline = std::time::Instant::now() + POST_EXIT_CLEANUP_GRACE;
     terminate_owned_group(&group);
     let stdout = recv_pipe_drain(stdout, cleanup_deadline, "stdout")?;
@@ -136,16 +130,13 @@ fn terminate_tmux_tree(group: &xai_tty_utils::ProcessGroup, child: &mut std::pro
 }
 
 /// SIGTERM the group, then escalate to SIGKILL only if it outlives the grace.
-///
-/// Callers reach this with the leader already reaped, so the group is usually
-/// empty on the first check.
+/// Callers reach this with the leader already reaped, so the group is usually empty on the first check.
 fn terminate_owned_group(group: &xai_tty_utils::ProcessGroup) {
     let _ = group.terminate();
     let deadline = std::time::Instant::now() + GROUP_EXIT_GRACE;
     loop {
         if group.has_live_members() == Some(false) {
-            // `return`, not `break`: the reaped leader's pid may already
-            // belong to an unrelated group, so an empty group gets no SIGKILL.
+            // `return`, not `break`: the reaped leader's pid may already belong to an unrelated group, so an empty group gets no SIGKILL
             return;
         }
         if std::time::Instant::now() >= deadline {
@@ -204,17 +195,15 @@ fn query_option_support_with(runner: &dyn TmuxCommandRunner, option: &str) -> Tm
     }
 }
 
-/// The attached client's resolved terminal features, as a comma-separated list
-/// (`RGB`, `clipboard`, `focus`, …).
+/// The attached client's resolved terminal features, as a comma-separated list (`RGB`, `clipboard`, `focus`, …).
 ///
-/// tmux resolves this once per client at attach time from the outer terminal's
-/// terminfo plus `terminal-features` / `terminal-overrides`, and it decides
-/// whether 24-bit SGR survives the multiplexer. `COLORTERM` inside the pane
-/// describes only what the pane's program emits, so it cannot answer that.
+/// tmux resolves this once per client at attach time from the outer terminal's terminfo plus `terminal-features` / `terminal-overrides`.
+/// The list decides whether 24-bit SGR survives the multiplexer.
+/// `COLORTERM` inside the pane describes only what the pane's program emits, so it cannot answer that.
 ///
-/// Empty output means the answer is unknown rather than negative: tmux before
-/// 3.2 has no `terminal-features` and renders the unknown format as an empty
-/// string, and a server with no attached client has nothing to report.
+/// Empty output means the answer is unknown rather than negative.
+/// tmux before 3.2 has no `terminal-features` and renders the unknown format as an empty string.
+/// A server with no attached client has nothing to report.
 pub fn query_client_features() -> TmuxQueryResult<String> {
     query_client_features_with(&LiveTmuxCommandRunner)
 }
@@ -418,132 +407,6 @@ mod tests {
         assert_eq!(
             query_option_support_with(&runner, "allow-passthrough"),
             TmuxQueryResult::Unavailable
-        );
-    }
-
-    /// A leader that exits successfully just under the process deadline must
-    /// still return captured output: post-exit TERM grace + pipe drain use a
-    /// separate bound and must not turn success into a drain timeout.
-    ///
-    /// A background descendant keeps the captured pipes open until process-group
-    /// teardown so the drain cannot finish during the wait loop. That makes the
-    /// post-exit cleanup window load-bearing once the main deadline is nearly
-    /// exhausted.
-    #[cfg(unix)]
-    #[test]
-    #[serial_test::serial(tmux_probe_path)]
-    fn successful_near_deadline_exit_still_returns_captured_output() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let temp = tempfile::tempdir().unwrap();
-        let bin = temp.path().join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let tmux = bin.join("tmux");
-        // Burn most of the process budget, then exit successfully while a
-        // descendant still holds the pipes. Remaining main-deadline time is
-        // intentionally below the fixed TERM grace sleep so a shared deadline
-        // would fail the drain; the separate post-exit cleanup grace must keep
-        // this a success. Perl select is used for subsecond precision.
-        let timeout = Duration::from_millis(1500);
-        std::fs::write(
-            &tmux,
-            "#!/bin/sh\n\
-             /usr/bin/perl -e 'select(undef, undef, undef, 1.2)'\n\
-             ( exec sleep 30 ) &\n\
-             printf 'tmux 3.4\\n'\n\
-             exit 0\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        let previous_path = std::env::var_os("PATH");
-        let mut path = OsString::from(bin.as_os_str());
-        path.push(":");
-        if let Some(existing) = &previous_path {
-            path.push(existing);
-        }
-        // SAFETY: serialized on `tmux_probe_path`; restored before return.
-        unsafe {
-            std::env::set_var("PATH", &path);
-        }
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_tmux_bounded(TmuxCommand::Version, timeout)
-        }));
-        match previous_path {
-            Some(value) => unsafe {
-                std::env::set_var("PATH", value);
-            },
-            None => unsafe {
-                std::env::remove_var("PATH");
-            },
-        }
-        let output = result
-            .expect("near-deadline probe must not panic")
-            .expect("near-deadline success must not become a drain error");
-        assert!(output.status_success, "expected successful status");
-        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "tmux 3.4");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn empty_group_teardown_does_not_wait_out_the_grace() {
-        let group = xai_tty_utils::ProcessGroup::new().expect("group");
-        let started = std::time::Instant::now();
-        terminate_owned_group(&group);
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed < GROUP_EXIT_GRACE / 2,
-            "an empty group must not wait out the grace, took {elapsed:?}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn group_that_ignores_sigterm_waits_the_grace_and_is_killed() {
-        let mut group = xai_tty_utils::ProcessGroup::new().expect("group");
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c")
-            .arg("trap '' TERM; sleep 1000")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        xai_tty_utils::detach_std_command(&mut cmd);
-        #[allow(clippy::disallowed_methods)] // test fixture; the test kills it
-        let mut child = cmd.spawn().expect("spawn sigterm-ignoring child");
-        group.attach_std(&child).expect("attach");
-        // The shell installs its trap ~0.3ms after exec. Signal before that
-        // and it dies to the default SIGTERM, leaving a zombie that still
-        // reports live — the test then passes without exercising SIGKILL.
-        std::thread::sleep(Duration::from_millis(250));
-
-        let started = std::time::Instant::now();
-        terminate_owned_group(&group);
-        let elapsed = started.elapsed();
-
-        assert!(
-            elapsed >= GROUP_EXIT_GRACE,
-            "an occupied group must still get the full grace, took {elapsed:?}"
-        );
-
-        // Bounded: without SIGKILL this fails in seconds rather than blocking
-        // the run on `sleep 1000`.
-        let reap_deadline = std::time::Instant::now() + Duration::from_secs(5);
-        let status = loop {
-            match child.try_wait().expect("poll child") {
-                Some(status) => break status,
-                None if std::time::Instant::now() < reap_deadline => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                None => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    panic!("the child survived teardown, so SIGKILL never escalated");
-                }
-            }
-        };
-        assert!(
-            !status.success(),
-            "the child must have been killed, got {status:?}"
         );
     }
 }

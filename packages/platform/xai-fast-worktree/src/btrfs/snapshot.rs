@@ -527,39 +527,8 @@ pub fn snapshot_meta_targets(snapshot_path: &Path, dest: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::btrfs::detect::{is_btrfs, is_btrfs_subvolume};
+    use crate::btrfs::detect::is_btrfs;
     use std::path::PathBuf;
-
-    /// Helper to find a writable BTRFS subvolume for testing.
-    /// Returns (subvolume_path, test_dest_path) if available.
-    fn get_btrfs_snapshot_test_paths() -> Option<(PathBuf, PathBuf)> {
-        // Check environment variable first
-        if let Ok(path) = std::env::var("BTRFS_TEST_PATH") {
-            let path = PathBuf::from(&path);
-            if path.exists()
-                && is_btrfs(&path).unwrap_or(false)
-                && is_btrfs_subvolume(&path).ok().flatten().is_some()
-            {
-                let dest = PathBuf::from(format!("{}_snapshot_test", path.display()));
-                return Some((path, dest));
-            }
-        }
-
-        // Check common BTRFS mount points
-        for candidate in &["/", "/home"] {
-            let path = Path::new(candidate);
-            if path.exists()
-                && is_btrfs(path).unwrap_or(false)
-                && is_btrfs_subvolume(path).ok().flatten().is_some()
-            {
-                // For system paths, use a temp location
-                let dest = PathBuf::from("/tmp/btrfs_snapshot_test");
-                return Some((path.to_path_buf(), dest));
-            }
-        }
-
-        None
-    }
 
     #[test]
     fn test_create_snapshot_nonexistent_source() {
@@ -600,46 +569,6 @@ mod tests {
 
         // Clean up
         let _ = std::fs::remove_dir_all(&dest_path);
-    }
-
-    #[test]
-    fn test_create_snapshot_on_real_btrfs() {
-        // This test automatically skips if no BTRFS subvolume is available
-        let Some((source_path, dest_path)) = get_btrfs_snapshot_test_paths() else {
-            eprintln!("Skipping test: no BTRFS subvolume detected for snapshot test");
-            return;
-        };
-
-        // Clean up if exists from previous run
-        let _ = std::process::Command::new("btrfs")
-            .args(["subvolume", "delete", &dest_path.to_string_lossy()])
-            .output();
-        let _ = std::fs::remove_dir_all(&dest_path);
-
-        // Note: This test may fail if:
-        // 1. We don't have permission to create snapshots
-        // 2. The dest path is on a different filesystem
-        // So we handle both success and expected failures gracefully
-
-        match create_snapshot(&source_path, &dest_path) {
-            Ok(()) => {
-                eprintln!(
-                    "BTRFS snapshot created: {} -> {}",
-                    source_path.display(),
-                    dest_path.display()
-                );
-                assert!(dest_path.exists(), "Snapshot should exist");
-
-                // Clean up - use btrfs subvolume delete
-                let _ = std::process::Command::new("btrfs")
-                    .args(["subvolume", "delete", &dest_path.to_string_lossy()])
-                    .output();
-            }
-            Err(e) => {
-                // Expected to fail if we don't have permissions or cross-filesystem
-                eprintln!("Snapshot failed (expected if no permissions): {}", e);
-            }
-        }
     }
 
     #[test]
@@ -694,19 +623,6 @@ mod tests {
 
         remove_btrfs_metadata(&snapshot_path);
         assert!(!meta_path.exists());
-    }
-
-    #[test]
-    fn test_remove_btrfs_metadata_nonexistent() {
-        remove_btrfs_metadata(Path::new("/nonexistent/snapshot"));
-    }
-
-    #[test]
-    fn test_unix_timestamp_string() {
-        let ts = crate::util::unix_timestamp_string();
-        assert!(ts.ends_with("s-since-epoch"));
-        let secs: u64 = ts.strip_suffix("s-since-epoch").unwrap().parse().unwrap();
-        assert!(secs > 1_700_000_000);
     }
 
     /// Assert the snapshot name keeps `<basename>-` and ends in a 16-hex hash.

@@ -60,12 +60,11 @@ pub use intra_compaction::DEFAULT_COMPACTION_MODEL_NAME;
 // grok-build's full-replace subsystem now lives under `code_compaction`;
 // re-exported at the crate root so consumers keep a stable public API.
 pub use code_compaction::{
-    CompactedHistoryParts, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT, FailureKind,
-    FullReplaceAttemptOutcome, FullReplaceConfig, FullReplaceContext, FullReplaceError,
-    FullReplaceObserver, FullReplaceOutput, FullReplaceSummary, MIN_SUMMARY_SEED_CHARS,
-    SELF_SUMMARIZATION_PROMPT, SummaryPromptKind, apply_full_replace_compaction,
-    assemble_compacted_history, build_summary_prompt, build_summary_prompt_kind,
-    classify_http_status, classify_stream_event_error, format_compact_summary,
+    CompactedHistoryParts, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT, FullReplaceAttemptOutcome,
+    FullReplaceConfig, FullReplaceContext, FullReplaceError, FullReplaceObserver,
+    FullReplaceOutput, FullReplaceSummary, MIN_SUMMARY_SEED_CHARS, SELF_SUMMARIZATION_PROMPT,
+    SummaryPromptKind, apply_full_replace_compaction, assemble_compacted_history,
+    build_summary_prompt, build_summary_prompt_kind, format_compact_summary,
     format_compact_summary_content, is_context_length_error, is_degenerate_summary,
     sample_full_replace_summary, wrap_user_query,
 };

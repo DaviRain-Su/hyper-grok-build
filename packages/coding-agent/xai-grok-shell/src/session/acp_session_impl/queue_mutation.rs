@@ -36,11 +36,9 @@ impl InputOrigin {
     }
 }
 
-/// Positive-capability authorization for generic queue controls.
+/// Authorization for generic queue controls.
 ///
-/// Represented as visibility/editability capabilities rather than an enum so a
-/// protected (visible, non-editable) row can be minted without a dead variant on
-/// lower stack layers.
+/// Two capabilities (visible, editable) rather than an enum, so a protected row (visible, not editable) needs no dead variant in lower stack layers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct QueueMutationPolicy {
     visible: bool,

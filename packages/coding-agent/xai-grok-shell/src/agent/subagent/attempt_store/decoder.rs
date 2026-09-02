@@ -300,8 +300,8 @@ fn decode_core_record(event: u8, fields: DecodedFields<'_>) -> Result<RecordV1> 
     Ok(record)
 }
 
-// Lexically find every top-level key that decodes to `c` (including whitespace
-// around `:` and `\u0063` escapes) and bound its string before JSON allocation.
+// Lexically find every top-level key that decodes to `c`, including whitespace around `:` and `\u0063` escapes
+// Bound its string before JSON allocation
 fn check_content_encoded_len(body: &[u8]) -> Result<()> {
     let mut fields = body
         .strip_prefix(b"{")

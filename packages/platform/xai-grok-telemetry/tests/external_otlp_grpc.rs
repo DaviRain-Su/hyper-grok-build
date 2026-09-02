@@ -1,7 +1,5 @@
-//! gRPC transport coverage for the external OTEL stream. This mirrors the
-//! primary HTTP/protobuf wire test in `external_otlp.rs`, but must live in its
-//! own integration-test binary because the external telemetry registry is a
-//! process-global `OnceLock`.
+//! gRPC transport coverage for the external OTEL stream, mirroring the primary HTTP/protobuf wire test in `external_otlp.rs`.
+//! It lives in its own integration-test binary because the external telemetry registry is a process-global `OnceLock`.
 
 mod otlp_collector;
 
@@ -69,6 +67,7 @@ fn external_stream_grpc_end_to_end() {
         client_identifier: None,
         screen_mode: None,
         prompt_text: Some(CANARY_PROMPT.into()),
+        command_name: None,
     });
     xai_grok_telemetry::log_event(xai_grok_telemetry::events::ModelResponseReceived {
         model_id: CANARY_MODEL.into(),
@@ -78,6 +77,8 @@ fn external_stream_grpc_end_to_end() {
         completion_tokens: Some(7),
         reasoning_tokens: None,
         cached_prompt_tokens: None,
+        cache_creation_tokens: None,
+        cost_usd_ticks: None,
     });
 
     xai_grok_telemetry::external::flush();

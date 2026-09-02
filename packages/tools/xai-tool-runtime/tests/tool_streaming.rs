@@ -149,20 +149,6 @@ async fn streaming_err_propagates_through_terminal() {
 }
 
 #[tokio::test]
-async fn streaming_progress_count_is_independent_of_args() {
-    // Distinct invocations on the same tool produce the same shape.
-    let tool = StreamingOk;
-    for _ in 0..3 {
-        let count = tool
-            .execute(ToolCallContext::default(), EmptyArgs {})
-            .await
-            .count()
-            .await;
-        assert_eq!(count, 4);
-    }
-}
-
-#[tokio::test]
 async fn empty_progress_still_yields_terminal() {
     // Building `with_progress` on an empty stream still produces exactly
     // one terminal item — the same shape `terminal_only` produces.

@@ -1,7 +1,6 @@
 //! Per-working-directory prompt history for fast reverse search.
 //!
-//! Stores prompts in a separate JSONL file per CWD for instant loading,
-//! independent of session storage. Each file is capped at 10,000 entries.
+//! Stores prompts in a separate JSONL file per CWD for instant loading, independent of session storage.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -17,14 +16,12 @@ pub struct PromptEntry {
     pub session_id: String,
     pub prompt: String,
     /// Whether this prompt was a direct bash command (vs. an AI prompt).
-    /// Defaults to `false` for backward compatibility — entries written before
-    /// this field existed are treated as non-bash. Shell history files
-    /// (`~/.bash_history` etc.) compensate for this gap.
+    /// Defaults to `false` for backward compatibility: entries written before this field existed are treated as non-bash.
+    /// Shell history files (`~/.bash_history` etc.) compensate for this gap.
     #[serde(default)]
     pub is_bash: bool,
 }
 
-/// Get the path to the prompt history file for a given CWD
 pub(crate) fn prompt_history_path(cwd: &str) -> PathBuf {
     crate::util::grok_home::sessions_cwd_dir(cwd).join(PROMPT_HISTORY_FILE)
 }
@@ -47,22 +44,18 @@ pub(crate) fn append_prompt(cwd: &str, entry: &PromptEntry) -> io::Result<()> {
     Ok(())
 }
 
-/// Load prompts for a given CWD.
 /// Returns prompts in reverse chronological order (most recent first).
 pub(crate) fn load_prompts(cwd: &str) -> io::Result<Vec<String>> {
     load_prompts_filtered(cwd, |_| true)
 }
 
-/// Load prompts for a given CWD, restricted to a single session id.
-/// Returns prompts in reverse chronological order (most recent first), matching
-/// `load_prompts` ordering — used by the pager's up-arrow / Ctrl+R history
-/// overlay when it wants only the current session's prompts.
+/// Returns prompts in reverse chronological order (most recent first), matching `load_prompts` ordering.
+/// The pager's up-arrow / Ctrl+R history overlay uses this when it wants only the current session's prompts.
 pub(crate) fn load_prompts_for_session(cwd: &str, session_id: &str) -> io::Result<Vec<String>> {
     load_prompts_filtered(cwd, |e| e.session_id == session_id)
 }
 
 /// Truncate the history file to MAX_PROMPT_HISTORY_ENTRIES if it exceeds the limit.
-/// Uses atomic rename for safety.
 pub(crate) fn truncate_if_needed(cwd: &str) -> io::Result<()> {
     let path = prompt_history_path(cwd);
     if !path.exists() {
@@ -112,13 +105,11 @@ pub(crate) async fn append_prompt_async(cwd: String, entry: PromptEntry) {
     .await;
 }
 
-/// Load only bash-command prompts for a given CWD.
 /// Returns prompts in reverse chronological order (most recent first).
 pub(crate) fn load_bash_prompts(cwd: &str) -> io::Result<Vec<String>> {
     load_prompts_filtered(cwd, |e| e.is_bash)
 }
 
-/// Shared implementation for loading prompts with an optional filter predicate.
 fn load_prompts_filtered(
     cwd: &str,
     filter: impl Fn(&PromptEntry) -> bool,
@@ -150,14 +141,12 @@ fn load_prompts_filtered(
     Ok(prompts)
 }
 
-/// Async wrapper for load_prompts
 pub(crate) async fn load_prompts_async(cwd: String) -> io::Result<Vec<String>> {
     tokio::task::spawn_blocking(move || load_prompts(&cwd))
         .await
         .map_err(io::Error::other)?
 }
 
-/// Async wrapper for load_prompts_for_session
 pub(crate) async fn load_prompts_for_session_async(
     cwd: String,
     session_id: String,
@@ -167,7 +156,6 @@ pub(crate) async fn load_prompts_for_session_async(
         .map_err(io::Error::other)?
 }
 
-/// Async wrapper for load_bash_prompts
 pub(crate) async fn load_bash_prompts_async(cwd: String) -> io::Result<Vec<String>> {
     tokio::task::spawn_blocking(move || load_bash_prompts(&cwd))
         .await
@@ -191,7 +179,6 @@ mod tests {
 
     fn test_cwd() -> (TempDir, String) {
         let tmp = TempDir::new().unwrap();
-        // Use a fake CWD path for testing
         let cwd = tmp
             .path()
             .join("test_project")
@@ -243,7 +230,7 @@ mod tests {
         }
 
         let prompts = load_prompts(&cwd).unwrap();
-        // Should be deduplicated to 1
+        // Consecutive identical prompts collapse to one entry
         assert_eq!(prompts.len(), 1);
         assert_eq!(prompts[0], "same prompt");
     }
@@ -257,11 +244,10 @@ mod tests {
 
     #[test]
     fn test_path_encoding() {
-        // CWD with special characters
         let cwd = "/path/with spaces/and@special#chars";
         let path = prompt_history_path(cwd);
         assert!(path.to_string_lossy().contains("prompt_history.jsonl"));
-        // The path should be encoded
+        // Encoding the CWD removes the spaces
         assert!(!path.to_string_lossy().contains(" "));
     }
 
@@ -313,12 +299,12 @@ mod tests {
             r#"{"timestamp":"2024-01-01T00:00:00Z","session_id":"s1","prompt":"old command"}"#;
         std::fs::write(&path, format!("{old_json}\n")).unwrap();
 
-        // Should deserialize fine with is_bash defaulting to false
+        // The old entry deserializes with is_bash defaulting to false
         let all = load_prompts(&cwd).unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0], "old command");
 
-        // Should NOT appear in bash-filtered results
+        // The old entry does not appear in bash-filtered results
         let bash = load_bash_prompts(&cwd).unwrap();
         assert!(bash.is_empty());
     }
@@ -373,10 +359,8 @@ mod tests {
         let s2 = load_prompts_for_session(&cwd, "s2").unwrap();
         assert_eq!(s2, vec!["s2 second".to_string(), "s2 first".to_string()]);
 
-        // Unknown session id yields nothing.
         assert!(load_prompts_for_session(&cwd, "nope").unwrap().is_empty());
 
-        // The unfiltered load still returns everything.
         assert_eq!(load_prompts(&cwd).unwrap().len(), 4);
     }
 

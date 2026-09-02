@@ -1,10 +1,7 @@
-//! Process-local single-flight for the blocking flock wait: at most one OS thread
-//! parks in the kernel per lock file, shared by all callers — without the dedupe,
-//! every timed-out caller leaves its own thread parked against tokio's bounded
-//! blocking pool. Liveness is ownership: the parked thread's deposit guard and
-//! the tickets hold the only strong references, an unclaimed deposit is freed
-//! when the last one drops, and the registry's `Weak` entries can neither
-//! outlive nor poison a wait.
+//! Process-local single-flight for the blocking flock wait: at most one OS thread parks in the kernel per lock file, shared by all callers.
+//! Without the dedupe, every timed-out caller leaves its own thread parked against tokio's bounded blocking pool.
+//! Liveness is ownership: the parked thread's deposit guard and the tickets hold the only strong references.
+//! An unclaimed deposit is freed when the last one drops, and the registry's `Weak` entries can neither outlive nor poison a wait.
 
 #[cfg(all(feature = "loom", not(test)))]
 compile_error!("the `loom` feature is test-only: it swaps this module's mutexes for loom models");
@@ -29,12 +26,11 @@ use loom::sync::{Mutex, MutexGuard};
 use std::sync::{Mutex, MutexGuard};
 
 // Process-global: every `AuthManager` in the process must share one wait per lock path.
-// Lock order: WAITS -> round; every other site takes round only.
+// Lock order: WAITS before round; every other site takes round only
 static WAITS: LazyLock<Mutex<HashMap<PathBuf, Weak<Wait>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// `Deposited`/`Claimed` imply the parked thread has exited; losers seeing
-/// `Claimed` rejoin.
+/// `Deposited`/`Claimed` imply the parked thread has exited; losers seeing `Claimed` rejoin.
 enum Round {
     Waiting,
     Deposited(io::Result<File>),
@@ -77,7 +73,7 @@ impl Ticket {
         self.wait.lock_round().take_deposit()
     }
 
-    /// `Some` claims this round's outcome; `None` means another subscriber won — rejoin.
+    /// `Some` claims this round's outcome; `None` means another subscriber won, so rejoin.
     pub(super) async fn claim(&self) -> Option<io::Result<File>> {
         loop {
             // Register before checking state so a racing deposit is not missed.
@@ -98,8 +94,7 @@ impl Ticket {
     }
 }
 
-/// Deposits the acquire outcome and wakes waiters when dropped — on unwind too,
-/// where the missing result becomes the deposited error.
+/// Deposits the acquire outcome and wakes waiters when dropped, on unwind too, where the missing result becomes the deposited error.
 struct DepositOnDrop {
     wait: Arc<Wait>,
     result: Option<io::Result<File>>,

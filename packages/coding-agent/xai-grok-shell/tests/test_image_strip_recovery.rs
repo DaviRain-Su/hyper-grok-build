@@ -1,5 +1,5 @@
-//! Server-rejected (but client-valid) image recovers in-turn and persists
-//! so the next turn does not resend it.
+//! An image the client accepts but the server rejects is stripped within the failing turn.
+//! The strip persists so the next turn does not resend the image.
 
 mod acp_harness;
 
@@ -58,7 +58,7 @@ async fn seed_poisoned_session(cwd: &std::path::Path, image_url: &str) -> Info {
     info
 }
 
-/// Main-turn `/v1/chat/completions` bodies, excluding turn-summary side-calls.
+/// `/v1/chat/completions` bodies from the main turn, excluding the turn-summary requests.
 fn chat_completion_bodies(server: &xai_grok_test_support::MockInferenceServer) -> Vec<String> {
     server
         .requests()
@@ -91,7 +91,7 @@ fn poisoned_image_session_recovers_within_the_failing_turn() {
         .expect("session/load timed out")
         .expect("session/load failed");
 
-        // One-shot 400; strip-retry falls through to echo.
+        // The 400 fires once; the strip-retry falls through to the mock's default echo
         server.enqueue_response(
             "/v1/chat/completions",
             ScriptedResponse::json(
@@ -163,7 +163,7 @@ fn poisoned_image_session_recovers_within_the_failing_turn() {
     });
 }
 
-/// Session `chat_history.jsonl`; cwd encoding is internal, so we scan.
+/// The session's `chat_history.jsonl`; the sessions dir name encodes the cwd in an internal format, so we scan for the file.
 fn session_chat_jsonl() -> std::path::PathBuf {
     let sessions = std::path::PathBuf::from(std::env::var("GROK_HOME").expect("GROK_HOME set"))
         .join("sessions");

@@ -1,10 +1,6 @@
-//! Tests for the `--laziness-debug-log` prototype: pure-function
-//! coverage of `classify_debug_decision`, the JSONL line shape,
-//! and the file-append behaviour. End-to-end exercise of the
-//! debug-mode branch inside `maybe_fire_laziness_check` is out
-//! of scope here — it requires a live sampler responder and is
-//! covered indirectly by the `laziness_integration_tests` module
-//! (which drives the production path with the dev flag off).
+//! Tests for the `--laziness-debug-log` prototype: `classify_debug_decision`, the JSONL line shape, and the file append.
+//! The debug branch inside `maybe_fire_laziness_check` needs a live sampler responder, so it is out of scope here.
+//! `laziness_integration_tests` covers it indirectly by driving the production path with the dev flag off.
 use super::{
     ClassifierOutput, DebugClassifierOutput, DebugDecision, DebugTodoSnapshot,
     LazinessDebugLogLine, LazinessFireMeta, LazinessFireOutcome, LazinessSuppressReason,
@@ -52,17 +48,10 @@ fn assistant_with_tool_call(text: &str, name: &str, args: &str) -> ConversationI
     })
 }
 
-/// Build an `AssistantItem` with arbitrary `reasoning`, `content`,
-/// and `tool_calls` for the `[assistant reasoning]` test coverage.
-/// Trivially-defaulted fields (`raw_output`, `model_id`,
-/// `model_fingerprint`) are filled with `None` so each test stays a
-/// one-liner.
-/// Build `[Reasoning(text), Assistant(content, tool_calls)]` as the
-/// reasoning-as-sibling equivalent of the old
-/// `AssistantItem { reasoning, content, tool_calls }` literal. When
-/// `reasoning_text` is empty, no Reasoning item is emitted (callers
-/// who want an encrypted-only sibling should build that variant
-/// inline).
+/// Build an `AssistantItem` with arbitrary `reasoning`, `content`, and `tool_calls` for the `[assistant reasoning]` test coverage.
+/// Trivially-defaulted fields (`raw_output`, `model_id`, `model_fingerprint`) are filled with `None` so each test stays a one-liner.
+/// Build `[Reasoning(text), Assistant(content, tool_calls)]`, the equivalent of the old `AssistantItem { reasoning, content, tool_calls }` literal.
+/// When `reasoning_text` is empty, no Reasoning item is emitted (callers who want an encrypted-only sibling should build that variant inline).
 fn assistant_with_reasoning_items(
     reasoning_text: &str,
     content: &str,
@@ -98,13 +87,9 @@ fn assistant_with_reasoning_items(
 
 #[test]
 fn flatten_renders_roles_in_order_without_synthesising_an_assistant_turn() {
-    // Regression guard for the bug where the classifier saw raw
-    // `ConversationItem::Assistant` items and continued the
-    // conversation instead of classifying. The flattener MUST emit
-    // every assistant message as a `[assistant]` text line — never
-    // a structured assistant turn — so the request that wraps the
-    // output cannot contain an assistant item the model could
-    // latch onto.
+    // Regression guard: the classifier once saw raw `ConversationItem::Assistant` items and continued the conversation instead of classifying
+    // The flattener MUST emit every assistant message as a `[assistant]` text line, never a structured assistant turn
+    // That keeps assistant items out of the request that wraps the output, so the model has nothing to latch onto
     let items = vec![
         user_text("hello"),
         assistant_text("done"),
@@ -173,8 +158,7 @@ fn flatten_truncates_long_fields() {
 fn flatten_collapses_newlines_to_keep_one_line_per_item() {
     let items = vec![user_text("line1\nline2\nline3")];
     let out = flatten_transcript_for_classifier(&items, true);
-    // Exactly one `\n` at the end of the user line — internal
-    // newlines collapsed to the U+23CE arrow.
+    // Exactly one `\n` ends the user line; internal newlines collapse to the U+23CE arrow
     assert_eq!(out, "[user] line1 ⏎ line2 ⏎ line3\n");
 }
 
@@ -195,10 +179,8 @@ fn flatten_renders_empty_input_as_empty_string() {
 
 #[test]
 fn flatten_renders_assistant_reasoning() {
-    // Plain-text reasoning is exposed as a `[assistant reasoning]`
-    // line so the classifier can consider chain-of-thought as a
-    // signal (e.g. "agent reasoned about running tests but never
-    // called the tool" → still a stall).
+    // Plain-text reasoning becomes a `[assistant reasoning]` line so the classifier can use chain-of-thought as a signal
+    // An agent that reasoned about running tests but never called the tool is still a stall
     let items = assistant_with_reasoning_items("I should run the tests now.", "", vec![]);
     let out = flatten_transcript_for_classifier(&items, true);
     assert_eq!(
@@ -209,8 +191,7 @@ fn flatten_renders_assistant_reasoning() {
 
 #[test]
 fn flatten_skips_reasoning_when_encrypted_only() {
-    // Encrypted reasoning is opaque to a text classifier — drop it
-    // rather than emit a meaningless line.
+    // Encrypted reasoning is opaque to a text classifier, so drop it rather than emit a meaningless line
     let items = vec![
         ConversationItem::Reasoning(xai_grok_sampling_types::rs::ReasoningItem {
             id: String::new(),
@@ -239,8 +220,7 @@ fn flatten_skips_reasoning_when_encrypted_only() {
 
 #[test]
 fn flatten_skips_reasoning_when_text_is_empty() {
-    // Empty-string reasoning is treated as "no reasoning" — a
-    // zero-info line would just waste tokens.
+    // Empty-string reasoning is treated as no reasoning; a line with no content would only waste tokens
     let items = vec![
         ConversationItem::Reasoning(xai_grok_sampling_types::rs::ReasoningItem {
             id: String::new(),
@@ -273,8 +253,7 @@ fn flatten_skips_reasoning_when_text_is_empty() {
 
 #[test]
 fn flatten_skips_reasoning_when_text_is_whitespace_only() {
-    // Whitespace-only reasoning (spaces, tabs, newlines) carries
-    // zero signal.
+    // Whitespace-only reasoning (spaces, tabs, newlines) carries zero signal
     let items = assistant_with_reasoning_items("   \n\t  \n  ", "ok", vec![]);
     let out = flatten_transcript_for_classifier(&items, true);
     assert!(
@@ -286,10 +265,8 @@ fn flatten_skips_reasoning_when_text_is_whitespace_only() {
 
 #[test]
 fn flatten_orders_reasoning_before_content_and_tools() {
-    // Chronological order matches how the agent actually produced
-    // the turn: reason first, then write visible output, then call
-    // tools. The classifier reads top-to-bottom; the line order is
-    // a load-bearing part of the format.
+    // Chronological order matches how the agent actually produced the turn: reason first, then write visible output, then call tools
+    // The classifier reads top to bottom, so the line order is part of the format
     let items = assistant_with_reasoning_items(
         "I should read the file first",
         "let me check",
@@ -311,8 +288,7 @@ fn flatten_orders_reasoning_before_content_and_tools() {
 
 #[test]
 fn flatten_truncates_long_reasoning_text() {
-    // Reasoning uses a tighter 200-char cap than the 400-char cap
-    // applied to other line types.
+    // Reasoning uses a tighter 200-char cap than the 400-char cap applied to other line types
     let long = "r".repeat(2_000);
     let items = assistant_with_reasoning_items(&long, "", vec![]);
     let out = flatten_transcript_for_classifier(&items, true);
@@ -320,10 +296,8 @@ fn flatten_truncates_long_reasoning_text() {
         out.starts_with("[assistant reasoning] "),
         "reasoning line is emitted: {out}",
     );
-    // Pin the *content* of the truncated prefix — a bug that
-    // truncated to 0 chars (or replaced the body with the
-    // `…[truncated]` sentinel alone) would still pass a pure
-    // "contains the sentinel" check.
+    // Pin the *content* of the truncated prefix, not just the sentinel
+    // A bug that truncated to 0 chars, or replaced the body with the `…[truncated]` sentinel alone, would still pass a "contains the sentinel" check
     assert!(
         out.contains(&"r".repeat(200)),
         "first 200 chars of reasoning preserved in output: {out}",
@@ -345,9 +319,8 @@ fn flatten_truncates_long_reasoning_text() {
 
 #[test]
 fn flatten_drops_reasoning_when_include_reasoning_is_false() {
-    // The per-model / CLI override path: when `include_reasoning`
-    // is `false`, even a non-empty reasoning.text is dropped. The
-    // assistant content / tool calls are unaffected.
+    // The per-model or CLI override path: when `include_reasoning` is `false`, even a non-empty reasoning.text is dropped
+    // The assistant content and tool calls are unaffected
     let items = assistant_with_reasoning_items(
         "plan: read first",
         "ok",
@@ -370,8 +343,7 @@ fn flatten_drops_reasoning_when_include_reasoning_is_false() {
 
 #[test]
 fn flatten_keeps_reasoning_when_include_reasoning_is_true() {
-    // Sibling of `flatten_drops_reasoning_when_include_reasoning_is_false`:
-    // same item, opposite flag → reasoning line IS emitted.
+    // Sibling of `flatten_drops_reasoning_when_include_reasoning_is_false`: same item, opposite flag, so the reasoning line IS emitted
     let items = assistant_with_reasoning_items(
         "plan: read first",
         "ok",
@@ -406,9 +378,8 @@ fn synthetic_user_text(
 
 #[test]
 fn window_keeps_last_user_prompt_even_when_30_tool_calls_follow_it() {
-    // Regression for the original "tool-call burst eats the user
-    // prompt" bug. With min_user_turns=1, the window must extend
-    // back to capture that prompt even if the tail-30 doesn't.
+    // Regression for the original "tool-call burst eats the user prompt" bug
+    // With min_user_turns=1, the window must extend back to capture that prompt even when the last 30 items don't include it
     let mut items = vec![user_text("write a Rust function that sorts a list")];
     for _ in 0..40 {
         items.push(assistant_with_tool_call("checking", "read_file", "{}"));
@@ -419,10 +390,9 @@ fn window_keeps_last_user_prompt_even_when_30_tool_calls_follow_it() {
 
 #[test]
 fn window_pins_min_user_turns_user_prompts_into_view() {
-    // Five user prompts each separated by 10 tool calls. With
-    // min_user_turns=3 the window must extend back to the
-    // 3rd-from-last user prompt so a short final reply like
-    // "yes" can be interpreted against the prior exchange.
+    // Five user prompts each separated by 10 tool calls
+    // With min_user_turns=3 the window must extend back to the 3rd-from-last user prompt
+    // That lets a short final reply like "yes" be interpreted against the prior exchange
     let mut items: Vec<ConversationItem> = Vec::new();
     for i in 0..5 {
         items.push(user_text(&format!("prompt {i}")));
@@ -431,7 +401,7 @@ fn window_pins_min_user_turns_user_prompts_into_view() {
         }
     }
     // Layout: U(0) Asst×10  U(11) Asst×10  U(22) Asst×10  U(33) Asst×10  U(44) Asst×10
-    // min_user_turns=3 -> 3rd-from-last user idx = U(22) at idx 22.
+    // With min_user_turns=3, the 3rd-from-last user idx = U(22) at idx 22
     // tail_start = 55 - 30 = 25.
     // Window must start at min(25, 22) = 22.
     let start = super::laziness_window_start(&items, 30, 3, 0);
@@ -440,11 +410,8 @@ fn window_pins_min_user_turns_user_prompts_into_view() {
 
 #[test]
 fn window_pins_min_assistant_turns_assistant_replies_into_view() {
-    // Symmetric to the user-pin test: a "yes" final user reply
-    // is meaningless without seeing the assistant's prior
-    // suggestion. Min_assistant_turns must pull older assistant
-    // text turns into the window when tool-calls dominate the
-    // tail.
+    // Symmetric to the user-pin test: a "yes" final user reply is meaningless without seeing the assistant's prior suggestion
+    // When tool calls dominate the tail, min_assistant_turns must pull older assistant text turns into the window
     let mut items: Vec<ConversationItem> = Vec::new();
     for i in 0..6 {
         items.push(assistant_text(&format!("reply {i}")));
@@ -453,9 +420,8 @@ fn window_pins_min_assistant_turns_assistant_replies_into_view() {
         }
     }
     // Layout: AT(0) AC×6  AT(7) AC×6  AT(14) AC×6  AT(21) AC×6  AT(28) AC×6  AT(35) AC×6
-    // (AT = assistant text turn, AC = assistant-with-tool-call which has
-    // non-empty content "step" — so it also counts as an assistant text turn.)
-    // assistant_text-eligible idxs: every assistant item, total 42.
+    // (AT = assistant text turn, AC = assistant-with-tool-call, whose non-empty content "step" also counts it as an assistant text turn.)
+    // Every assistant item is an eligible assistant text turn, so there are 42
     // 3rd-from-last assistant-text turn idx = 42 - 3 = 39.
     // tail_start = 42 - 30 = 12.
     // Window must start at min(12, 39) = 12.
@@ -465,9 +431,8 @@ fn window_pins_min_assistant_turns_assistant_replies_into_view() {
 
 #[test]
 fn window_takes_earliest_of_user_pin_and_assistant_pin_and_tail() {
-    // Realistic combined case: chat has a mix; both minimums
-    // demand earlier indices than tail-30. Window picks the
-    // EARLIEST so both invariants are satisfied.
+    // Realistic combined case: the chat mixes user prompts and tool calls, and both minimums demand earlier indices than the 30-item tail
+    // The window picks the EARLIEST so both invariants are satisfied
     let mut items: Vec<ConversationItem> = Vec::new();
     for i in 0..3 {
         items.push(user_text(&format!("u{i}")));
@@ -475,12 +440,11 @@ fn window_takes_earliest_of_user_pin_and_assistant_pin_and_tail() {
             items.push(assistant_with_tool_call("x", "read_file", "{}"));
         }
     }
-    // Layout: U(0) AC×15  U(16) AC×15  U(32) AC×15 — total 48.
+    // Layout: U(0) AC×15  U(16) AC×15  U(32) AC×15, total 48
     // For min_user_turns=2:
     //   user idxs = [0, 16, 32]; 2nd-from-last = idx 16.
     // For min_assistant_turns=10:
-    //   assistant_text idxs are every AC (45 of them); 10th-from-last
-    //   = idx 47 - 9 = 38.
+    //   assistant_text idxs are every AC (45 of them); 10th-from-last = idx 47 - 9 = 38
     // tail_start = 48 - 30 = 18.
     // Earliest of (18, 16, 38) = 16.
     let start = super::laziness_window_start(&items, 30, 2, 10);
@@ -489,8 +453,7 @@ fn window_takes_earliest_of_user_pin_and_assistant_pin_and_tail() {
 
 #[test]
 fn window_relaxes_minimums_when_chat_lacks_enough_turns() {
-    // A chat with only 1 user prompt and 2 assistant turns must
-    // not panic or pad. Window just starts at 0.
+    // A chat with only 1 user prompt and 2 assistant turns must not panic or pad; the window just starts at 0
     let items = vec![
         user_text("only prompt"),
         assistant_text("first reply"),
@@ -502,8 +465,7 @@ fn window_relaxes_minimums_when_chat_lacks_enough_turns() {
 
 #[test]
 fn window_ignores_synthetic_user_items_when_pinning() {
-    // SystemReminder / AutoContinue user items
-    // are synthesised by the runtime, not typed by the user.
+    // SystemReminder and AutoContinue user items are synthesised by the runtime, not typed by the user
     // They MUST NOT count toward `min_user_turns`.
     use xai_grok_sampling_types::SyntheticReason;
     let mut items = vec![user_text("real user prompt")]; // idx 0
@@ -517,7 +479,7 @@ fn window_ignores_synthetic_user_items_when_pinning() {
     for _ in 0..5 {
         items.push(assistant_text("more"));
     }
-    // Real user prompts = [idx 0]. min_user_turns=1 -> nth_user_idx=0.
+    // Real user prompts = [idx 0]. With min_user_turns=1, nth_user_idx = 0.
     // tail_start = 36 - 30 = 6.
     // Window must start at 0.
     let start = super::laziness_window_start(&items, 30, 1, 0);
@@ -526,8 +488,7 @@ fn window_ignores_synthetic_user_items_when_pinning() {
 
 #[test]
 fn window_falls_back_to_tail_when_no_real_user_prompt_present() {
-    // No real user items at all → user pin is None → falls back
-    // to plain tail-30 (and assistant pin if applicable).
+    // With no real user items at all, the user pin is None, so the window falls back to the plain 30-item tail (and the assistant pin if applicable)
     use xai_grok_sampling_types::SyntheticReason;
     let mut items: Vec<ConversationItem> = Vec::new();
     for _ in 0..40 {
@@ -537,7 +498,7 @@ fn window_falls_back_to_tail_when_no_real_user_prompt_present() {
         "<system-reminder>",
         SyntheticReason::SystemReminder,
     ));
-    // min_assistant_turns=3 → 3rd-from-last asst-text idx = 40 - 3 = 37.
+    // With min_assistant_turns=3, the 3rd-from-last assistant-text idx = 40 - 3 = 37
     // tail_start = 41 - 30 = 11.
     // Earliest = 11.
     let start = super::laziness_window_start(&items, 30, 5, 3);
@@ -546,16 +507,15 @@ fn window_falls_back_to_tail_when_no_real_user_prompt_present() {
 
 #[test]
 fn window_short_session_returns_zero() {
-    // Fewer items than the limit → window starts at 0.
+    // With fewer items than the limit, the window starts at 0
     let items = vec![user_text("hi"), assistant_text("hello")];
     assert_eq!(super::laziness_window_start(&items, 30, 5, 5), 0);
 }
 
 #[test]
 fn window_assistant_text_pin_skips_empty_assistant_turns() {
-    // Assistant items with empty `.content` (tool-call-only
-    // routing turns) MUST NOT count toward min_assistant_turns
-    // — they have no prose for the classifier to interpret.
+    // Assistant items with empty `.content` (tool-call-only routing turns) MUST NOT count toward min_assistant_turns
+    // They have no prose for the classifier to interpret
     let empty_asst = ConversationItem::Assistant(xai_grok_sampling_types::AssistantItem {
         content: String::new().into(),
         provider_native_state: None,
@@ -576,8 +536,7 @@ fn window_assistant_text_pin_skips_empty_assistant_turns() {
         items.push(empty_asst.clone());
     }
     // tail_start = 15 - 30 = 0 (saturating).
-    // min_assistant_turns=3 → 3rd-from-last assistant TEXT turn
-    //   = idx 5 - 3 = 2 (text turns are 0..5 inclusive of 4).
+    // With min_assistant_turns=3, the 3rd-from-last assistant TEXT turn = idx 5 - 3 = 2 (text turns are 0..5 inclusive of 4)
     // Earliest = 0.
     let start = super::laziness_window_start(&items, 30, 0, 3);
     assert_eq!(start, 0);
@@ -608,8 +567,7 @@ fn classify_debug_decision_low_confidence_for_stalled_below_threshold() {
 
 #[test]
 fn classify_debug_decision_not_stalled_irrespective_of_confidence() {
-    // High-confidence not-stalled is still NoNudgeNotStalled —
-    // the confidence threshold only gates stalled_* verdicts.
+    // A not-stalled verdict stays NoNudgeNotStalled even at high confidence; the threshold only gates stalled_* verdicts
     let p = parsed(LazinessCategory::NotStalledComplete, 0.99);
     assert_eq!(
         classify_debug_decision(&p, 0.7),
@@ -619,11 +577,8 @@ fn classify_debug_decision_not_stalled_irrespective_of_confidence() {
 
 #[test]
 fn classify_debug_decision_all_stalled_variants_route_to_would_nudge() {
-    // Drive the loop off `LazinessCategory::all().filter(is_stalled)`
-    // so adding a new stalled variant forces this test to grow
-    // automatically — no hand-coded array to drift. The compiler
-    // enforces exhaustivity via `LazinessCategory::is_stalled`'s
-    // match.
+    // Drive the loop off `LazinessCategory::all().filter(is_stalled)` so adding a new stalled variant grows this test automatically
+    // There is no hand-coded array to drift; the compiler enforces exhaustivity via `LazinessCategory::is_stalled`'s match
     let mut covered = 0usize;
     for &cat in LazinessCategory::all() {
         if !cat.is_stalled() {
@@ -637,7 +592,6 @@ fn classify_debug_decision_all_stalled_variants_route_to_would_nudge() {
             "{cat:?} should route to WouldNudge above threshold",
         );
     }
-    // Sanity: at least the four stalled_* variants exercised today.
     assert!(
         covered >= 4,
         "expected at least four stalled variants, got {covered}",
@@ -692,9 +646,8 @@ fn log_line_serializes_to_expected_jsonl_shape() {
     ] {
         assert!(parsed.get(key).is_some(), "missing key: {key}");
     }
-    // Closed-set discriminator on `decision` — snake_case via
-    // serde rename_all. Catches a typo or rename without forcing
-    // a match-arm update across consumers.
+    // `decision` serializes to a fixed snake_case string via serde's rename_all
+    // Pinning it catches a typo or rename without forcing a match-arm update across consumers
     assert_eq!(parsed["decision"], "would_nudge");
     assert_eq!(parsed["parsed"]["category"], "stalled_narration");
     assert_eq!(parsed["items_sent"], 28);
@@ -753,10 +706,8 @@ fn build_laziness_debug_line_suppressed_not_goal_mode_includes_parsed_verdict() 
     assert!(v["classifier_raw_output"].is_string());
 }
 
-/// Smoke test: write two lines, parse them back from disk, and
-/// confirm both round-trip cleanly. Catches regressions in the
-/// append-only semantics (each line becomes its own JSON object,
-/// separated by `\n`).
+/// Write two lines, parse them back from disk, and confirm both round-trip cleanly.
+/// Each append must produce its own JSON object on its own `\n`-separated line.
 #[tokio::test]
 async fn append_writes_two_lines_each_parseable() {
     let dir = tempfile::tempdir().expect("tempdir");

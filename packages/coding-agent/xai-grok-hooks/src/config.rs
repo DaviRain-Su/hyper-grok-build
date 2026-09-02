@@ -77,8 +77,7 @@ impl HooksMap {
         )
     }
 
-    /// Parse a `hooks` table from TOML. Unlike [`Self::from_value`], a malformed
-    /// event is skipped so one bad event can't drop the layer.
+    /// Parse a `hooks` table from TOML. Unlike [`Self::from_value`], a malformed event is skipped so one bad event can't drop the layer.
     pub fn from_toml_value(value: toml::Value) -> Result<Self, String> {
         let entries: HashMap<String, toml::Value> = value
             .try_into()
@@ -111,8 +110,7 @@ pub struct RawHandler {
     pub env: HashMap<String, String>,
 }
 
-/// Treat `null` or an absent field as an empty map (serde otherwise rejects
-/// `null` for a `HashMap`).
+/// Treat `null` or an absent field as an empty map (serde otherwise rejects `null` for a `HashMap`).
 fn deserialize_optional_string_map<'de, D>(de: D) -> Result<HashMap<String, String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -125,11 +123,10 @@ pub const DEFAULT_TIMEOUT_SECS: u64 = 5;
 
 pub const DEFAULT_TIMEOUT_MS: u64 = DEFAULT_TIMEOUT_SECS * 1000;
 
-/// Stop gates run real verification (builds, tests) and fail open on timeout, so
-/// the short observe default would silently disable a ported stop policy.
-pub const DEFAULT_STOP_GATE_TIMEOUT_SECS: u64 = 600;
+/// Stop and PostToolUse gates run verification work (builds, tests, linters), so they get a generous 600s bound; they fail open on timeout.
+pub const DEFAULT_VERIFICATION_GATE_TIMEOUT_SECS: u64 = 600;
 
-pub const DEFAULT_STOP_GATE_TIMEOUT_MS: u64 = DEFAULT_STOP_GATE_TIMEOUT_SECS * 1000;
+pub const DEFAULT_VERIFICATION_GATE_TIMEOUT_MS: u64 = DEFAULT_VERIFICATION_GATE_TIMEOUT_SECS * 1000;
 
 /// Prompt gates run before every prompt, so a stuck hook stalls the session.
 /// 30s bounds that stall while leaving room for real validation work.
@@ -137,10 +134,44 @@ pub const DEFAULT_PROMPT_GATE_TIMEOUT_SECS: u64 = 30;
 
 pub const DEFAULT_PROMPT_GATE_TIMEOUT_MS: u64 = DEFAULT_PROMPT_GATE_TIMEOUT_SECS * 1000;
 
+pub const SESSION_END_HOOK_BUDGET_DEFAULT_MS: u64 = 1_500;
+pub const SESSION_END_HOOK_BUDGET_MAX_MS: u64 = 60_000;
+
+fn resolve_session_end_default(value: Option<&str>) -> u64 {
+    let Some(value) = value else {
+        return SESSION_END_HOOK_BUDGET_DEFAULT_MS;
+    };
+    match value.trim().parse::<u64>() {
+        Ok(ms) if ms > 0 => ms.min(SESSION_END_HOOK_BUDGET_MAX_MS),
+        _ => {
+            tracing::warn!(
+                value,
+                "GROK_SESSION_END_HOOKS_TIMEOUT_MS must be a positive integer; using default {}ms",
+                SESSION_END_HOOK_BUDGET_DEFAULT_MS
+            );
+            SESSION_END_HOOK_BUDGET_DEFAULT_MS
+        }
+    }
+}
+
+fn session_end_default_timeout_ms() -> u64 {
+    static VALUE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        resolve_session_end_default(
+            std::env::var("GROK_SESSION_END_HOOKS_TIMEOUT_MS")
+                .ok()
+                .as_deref(),
+        )
+    })
+}
+
 fn default_timeout_ms(event: crate::event::HookEventName) -> u64 {
     use crate::event::GateKind;
+    if event == crate::event::HookEventName::SessionEnd {
+        return session_end_default_timeout_ms();
+    }
     match event.traits().gate {
-        GateKind::Stop => DEFAULT_STOP_GATE_TIMEOUT_MS,
+        GateKind::Stop | GateKind::PostTool => DEFAULT_VERIFICATION_GATE_TIMEOUT_MS,
         GateKind::Prompt => DEFAULT_PROMPT_GATE_TIMEOUT_MS,
         GateKind::Observe | GateKind::Tool => DEFAULT_TIMEOUT_MS,
     }
@@ -186,25 +217,23 @@ pub struct HookSpec {
     #[serde(skip)]
     pub matcher: Option<HookMatcher>,
     pub enabled: bool,
-    /// Command path, env-expanded; unresolved/modifier forms kept for the runner's
-    /// `sh -c` branch. Not re-expanded at run time. Display via `command_raw`.
+    /// Command path, env-expanded; unresolved/modifier forms kept for the runner's `sh -c` branch.
+    /// Not re-expanded at run time. Display via `command_raw`.
     pub command: Option<PathBuf>,
     /// Pre-expansion `command` for display, so resolved secrets never leak.
     pub command_raw: Option<String>,
-    /// URL (http handlers), env-expanded. Unlike `command`, the HTTP runner
-    /// re-expands at run time before SSRF validation (deliberate asymmetry).
+    /// URL (http handlers), env-expanded.
+    /// Unlike `command`, the HTTP runner re-expands at run time before SSRF validation (deliberate asymmetry).
     pub url: Option<String>,
     /// Pre-expansion `url` for display; see `command_raw`.
     pub url_raw: Option<String>,
     pub timeout_ms: u64,
     pub source_dir: PathBuf,
-    /// Env injected into the hook process, and consulted by load-time `command`/
-    /// `url` expansion. Precedence low→high: user `env` (reserved keys stripped) <
-    /// plugin-injected < runner-injected at spawn (authentic identity always wins).
+    /// Env injected into the hook process, and consulted by load-time `command`/`url` expansion.
+    /// Precedence from low to high: user `env` (reserved keys stripped), plugin-injected, runner-injected at spawn (authentic identity always wins).
     pub extra_env: std::collections::HashMap<String, String>,
-    /// The hook's origin and single source of truth for classification: `File`
-    /// (JSON files, agent frontmatter), a config tier, or `Plugin`. `#[serde(default)]`
-    /// reads pre-field wire specs as `File`.
+    /// The hook's origin and single source of truth for classification: `File` (JSON files, agent frontmatter), a config tier, or `Plugin`.
+    /// `#[serde(default)]` maps specs serialized before this field existed to `File`.
     #[serde(default)]
     pub layer: HookProvenance,
 }
@@ -226,15 +255,13 @@ pub fn expand_env_skipping_runner_vars(input: &str) -> String {
 }
 
 impl HookSpec {
-    /// Pinned by admin/server-managed policy and therefore not user-disableable;
-    /// see [`HookProvenance::is_managed_policy`].
+    /// Pinned by admin/server-managed policy and therefore not user-disableable; see [`HookProvenance::is_managed_policy`].
     pub fn is_managed_policy(&self) -> bool {
         self.layer.is_managed_policy()
     }
 }
 
-/// Namespace prefixes stamped on hook names, matched by [`hook_origin`]. Shared
-/// so a rename can't silently reclassify a tier.
+/// Namespace prefixes stamped on hook names, matched by [`hook_origin`]. Shared so a rename can't silently reclassify a tier.
 pub const GLOBAL_HOOK_PREFIX: &str = "global/";
 pub const PROJECT_HOOK_PREFIX: &str = "project/";
 pub const PLUGIN_HOOK_PREFIX: &str = "plugin/";
@@ -254,14 +281,12 @@ pub enum HookOrigin {
     Unknown,
 }
 
-/// Classify a hook's origin from [`HookProvenance`], falling back to the name
-/// prefix for `File`-tier hooks.
+/// Classify a hook's origin from [`HookProvenance`], falling back to the name prefix for `File`-tier hooks.
 pub fn hook_origin(spec: &HookSpec) -> HookOrigin {
     match spec.layer {
         HookProvenance::SystemManaged => HookOrigin::SystemManaged,
         HookProvenance::Managed => HookOrigin::Managed,
-        // Both requirements tiers display as the requirements origin; only
-        // the policy exemption distinguishes root-owned from `$GROK_HOME`.
+        // Both requirements tiers display as the requirements origin; only the policy exemption distinguishes root-owned from `$GROK_HOME`
         HookProvenance::Requirements | HookProvenance::UserRequirements => HookOrigin::Requirements,
         HookProvenance::User => HookOrigin::UserConfig,
         HookProvenance::Plugin => HookOrigin::Plugin,
@@ -284,11 +309,9 @@ pub fn hook_origin(spec: &HookSpec) -> HookOrigin {
     }
 }
 
-/// User-facing hook name for blocked-prompt copy: drops the stamped
-/// `:{event}[i].hooks[j]` tail, then renders config-tier sources as tier
-/// copy — split by [`HookProvenance::is_managed_policy`] (who controls the
-/// hook), not [`HookOrigin`]'s modal grouping. Real names (`global/lint`),
-/// agent identities (`agent:<name>`), and `client:<id>` pass through.
+/// User-facing hook name for blocked-prompt copy: drops the stamped `:{event}[i].hooks[j]` tail, then renders config-tier sources as tier copy.
+/// The tier copy is split by [`HookProvenance::is_managed_policy`] (who controls the hook), not [`HookOrigin`]'s grouping.
+/// Real names (`global/lint`), agent identities (`agent:<name>`), and `client:<id>` pass through.
 pub fn hook_display_name(qualified: &str) -> &str {
     let source = strip_spec_path(qualified);
     match source {
@@ -299,7 +322,7 @@ pub fn hook_display_name(qualified: &str) -> &str {
     }
 }
 
-/// `{source}:{event}[i].hooks[j]` → `{source}`; anything else unchanged.
+/// `{source}:{event}[i].hooks[j]` becomes `{source}`; anything else is unchanged.
 fn strip_spec_path(qualified: &str) -> &str {
     match qualified.rsplit_once(':') {
         Some((source, tail)) if !source.is_empty() && is_spec_path(tail) => source,
@@ -327,8 +350,7 @@ fn is_spec_path(tail: &str) -> bool {
 
 /// Parse hooks from a JSON value (e.g. from agent definition frontmatter).
 ///
-/// `source_dir` resolves relative command paths: pass the agent definition's
-/// directory or the workspace CWD.
+/// `source_dir` resolves relative command paths: pass the agent definition's directory or the workspace CWD.
 pub fn parse_hooks_from_value(
     hooks: &serde_json::Value,
     source_name: &str,
@@ -336,8 +358,8 @@ pub fn parse_hooks_from_value(
     parse_hooks_from_value_with_dir(hooks, source_name, std::path::Path::new("."))
 }
 
-/// [`parse_hooks_from_value`] with an explicit `source_dir`. Parses the decoded
-/// value directly (no re-parse round-trip); a malformed event is a hard error.
+/// [`parse_hooks_from_value`] with an explicit `source_dir`.
+/// Parses the decoded value directly (no re-parse round-trip); a malformed event is a hard error.
 pub fn parse_hooks_from_value_with_dir(
     hooks: &serde_json::Value,
     source_name: &str,
@@ -379,11 +401,9 @@ pub fn parse_hooks_from_value_with_dir(
     )
 }
 
-/// Build specs from config-layer `hooks` blocks, tagging each with its layer's
-/// `source_name`. Layers arrive highest-authority-first and specs preserve that
-/// order, so the caller's dedup keeps the higher-authority copy. Relative commands
-/// resolve against each layer's own directory; a layer that fails to parse is
-/// recorded and skipped, the rest still load.
+/// Build specs from config-layer `hooks` blocks, tagging each with its layer's `source_name`.
+/// Layers arrive highest-authority-first and specs preserve that order, so the caller's dedup keeps the higher-authority copy.
+/// Relative commands resolve against each layer's own directory; a layer that fails to parse is recorded and skipped, the rest still load.
 pub fn parse_hooks_from_config_layers(
     layers: &[xai_grok_config::HookConfigLayer],
 ) -> (Vec<HookSpec>, Vec<HookError>) {
@@ -488,8 +508,7 @@ pub fn parse_hook_file(content: &str, file_path: &Path) -> (Vec<HookSpec>, Vec<H
     )
 }
 
-/// Build [`HookSpec`]s from a [`HooksMap`], shared by the JSON and config paths
-/// so the two never diverge.
+/// Build [`HookSpec`]s from a [`HooksMap`], shared by the JSON and config paths so the two never diverge.
 fn build_specs(hooks_map: HooksMap, ctx: SpecContext<'_>) -> (Vec<HookSpec>, Vec<HookError>) {
     let mut specs = Vec::new();
     let mut errors = Vec::new();
@@ -530,9 +549,9 @@ fn build_specs(hooks_map: HooksMap, ctx: SpecContext<'_>) -> (Vec<HookSpec>, Vec
     (specs, errors)
 }
 
-/// Resolve a group's `(configured_matcher, compiled_matcher)`. The compiled
-/// matcher is `None` with no pattern, or when the event ignores matchers (pattern
-/// kept for display, hook always fires). Errors only on an invalid regex.
+/// Resolve a group's `(configured_matcher, compiled_matcher)`.
+/// The compiled matcher is `None` with no pattern, or when the event ignores matchers (pattern kept for display, hook always fires).
+/// Errors only on an invalid regex.
 fn resolve_group_matcher(
     group_matcher: Option<&str>,
     event: HookEventName,
@@ -577,8 +596,7 @@ struct SpecContext<'a> {
 }
 
 /// Build one [`HookSpec`] from a handler entry, or the [`HookError`] preventing it.
-/// `command`/`url` are env-expanded (unset refs kept for the runner); `matcher` is
-/// not, since `$` is the regex end anchor.
+/// `command`/`url` are env-expanded (unset refs kept for the runner); `matcher` is not, since `$` is the regex end anchor.
 fn build_one_spec(
     handler: RawHandler,
     event: HookEventName,
@@ -587,12 +605,17 @@ fn build_one_spec(
     compiled_matcher: Option<HookMatcher>,
     ctx: &SpecContext<'_>,
 ) -> Result<HookSpec, HookError> {
-    let timeout_ms = handler
-        .timeout
-        // Untrusted config value: saturate rather than overflow (debug panic /
-        // release wrap) on an absurd timeout.
-        .map(|secs| secs.saturating_mul(1000))
-        .unwrap_or(default_timeout_ms(event));
+    let timeout_ms = match handler.timeout {
+        None | Some(0) => default_timeout_ms(event),
+        Some(secs) => {
+            let ms = secs.saturating_mul(1000);
+            if event == crate::event::HookEventName::SessionEnd {
+                ms.min(SESSION_END_HOOK_BUDGET_MAX_MS)
+            } else {
+                ms
+            }
+        }
+    };
 
     let mut extra_env: HashMap<String, String> = handler.env;
     strip_reserved_env_keys(&mut extra_env, &name, ctx.error_path);
@@ -932,6 +955,7 @@ mod tests {
 
     #[test]
     fn parse_default_timeout() {
+        use crate::event::GateKind;
         let json = r#"{
             "hooks": {
                 "SessionEnd": [
@@ -943,6 +967,9 @@ mod tests {
                 "SubagentStop": [
                     { "hooks": [{ "type": "command", "command": "sub.sh" }] }
                 ],
+                "PostToolUse": [
+                    { "hooks": [{ "type": "command", "command": "lint.sh" }] }
+                ],
                 "UserPromptSubmit": [
                     { "hooks": [{ "type": "command", "command": "gate.sh" }] }
                 ]
@@ -951,13 +978,68 @@ mod tests {
         let (specs, errors) = parse_hook_file(json, Path::new("/tmp/test.json"));
         assert!(errors.is_empty());
         for spec in &specs {
-            let expected = match spec.event {
-                HookEventName::Stop | HookEventName::SubagentStop => DEFAULT_STOP_GATE_TIMEOUT_MS,
-                HookEventName::UserPromptSubmit => DEFAULT_PROMPT_GATE_TIMEOUT_MS,
-                _ => DEFAULT_TIMEOUT_MS,
+            let expected = if spec.event == crate::event::HookEventName::SessionEnd {
+                SESSION_END_HOOK_BUDGET_DEFAULT_MS
+            } else {
+                match spec.event.traits().gate {
+                    GateKind::Stop | GateKind::PostTool => DEFAULT_VERIFICATION_GATE_TIMEOUT_MS,
+                    GateKind::Prompt => DEFAULT_PROMPT_GATE_TIMEOUT_MS,
+                    GateKind::Observe | GateKind::Tool => DEFAULT_TIMEOUT_MS,
+                }
             };
             assert_eq!(spec.timeout_ms, expected, "event {}", spec.event);
         }
+    }
+
+    #[test]
+    fn resolve_session_end_default_parses_env() {
+        assert_eq!(
+            resolve_session_end_default(None),
+            SESSION_END_HOOK_BUDGET_DEFAULT_MS
+        );
+        assert_eq!(resolve_session_end_default(Some(" 2000 ")), 2000);
+        assert_eq!(
+            resolve_session_end_default(Some("0")),
+            SESSION_END_HOOK_BUDGET_DEFAULT_MS
+        );
+        assert_eq!(
+            resolve_session_end_default(Some("nope")),
+            SESSION_END_HOOK_BUDGET_DEFAULT_MS
+        );
+        assert_eq!(
+            resolve_session_end_default(Some("600000")),
+            SESSION_END_HOOK_BUDGET_MAX_MS
+        );
+    }
+
+    #[test]
+    fn zero_timeout_floors_to_event_default() {
+        let json = r#"{ "hooks": { "Stop": [{ "hooks": [{ "type": "command", "command": "s.sh", "timeout": 0 }] }] } }"#;
+        let (specs, errors) = parse_hook_file(json, Path::new("/tmp/test.json"));
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_ne!(specs[0].timeout_ms, 0);
+        assert_eq!(specs[0].timeout_ms, default_timeout_ms(specs[0].event));
+    }
+
+    #[test]
+    fn session_end_timeout_resolution() {
+        fn timeout_ms(handler_timeout: Option<u64>) -> u64 {
+            let handler = match handler_timeout {
+                Some(secs) => {
+                    format!(r#"{{ "type": "command", "command": "end.sh", "timeout": {secs} }}"#)
+                }
+                None => r#"{ "type": "command", "command": "end.sh" }"#.to_string(),
+            };
+            let json =
+                format!(r#"{{ "hooks": {{ "SessionEnd": [{{ "hooks": [{handler}] }}] }} }}"#);
+            let (specs, errors) = parse_hook_file(&json, Path::new("/tmp/test.json"));
+            assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+            specs[0].timeout_ms
+        }
+        assert_eq!(timeout_ms(None), SESSION_END_HOOK_BUDGET_DEFAULT_MS);
+        assert_eq!(timeout_ms(Some(10)), 10_000);
+        assert_eq!(timeout_ms(Some(120)), SESSION_END_HOOK_BUDGET_MAX_MS);
+        assert_eq!(timeout_ms(Some(0)), SESSION_END_HOOK_BUDGET_DEFAULT_MS);
     }
 
     #[test]

@@ -1,13 +1,10 @@
-//! Hooks and plugins tracing target and optional file-based logging layer.
-//!
 //! A dedicated tracing target for hooks and plugins subsystems with an optional
 //! file logger that writes to `~/.grok/logs/hooks.log`.
 //!
 //! ## When to use
 //!
-//! Use regular `tracing::info!` / `tracing::debug!` / `tracing::warn!` with
-//! targets `xai_grok_hooks` or `xai_grok_agent::plugins` at key lifecycle
-//! points — discovery, dispatch, execution, errors.
+//! Use regular `tracing::info!` / `tracing::debug!` / `tracing::warn!` with targets `xai_grok_hooks` or `xai_grok_agent::plugins`.
+//! Log at discovery, dispatch, execution, and error points.
 //!
 //! ## Enabling
 //!
@@ -57,8 +54,6 @@ impl FormatTime for UptimeTimer {
     }
 }
 
-/// Build the hooks/plugins log layer.
-///
 /// Writes to `~/.grok/logs/hooks.log` (or custom path via `GROK_HOOKS_LOG`).
 /// Filters to hooks (`xai_grok_hooks`) and plugins (`xai_grok_agent::plugins`) targets.
 /// Set `GROK_HOOKS_LOG=0` to disable, `GROK_HOOKS_LOG=/path` to redirect.
@@ -90,7 +85,6 @@ where
         *slot = Some(guard);
     }
 
-    // Filter for both hooks and plugins targets at debug level
     let filter = tracing_subscriber::filter::EnvFilter::new(
         "xai_grok_hooks=debug,xai_grok_agent::plugins=debug",
     );

@@ -1,20 +1,17 @@
 //! Writeback push: async queue that flushes session updates to the backend.
 //!
-//! `RemoteSync` runs a background tokio task that buffers ACP notifications
-//! and flushes them to the backend via [`BackendClient::save_session_data()`].
+//! `RemoteSync` runs a background task that buffers ACP notifications and flushes them to the backend via [`BackendClient::save_session_data()`].
 //!
 //! ## Backpressure
 //!
-//! When the buffer exceeds [`MAX_PENDING`], the task attempts an emergency
-//! flush. If that also fails (network down), the oldest messages are dropped
-//! to prevent unbounded memory growth.
+//! When the buffer exceeds [`MAX_PENDING`], the task attempts an emergency flush.
+//! If that also fails (network down), the oldest messages are dropped to prevent unbounded memory growth.
 //!
 //! ## Drop behavior
 //!
-//! When `RemoteSync` is dropped, the sender half of the channel closes and
-//! the background task exits. **Pending buffered messages are lost.** This
-//! is acceptable because the local JSONL files are the source of truth —
-//! writeback is best-effort.
+//! When `RemoteSync` is dropped, the sender half of the channel closes and the background task exits.
+//! **Pending buffered messages are lost.**
+//! This is acceptable because the local JSONL files are the source of truth: writeback is best-effort.
 
 use crate::remote::BackendClient;
 use crate::session::export::{ExportedMessage, ExportedMetadata};
@@ -37,8 +34,7 @@ enum SyncMsg {
         title: String,
         is_manual: bool,
     },
-    /// Drop cached title + manual flag so later flushes cannot re-advertise
-    /// a pin the local summary no longer has.
+    /// Drop the cached title and manual flag so later flushes cannot re-advertise a pin the local summary no longer has.
     ClearTitle,
     SetModelId(String),
 }
@@ -190,15 +186,13 @@ async fn sync_task(
                     .upsert_session(&session_id, &metadata, &agent_id())
                     .await
                 {
-                    // save_session_data does not write the session-row title
-                    // (backend upsert title=None). Without this, list/--resume
-                    // keep the pre-rename row until the next message flush.
+                    // save_session_data does not write the session-row title (the backend upsert uses `title=None`)
+                    // Without this upsert, `list` and `--resume` keep the pre-rename row until the next message flush
                     tracing::warn!(error = %e, "Writeback: failed to upsert session title");
                 }
             }
             SyncMsg::ClearTitle => {
-                // Empty string, not `None`: an omitted field leaves the
-                // backend's prior pin in place.
+                // Empty string, not `None`: an omitted field leaves the backend's prior pin in place
                 metadata.title = Some(String::new());
                 metadata.title_is_manual = Some(false);
                 metadata.updated_at = Some(chrono::Utc::now().to_rfc3339());
@@ -211,8 +205,7 @@ async fn sync_task(
                     .upsert_session(&session_id, &metadata, &agent_id())
                     .await
                 {
-                    // Same row-title gap as SetTitle: save_session_data does
-                    // not clear the session-row pin (backend title=None).
+                    // Same row-title gap as SetTitle: save_session_data does not clear the session-row pin (the backend upsert uses `title=None`)
                     tracing::warn!(error = %e, "Writeback: failed to upsert cleared session title");
                 }
             }

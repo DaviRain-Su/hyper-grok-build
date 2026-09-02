@@ -1,14 +1,8 @@
-//! OAuth configuration types for MCP servers.
-//!
-//! Constructed by the host's TOML parsing (`McpServerConfig::oauth_config`)
-//! and consumed by [`crate::oauth`].
+//! The host's TOML parsing (`McpServerConfig::oauth_config`) builds these types; [`crate::oauth`] consumes them.
 
 use std::collections::HashMap;
 
-/// OAuth configuration extracted from an MCP server's config.
-///
-/// Travels alongside `acp::McpServer` (which can't be extended since it's
-/// an external crate type). Keyed by server name in [`McpOAuthConfigMap`].
+/// Travels alongside `acp::McpServer` (which can't be extended since it's an external crate type).
 #[derive(Debug, Clone, Default)]
 pub struct McpOAuthConfig {
     pub client_id: Option<String>,

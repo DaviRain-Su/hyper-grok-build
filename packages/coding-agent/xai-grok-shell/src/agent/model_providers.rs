@@ -16,8 +16,7 @@ pub struct ModelProviderConfig {
     pub extra_headers: IndexMap<String, String>,
     /// Query parameters folded into every request URL; inherited by models.
     pub query_params: IndexMap<String, String>,
-    /// Header name to environment variable; inherited by models, resolved at
-    /// client build.
+    /// Header name to environment variable; inherited by models, resolved at client build.
     pub env_http_headers: IndexMap<String, String>,
     pub auth_provider: Option<String>,
     pub auth: Option<crate::auth::AuthProviderConfig>,

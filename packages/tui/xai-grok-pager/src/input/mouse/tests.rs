@@ -1,5 +1,4 @@
-//! Unit tests for scroll normalization in [`super`] (`mouse`), split out via
-//! `#[path]` to keep the module itself small.
+//! Unit tests for scroll normalization in [`super`] (`mouse`), split out via `#[path]` to keep the module itself small.
 
 use super::*;
 
@@ -18,12 +17,10 @@ fn make_vscode_config() -> ScrollConfig {
     ScrollConfig::from_terminal(TerminalName::VsCode, ScrollConfigOverrides::default())
 }
 
-/// Drive the state machine by its own suggested deadlines, exactly as the
-/// event loop's dedicated scroll clock does: tick at each
-/// `scroll_clock_deadline` until the stream finalizes. A zero delay (the exact
-/// 80ms gap boundary is not-yet-finalizable because the gap check is
-/// strict) advances by 1ms, mirroring the real loop's monotonic wall
-/// clock. Returns `(tick_time, flushed_lines)` for every tick.
+/// Drive the state machine exactly as the event loop's dedicated scroll clock does: tick at each `scroll_clock_deadline` until the stream finalizes.
+/// A zero delay advances by 1ms, mirroring the real loop's monotonic wall clock.
+/// (A tick at the exact 80ms boundary cannot finalize because the gap check is strict.)
+/// Returns `(tick_time, flushed_lines)` for every tick.
 fn drive_suggested_ticks(state: &mut MouseScrollState, mut now: Instant) -> Vec<(Instant, i32)> {
     let mut ticks = Vec::new();
     for _ in 0..64 {
@@ -39,42 +36,29 @@ fn drive_suggested_ticks(state: &mut MouseScrollState, mut now: Instant) -> Vec<
 
 #[test]
 fn clamped_pending_tail_does_not_busy_spin_scroll_clock() {
-    // Direction-clamp spin regression: a fast flick followed by a slow
-    // drag decays the acceleration multiplier (2.5x → 1.0x). Under
-    // retroactive whole-stream accel this pulled desired BELOW applied,
-    // making flushes clamped no-ops that never advanced last_redraw_at —
-    // if the deadline predicate disagrees with the flush (raw desired !=
-    // applied), it reports pending with a zero deadline forever and the
-    // scroll clock busy-spins a full core for the rest of the gesture.
+    // Direction-clamp spin regression: a fast flick followed by a slow drag decays the acceleration multiplier from 2.5x to 1.0x
+    // Under retroactive whole-stream accel this pulled desired BELOW applied, making flushes clamped no-ops that never advanced last_redraw_at
+    // If the deadline predicate disagrees with the flush (raw desired != applied), it reports pending with a zero deadline forever
+    // The scroll clock then busy-spins a full core for the rest of the gesture
     //
-    // Deliberate contract change (per-event accel weighting): under this
-    // fixture's forced-Trackpad config the pricing formula never
-    // switches, so desired is monotone and the collapsed
-    // "applied > desired" state originally staged here is unreachable —
-    // the original premise asserts are inverted to pin that contract.
-    // (Auto-mode promotion re-prices can still clamp; the clamp stays
-    // load-bearing — see effective_pending.) The property this test
-    // exists for is unchanged: suggested deadlines through a
-    // decelerating tail are never zero, and the drive helper's
-    // 64-wakeup bound must hold.
+    // Under this fixture's forced-Trackpad config the pricing formula never switches, so desired is monotone and "applied > desired" is unreachable
+    // Auto-mode promotion re-prices can still clamp, so the clamp is still needed (see effective_pending)
+    // The property under test: suggested deadlines through a decelerating tail are never zero, within the drive helper's 64-wakeup bound
     let config = make_config(3, ScrollInputMode::Trackpad);
     let base = Instant::now();
     let mut state = MouseScrollState::new_at(base);
 
-    // Fast flick: 15 events at 7ms (fast band, accel 2.5x, comfortably
-    // above the 6ms duplicate-guard boundary) build a capped backlog
-    // across the in-burst cadence flushes.
+    // Fast flick: 15 events at 7ms build a capped backlog across the in-burst cadence flushes
+    // 7ms is the fast band (accel 2.5x), above the 6ms duplicate-guard boundary
     let mut at = base;
     for i in 0..15u64 {
         at = base + Duration::from_millis(1 + i * 7);
         let _ = state.on_scroll_event_at(at, ScrollDirection::Down, config);
     }
 
-    // Slow drag tail: 40ms intervals (above the medium accel band once
-    // the rolling window turns over → multiplier 1.0). Desired used to
-    // collapse here; now every update must suggest a real deadline
-    // (16ms cadence while backlog drains, 80ms gap when drained) —
-    // Some(ZERO) is the spin signature.
+    // Slow drag tail: 40ms intervals sit above the medium accel band once the rolling window turns over, so the multiplier decays to 1.0
+    // Desired used to collapse here; now every update must suggest a real deadline (16ms cadence while backlog drains, 80ms gap when drained)
+    // Some(ZERO) means the busy-spin bug is back
     for i in 1..=6u64 {
         at = base + Duration::from_millis(99 + i * 40);
         let update = state.on_scroll_event_at(at, ScrollDirection::Down, config);
@@ -93,10 +77,8 @@ fn clamped_pending_tail_does_not_busy_spin_scroll_clock() {
         stream.applied_lines
     );
 
-    // Following the suggested deadlines from the last event must reach
-    // finalize in a couple of wakeups (the gap check + the strict-
-    // boundary step) — under the spin bug this panics at the 64-tick cap
-    // long before the 80ms gap elapses in 1ms steps.
+    // Following the suggested deadlines from the last event must reach finalize in a couple of wakeups (the gap check and the strict-boundary step)
+    // Under the spin bug this panics at the 64-tick cap long before the 80ms gap elapses in 1ms steps
     let ticks = drive_suggested_ticks(&mut state, at);
     assert!(
         ticks.len() <= 3,
@@ -111,17 +93,15 @@ fn clamped_pending_tail_does_not_busy_spin_scroll_clock() {
 
 #[test]
 fn residual_backlog_flushes_on_16ms_cadence_slots() {
-    // The event loop's scroll clock follows scroll_clock_deadline, so residual
-    // (cap-suppressed) trackpad lines must be due in exact REDRAW_CADENCE
-    // (16ms) slots. Pacing these flushes on the ~33ms animation tick was
-    // the "laggy yet too sensitive" defect: fewer, bigger jumps.
+    // The event loop's scroll clock follows scroll_clock_deadline
+    // Residual (cap-suppressed) trackpad lines must be due in exact REDRAW_CADENCE (16ms) slots
+    // Pacing these flushes on the ~33ms animation tick was the "laggy yet too sensitive" defect: fewer, bigger jumps
     let config = make_config(3, ScrollInputMode::Trackpad);
     let base = Instant::now();
     let mut state = MouseScrollState::new_at(base);
 
-    // 8 events at 2ms land inside one cadence slot (sub-6ms spacing is
-    // accel-excluded, so desired is the raw 8): more than the 6-line
-    // floor cap can flush at once, leaving a residual backlog.
+    // 8 events at 2ms land inside one cadence slot (sub-6ms spacing is accel-excluded, so desired is the raw 8).
+    // That is more than the 6-line floor cap can flush at once, leaving a residual backlog.
     let mut last_event_at = base;
     for i in 0..8u64 {
         last_event_at = base + Duration::from_millis(1 + i * 2);
@@ -139,8 +119,7 @@ fn residual_backlog_flushes_on_16ms_cadence_slots() {
         "capped backlog must drain over multiple cadence flushes, got {}",
         flushes.len()
     );
-    // Synthetic clock → deadline chain is exact: consecutive residual
-    // flushes land exactly one REDRAW_CADENCE apart, never a 33ms slot.
+    // The synthetic clock makes the deadline chain exact: consecutive residual flushes land exactly one REDRAW_CADENCE apart, never a 33ms slot
     for pair in flushes.windows(2) {
         let spacing = pair[1].0.duration_since(pair[0].0);
         assert_eq!(
@@ -156,9 +135,8 @@ fn residual_backlog_flushes_on_16ms_cadence_slots() {
 
 #[test]
 fn no_flush_starvation_when_events_stop_mid_cadence() {
-    // Events that stop inside a cadence window (every event suppressed,
-    // nothing flushed yet) must still flush at the next 16ms slot via the
-    // suggested deadline — not starve until the 80ms gap finalize.
+    // Events that stop inside a cadence window (every event suppressed, nothing flushed yet) must still flush at the next 16ms slot
+    // The suggested deadline drives that flush; without it they starve until the 80ms gap finalize
     let config = make_config(3, ScrollInputMode::Trackpad);
     let base = Instant::now();
     let mut state = MouseScrollState::new_at(base);
@@ -190,16 +168,13 @@ fn no_flush_starvation_when_events_stop_mid_cadence() {
 
 #[test]
 fn suggested_deadlines_finalize_at_80ms_gap_without_idle_spin() {
-    // With nothing pending, the only deadline is the 80ms gap check: the
-    // scroll clock must sleep the full remainder (no 16ms idle spinning)
-    // and the stream must finalize just past the gap — the exact
-    // STREAM_GAP semantics the animation tick used to provide.
+    // With nothing pending, the only deadline is the 80ms gap check: the scroll clock must sleep the full remainder (no 16ms idle spinning)
+    // The stream must finalize just past the gap, exactly the STREAM_GAP behavior the animation tick used to provide
     let config = make_config(3, ScrollInputMode::Auto);
     let base = Instant::now();
     let mut state = MouseScrollState::new_at(base);
 
-    // One full wheel tick: promotes on the 3rd event and flushes
-    // immediately, leaving desired == applied.
+    // One full wheel tick: promotes on the 3rd event and flushes immediately, leaving desired == applied
     let mut last_event_at = base;
     for i in 0..3u64 {
         last_event_at = base + Duration::from_millis(1 + i);
@@ -282,24 +257,20 @@ fn direction_flip_closes_previous_stream() {
     let _ = state.on_scroll_event_at(base + Duration::from_millis(2), ScrollDirection::Up, config);
     let _ = state.on_scroll_event_at(base + Duration::from_millis(3), ScrollDirection::Up, config);
 
-    // Direction flip should close the previous stream
     let update = state.on_scroll_event_at(
         base + Duration::from_millis(4),
         ScrollDirection::Down,
         config,
     );
 
-    // Should have at least 1 line from the new direction
     assert!(update.lines >= 0);
 }
 
 #[test]
 fn continuous_trackpad_scroll_does_not_stall() {
-    // Regression test: continuous scrolling must not stop producing lines
-    // after many events. Before the fix, accumulated_events was capped at
-    // ±256 and desired_lines was clamped at ±256, causing scroll to freeze
-    // during long trackpad gestures (~1–2 seconds of continuous two-finger
-    // scroll).
+    // Regression test: continuous scrolling must not stop producing lines after many events
+    // Before the fix, accumulated_events was capped at ±256 and desired_lines was clamped at ±256
+    // Scroll froze during long trackpad gestures (1-2 seconds of continuous two-finger scroll)
     let config = make_config(3, ScrollInputMode::Trackpad);
     let base = Instant::now();
     let mut state = MouseScrollState::new_at(base);
@@ -315,8 +286,7 @@ fn continuous_trackpad_scroll_does_not_stall() {
         total_lines += update.lines as i64;
     }
 
-    // With 1000 events, events_per_tick=3, lines_per_tick=3, and up to 3x
-    // trackpad acceleration, we should have scrolled well over 500 lines.
+    // With 1000 events, events_per_tick=3, lines_per_tick=3, and up to 3x trackpad acceleration, we should have scrolled well over 500 lines
     // Before the fix this would stall at ~256 lines.
     assert!(
         total_lines > 500,
@@ -326,10 +296,9 @@ fn continuous_trackpad_scroll_does_not_stall() {
 
 #[test]
 fn continuous_trackpad_scroll_single_event_terminal() {
-    // Regression test for terminals that emit 1 event per tick
-    // (iTerm2, WezTerm, VS Code). With normalized trackpad base rate
-    // (always ept=3 divisor), these now behave identically to ept=3
-    // terminals. Verify scrolling doesn't stall.
+    // Regression test for terminals that emit 1 event per tick (iTerm2, WezTerm, VS Code)
+    // With normalized trackpad base rate (always ept=3 divisor), these now behave identically to ept=3 terminals
+    // Verify scrolling doesn't stall
     let config = make_config(1, ScrollInputMode::Trackpad);
     let base = Instant::now();
     let mut state = MouseScrollState::new_at(base);
@@ -344,9 +313,8 @@ fn continuous_trackpad_scroll_single_event_terminal() {
         total_lines += update.lines as i64;
     }
 
-    // With normalized base rate (2/3 lines/event, same as ept=3) and
-    // per-flush cap of 4, 500 events over 2.5s should produce substantial
-    // scroll distance. Base = 500 × 0.67 ≈ 333 lines.
+    // With normalized base rate (2/3 lines/event, same as ept=3) and per-flush cap of 4, 500 events over 2.5s produce substantial scroll distance
+    // Base = 500 × 0.67 ≈ 333 lines
     assert!(
         total_lines > 200,
         "expected > 200 total lines (ept=1, normalized), got {total_lines}"
@@ -365,20 +333,18 @@ fn stream_gap_closes_stream() {
         config,
     );
 
-    // After stream gap, on_tick should return no pending ticks
+    // 100ms is past the 80ms stream gap, so on_tick has no next deadline
     let update = state.on_tick_at(base + Duration::from_millis(100));
     assert!(update.next_tick_in.is_none());
 }
 
 #[test]
 fn high_rate_wheel_coalesces_redraws() {
-    // Simulate a Logitech free-spinning wheel: 300 events over ~900ms
-    // at 3ms intervals (~333 events/sec). The first 3 events arrive
-    // within 12ms and get promoted to Wheel mode.
+    // Simulate a Logitech free-spinning wheel: 300 events over ~900ms at 3ms intervals (~333 events/sec)
+    // The first 3 events arrive within 12ms and get promoted to Wheel mode
     //
-    // With cadence coalescing (16ms), we expect ~56 flushes (one per
-    // 16ms window), not ~300 (one per event). Each flush should batch
-    // the accumulated lines, so total lines scrolled is preserved.
+    // With cadence coalescing (16ms), we expect ~56 flushes (one per 16ms window), not ~300 (one per event)
+    // Each flush should batch the accumulated lines, so total lines scrolled is preserved
     let config = make_config(3, ScrollInputMode::Auto);
     let base = Instant::now();
     let mut state = MouseScrollState::new_at(base);
@@ -406,8 +372,7 @@ fn high_rate_wheel_coalesces_redraws() {
         "expected > 200 total lines, got {total_lines}"
     );
 
-    // Flush count should be bounded by cadence (~60fps), not
-    // proportional to the raw event count.
+    // Flush count should be bounded by cadence (~60fps), not proportional to the raw event count
     // 300 events × 3ms = 900ms → 900/16 ≈ 56 cadence windows.
     let max_expected_flushes = (event_count * interval_ms / REDRAW_CADENCE_MS) + 10;
     assert!(
@@ -419,9 +384,8 @@ fn high_rate_wheel_coalesces_redraws() {
 
 #[test]
 fn discrete_wheel_tick_still_flushes_promptly() {
-    // A single wheel tick (3 events in <12ms) should flush on
-    // promotion (just_promoted), not be delayed to the next cadence
-    // window. This ensures regular mouse wheels remain responsive.
+    // A single wheel tick (3 events in <12ms) should flush on promotion (just_promoted), not be delayed to the next cadence window
+    // Regular mouse wheels must remain responsive
     let config = make_config(3, ScrollInputMode::Auto);
     let base = Instant::now();
     let mut state = MouseScrollState::new_at(base);
@@ -442,8 +406,7 @@ fn discrete_wheel_tick_still_flushes_promptly() {
         config,
     );
 
-    // The 3rd event completes the tick and triggers promotion →
-    // immediate flush of all 3 lines.
+    // The 3rd event completes the tick and triggers promotion, flushing all 3 lines immediately
     let total = u1.lines + u2.lines + u3.lines;
     assert_eq!(
         total, 3,
@@ -453,9 +416,7 @@ fn discrete_wheel_tick_still_flushes_promptly() {
 
 #[test]
 fn finalized_stream_carry_is_only_fractional() {
-    // After a fast capped stream ends, carry_lines should only
-    // hold the sub-line fractional remainder, not cap-induced
-    // integer backlog.
+    // After a fast capped stream ends, carry_lines should only hold the sub-line fractional remainder, not cap-induced integer backlog
     let config = make_config(3, ScrollInputMode::Trackpad);
     let base = Instant::now();
     let mut state = MouseScrollState::new_at(base);
@@ -469,13 +430,11 @@ fn finalized_stream_carry_is_only_fractional() {
         );
     }
 
-    // Finalize via stream gap (driving the drain to completion — a single
-    // overdue tick may now be a tapered drain flush, not the finalize).
+    // Finalize via stream gap, driving the drain to completion (a single overdue tick may now be a tapered drain flush, not the finalize)
     let _ = state.on_tick_at(base + Duration::from_millis(500));
     let _ = drive_suggested_ticks(&mut state, base + Duration::from_millis(500));
     assert!(!state.has_active_stream(), "stream must finalize");
 
-    // carry_lines should be fractional (< 1.0), not tens of lines.
     assert!(
         state.carry_lines.abs() < 1.0,
         "carry after finalization should be fractional, got {}",
@@ -486,8 +445,7 @@ fn finalized_stream_carry_is_only_fractional() {
 #[test]
 fn two_same_direction_gestures_no_carry_pollution() {
     // Two consecutive same-direction gestures separated by a gap.
-    // The second gesture should start clean — no burst from the
-    // first gesture's capped backlog.
+    // The second gesture should start clean, with no burst from the first gesture's capped backlog
     let config = make_config(3, ScrollInputMode::Trackpad);
     let base = Instant::now();
     let mut state = MouseScrollState::new_at(base);
@@ -517,8 +475,6 @@ fn two_same_direction_gestures_no_carry_pollution() {
         }
     }
 
-    // First flush of gesture 2 should be small (1-2 lines), not a
-    // burst from gesture 1's leftover backlog.
     assert!(
         g2_first_flush_lines <= 4,
         "second gesture first flush should be small, got {} lines (carry pollution?)",
@@ -526,8 +482,7 @@ fn two_same_direction_gestures_no_carry_pollution() {
     );
 }
 
-/// Feed a dense trackpad flick (`events` at `interval_ms`), then drive
-/// the suggested deadlines to finalize; returns total delivered lines.
+/// Feed a dense trackpad flick (`events` at `interval_ms`), then drive the suggested deadlines to finalize; returns total delivered lines.
 fn run_flick_to_finalize(config: ScrollConfig, events: u64, interval_ms: u64) -> i64 {
     let base = Instant::now();
     let mut state = MouseScrollState::new_at(base);
@@ -548,13 +503,11 @@ fn run_flick_to_finalize(config: ScrollConfig, events: u64, interval_ms: u64) ->
 
 #[test]
 fn fast_flick_delivery_scales_with_viewport() {
-    // Proportional per-flush cap: the fixed 6-line cap ceilinged fast
-    // flicks at ~360 lines/s regardless of screen size, so a dense burst
-    // lost most of its travel. The cap is now max(6, viewport/2) — the
-    // same flick must deliver strictly more on a taller viewport, and a
-    // stamped viewport must never deliver less than the legacy floor.
-    // 6x speed as the demand amplifier: the 2ms spacing below is
-    // accel-excluded (duplicate guard), so acceleration cannot supply it.
+    // Proportional per-flush cap: the fixed 6-line cap held fast flicks to ~360 lines/s regardless of screen size
+    // A dense burst lost most of its travel
+    // The cap is now max(6, viewport/2): the same flick must deliver strictly more on a taller viewport
+    // A stamped viewport must never deliver less than the legacy floor
+    // 6x speed supplies the demand: the 2ms spacing below is accel-excluded (duplicate guard), so acceleration cannot
     let base_config = ScrollConfig::from_terminal(
         TerminalName::Unknown,
         ScrollConfigOverrides {
@@ -564,8 +517,7 @@ fn fast_flick_delivery_scales_with_viewport() {
             ..ScrollConfigOverrides::default()
         },
     );
-    // 60 events at 2ms: desired = 360 lines accrues far faster than the
-    // floor cap can drain (6 per 16ms slot), so delivery is cap-bound.
+    // 60 events at 2ms: desired = 360 lines accrues far faster than the floor cap can drain (6 per 16ms slot), so delivery is cap-bound
     let floor = run_flick_to_finalize(base_config, 60, 2);
     let small = run_flick_to_finalize(base_config.with_viewport_height(20), 60, 2);
     let tall = run_flick_to_finalize(base_config.with_viewport_height(60), 60, 2);
@@ -584,19 +536,15 @@ fn fast_flick_delivery_scales_with_viewport() {
 
 #[test]
 fn finalize_flushes_whole_line_backlog_not_just_carry() {
-    // Stream-end backlog: finalize used to deliver at most the 6-line cap
-    // and silently discard the remaining whole lines (only the fractional
-    // remainder survived as carry) — a fast flick's tail evaporated. With
-    // the proportional cap the finalize flush must drain the whole-line
-    // backlog when it fits in one cap.
+    // Stream-end backlog: finalize used to deliver at most the 6-line cap and silently discard the remaining whole lines
+    // Only the fractional remainder survived as carry, so a fast flick's tail evaporated
+    // With the proportional cap the finalize flush must drain the whole-line backlog when it fits in one cap
     let config = make_config(3, ScrollInputMode::Trackpad).with_viewport_height(40);
     let base = Instant::now();
     let mut state = MouseScrollState::new_at(base);
 
-    // 40 events at 2ms (sub-6ms spacing is accel-excluded, so desired is
-    // the raw 40): the four in-burst cadence flushes apply 33 — leaving
-    // a whole-line backlog bigger than the legacy 6-line cap but within
-    // one proportional cap (20).
+    // 40 events at 2ms (sub-6ms spacing is accel-excluded, so desired is the raw 40): the four in-burst cadence flushes apply 33
+    // That leaves a whole-line backlog bigger than the legacy 6-line cap but within one proportional cap (20)
     let mut at = base;
     for i in 0..40u64 {
         at = base + Duration::from_millis(1 + i * 2);
@@ -612,14 +560,12 @@ fn finalize_flushes_whole_line_backlog_not_just_carry() {
          cap, got {pending}"
     );
 
-    // First tick past the 80ms gap: the backlog is backed by unflushed
-    // events (arrivals since the last in-burst flush), so the catch-up
-    // flush still delivers it whole.
+    // First tick past the 80ms gap: the backlog is backed by unflushed events (arrivals since the last in-burst flush)
+    // The catch-up flush therefore still delivers it whole
     //
-    // Contract change (finalize-decel): the gap tick no longer finalizes
-    // while lines remain — the drain completes on the 16ms scroll clock and
-    // the finalize follows with nothing left to flush or drop. Same
-    // delivered total as the parent contract, without the finalize burst.
+    // The gap tick no longer finalizes while lines remain
+    // The drain completes on the 16ms scroll clock and the finalize follows with nothing left to flush or drop
+    // The delivered total matches the old behavior, without the finalize burst
     let update = state.on_tick_at(at + STREAM_GAP + Duration::from_millis(1));
     assert_eq!(
         update.lines, pending,
@@ -645,12 +591,10 @@ fn finalize_flushes_whole_line_backlog_not_just_carry() {
 
 #[test]
 fn fractional_carry_not_reamplified_by_speed_multiplier() {
-    // Carry unit-exactness: desired/applied/carry share FINAL line units
-    // (see MouseScrollState::carry_lines), so a sub-line remainder must
-    // cross a stream boundary as-is. Consuming it before the speed
-    // multiplier re-amplified it by up to (multiplier - 1) phantom lines
-    // per gesture — ~5 at scroll_speed 100, the exact setting the
-    // trackpad pty regression test runs at.
+    // desired/applied/carry share FINAL line units (see MouseScrollState::carry_lines)
+    // A sub-line remainder must therefore cross a stream boundary as-is
+    // Consuming it before the speed multiplier re-amplified it by up to (multiplier - 1) phantom lines per gesture
+    // That is ~5 lines at scroll_speed 100, the exact setting the trackpad pty regression test runs at
     let config = ScrollConfig::from_terminal(
         TerminalName::Unknown,
         ScrollConfigOverrides {
@@ -668,10 +612,9 @@ fn fractional_carry_not_reamplified_by_speed_multiplier() {
     state.carry_lines = 0.9;
     state.carry_direction = Some(ScrollDirection::Down);
 
-    // First event of the next gesture flushes immediately (>16ms since
-    // the last redraw): 1.0-weighted (no interval history) × 6.0 speed
-    // + 0.9 carry = 6.9 → 6 lines. Re-amplified carry would price
-    // (1.0 + 0.9) × 6.0 = 11.4 → 11.
+    // First event of the next gesture flushes immediately (>16ms since the last redraw)
+    // 1.0-weighted (no interval history) × 6.0 speed + 0.9 carry = 6.9 → 6 lines
+    // Re-amplified carry would price (1.0 + 0.9) × 6.0 = 11.4 → 11
     let update = state.on_scroll_event_at(
         base + Duration::from_millis(100),
         ScrollDirection::Down,
@@ -695,20 +638,16 @@ fn fractional_carry_not_reamplified_by_speed_multiplier() {
 
 #[test]
 fn desired_monotone_no_zero_flush_window_under_decaying_accel() {
-    // Retroactive accel regression: multiplying the whole accumulated
-    // total by the CURRENT multiplier meant a fast start followed by a
-    // slow tail shrank desired below applied — flushes clamped to zero
-    // and the gesture visibly paused mid-stream. With per-event weights,
-    // desired must be monotone and every decelerating tail event (each
-    // ≥16ms apart, so cadence-eligible) must still deliver lines while
-    // backlog exists.
+    // Retroactive accel regression: the whole accumulated total was multiplied by the CURRENT multiplier
+    // A fast start followed by a slow tail then shrank desired below applied: flushes clamped to zero and the gesture visibly paused mid-stream
+    // With per-event weights, desired must be monotone
+    // Every decelerating tail event (each at least 16ms apart, so each can flush on the 16ms cadence) must still deliver lines while backlog exists
     let config = make_config(3, ScrollInputMode::Trackpad);
     let base = Instant::now();
     let mut state = MouseScrollState::new_at(base);
 
     let mut last_desired = 0.0f32;
-    // 7ms spacing: fast band, comfortably above the 6ms duplicate-guard
-    // boundary.
+    // 7ms spacing: fast band, above the 6ms duplicate-guard boundary
     for i in 0..15u64 {
         let at = base + Duration::from_millis(1 + i * 7);
         let _ = state.on_scroll_event_at(at, ScrollDirection::Down, config);
@@ -720,8 +659,7 @@ fn desired_monotone_no_zero_flush_window_under_decaying_accel() {
         last_desired = desired;
     }
 
-    // Decelerating tail: 24ms intervals decay the multiplier toward 1.0
-    // as the rolling window turns over.
+    // Decelerating tail: 24ms intervals decay the multiplier toward 1.0 as the rolling window turns over
     for i in 1..=10u64 {
         let at = base + Duration::from_millis(99 + i * 24);
         let update = state.on_scroll_event_at(at, ScrollDirection::Down, config);
@@ -743,9 +681,8 @@ fn desired_monotone_no_zero_flush_window_under_decaying_accel() {
 
 #[test]
 fn tiny_viewport_floor_cap_still_scrolls() {
-    // Cap floor: viewport/2 on a 4-row pane would be 2 lines per flush;
-    // the floor keeps tiny (and unknown, height 0) viewports at the
-    // legacy 6-line cap so they still travel.
+    // Cap floor: viewport/2 on a 4-row pane would be 2 lines per flush
+    // The floor keeps tiny (and unknown, height 0) viewports at the legacy 6-line cap so they still travel
     let base_config = make_config(3, ScrollInputMode::Trackpad);
     assert_eq!(base_config.with_viewport_height(4).flush_cap(), 6);
     assert_eq!(base_config.with_viewport_height(0).flush_cap(), 6);
@@ -772,8 +709,7 @@ fn tiny_viewport_floor_cap_still_scrolls() {
 #[test]
 fn vscode_fast_scroll_matches_native_terminal_throughput() {
     // VS Code emits events at ~30ms intervals vs ~10ms for native terminals.
-    // With wider accel bands and higher trackpad_lines_per_tick, VS Code
-    // should achieve comparable scroll throughput.
+    // With wider accel bands and higher trackpad_lines_per_tick, VS Code should achieve comparable scroll throughput
     let vscode = make_vscode_config();
     let native = make_config(1, ScrollInputMode::Trackpad);
     let base = Instant::now();
@@ -950,14 +886,11 @@ fn cancel_stream_drops_pending_momentum_and_fractional_carry() {
 
 #[test]
 fn wheel_flood_flushes_capped_with_backlog_carry() {
-    // Wheel-path cap: a confirmed-wheel flood (e.g. terminal momentum
-    // bursts, or a trackpad misread as wheel) used to flush its whole
-    // backlog in one 16ms slot — the parent capped only confirmed
-    // trackpad. 30 events at 1ms on an ept=3 Auto profile promote to
-    // Wheel at event 3 and pile ~1 line/event into two cadence slots;
-    // every flush must now respect the proportional cap (viewport 20 →
-    // 10) with the excess carried into later slots, not delivered as
-    // one jump (the parent flushed 16 at the second slot).
+    // Wheel-path cap regression: the old code capped only confirmed trackpad
+    // A confirmed-wheel flood (e.g. terminal momentum bursts, or a trackpad misread as wheel) flushed its whole backlog in one 16ms slot.
+    // 30 events at 1ms on an ept=3 Auto profile promote to Wheel at event 3 and pile ~1 line/event into two cadence slots
+    // Every flush must respect the proportional cap (viewport 20 yields cap 10), with the excess carried into later slots
+    // The old code delivered it as one jump, flushing 16 at the second slot
     let config = make_config(3, ScrollInputMode::Auto).with_viewport_height(20);
     let cap = config.flush_cap();
     assert_eq!(cap, 10, "fixture: viewport 20 must yield cap 10");
@@ -1008,12 +941,9 @@ fn wheel_flood_flushes_capped_with_backlog_carry() {
 
 #[test]
 fn unclassified_flood_on_ept3_capped_not_teleported() {
-    // Unknown-path cap: an ept=3 stream that misses the 12ms wheel
-    // promotion window never classifies mid-stream, and the parent
-    // flushed it uncapped — the exact misclassified-trackpad flood
-    // (a brand the table calls ept=3 whose trackpad never promotes).
-    // Three spaced events pin kind at Unknown, then a 1ms flood must
-    // stay under the proportional cap per flush.
+    // Unknown-path cap: an ept=3 stream that misses the 12ms wheel promotion window never classifies mid-stream
+    // The old code flushed it uncapped: the exact misclassified-trackpad flood (a brand the table calls ept=3 whose trackpad never promotes)
+    // Three spaced events pin kind at Unknown, then a 1ms flood must stay under the proportional cap per flush
     let config = make_config(3, ScrollInputMode::Auto).with_viewport_height(20);
     let cap = config.flush_cap();
     let base = Instant::now();
@@ -1021,10 +951,9 @@ fn unclassified_flood_on_ept3_capped_not_teleported() {
 
     let mut at = base;
     let mut flushes: Vec<i32> = Vec::new();
-    // 3 events at 25ms: the third lands 50ms after start, past the 12ms
-    // promotion window, so the stream can never become Wheel (and the
-    // interval window sits at base weight, keeping the finalize reprice
-    // total-neutral). Then a 37-event flood at 1ms.
+    // 3 events at 25ms: the third lands 50ms after start, past the 12ms promotion window, so the stream can never become Wheel
+    // The interval window sits at base weight, so the finalize reprice does not change the total
+    // Then a 37-event flood at 1ms follows
     for i in 0..40u64 {
         at = base + Duration::from_millis(if i < 3 { 1 + i * 25 } else { 49 + i });
         let update = state.on_scroll_event_at(at, ScrollDirection::Down, config);
@@ -1063,13 +992,10 @@ fn unclassified_flood_on_ept3_capped_not_teleported() {
 
 #[test]
 fn legit_ept1_wheel_notches_never_hit_the_cap() {
-    // Cap un-hittability for real wheels: on an ept=1 profile (iTerm2
-    // shape: 1 event and 1 line per notch) the wheel path has no
-    // acceleration — desired is accumulated_events x (lpt/ept) x speed —
-    // so a flush covers at most the notches accumulated since the last
-    // 16ms slot: ~2 per slot even free-spinning, far under the 6-line
-    // floor cap, let alone viewport/2. Every notch must arrive intact
-    // and no flush may come near the cap.
+    // Real wheels cannot hit the cap: on an ept=1 profile (iTerm2 shape: 1 event and 1 line per notch) the wheel path has no acceleration
+    // Desired is accumulated_events x (lpt/ept) x speed, so a flush covers at most the notches accumulated since the last 16ms slot
+    // That is ~2 per slot even free-spinning, far under the 6-line floor cap, let alone viewport/2
+    // Every notch must arrive intact and no flush may come near the cap
     let config = ScrollConfig::from_terminal(TerminalName::Iterm2, Default::default())
         .with_viewport_height(20);
     assert_eq!(config.events_per_tick, 1);
@@ -1077,8 +1003,7 @@ fn legit_ept1_wheel_notches_never_hit_the_cap() {
     let base = Instant::now();
     let mut state = MouseScrollState::new_at(base);
 
-    // 10 notches at 40ms: above the 30ms ept=1 trackpad-detect window,
-    // so the stream stays wheel-like throughout.
+    // 10 notches at 40ms: above the 30ms ept=1 trackpad-detect window, so the stream stays wheel-like throughout
     let mut at = base;
     let mut total = 0i32;
     for i in 0..10u64 {
@@ -1100,12 +1025,9 @@ fn legit_ept1_wheel_notches_never_hit_the_cap() {
 
 #[test]
 fn ghostty_duplicate_reports_do_not_feed_accel_banding() {
-    // Ghostty emits >= 2 SGR reports per physical notch ~4ms apart
-    // (ghostty.org discussion #7577): the parent fed those 4ms gaps into
-    // the interval window, reading a human 25ms notch cadence as
-    // max-velocity scrolling. Duplicates must be excluded from banding
-    // (accel equals the same stream with duplicates removed) while still
-    // counting for line accumulation.
+    // Ghostty emits at least two SGR reports per physical notch, ~4ms apart
+    // The old code fed those 4ms gaps into the interval window, reading a human 25ms notch cadence as max-velocity scrolling
+    // Duplicates must be excluded from banding (accel equals the same stream with duplicates removed) while still counting for line accumulation
     let config = ScrollConfig::from_terminal(TerminalName::Ghostty, Default::default());
     let base = Instant::now();
 
@@ -1147,11 +1069,9 @@ fn ghostty_duplicate_reports_do_not_feed_accel_banding() {
 
 #[test]
 fn multiplexed_sessions_use_conservative_profile_regardless_of_brand() {
-    // tmux/screen/zellij/herdr re-encode mouse into their own SGR stream, so
-    // the outer brand's ept/pacing calibration is wrong under them: the
-    // conservative ept=1 shape applies no matter the brand. Cmux is a
-    // passthrough and Undetected means no multiplexer — both keep the
-    // brand profile byte-identical to `from_terminal`.
+    // tmux/screen/zellij/herdr re-encode mouse into their own SGR stream, so the outer brand's ept/pacing calibration is wrong under them
+    // The conservative ept=1 shape applies no matter the brand
+    // Cmux is a passthrough and Undetected means no multiplexer; both keep the brand profile byte-identical to `from_terminal`
     let brands = [
         TerminalName::Ghostty,
         TerminalName::Iterm2,
@@ -1212,9 +1132,8 @@ fn multiplexed_sessions_use_conservative_profile_regardless_of_brand() {
 // ── User-facing scroll settings (scroll_mode / invert_scroll /
 //    scroll_lines) — override plumbing + forced-mode pricing ──────────────
 
-/// The settings caches assemble into overrides and reach the config through
-/// `from_terminal_context`: forced mode, inverted direction, and the single
-/// `scroll_lines` knob overriding BOTH per-tick values.
+/// The settings caches assemble into overrides and reach the config through `from_terminal_context`.
+/// That covers forced mode, inverted direction, and the single `scroll_lines` knob overriding BOTH per-tick values.
 #[test]
 fn settings_cache_overrides_reach_scroll_config() {
     // Thread-local caches: sets are visible only to this test's thread.
@@ -1241,7 +1160,7 @@ fn settings_cache_overrides_reach_scroll_config() {
     assert_eq!(config.wheel_lines_per_tick, 2);
     assert_eq!(config.trackpad_lines_per_tick, 2);
 
-    // Auto mode + unset lines = no opinion: the profile stays in charge.
+    // Auto mode with unset lines expresses no opinion: the profile stays in charge
     crate::appearance::cache::set_scroll_mode(crate::appearance::ScrollMode::Auto);
     crate::appearance::cache::set_invert_scroll(false);
     let neutral = ScrollConfigOverrides {
@@ -1260,8 +1179,7 @@ fn settings_cache_overrides_reach_scroll_config() {
     assert_eq!(config.trackpad_lines_per_tick, 15);
 }
 
-/// `scroll_lines` unset keeps every profile's own values; set, it overrides
-/// both paths on any brand (from_terminal_context is the only prod path).
+/// `scroll_lines` unset keeps every profile's own values; set, it overrides both paths on any brand (from_terminal_context is the only prod path).
 #[test]
 fn scroll_lines_override_beats_profile_and_unset_keeps_it() {
     let unset = ScrollConfig::from_terminal(TerminalName::VsCode, Default::default());
@@ -1280,20 +1198,14 @@ fn scroll_lines_override_beats_profile_and_unset_keeps_it() {
     assert_eq!(set.trackpad_lines_per_tick, 4);
 }
 
-/// Forced-wheel mode prices a flood at exact wheel rates regardless of
-/// arrival timing: 30 events at 8ms deliver exactly
-/// `events/ept x wheel_lines` = 30 lines.
+/// Forced-wheel mode prices a flood at exact wheel rates regardless of arrival timing.
+/// 30 events at 8ms deliver exactly `events/ept x wheel_lines` = 30 lines.
 ///
-/// Contract change (finalize-decel): the identical Auto stream used to
-/// deliver strictly MORE — it stayed Unknown mid-stream (8ms spacing misses
-/// the 12ms wheel-promotion window, and ept=3 has no mid-stream trackpad
-/// promotion), priced accel-free the whole gesture, and then the finalize's
-/// Unknown→Trackpad flip re-priced it accel-weighted, bursting the excess
-/// AFTER input ended — the end-of-gesture jerk. The finalize
-/// reclassification may no longer mint demand, so Auto now equals the
-/// forced-wheel total on this shape by design; live acceleration still
-/// applies to streams confirmed trackpad mid-stream (the ept=1 paths
-/// covered by the continuous/vscode throughput tests).
+/// The identical Auto stream used to deliver strictly MORE.
+/// It stayed Unknown mid-stream (8ms misses the 12ms wheel-promotion window; ept=3 has no mid-stream trackpad promotion) and priced accel-free.
+/// The finalize's flip from Unknown to Trackpad then re-priced it accel-weighted, bursting the excess AFTER input ended: the end-of-gesture jerk.
+/// The finalize reclassification may no longer add demand, so Auto now equals the forced-wheel total on this shape by design.
+/// Live acceleration still applies to streams confirmed trackpad mid-stream (the ept=1 paths covered by the continuous/vscode throughput tests).
 #[test]
 fn forced_wheel_mode_prices_flood_as_wheel_regardless_of_timing() {
     let run = |mode: Option<ScrollInputMode>| -> i32 {
@@ -1336,9 +1248,8 @@ fn forced_wheel_mode_prices_flood_as_wheel_regardless_of_timing() {
     );
 }
 
-/// `invert_direction` flips the sign end-to-end through `on_scroll_event`:
-/// a physical scroll-down burst lands as upward line deltas of the same
-/// magnitude as the non-inverted run.
+/// `invert_direction` flips the sign end-to-end through `on_scroll_event`.
+/// A physical scroll-down burst lands as upward line deltas of the same magnitude as the non-inverted run.
 #[test]
 fn invert_direction_flips_sign_end_to_end() {
     let run = |invert: bool| -> i32 {
@@ -1374,13 +1285,11 @@ fn invert_direction_flips_sign_end_to_end() {
     );
 }
 
-/// `debug_snapshot` tracks the stream lifecycle (idle → live flood →
-/// finalized breadcrumb) and echoes the config in effect, without mutating
-/// state: consecutive snapshots at the same `now` are identical.
+/// `debug_snapshot` follows the stream from idle through live flood to the finalized breadcrumb and echoes the config in effect.
+/// It does not mutate state: consecutive snapshots at the same `now` are identical.
 #[test]
 fn debug_snapshot_tracks_stream_lifecycle_without_mutating() {
-    // ept=1 Auto so the live trackpad promotion fires (>2 events with avg
-    // interval < 30ms); viewport 40 pins the cap echo at 40/2 = 20.
+    // ept=1 Auto so the live trackpad promotion fires (>2 events with avg interval < 30ms); viewport 40 pins the cap echo at 40/2 = 20
     let config = make_config(1, ScrollInputMode::Auto).with_viewport_height(40);
     let base = Instant::now();
     let mut state = MouseScrollState::new_at(base);
@@ -1435,25 +1344,20 @@ fn debug_snapshot_tracks_stream_lifecycle_without_mutating() {
 
 #[test]
 fn scroll_log_records_flood_flushes_and_capped_finalize_drop() {
-    // GROK_SCROLL_LOG flight recorder: a trackpad flood on the synthetic
-    // clock must produce parseable JSONL ordered stream_start → flushes →
-    // finalize, with ts_ms on the state machine's own timeline and the
-    // finalize's flushed/dropped/backlog_after mutually consistent — the
-    // fields the rear-end-burst investigation reads. Recording must not
-    // change delivered lines (pure-observation invariant).
+    // GROK_SCROLL_LOG: a trackpad flood on the synthetic clock must produce parseable JSONL ordered stream_start, then flushes, then finalize
+    // ts_ms must sit on the state machine's own timeline, and the finalize's flushed/dropped/backlog_after must be mutually consistent
+    // Recording must not change delivered lines (pure-observation invariant)
     let config = make_config(3, ScrollInputMode::Trackpad);
     let base = Instant::now();
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("scroll-log.jsonl");
     let mut state = MouseScrollState::new_at(base);
     state.recorder = Some(ScrollLogRecorder::new(path.clone(), base));
-    // Recorder-off twin driven identically pins the no-behavior-change
-    // invariant on delivered lines.
+    // A second state without a recorder, driven identically, proves recording does not change delivered lines
     let mut mirror = MouseScrollState::new_at(base);
 
-    // 50 events at 2ms: sub-6ms spacing is accel-excluded (multiplier
-    // stays 1.0), so desired is exactly 50.0 lines while the 16ms cadence
-    // flushes deliver at most the 6-line floor cap — a growing backlog.
+    // 50 events at 2ms: sub-6ms spacing is accel-excluded (multiplier stays 1.0), so desired is exactly 50.0 lines
+    // The 16ms cadence flushes deliver at most the 6-line floor cap, so the backlog grows
     let mut at = base;
     let mut delivered = 0;
     let mut mirrored = 0;
@@ -1468,11 +1372,9 @@ fn scroll_log_records_flood_flushes_and_capped_finalize_drop() {
     }
     // Overdue ticks past the 80ms gap (a starved scroll clock).
     //
-    // Contract change (finalize-decel): the first post-gap tick no longer
-    // finalizes with a capped burst — the backlog drains tapered on 16ms
-    // slots first, the coast budget writes off what one cap cannot honor,
-    // and only then does the finalize land (with a nonzero `dropped` that
-    // now quantifies the written-off flood excess, not a burst).
+    // The first post-gap tick no longer finalizes with a capped burst
+    // The backlog drains tapered on 16ms slots first, the coast budget writes off what one cap cannot honor, and only then does the finalize land
+    // Its nonzero `dropped` quantifies the written-off flood excess, not a burst
     let mut final_at = at + Duration::from_millis(81);
     delivered += state.on_tick_at(final_at).lines;
     mirrored += mirror.on_tick_at(final_at).lines;
@@ -1487,8 +1389,7 @@ fn scroll_log_records_flood_flushes_and_capped_finalize_drop() {
     assert!(!state.has_active_stream());
     assert_eq!(delivered, mirrored, "recording must not change scrolling");
 
-    // The finalize record flushed the BufWriter: the file is readable
-    // while the recorder is still alive (the tail -f contract).
+    // The finalize record flushed the BufWriter: the file is readable while the recorder is still alive (the tail -f contract)
     let raw = std::fs::read_to_string(&path).expect("log readable mid-session");
     let records: Vec<serde_json::Value> = raw
         .lines()
@@ -1518,9 +1419,7 @@ fn scroll_log_records_flood_flushes_and_capped_finalize_drop() {
     assert_eq!(last["trigger"], "finalize");
     for flush in &records[1..records.len() - 1] {
         assert_eq!(flush["evt"], "flush");
-        // In-burst flushes ride the event path; the post-gap drain flushes
-        // ride the tick path (contract change: they replace the old
-        // finalize burst).
+        // In-burst flushes ride the event path; the post-gap drain flushes ride the tick path (they replace the old finalize burst)
         assert!(
             flush["trigger"] == "event" || flush["trigger"] == "tick",
             "unexpected flush trigger: {flush}"
@@ -1541,8 +1440,7 @@ fn scroll_log_records_flood_flushes_and_capped_finalize_drop() {
         "drain flushes must decelerate (non-increasing), got {drain_flushes:?}"
     );
 
-    // ts_ms is the synthetic timeline: monotone, finalize at the tick's
-    // exact offset.
+    // ts_ms is the synthetic timeline: monotone, finalize at the tick's exact offset
     let ts: Vec<f64> = records
         .iter()
         .map(|r| r["ts_ms"].as_f64().expect("ts_ms is a number"))
@@ -1554,9 +1452,8 @@ fn scroll_log_records_flood_flushes_and_capped_finalize_drop() {
     let expected_ms = final_at.duration_since(base).as_secs_f64() * 1000.0;
     assert!((ts.last().expect("nonempty") - expected_ms).abs() < 1e-6);
 
-    // Finalize consistency (contract change: the finalize flushes nothing —
-    // the drain already ran dry or the coast budget wrote the rest off, so
-    // `dropped` is exactly the whole-line backlog the budget declined).
+    // Finalize consistency: the finalize flushes nothing because the drain already ran dry or the coast budget wrote the rest off
+    // `dropped` is exactly the whole-line backlog the budget declined
     let cap = last["cap"].as_i64().expect("cap");
     let flushed = last["flushed"].as_i64().expect("flushed");
     let dropped = last["dropped"].as_i64().expect("dropped");
@@ -1590,15 +1487,12 @@ fn scroll_log_records_flood_flushes_and_capped_finalize_drop() {
     assert!(last["ms_since_prev_flush"].as_f64().expect("spacing") > 0.0);
 }
 
-/// Producer-side wire-format tripwire, twin of the harness's
-/// `scroll_matrix::log::ScrollLogLine` parser
-/// (`xai-grok-pager-pty-harness/src/scroll_matrix/log.rs`). The harness
-/// declares every always-emitted field REQUIRED, so its deserializer fails
-/// loudly on a pager-side rename; this test pins the same contract from the
-/// producer side as raw JSON key sets. The key lists are hardcoded string
-/// fixtures on purpose — no harness dependency (harness→pager stays
-/// binary-only via PAGER_BINARY) and no shared constants with the
-/// serializer, otherwise a rename would update both sides silently.
+/// Producer-side twin of the harness's `scroll_matrix::log::ScrollLogLine` parser (`xai-grok-pager-pty-harness/src/scroll_matrix/log.rs`).
+/// The harness declares every always-emitted field REQUIRED, so its deserializer fails loudly on a pager-side rename.
+/// This test pins the same contract from the producer side as raw JSON key sets.
+/// The key lists are hardcoded string fixtures on purpose.
+/// They take no harness dependency (the harness reaches the pager only as a binary via PAGER_BINARY).
+/// They share no constants with the serializer, otherwise a rename would update both sides silently.
 #[test]
 fn scroll_log_wire_format_matches_harness_required_field_set() {
     // Always-emitted fields the harness parser requires on every record.
@@ -1630,9 +1524,8 @@ fn scroll_log_wire_format_matches_harness_required_field_set() {
         "viewport_height",
     ];
 
-    // Same trackpad-flood drive as the recorder test above: 50 events at
-    // 2ms build a capped backlog (≥1 nonzero mid-stream flush), then ticks
-    // drain to the finalize with dropped > 0 — one record of each evt.
+    // Same trackpad-flood drive as the recorder test above: 50 events at 2ms build a capped backlog (at least one nonzero mid-stream flush)
+    // Ticks then drain to the finalize with dropped > 0, so there is one record of each evt
     let config = make_config(3, ScrollInputMode::Trackpad);
     let base = Instant::now();
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1644,8 +1537,7 @@ fn scroll_log_wire_format_matches_harness_required_field_set() {
         at = base + Duration::from_millis(i * 2);
         let _ = state.on_scroll_event_at(at, ScrollDirection::Down, config);
     }
-    // Contract change (finalize-decel): the post-gap drain runs before the
-    // finalize, so tick until the stream actually ends.
+    // The post-gap drain runs before the finalize, so tick until the stream actually ends
     let mut tick_at = at + Duration::from_millis(81);
     let _ = state.on_tick_at(tick_at);
     for _ in 0..10 {
@@ -1680,14 +1572,14 @@ fn scroll_log_wire_format_matches_harness_required_field_set() {
         let obj = record.as_object().expect("records are flat JSON objects");
         let evt = record["evt"].as_str().expect("evt");
 
-        // Every record carries the full harness-required key set…
+        // Every record carries the full harness-required key set
         for key in REQUIRED_KEYS {
             assert!(
                 obj.contains_key(*key),
                 "{evt} record missing harness-required key {key}: {record}"
             );
         }
-        // …with the JSON types the harness parser declares.
+        // The values carry the JSON types the harness parser declares
         for key in [
             "ts_ms",
             "events_total",
@@ -1711,9 +1603,9 @@ fn scroll_log_wire_format_matches_harness_required_field_set() {
                 "{evt} key {key} must be a JSON string: {record}"
             );
         }
-        // No keys unknown to the harness schema: an additive field won't
-        // break the harness (unknown fields tolerated there) but must be a
-        // conscious schema change — extend `ScrollLogLine` and this list.
+        // No keys unknown to the harness schema
+        // An additive field won't break the harness (unknown fields tolerated there) but must be a conscious schema change
+        // Extend `ScrollLogLine` and this list
         for key in obj.keys() {
             assert!(
                 REQUIRED_KEYS.contains(&key.as_str())
@@ -1723,8 +1615,7 @@ fn scroll_log_wire_format_matches_harness_required_field_set() {
             );
         }
 
-        // Optional-group placement per evt (the harness relies on the
-        // config echo riding stream_start and dropped riding finalize).
+        // Optional-group placement per evt (the harness relies on the config echo riding stream_start and dropped riding finalize)
         match evt {
             "stream_start" => {
                 for key in CONFIG_ECHO_KEYS {
@@ -1767,8 +1658,7 @@ fn scroll_log_wire_format_matches_harness_required_field_set() {
     }
 }
 
-/// `/debug log` runtime toggle: enable builds a recorder (lazy-open, no
-/// file yet) targeting the default timestamped path; disable drops it.
+/// `/debug log` runtime toggle: enable builds a recorder (lazy-open, no file yet) targeting the default timestamped path; disable drops it.
 #[test]
 fn toggle_scroll_log_round_trips_without_env() {
     // new_at never reads the env, so the recorder starts absent.
@@ -1788,16 +1678,13 @@ fn toggle_scroll_log_round_trips_without_env() {
     assert!(!state.scroll_log_active());
 }
 
-/// The end-of-gesture jerk, replayed from a synthetic capture of a 54-event
-/// trackpad glide on an ept=3 Auto profile (cap 20, speed 1.0, viewport 41)
-/// delivering 1-4 lines per 16.6ms flush with ZERO backlog throughout — then
-/// the old finalize re-priced the Unknown stream accel-weighted (desired 54 →
-/// 121.6), slammed a cap-sized 20-line burst after the fingers stopped, and
-/// dropped 47 more.
+/// The end-of-gesture jerk, replayed from a synthetic capture: a 54-event trackpad glide on an ept=3 Auto profile (cap 20, speed 1.0, viewport 41).
+/// The glide delivered 1-4 lines per 16.6ms flush with ZERO backlog throughout.
+/// The old finalize then re-priced the Unknown stream accel-weighted (desired 54 to 121.6).
+/// It burst a cap-sized 20 lines after the fingers stopped and dropped 47 more.
 ///
-/// The fix contract: the gesture delivers exactly its mid-stream total (54),
-/// any motion after the last event decelerates (non-increasing flushes
-/// summing to at most one cap), and the finalize drops nothing.
+/// The gesture must now deliver exactly its mid-stream total (54) and the finalize must drop nothing.
+/// Any motion after the last event decelerates (non-increasing flushes summing to at most one cap).
 #[test]
 fn real_session_glide_ends_without_finalize_burst_or_drop() {
     let config = make_config(3, ScrollInputMode::Auto).with_viewport_height(41);
@@ -1808,10 +1695,8 @@ fn real_session_glide_ends_without_finalize_burst_or_drop() {
     let mut state = MouseScrollState::new_at(base);
     state.recorder = Some(ScrollLogRecorder::new(path.clone(), base));
 
-    // Events-per-flush counts as captured (54 events over ~407ms): dense
-    // middle at up to 4 events per 16.6ms slot, decelerating 1-event tail.
-    // Within a slot the terminal batches events ~4ms apart (sub-6ms spacing
-    // stays out of the accel window, exactly like the real capture).
+    // Events-per-flush counts as captured (54 events over ~407ms): dense middle at up to 4 events per 16.6ms slot, decelerating 1-event tail
+    // Within a slot the terminal batches events ~4ms apart (sub-6ms spacing stays out of the accel window, exactly like the real capture)
     const EVENTS_PER_SLOT: &[u64] = &[
         1, 1, 2, 2, 4, 1, 3, 4, 4, 4, 4, 4, 4, 4, 4, 1, 1, 1, 1, 1, 1, 1, 1,
     ];
@@ -1847,8 +1732,7 @@ fn real_session_glide_ends_without_finalize_burst_or_drop() {
     assert!(!state.has_active_stream(), "gesture must finalize");
 
     let tail_total = tail.iter().map(|&l| i64::from(l)).sum::<i64>();
-    // Old behavior delivered 74 (54 glide + a 20-line finalize burst) and
-    // dropped 47; the fix delivers the mid-stream promise exactly.
+    // Old behavior delivered 74 (54 glide + a 20-line finalize burst) and dropped 47; the fix delivers the mid-stream total exactly
     assert_eq!(
         delivered_during_input + tail_total,
         54,
@@ -1864,8 +1748,7 @@ fn real_session_glide_ends_without_finalize_burst_or_drop() {
         "post-input flushes must decelerate (non-increasing), got {tail:?}"
     );
 
-    // The recorder's finalize line is the review artifact: no burst
-    // (flushed 0 after the drain) and nothing dropped.
+    // The recorder's finalize line must show no burst (flushed 0 after the drain) and nothing dropped
     let raw = std::fs::read_to_string(&path).expect("finalize flushed the log");
     let last: serde_json::Value =
         serde_json::from_str(raw.lines().last().expect("nonempty")).expect("parses");

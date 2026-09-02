@@ -2,8 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::VoiceError;
 
-/// Default STT capture rate (Hz). Shared with the `__mic-capture` helper's
-/// argv default so parent and child agree when `--rate` is omitted.
+/// Default STT capture rate (Hz). Shared with the `__mic-capture` helper's argv default so parent and child agree when `--rate` is omitted.
 pub const DEFAULT_SAMPLE_RATE: u32 = 16_000;
 
 /// Voice settings for the STT transport.
@@ -14,18 +13,17 @@ pub const DEFAULT_SAMPLE_RATE: u32 = 16_000;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct VoiceConfig {
-    /// HTTPS API root (or bare host). Bases may end in `/v1` or `/xai/v1`; the
-    /// default STT path de-duplicates a leading `v1/` so both become `…/v1/stt`.
+    /// HTTPS API root (or bare host).
+    /// Bases may end in `/v1` or `/xai/v1`; the default STT path de-duplicates a leading `v1/` so both become `…/v1/stt`.
     pub api_base: String,
     pub stt_ws_path: String,
-    /// Preferred STT language (catalog code or `"auto"`). Resolved via
-    /// [`crate::language_for_api`] at connect time.
+    /// Preferred STT language (catalog code or `"auto"`). [`crate::language_for_api`] resolves it at connect time.
     pub language: String,
     pub sample_rate: u32,
     pub stt_endpointing_ms: u32,
     pub stt_interim_results: bool,
 
-    /// Pager-stamped request identity; not user config.
+    /// The pager stamps this request identity; `serde(skip)` keeps user config from setting it.
     #[serde(skip)]
     pub client_identifier: String,
     #[serde(skip)]
@@ -53,19 +51,16 @@ impl VoiceConfig {
         ws_url(&self.api_base, &self.stt_ws_path)
     }
 
-    /// `api_base`: non-empty `[voice].api_base`, else `[endpoints].xai_api_base_url`
-    /// from `root`, else `resolved_endpoints_base`, else `https://api.x.ai`.
+    /// `api_base`: non-empty `[voice].api_base`, else `[endpoints].xai_api_base_url` from `root`, else `resolved_endpoints_base`, else the default.
     ///
-    /// `resolved_endpoints_base` carries the caller's env / CLI overrides; it
-    /// ranks below the raw table so config keeps beating env (shell precedence).
+    /// `resolved_endpoints_base` carries the caller's env/CLI overrides; it ranks below the raw table so config keeps beating env (shell precedence).
     pub fn from_config_table(root: &toml::Table, resolved_endpoints_base: Option<&str>) -> Self {
         let voice_table = root.get("voice").and_then(|v| v.as_table());
         let mut cfg: Self = voice_table
             .and_then(|t| toml::Value::Table(t.clone()).try_into().ok())
             .unwrap_or_default();
 
-        // Read `[voice].api_base` from the raw table, not `cfg`: serde default
-        // makes "unset" and an explicit `https://api.x.ai` indistinguishable.
+        // Read `[voice].api_base` from the raw table, not `cfg`: serde default makes "unset" and an explicit `https://api.x.ai` indistinguishable
         cfg.api_base = non_empty_str(
             voice_table
                 .and_then(|t| t.get("api_base"))
@@ -89,8 +84,8 @@ fn non_empty_str(s: Option<&str>) -> Option<&str> {
     s.map(str::trim).filter(|s| !s.is_empty())
 }
 
-/// `strip_prefix` ignoring ASCII case: RFC 3986 schemes are case-insensitive,
-/// so `HTTP://` must hit the plaintext rejection and `HTTPS://` must work.
+/// `strip_prefix` ignoring ASCII case: RFC 3986 schemes are case-insensitive.
+/// `HTTP://` must hit the plaintext rejection and `HTTPS://` must work.
 fn strip_scheme<'a>(s: &'a str, scheme: &str) -> Option<&'a str> {
     s.get(..scheme.len())
         .filter(|p| p.eq_ignore_ascii_case(scheme))
@@ -110,7 +105,7 @@ fn ws_url(api_base: &str, path: &str) -> Result<String, VoiceError> {
     let rest = strip_scheme(base, "https://")
         .or_else(|| strip_scheme(base, "wss://"))
         .unwrap_or(base);
-    // Default path `/v1/stt`; bases often end in `/v1` or `/xai/v1`.
+    // The default path is `/v1/stt`; bases often end in `/v1` or `/xai/v1`
     let path = match (rest.ends_with("/v1"), path.strip_prefix("v1/")) {
         (true, Some(rest_path)) => rest_path,
         _ => path,
@@ -240,7 +235,7 @@ api_base = "  "
         assert_eq!(cfg.api_base, VoiceConfig::default().api_base);
     }
 
-    /// config.toml beats the env/CLI fallback (shell endpoints precedence).
+    /// config.toml beats the env/CLI fallback, matching the shell's endpoints precedence.
     #[test]
     fn table_endpoints_beat_resolved_endpoints_base() {
         let table: toml::Table = toml::from_str(

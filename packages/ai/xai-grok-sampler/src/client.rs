@@ -22,9 +22,12 @@ use reqwest::header::{
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+use tracing::Instrument;
 
-use crate::pi_messages::PiMessagesEvent;
 use xai_grok_sampling_types::error::{
     parse_error_code, try_parse_stream_error, user_facing_api_error_message,
 };
@@ -36,10 +39,13 @@ use xai_grok_sampling_types::{
     is_check_event, messages, rs,
 };
 
+use crate::pi_messages::PiMessagesEvent;
 use crate::adapter::BackendAdapter;
 use crate::config::{AuthScheme, OriginClientInfo, SamplerConfig};
 use crate::events::SamplingErrorInfo;
 use crate::types::ResponsesStreamItem;
+use crate::span_timing::{ERROR, STATUS_CODE, SUCCESS, ItemClass, StreamSpanTiming};
+use crate::stream_classify::{chat_chunk_class, message_event_class, responses_event_class};
 
 // Re-export ApiBackend from the shared types crate for downstream callers.
 pub use xai_grok_sampling_types::ApiBackend;
@@ -741,8 +747,7 @@ fn normalize_codex_response_event(value: &mut serde_json::Value, requested_model
 /// `ResponseUsage` unchanged so billing telemetry stays correct. When
 /// the API doesn't emit `context_details` (older deployments) `total_tokens`
 /// passes through unchanged.
-#[cfg(test)]
-fn deserialize_response_event(
+pub(crate) fn deserialize_response_event(
     data: &str,
     dialect: ResponsesWireDialect,
 ) -> Result<Option<rs::ResponseStreamEvent>> {
@@ -1315,14 +1320,11 @@ fn extract_context_total(value: &serde_json::Value) -> Option<u32> {
     Some(i.saturating_add(o))
 }
 
-/// Record `success=false` + `error` on the active inference span when a stream
-/// request fails before any response (transport/connect/TLS errors). Without
-/// this the `#[instrument]` span closes with both fields Empty, so an outage
-/// shows zero `success=false` and error-rate alerts never fire.
-fn record_stream_request_failure(err: &reqwest::Error) {
-    let span = tracing::Span::current();
-    span.record("success", false);
-    span.record("error", err.to_string().as_str());
+fn responses_stream_item_class(item: &ResponsesStreamItem) -> ItemClass {
+    match item {
+        ResponsesStreamItem::Event(event) => responses_event_class(event),
+        ResponsesStreamItem::Heartbeat => ItemClass::Other,
+    }
 }
 
 /// Splice the raw-JSON hosted-tool entries for `web_search` and `x_search` into a serialized
@@ -1536,6 +1538,7 @@ pub struct SamplingClient {
     /// across rebuilt clients so automatic compaction does not probe the same
     /// unsupported relay on every turn.
     codex_compact_unsupported: CodexCompactUnsupportedCache,
+    first_use_noted: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for SamplingClient {
@@ -1943,6 +1946,7 @@ impl SamplingClient {
             google_adc: Arc::new(crate::google::VertexAdcTokenProvider::new()),
             codex_turn_state: shared_codex_turn_state_cache(),
             codex_compact_unsupported: shared_codex_compact_unsupported_cache(),
+            first_use_noted: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -1978,6 +1982,11 @@ impl SamplingClient {
     /// so a hard-expired
     /// seed key cannot ride on the wire.
     fn post(&self, url: impl reqwest::IntoUrl) -> SentRequest {
+        if !self.first_use_noted.load(Ordering::Relaxed)
+            && !self.first_use_noted.swap(true, Ordering::Relaxed)
+        {
+            crate::prewarm::note_first_sampling_use(&self.base_url);
+        }
         let mut headers = self.default_headers.clone();
         if let Some(resolver) = &self.bearer_resolver {
             // A resolver is authoritative. Remove construction-time auth even
@@ -2603,18 +2612,22 @@ impl SamplingClient {
         self.handle_response(response, sent_bearer.as_deref()).await
     }
 
+    async fn execute_stream_request(
+        &self,
+        built_request: reqwest::Request,
+        span_timing: &mut StreamSpanTiming,
+    ) -> Result<reqwest::Response> {
+        span_timing.record_request_build();
+        let response = self.http.execute(built_request).await.map_err(|e| {
+            tracing::debug!("HTTP request failed: {}", e);
+            span_timing.record_transport_failure(&e.to_string());
+            e
+        })?;
+        span_timing.record_response_headers();
+        Ok(response)
+    }
+
     /// Start a streaming chat completion request. Returns a stream of typed chunks.
-    #[tracing::instrument(
-        name = "http.chat_completion_stream",
-        skip_all,
-        fields(
-            endpoint = %self.endpoint("chat/completions"),
-            model_id = request.model.as_deref().unwrap_or(""),
-            status_code = tracing::field::Empty,
-            success = tracing::field::Empty,
-            error = tracing::field::Empty,
-        )
-    )]
     pub async fn chat_completion_stream(
         &self,
         request: ChatCompletionRequest,
@@ -2622,6 +2635,30 @@ impl SamplingClient {
         BoxStream<'static, Result<ChatCompletionChunk>>,
         Option<ResponseModelMetadata>,
     )> {
+        let region = crate::span_timing::stream_span!(
+            "http.chat_completion_stream",
+            endpoint = %self.endpoint("chat/completions"),
+            model_id = request.model.as_deref().unwrap_or(""),
+        );
+        if region.span().is_disabled() {
+            self.chat_completion_stream_inner(request, region).await
+        } else {
+            let span = region.span().clone();
+            self.chat_completion_stream_inner(request, region)
+                .instrument(span)
+                .await
+        }
+    }
+
+    async fn chat_completion_stream_inner(
+        &self,
+        request: ChatCompletionRequest,
+        region: crate::span_timing::Region,
+    ) -> Result<(
+        BoxStream<'static, Result<ChatCompletionChunk>>,
+        Option<ResponseModelMetadata>,
+    )> {
+        let mut span_timing = StreamSpanTiming::start(region);
         let payload = self.apply_defaults(request)?;
         let x_grok_conv_id = &payload.x_grok_conv_id.clone().unwrap_or_default();
         let x_grok_req_id = &payload.x_grok_req_id.clone().unwrap_or_default();
@@ -2680,22 +2717,21 @@ impl SamplingClient {
         );
         Self::log_request_headers(&built_request, "chat/completions");
 
-        let response = self.http.execute(built_request).await.map_err(|e| {
-            tracing::debug!("HTTP request failed: {}", e);
-            record_stream_request_failure(&e);
-            e
-        })?;
+        let response = self
+            .execute_stream_request(built_request, &mut span_timing)
+            .await?;
 
         let status = response.status();
-        let span = tracing::Span::current();
-        span.record("status_code", status.as_u16() as i64);
-        span.record("success", status.is_success());
+        span_timing
+            .span()
+            .record(STATUS_CODE, status.as_u16() as i64);
+        span_timing.span().record(SUCCESS, status.is_success());
         let model_metadata = extract_model_metadata(response.headers());
         let retry_after_secs = extract_retry_after(response.headers());
         let should_retry = extract_should_retry(response.headers());
         if !status.is_success() {
             if status == reqwest::StatusCode::UNAUTHORIZED {
-                span.record("error", "unauthorized (401)");
+                span_timing.span().record(ERROR, "unauthorized (401)");
                 self.record_401_attribution(
                     crate::attribution::SamplingConsumer::ChatCompletionsStream,
                     sent_bearer.as_deref(),
@@ -2711,7 +2747,7 @@ impl SamplingClient {
 
             let bytes = response.bytes().await?;
             let message = user_facing_api_error_message(status, bytes.as_ref());
-            span.record("error", message.as_str());
+            span_timing.span().record(ERROR, message.as_str());
             tracing::error!(
                 status = %status,
                 error_message = %message,
@@ -2795,7 +2831,10 @@ impl SamplingClient {
             })
             .boxed();
 
-        Ok((chunks, model_metadata))
+        Ok((
+            span_timing.hold_until_first_content(chunks, chat_chunk_class),
+            model_metadata,
+        ))
     }
 
     // =========================================================================
@@ -2996,26 +3035,41 @@ impl SamplingClient {
     /// SSE decoder as the server reports triggers and is meant to be handed
     /// to `stream_responses` so the signals land on the final
     /// `ConversationResponse`.
-    #[tracing::instrument(
-        name = "http.create_response_stream",
-        skip_all,
-        fields(
-            endpoint = %self.endpoint("responses"),
-            model_id = request.inner.model.as_deref().unwrap_or(""),
-            status_code = tracing::field::Empty,
-            success = tracing::field::Empty,
-            error = tracing::field::Empty,
-        )
-    )]
     #[allow(clippy::type_complexity)]
     pub async fn create_response_stream(
         &self,
-        mut request: CreateResponseWrapper,
+        request: CreateResponseWrapper,
     ) -> Result<(
         BoxStream<'static, Result<ResponsesStreamItem>>,
         Option<ResponseModelMetadata>,
         Option<crate::doom_loop::DoomLoopSignalCollector>,
     )> {
+        let region = crate::span_timing::stream_span!(
+            "http.create_response_stream",
+            endpoint = %self.endpoint("responses"),
+            model_id = request.inner.model.as_deref().unwrap_or(""),
+        );
+        if region.span().is_disabled() {
+            self.create_response_stream_inner(request, region).await
+        } else {
+            let span = region.span().clone();
+            self.create_response_stream_inner(request, region)
+                .instrument(span)
+                .await
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    async fn create_response_stream_inner(
+        &self,
+        mut request: CreateResponseWrapper,
+        region: crate::span_timing::Region,
+    ) -> Result<(
+        BoxStream<'static, Result<ResponsesStreamItem>>,
+        Option<ResponseModelMetadata>,
+        Option<crate::doom_loop::DoomLoopSignalCollector>,
+    )> {
+        let mut span_timing = StreamSpanTiming::start(region);
         self.apply_response_defaults(&mut request)?;
 
         // Enable streaming
@@ -3144,19 +3198,18 @@ impl SamplingClient {
         );
         Self::log_request_headers(&built_request, "responses");
 
-        let response = self.http.execute(built_request).await.map_err(|e| {
-            tracing::debug!("HTTP request failed: {}", e);
-            record_stream_request_failure(&e);
-            e
-        })?;
+        let response = self
+            .execute_stream_request(built_request, &mut span_timing)
+            .await?;
 
         let status = response.status();
-        let span = tracing::Span::current();
-        span.record("status_code", status.as_u16() as i64);
-        span.record("success", status.is_success());
+        span_timing
+            .span()
+            .record(STATUS_CODE, status.as_u16() as i64);
+        span_timing.span().record(SUCCESS, status.is_success());
         if !status.is_success() {
             if status == reqwest::StatusCode::UNAUTHORIZED {
-                span.record("error", "unauthorized (401)");
+                span_timing.span().record(ERROR, "unauthorized (401)");
                 self.record_401_attribution(
                     crate::attribution::SamplingConsumer::ResponsesStream,
                     sent_bearer.as_deref(),
@@ -3174,7 +3227,7 @@ impl SamplingClient {
             let should_retry = extract_should_retry(response.headers());
             let bytes = response.bytes().await?;
             let message = user_facing_api_error_message(status, bytes.as_ref());
-            span.record("error", message.as_str());
+            span_timing.span().record(ERROR, message.as_str());
             tracing::error!(
                 status = %status,
                 error_message = %message,
@@ -3302,7 +3355,11 @@ impl SamplingClient {
             })
             .boxed();
 
-        Ok((events, model_metadata, doom_loop))
+        Ok((
+            span_timing.hold_until_first_content(events, responses_stream_item_class),
+            model_metadata,
+            doom_loop,
+        ))
     }
 
     // =========================================================================
@@ -3446,24 +3503,37 @@ impl SamplingClient {
     /// - `message_start` - Initial message object
     /// - `content_block_start` / `content_block_delta` / `content_block_stop` - Content blocks
     /// - `message_delta` / `message_stop` - Final message with stop reason
-    #[tracing::instrument(
-        name = "http.create_message_stream",
-        skip_all,
-        fields(
-            endpoint = %self.endpoint("messages"),
-            model_id = request.inner.model.as_str(),
-            status_code = tracing::field::Empty,
-            success = tracing::field::Empty,
-            error = tracing::field::Empty,
-        )
-    )]
     pub async fn create_message_stream(
         &self,
-        mut request: MessagesRequestWrapper,
+        request: MessagesRequestWrapper,
     ) -> Result<(
         BoxStream<'static, Result<messages::MessageStreamEvent>>,
         Option<ResponseModelMetadata>,
     )> {
+        let region = crate::span_timing::stream_span!(
+            "http.create_message_stream",
+            endpoint = %self.endpoint("messages"),
+            model_id = request.inner.model.as_str(),
+        );
+        if region.span().is_disabled() {
+            self.create_message_stream_inner(request, region).await
+        } else {
+            let span = region.span().clone();
+            self.create_message_stream_inner(request, region)
+                .instrument(span)
+                .await
+        }
+    }
+
+    async fn create_message_stream_inner(
+        &self,
+        mut request: MessagesRequestWrapper,
+        region: crate::span_timing::Region,
+    ) -> Result<(
+        BoxStream<'static, Result<messages::MessageStreamEvent>>,
+        Option<ResponseModelMetadata>,
+    )> {
+        let mut span_timing = StreamSpanTiming::start(region);
         self.apply_message_defaults(&mut request)?;
 
         // Enable streaming
@@ -3521,19 +3591,18 @@ impl SamplingClient {
         );
         Self::log_request_headers(&built_request, "messages");
 
-        let response = self.http.execute(built_request).await.map_err(|e| {
-            tracing::debug!("HTTP request failed: {}", e);
-            record_stream_request_failure(&e);
-            e
-        })?;
+        let response = self
+            .execute_stream_request(built_request, &mut span_timing)
+            .await?;
 
         let status = response.status();
-        let span = tracing::Span::current();
-        span.record("status_code", status.as_u16() as i64);
-        span.record("success", status.is_success());
+        span_timing
+            .span()
+            .record(STATUS_CODE, status.as_u16() as i64);
+        span_timing.span().record(SUCCESS, status.is_success());
         if !status.is_success() {
             if status == reqwest::StatusCode::UNAUTHORIZED {
-                span.record("error", "unauthorized (401)");
+                span_timing.span().record(ERROR, "unauthorized (401)");
                 self.record_401_attribution(
                     crate::attribution::SamplingConsumer::MessagesStream,
                     sent_bearer.as_deref(),
@@ -3551,7 +3620,7 @@ impl SamplingClient {
             let should_retry = extract_should_retry(response.headers());
             let bytes = response.bytes().await?;
             let message = user_facing_api_error_message(status, bytes.as_ref());
-            span.record("error", message.as_str());
+            span_timing.span().record(ERROR, message.as_str());
             tracing::error!(
                 status = %status,
                 error_message = %message,
@@ -3626,7 +3695,10 @@ impl SamplingClient {
             })
             .boxed();
 
-        Ok((events, model_metadata))
+        Ok((
+            span_timing.hold_until_first_content(events, message_event_class),
+            model_metadata,
+        ))
     }
 
     // =========================================================================
@@ -3813,7 +3885,6 @@ impl SamplingClient {
             .json(&body);
         let response = http_request.send().await.map_err(|e| {
             tracing::debug!("HTTP request failed: {}", e);
-            record_stream_request_failure(&e);
             e
         })?;
         let status = response.status();

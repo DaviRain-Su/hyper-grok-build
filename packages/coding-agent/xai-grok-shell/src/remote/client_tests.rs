@@ -54,8 +54,7 @@ struct LoginConfigServerState {
     body: String,
     seen: Arc<Mutex<Vec<LoginConfigHeaders>>>,
 }
-/// Mock cli-chat-proxy serving `GET /v1/login-config` with a fixed status +
-/// raw body, recording the request headers it saw.
+/// Mock cli-chat-proxy serving `GET /v1/login-config` with a fixed status and raw body, recording the request headers it saw.
 async fn start_login_config_server(
     status_code: StatusCode,
     body: String,
@@ -152,7 +151,7 @@ async fn fetch_login_device_flow_sends_only_unauthenticated_headers() {
     assert_eq!(h.user_id, None, "must not send x-userid");
     assert_eq!(h.email, None, "must not send x-email");
 }
-/// Mock cli-chat-proxy serving `GET /settings` with a fixed status + body.
+/// Mock cli-chat-proxy serving `GET /settings` with a fixed status and body.
 async fn start_settings_server(
     status: StatusCode,
     body: String,
@@ -169,9 +168,8 @@ async fn start_settings_server(
     let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     (base, handle)
 }
-/// `fetch_settings_blocking` maps each HTTP outcome to the [`SettingsFetch`]
-/// variant the external-OTEL gate relies on; 401 is the only outcome that
-/// yields `Rejected`, everything else non-2xx fails closed as `Retry`.
+/// `fetch_settings_blocking` maps each HTTP outcome to the [`SettingsFetch`] variant the external-OTEL gate relies on.
+/// Only 401 yields `Rejected`; every other non-2xx outcome fails closed as `Retry`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn settings_fetch_maps_status_to_outcome() {
     let auth = GrokAuth::test_default();
@@ -680,10 +678,8 @@ fn parse_remote_model_value_top_level_camelcase_wins_over_snake_case() {
     };
     assert_eq!(result.laziness_detector, expected);
 }
-/// `include_reasoning: false` parses cleanly under the per-model
-/// `lazinessDetector` block (camelCase wrapper, snake_case inner —
-/// matching the existing field-naming convention used for the
-/// sibling `min_confidence`, `idle_threshold_ms`, etc.).
+/// `include_reasoning: false` parses under the camelCase `lazinessDetector` wrapper with a snake_case inner key.
+/// That naming matches the sibling fields `min_confidence` and `idle_threshold_ms`.
 #[test]
 fn parse_remote_model_value_parses_include_reasoning_under_camelcase_wrapper() {
     let value = serde_json::json!({
@@ -877,8 +873,7 @@ fn list_url_explicit_overrides_derivation() {
         "https://registry.acme.com/api/list-models"
     );
 }
-/// REGRESSION: `grok setup` must send the deployment key to
-/// the proxy, never the inference endpoint.
+/// REGRESSION: `grok setup` must send the deployment key to the proxy, never the inference endpoint.
 #[test]
 #[serial_test::serial]
 fn deployment_config_url_uses_cli_chat_proxy_when_not_overridden() {
@@ -1014,8 +1009,7 @@ async fn fetch_bundle_falls_back_on_archive_503() {
     }
     server.abort();
 }
-/// `BackendClient::save_session_data` resolves auth from the attached
-/// `AuthManager` and sends the token as `Bearer <key>` on the wire.
+/// `BackendClient::save_session_data` resolves auth from the attached `AuthManager` and sends the token as `Bearer <key>` on the wire.
 /// This is the writeback path used on every session flush.
 #[tokio::test(flavor = "current_thread")]
 async fn backend_client_resolves_auth_from_auth_manager() {
@@ -1067,8 +1061,7 @@ async fn fetch_bundle_propagates_legacy_error_after_fallback() {
     ));
     server.abort();
 }
-/// Regression: reqwest .header() appends — duplicate
-/// or overlapping headers cause Cloudflare to reject the request.
+/// Regression: reqwest .header() appends, so duplicate or overlapping headers cause Cloudflare to reject the request.
 #[tokio::test(flavor = "current_thread")]
 #[allow(clippy::disallowed_methods)]
 async fn auth_headers_do_not_collide_with_json() {

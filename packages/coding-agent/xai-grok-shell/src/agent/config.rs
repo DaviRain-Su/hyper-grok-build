@@ -22,19 +22,18 @@ use xai_grok_sampling_types::{
 use xai_grok_tools::types::compat::{
     COMPAT_CELLS, CompatConfig, CompatConfigToml, CompatRemoteKey, CompatSurface, CompatVendor,
 };
-/// The mode in which the agent is running.
 /// Determines behavior like relay sync enablement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AgentMode {
-    /// TUI interactive mode - full UI with relay sync support
+    /// TUI interactive mode: full UI with relay sync support
     Tui,
-    /// Headless mode - no UI, connected to relay WebSocket
+    /// Headless mode: no UI, connected to relay WebSocket
     Headless,
-    /// Stdio mode - JSON-RPC over stdin/stdout
+    /// Stdio mode: JSON-RPC over stdin/stdout
     Stdio,
-    /// Server mode - WebSocket server for external clients
+    /// Server mode: WebSocket server for external clients
     Serve,
-    /// Leader mode - IPC server for follower clients
+    /// Leader mode: IPC server for follower clients
     Leader,
     /// Generic/unknown mode
     #[default]
@@ -46,9 +45,7 @@ pub const DEFAULT_AGENT_TYPE: &str = "grok-build-plan";
 pub(crate) fn default_agent_type() -> String {
     DEFAULT_AGENT_TYPE.to_owned()
 }
-/// Default base URL for the cli chat proxy.
 pub const CLI_CHAT_PROXY_BASE_URL_DEFAULT: &str = "https://cli-chat-proxy.grok.com/v1";
-/// Default base URL for the public xAI API.
 pub const XAI_API_BASE_URL_DEFAULT: &str = "https://api.x.ai/v1";
 const NO_INLINE_CITATIONS_RESPONSE_INCLUDE: &str = "no_inline_citations";
 /// One or more environment variable names that may hold a model API key.
@@ -61,8 +58,7 @@ const NO_INLINE_CITATIONS_RESPONSE_INCLUDE: &str = "no_inline_citations";
 /// env_key = ["ANTHROPIC_AUTH_TOKEN", "LC_ANTHROPIC_AUTH_TOKEN"]
 /// ```
 ///
-/// At resolve time the **first set, non-blank** value wins (e.g. SSH
-/// `AcceptEnv LC_*` forwarding of the Bottlerocket token).
+/// At resolve time the **first set, non-blank** value wins (e.g. SSH `AcceptEnv LC_*` forwarding of the Bottlerocket token).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum EnvKeys {
@@ -70,11 +66,10 @@ pub enum EnvKeys {
     Many(Vec<String>),
 }
 impl EnvKeys {
-    /// Single-name convenience constructor.
     pub fn single(name: impl Into<String>) -> Self {
         Self::One(name.into())
     }
-    /// Construct from an ordered list (empty names dropped; 0/1/N → Many/One/Many).
+    /// Construct from an ordered list (empty names dropped; one name builds `One`, any other count builds `Many`).
     pub fn new(names: impl IntoIterator<Item = impl Into<String>>) -> Self {
         let names: Vec<String> = names
             .into_iter()
@@ -137,8 +132,7 @@ impl EnvKeys {
         None
     }
 }
-/// Semantic equality: compares the ordered name lists, so `One("X")` and
-/// `Many(["X"])` (the shape serde produces for `["X"]`) compare equal.
+/// Semantic equality: compares the ordered name lists, so `One("X")` and `Many(["X"])` (the shape serde produces for `["X"]`) compare equal.
 impl PartialEq for EnvKeys {
     fn eq(&self, other: &Self) -> bool {
         self.names() == other.names()
@@ -150,19 +144,17 @@ impl std::fmt::Display for EnvKeys {
         f.write_str(&self.names().join(", "))
     }
 }
-/// Configuration for API endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EndpointsConfig {
-    /// cli chat proxy base URL. `None` = unset (resolvers apply the default);
-    /// `Some` = explicitly configured. Tracking explicitness (vs comparing to the
-    /// default value) lets an org pin the proxy to the default on purpose.
+    /// cli chat proxy base URL.
+    /// `None` means unset (resolvers apply the default); `Some` means explicitly configured.
+    /// Tracking explicitness (vs comparing to the default value) lets an org pin the proxy to the default on purpose.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cli_chat_proxy_base_url: Option<String>,
     /// Base URL for the public xAI API.
     pub xai_api_base_url: String,
-    /// Optional extra access-header value (applied only with the optional
-    /// non-production feature, and only for matching first-party hosts).
+    /// Optional extra access-header value (applied only with the optional non-production feature, and only for matching first-party hosts).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alpha_test_key: Option<String>,
     /// Env: `GROK_MODELS_BASE_URL`. Enables custom endpoint mode.
@@ -201,49 +193,44 @@ pub struct EndpointsConfig {
     /// Defaults to `{proxy_url()}/deployment/config`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub managed_config_url: Option<String>,
-    /// Env: `OTEL_EXPORTER_OTLP_ENDPOINT`. OTLP collector base; `/v1/traces` is
-    /// appended. Legacy repoint of the INTERNAL trace pipeline — deprecated in
-    /// favor of `GROK_INTERNAL_OTLP_TRACES_ENDPOINT`, and ignored by the internal
-    /// pipeline when `GROK_EXTERNAL_OTEL` is set (the standard `OTEL_*` vars then
-    /// route the external stream only).
+    /// Env: `OTEL_EXPORTER_OTLP_ENDPOINT`. OTLP collector base; `/v1/traces` is appended.
+    /// Legacy repoint of the INTERNAL trace pipeline, deprecated in favor of `GROK_INTERNAL_OTLP_TRACES_ENDPOINT`.
+    /// Ignored by the internal pipeline when `GROK_EXTERNAL_OTEL` is set (the standard `OTEL_*` vars then route the external stream only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub otel_exporter_otlp_endpoint: Option<String>,
-    /// Env: `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. Full traces endpoint, used
-    /// verbatim; overrides `otel_exporter_otlp_endpoint`. Same legacy/deprecation
-    /// semantics as `otel_exporter_otlp_endpoint`.
+    /// Env: `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`.
+    /// Full traces endpoint, used verbatim; overrides `otel_exporter_otlp_endpoint`.
+    /// Same legacy/deprecation semantics as `otel_exporter_otlp_endpoint`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub otel_exporter_otlp_traces_endpoint: Option<String>,
     /// Env: `OTEL_EXPORTER_OTLP_HEADERS`. `k=v,k2=v2`; merged onto export headers.
     /// Same legacy/deprecation semantics as `otel_exporter_otlp_endpoint`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub otel_exporter_otlp_headers: Option<String>,
-    /// Env: `GROK_INTERNAL_OTLP_TRACES_ENDPOINT`. Full INTERNAL traces endpoint,
-    /// used verbatim. Dev/debug repoint of the internal span firehose (replaces
-    /// the legacy `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` behavior; used by
-    /// local-ic-testing / internal dev flows). Wins over the legacy `OTEL_*` vars.
+    /// Env: `GROK_INTERNAL_OTLP_TRACES_ENDPOINT`. Full INTERNAL traces endpoint, used verbatim.
+    /// Dev/debug repoint of the internal span firehose (replaces the legacy `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` behavior).
+    /// Used by local-ic-testing / internal dev flows. Wins over the legacy `OTEL_*` vars.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grok_internal_otlp_traces_endpoint: Option<String>,
-    /// Env: `GROK_INTERNAL_OTLP_HEADERS`. `k=v,k2=v2` extra headers for the
-    /// internal export (debug). Wins over the legacy `OTEL_EXPORTER_OTLP_HEADERS`.
+    /// Env: `GROK_INTERNAL_OTLP_HEADERS`.
+    /// `k=v,k2=v2` extra headers for the internal export (debug).
+    /// Wins over the legacy `OTEL_EXPORTER_OTLP_HEADERS`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grok_internal_otlp_headers: Option<String>,
-    /// External-OTEL master switch, captured at construction via
-    /// [`external_otel_master_switch_resolved`] — the same layered resolution
-    /// (requirement pin > `GROK_EXTERNAL_OTEL` env > `[telemetry].otel_enabled`
-    /// config, managed layers included) that activates the external stream.
-    /// When set, the standard `OTEL_EXPORTER_OTLP_*` vars are reserved for the
-    /// external OTEL stream and the internal trace pipeline ignores them
-    /// entirely — an admin who opts in (by *any* layer, including an org
-    /// enable distributed via managed config with no env var) never receives
-    /// the internally-authed firehose. Held as a field (not re-read in the
-    /// resolvers) so the resolvers stay pure and testable without env races.
+    /// External-OTEL master switch, captured at construction via [`external_otel_master_switch_resolved`].
+    /// That resolver applies requirement pin > `GROK_EXTERNAL_OTEL` env > `[telemetry].otel_enabled` config, managed layers included.
+    /// Those are the same layers that activate the external stream.
+    /// When set, the standard `OTEL_EXPORTER_OTLP_*` vars are reserved for the external OTEL stream.
+    /// The internal trace pipeline then ignores them entirely.
+    /// An admin who opts in by *any* layer never receives the internally-authed firehose.
+    /// Held as a field (not re-read in the resolvers) so the resolvers stay pure and testable without env races.
     #[serde(skip)]
     pub external_otel_master_switch: bool,
     /// Env: `OTEL_TRACES_EXPORTER`. `otlp` (default) or `none` to disable spans.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub otel_traces_exporter: Option<String>,
-    /// Env: `OTEL_BSP_SCHEDULE_DELAY` (OTel) or `OTEL_TRACES_EXPORT_INTERVAL`
-    /// (Claude alias). Batch flush interval (ms).
+    /// Env: `OTEL_BSP_SCHEDULE_DELAY` (OTel) or `OTEL_TRACES_EXPORT_INTERVAL` (Claude alias).
+    /// Batch flush interval (ms).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub otel_traces_export_interval: Option<u64>,
     /// Env: `OTEL_EXPORTER_OTLP_TIMEOUT`. Export HTTP timeout (ms).
@@ -256,16 +243,15 @@ pub struct EndpointsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gcs_service_account_key: Option<String>,
 }
-/// A blank or whitespace-only override counts as unset. Single source of truth
-/// for the "empty value = not configured" rule shared by the endpoint resolvers.
+/// A blank or whitespace-only override counts as unset.
+/// Single source of truth for the "an empty value means not configured" rule shared by the endpoint resolvers.
 fn blank_as_unset(opt: &Option<String>) -> Option<String> {
     opt.as_deref()
         .filter(|s| !s.trim().is_empty())
         .map(str::to_owned)
 }
-/// Parse a `k=v,k2=v2` OTLP header list (the `OTEL_EXPORTER_OTLP_HEADERS`
-/// format, shared with `GROK_INTERNAL_OTLP_HEADERS`): split on `,`,
-/// `split_once('=')`, trim key/value, skip blank keys, keep empty values.
+/// Parse a `k=v,k2=v2` OTLP header list (the `OTEL_EXPORTER_OTLP_HEADERS` format, shared with `GROK_INTERNAL_OTLP_HEADERS`).
+/// Split on `,`, then `split_once('=')`, trim key/value, skip blank keys, keep empty values.
 fn parse_otlp_header_list(raw: &str) -> Vec<(String, String)> {
     raw.split(',')
         .filter_map(|kv| {
@@ -279,10 +265,9 @@ impl EndpointsConfig {
     pub fn has_custom_endpoint(&self) -> bool {
         self.models_base_url.is_some() || self.models_list_url.is_some()
     }
-    /// `default()` plus merged managed/requirements endpoint overrides, so
-    /// startup fetches use the configured (not public) endpoints. Only merges
-    /// layers — never derives one endpoint from another. Falls back to
-    /// `default()` on load failure.
+    /// `default()` plus merged managed/requirements endpoint overrides, so startup fetches use the configured (not public) endpoints.
+    /// Only merges layers; never derives one endpoint from another.
+    /// Falls back to `default()` on load failure.
     pub(crate) fn from_effective_config() -> Self {
         match crate::config::load_effective_config() {
             Ok(cfg) => Self::from_config_value(&cfg),
@@ -290,7 +275,7 @@ impl EndpointsConfig {
         }
     }
     /// Layer the `[endpoints]` table from `config` over the env/default base.
-    /// No field is derived from another — defaulting is done by the resolvers.
+    /// No field is derived from another; defaulting is done by the resolvers.
     /// `pub`: the pager resolves the voice STT base through this same path.
     pub fn from_config_value(config: &toml::Value) -> Self {
         let default = Self::default();
@@ -306,10 +291,9 @@ impl EndpointsConfig {
         resolved.external_otel_master_switch = external_otel_master_switch;
         resolved
     }
-    /// The cli-chat-proxy base URL through which all auxiliary services (and
-    /// OAuth/session inference) resolve: explicit `cli_chat_proxy_base_url`, else
-    /// the public default. NEVER falls back to `xai_api_base_url` — that is the
-    /// inference endpoint (API-key auth) only.
+    /// The cli-chat-proxy base URL through which all auxiliary services (and OAuth/session inference) resolve.
+    /// Explicit `cli_chat_proxy_base_url`, else the public default.
+    /// NEVER falls back to `xai_api_base_url`: that is the inference endpoint (API-key auth) only.
     pub fn proxy_url(&self) -> String {
         blank_as_unset(&self.cli_chat_proxy_base_url)
             .unwrap_or_else(|| CLI_CHAT_PROXY_BASE_URL_DEFAULT.to_owned())
@@ -319,19 +303,16 @@ impl EndpointsConfig {
             .clone()
             .unwrap_or_else(|| self.proxy_url())
     }
-    /// Feedback endpoint — an auxiliary service, so it defaults to the
-    /// cli-chat-proxy, never `xai_api_base_url`.
+    /// Feedback endpoint, an auxiliary service, so it defaults to the cli-chat-proxy, never `xai_api_base_url`.
     pub(crate) fn resolve_feedback_base_url(&self) -> String {
         blank_as_unset(&self.feedback_base_url).unwrap_or_else(|| self.proxy_url())
     }
-    /// Trace upload endpoint — an auxiliary service, so it defaults to the
-    /// cli-chat-proxy, never `xai_api_base_url`.
+    /// Trace upload endpoint, an auxiliary service, so it defaults to the cli-chat-proxy, never `xai_api_base_url`.
     pub(crate) fn resolve_trace_upload_url(&self) -> String {
         blank_as_unset(&self.trace_upload_url).unwrap_or_else(|| self.proxy_url())
     }
-    /// Managed deployment-config URL (`grok setup`): explicit `managed_config_url`,
-    /// else `proxy_url` + `/deployment/config`. Never `xai_api_base_url`, so the
-    /// deployment key reaches the proxy, not the inference host.
+    /// Managed deployment-config URL (`grok setup`): explicit `managed_config_url`, else `proxy_url` + `/deployment/config`.
+    /// Never `xai_api_base_url`, so the deployment key reaches the proxy, not the inference host.
     pub(crate) fn resolve_managed_config_url(&self) -> String {
         blank_as_unset(&self.managed_config_url).unwrap_or_else(|| {
             format!(
@@ -342,15 +323,10 @@ impl EndpointsConfig {
     }
     /// INTERNAL OTLP traces endpoint. Precedence:
     /// 1. `grok_internal_otlp_traces_endpoint` (verbatim)
-    /// 2. legacy `otel_exporter_otlp_traces_endpoint` (verbatim) >
-    ///    `otel_exporter_otlp_endpoint` + `/v1/traces` — ONLY when the
-    ///    external-OTEL master switch is unset (back-compat; deprecated)
+    /// 2. legacy `otel_exporter_otlp_traces_endpoint` (verbatim) > `otel_exporter_otlp_endpoint` + `/v1/traces` (back-compat; deprecated)
     /// 3. `proxy_url` + `/traces`.
-    /// Uses the proxy default (not the `xai_api_base_url` fallback) so
-    /// telemetry reports to xAI even when inference is overridden. When the
-    /// master switch IS set, the standard `OTEL_EXPORTER_OTLP_*` values are
-    /// completely ignored here so the internally-authed firehose never lands
-    /// at an external collector.
+    /// The legacy tier applies ONLY when the external-OTEL master switch is unset, keeping the internally-authed firehose off external collectors.
+    /// Uses the proxy default (not the `xai_api_base_url` fallback) so telemetry reports to xAI even when inference is overridden.
     pub(crate) fn resolve_otlp_traces_endpoint(&self) -> String {
         if let Some(full) = blank_as_unset(&self.grok_internal_otlp_traces_endpoint) {
             return full.trim_end_matches('/').to_string();
@@ -368,9 +344,9 @@ impl EndpointsConfig {
         }
         format!("{}/traces", self.proxy_url().trim_end_matches('/'))
     }
-    /// Legacy (standard-OTEL-var) internal traces endpoint, if any:
-    /// `otel_exporter_otlp_traces_endpoint` verbatim, else
-    /// `otel_exporter_otlp_endpoint` + `/v1/traces`. Ignores the master switch.
+    /// Legacy (standard-OTEL-var) internal traces endpoint, if any.
+    /// `otel_exporter_otlp_traces_endpoint` verbatim, else `otel_exporter_otlp_endpoint` + `/v1/traces`.
+    /// Ignores the master switch.
     fn legacy_internal_otlp_traces_endpoint(&self) -> Option<String> {
         if let Some(full) = blank_as_unset(&self.otel_exporter_otlp_traces_endpoint) {
             return Some(full.trim_end_matches('/').to_string());
@@ -378,9 +354,8 @@ impl EndpointsConfig {
         blank_as_unset(&self.otel_exporter_otlp_endpoint)
             .map(|base| format!("{}/v1/traces", base.trim_end_matches('/')))
     }
-    /// Extra headers for the INTERNAL export: `grok_internal_otlp_headers`
-    /// first; legacy fallback to `otel_exporter_otlp_headers` ONLY when the
-    /// external-OTEL master switch is unset (back-compat for existing users).
+    /// Extra headers for the INTERNAL export: `grok_internal_otlp_headers` first.
+    /// Legacy fallback to `otel_exporter_otlp_headers` ONLY when the external-OTEL master switch is unset (back-compat for existing users).
     pub(crate) fn resolve_otlp_headers(&self) -> Vec<(String, String)> {
         if let Some(headers) = blank_as_unset(&self.grok_internal_otlp_headers) {
             return parse_otlp_header_list(&headers);
@@ -392,16 +367,11 @@ impl EndpointsConfig {
         }
         Vec::new()
     }
-    /// Whether the legacy fallback actually supplied the internal endpoint OR
-    /// internal headers from the standard `OTEL_EXPORTER_OTLP_*` vars — i.e.
-    /// the master switch is unset AND (`otel_exporter_otlp_traces_endpoint` /
-    /// `otel_exporter_otlp_endpoint` is non-blank for the endpoint, or
-    /// `otel_exporter_otlp_headers` is non-blank for headers) AND no
-    /// `grok_internal_otlp_*` override shadowed that half.
+    /// Whether the legacy fallback actually supplied the internal endpoint OR internal headers from the standard `OTEL_EXPORTER_OTLP_*` vars.
+    /// True when the master switch is unset, the standard var for that half is non-blank, and no `grok_internal_otlp_*` override shadowed it.
     ///
-    /// CONTRACT: this flag is passed to the external OTEL stream's init, which
-    /// MUST refuse to activate when it is true — the same standard vars cannot
-    /// feed both pipelines (no-double-send invariant, enforced in code).
+    /// CONTRACT: this flag is passed to the external OTEL stream's init, which MUST refuse to activate when it is true.
+    /// The same standard vars cannot feed both pipelines (no-double-send invariant, enforced in code).
     pub(crate) fn internal_otlp_consumed_standard_vars(&self) -> bool {
         if self.external_otel_master_switch {
             return false;
@@ -412,23 +382,20 @@ impl EndpointsConfig {
             && blank_as_unset(&self.otel_exporter_otlp_headers).is_some();
         endpoint_consumed || headers_consumed
     }
-    /// Trace export enabled unless `OTEL_TRACES_EXPORTER=none`. Deliberately
-    /// still honored by the internal pipeline even with `GROK_EXTERNAL_OTEL`
-    /// set: disabling internal span export is the safe direction.
+    /// Trace export enabled unless `OTEL_TRACES_EXPORTER=none`.
+    /// Deliberately still honored by the internal pipeline even with `GROK_EXTERNAL_OTEL` set: disabling internal span export is the safe direction.
     pub(crate) fn resolve_traces_export_enabled(&self) -> bool {
         !matches!(
             self.otel_traces_exporter.as_deref().map(str::trim),
             Some("none")
         )
     }
-    /// `OTEL_BSP_SCHEDULE_DELAY` / `OTEL_TRACES_EXPORT_INTERVAL` — tuning-only,
-    /// deliberately shared between the internal and external pipelines.
+    /// `OTEL_BSP_SCHEDULE_DELAY` / `OTEL_TRACES_EXPORT_INTERVAL`: tuning-only, deliberately shared between the internal and external pipelines.
     pub(crate) fn resolve_otlp_export_interval(&self) -> Option<std::time::Duration> {
         self.otel_traces_export_interval
             .map(std::time::Duration::from_millis)
     }
-    /// `OTEL_EXPORTER_OTLP_TIMEOUT` — tuning-only, deliberately shared between
-    /// the internal and external pipelines.
+    /// `OTEL_EXPORTER_OTLP_TIMEOUT`: tuning-only, deliberately shared between the internal and external pipelines.
     pub(crate) fn resolve_otlp_timeout(&self) -> Option<std::time::Duration> {
         self.otel_exporter_otlp_timeout
             .map(std::time::Duration::from_millis)
@@ -491,11 +458,10 @@ impl EndpointsConfig {
         );
         None
     }
-    /// Whether trace upload can authenticate without an interactive login.
     pub fn has_noninteractive_upload_auth(&self) -> bool {
         self.deployment_key.is_some() || self.resolve_direct_upload_method().is_some()
     }
-    /// Direct bucket → proxy (if `auth_token` or `deployment_key`) → ambient GCS → `None`.
+    /// Tries the direct bucket, then the proxy (if `auth_token` or `deployment_key`), then ambient GCS, else `None`.
     pub fn resolve_upload_method(
         &self,
         auth_token: Option<String>,
@@ -587,28 +553,51 @@ pub use xai_grok_config_types::{
 /// Resolution result for a `/goal` role's model selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) enum GoalRoleModelChoice {
-    /// Use the current (parent) model + the parent's agent type.
+    /// Use the current (parent) model and the parent's agent type.
     #[default]
     InheritCurrent,
     /// Use this explicit pair (subject to auth/fail-open at spawn time).
     Explicit(crate::util::config::GoalRoleModel),
 }
+/// Fleet `allowed_models` pin. A list replaces the user/project allowlist;
+/// [`Self::FailClosed`] is a present-but-unreadable value (nothing selectable).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AllowlistPin {
+    List(Vec<String>),
+    FailClosed,
+}
 /// A requirement pin from `requirements.toml`. Wins over all other sources.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Constrained<T> {
     pin: Option<T>,
     source: Option<crate::config::RequirementSource>,
 }
-impl<T: Clone> Constrained<T> {
+impl<T> Default for Constrained<T> {
+    fn default() -> Self {
+        Self {
+            pin: None,
+            source: None,
+        }
+    }
+}
+impl<T> Constrained<T> {
     pub fn pin(&mut self, value: T, source: crate::config::RequirementSource) {
         self.pin = Some(value);
         self.source = Some(source);
     }
-    pub fn pinned(&self) -> Option<T> {
-        self.pin.clone()
+    pub fn pin_ref(&self) -> Option<&T> {
+        self.pin.as_ref()
+    }
+    pub fn is_pinned(&self) -> bool {
+        self.pin.is_some()
     }
     pub fn source(&self) -> Option<&crate::config::RequirementSource> {
         self.source.as_ref()
+    }
+}
+impl<T: Clone> Constrained<T> {
+    pub fn pinned(&self) -> Option<T> {
+        self.pin.clone()
     }
 }
 /// Enforced requirements from `requirements.toml`. Pinned values win over all other sources.
@@ -624,6 +613,10 @@ pub struct Requirements {
     pub respect_gitignore: Constrained<bool>,
     pub remote_fetch: Constrained<bool>,
     pub title_refresh: Constrained<bool>,
+    /// Fleet-pinned `[models] allowed_models`. Replace, not union — a user
+    /// list cannot widen the set once this is set. [`AllowlistPin::FailClosed`]
+    /// is a present-but-unreadable pin (nothing selectable).
+    pub allowed_models: Constrained<AllowlistPin>,
     /// Pins from a requirements layer or an MDM policy, keyed by [`Feature`].
     features: BTreeMap<Feature, Constrained<bool>>,
 }
@@ -642,13 +635,12 @@ impl Requirements {
 }
 /// Inputs for resolving `#[serde(skip)]` runtime fields after `new_from_toml_cfg()`.
 ///
-/// Constructed by each binary from its CLI args and startup state, then passed
-/// to [`Config::resolve_runtime_fields`].
+/// Constructed by each binary from its CLI args and startup state, then passed to [`Config::resolve_runtime_fields`].
 pub struct RuntimeResolutionContext<'a> {
     pub raw_config: &'a toml::Value,
     pub remote_settings: Option<&'a crate::util::config::RemoteSettings>,
     pub is_headless: bool,
-    /// `Some(true)` = CLI explicitly enabled, `None` = defer to config/env/remote.
+    /// `Some(true)` means the CLI explicitly enabled it; `None` defers to config/env/remote.
     pub cli_subagents: Option<bool>,
     pub cli_web_search_model: Option<&'a str>,
     pub cli_session_summary_model: Option<&'a str>,
@@ -656,24 +648,22 @@ pub struct RuntimeResolutionContext<'a> {
     pub memory_enabled_override: Option<bool>,
     /// CLI `--disable-web-search` flag. ORed with config.toml value.
     pub disable_web_search: bool,
-    /// CLI `--todo-gate` flag. Session-scoped — not persisted.
+    /// CLI `--todo-gate` flag. Session-scoped, not persisted.
     pub todo_gate: bool,
-    /// CLI `--laziness-debug-log <path>`. When `Some`, the Layer-3
-    /// classifier fires after every turn (bypassing the idle wait /
-    /// per-model gate / nudge cap) and writes a JSONL line per fire.
-    /// Observation-only. Session-scoped — not persisted.
+    /// CLI `--laziness-debug-log <path>`.
+    /// When `Some`, the Layer-3 classifier fires after every turn, bypassing the idle wait, per-model gate, and nudge cap.
+    /// It writes a JSONL line per fire. Observation-only. Session-scoped, not persisted.
     pub laziness_debug_log: Option<&'a std::path::Path>,
-    /// CLI `--storage-mode` override. `None` = defer to env/remote/default.
+    /// CLI `--storage-mode` override. `None` defers to env/remote/default.
     pub storage_mode: Option<&'a str>,
 }
-/// First-party credential env vars scrubbed from a BYOK auth-provider helper's
-/// environment so it can't inherit the keys Grok uses for its own first-party
-/// requests. Keep in sync with every first-party credential env read across the
-/// crate: `auth::manager` (`GROK_AUTH`/`GROK_AUTH_PATH`), `auth_method`
-/// (`XAI_API_KEY`/legacy), and the credential-bearing `env_string(...)` reads in
-/// `EndpointsConfig::default`. The `provider_helper_env_scrubs_first_party_credentials`
-/// test pins this against an independent audited literal, so any change here must
-/// be mirrored (and re-audited) there.
+/// First-party credential env vars scrubbed from a BYOK auth-provider helper's environment.
+/// Scrubbing keeps the helper from inheriting the keys Grok uses for its own first-party requests.
+/// Keep in sync with every first-party credential env read across the crate.
+/// Those live in `auth::manager` (`GROK_AUTH`/`GROK_AUTH_PATH`) and `auth_method` (`XAI_API_KEY`/legacy).
+/// The credential-bearing `env_string(...)` reads in `EndpointsConfig::default` count too.
+/// The `provider_helper_env_scrubs_first_party_credentials` test pins this against an independent audited literal.
+/// Any change here must be mirrored (and re-audited) there.
 pub(crate) const FIRST_PARTY_CREDENTIAL_ENV_VARS: &[&str] = &[
     crate::agent::auth_method::XAI_API_KEY_ENV_VAR,
     crate::agent::auth_method::LEGACY_XAI_API_KEY_ENV_VAR,
@@ -696,10 +686,9 @@ pub(crate) fn env_string(name: &str) -> Option<String> {
     }
 }
 pub use xai_grok_config::env_bool;
-/// Compaction-mode precedence (env > config > remote settings > default, with
-/// unrecognized values at each source falling through). `remote` sits just
-/// above the default, mirroring `feature_flag` in `resolve_bool_flag`. Pure so
-/// it's unit-testable without mutating process env.
+/// Compaction-mode precedence (env > config > remote settings > default, with unrecognized values at each source falling through).
+/// `remote` sits just above the default, mirroring `feature_flag` in `resolve_bool_flag`.
+/// Pure so it's unit-testable without mutating process env.
 pub(crate) fn resolve_compaction_mode_from(
     env: Option<&str>,
     config: Option<&str>,
@@ -724,8 +713,7 @@ pub(crate) fn resolve_compaction_detail_from(
         .or_else(|| remote.and_then(CompactionDetail::parse))
         .unwrap_or_default()
 }
-/// Resolve a single vendor-compat cell: env > `[compat]` TOML > remote settings
-/// remote flag > default ON.
+/// Resolve a single vendor-compat cell: env > `[compat]` TOML > remote settings remote flag > default ON.
 fn resolve_compat_cell(
     env: &str,
     cfg: Option<bool>,
@@ -771,7 +759,6 @@ fn remote_compat_value(
         CompatRemoteKey::CodexSessions => remote.codex_sessions_enabled,
     }
 }
-/// Resolve vendor compatibility cells from TOML and remote settings.
 fn resolve_compat_config(
     config: &CompatConfigToml,
     remote: Option<&crate::util::config::RemoteSettings>,
@@ -905,12 +892,12 @@ pub struct PluginsConfig {
     /// Additional plugin directory paths to load.
     #[serde(default)]
     pub paths: Vec<String>,
-    /// Plugin IDs or names to disable. Disabled plugins are discovered
-    /// but their components are not loaded into the session.
+    /// Plugin IDs or names to disable.
+    /// Disabled plugins are discovered but their components are not loaded into the session.
     #[serde(default)]
     pub disabled: Vec<String>,
-    /// Plugin IDs or names to explicitly enable. Used for project-scope plugins
-    /// which are disabled by default — adding a plugin here overrides that default.
+    /// Plugin IDs or names to explicitly enable.
+    /// Used for project-scope plugins, which are disabled by default; adding a plugin here overrides that default.
     #[serde(default)]
     pub enabled: Vec<String>,
     /// CLI `--plugin-dir` paths (populated by CLI arg processing, not config file).
@@ -921,12 +908,10 @@ impl PluginsConfig {
     /// Merge `enabledPlugins` from Claude settings files into this config.
     ///
     /// Reads `enabledPlugins` from `~/.claude/settings.json` only (user scope).
-    /// Project-level `<git_root>/.claude/settings.json` is intentionally NOT
-    /// read here: a malicious repo could pre-populate `enabledPlugins` to
-    /// bypass the project-plugin auto-disable logic in `populate_plugin_lists`,
-    /// enabling attacker-controlled hooks (e.g. SessionStart → RCE).
-    /// Native `.grok/config.toml` entries already present take precedence:
-    /// a name is only added if it isn't already in the opposite list.
+    /// Project-level `<git_root>/.claude/settings.json` is intentionally NOT read here.
+    /// A malicious repo could pre-populate `enabledPlugins` to bypass the project-plugin auto-disable logic in `populate_plugin_lists`.
+    /// That would enable attacker-controlled hooks (e.g. a SessionStart hook running arbitrary code).
+    /// Native `.grok/config.toml` entries already present take precedence: a name is only added if it isn't already in the opposite list.
     pub(crate) fn merge_claude_enabled_plugins(&mut self, _cwd: Option<&std::path::Path>) {
         if crate::claude_import::is_claude_import_marked_with_log("merge_claude_enabled_plugins") {
             return;
@@ -950,7 +935,6 @@ impl PluginsConfig {
             }
         }
     }
-    /// Build a `DiscoveryConfig` from this plugins config.
     pub(crate) fn to_discovery_config(
         &self,
     ) -> xai_grok_agent::plugins::discovery::DiscoveryConfig {
@@ -970,22 +954,21 @@ pub struct FeedbackConfig {
     pub user: Option<FeedbackUserConfig>,
 }
 /// Self-reported feedback author identity (never used for authorization).
-/// Merged only from trusted config tiers, so a cloned repo can't inject the
-/// `command` escape hatch.
+/// Merged only from trusted config tiers, so a cloned repo can't inject the `command` escape hatch.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FeedbackUserConfig {
-    /// Sources tried in order for the name. `os_user` yields the OS user name;
-    /// any other entry is a literal (`$VAR` expanded at load).
+    /// Sources tried in order for the name.
+    /// `os_user` yields the OS user name; any other entry is a literal (`$VAR` expanded at load).
     pub name: Vec<String>,
-    /// Sources tried in order for the email. `git_email` yields the global git
-    /// email; any other entry is a literal (`$VAR` expanded at load) needing `@`.
+    /// Sources tried in order for the email.
+    /// `git_email` yields the global git email; any other entry is a literal (`$VAR` expanded at load) needing `@`.
     pub email: Vec<String>,
     /// Fallback domain for `<name>@<domain>` when no `email` source resolves.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub email_domain: Option<String>,
-    /// Optional `sh -c` script printing `{"name","email"}` JSON; its fields win
-    /// over the lists above, with per-field fallback. Trusted config tiers only.
+    /// Optional `sh -c` script printing `{"name","email"}` JSON; its fields win over the lists above, with per-field fallback.
+    /// Trusted config tiers only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
 }
@@ -1016,9 +999,9 @@ pub struct CliConfig {
     pub worktree_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_registry: Option<bool>,
-    /// Env `GROK_MINIMUM_VERSION`. See [`crate::util::config::VersionPolicy`] for
-    /// the version-policy knobs. (Unrelated to
-    /// `version_overrides[].maximum_version`, which gates config patches.)
+    /// Env `GROK_MINIMUM_VERSION`.
+    /// See [`crate::util::config::VersionPolicy`] for the version-policy knobs.
+    /// (Unrelated to `version_overrides[].maximum_version`, which gates config patches.)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub minimum_version: Option<String>,
     /// Env `GROK_MAXIMUM_VERSION`. See [`crate::util::config::VersionPolicy`].
@@ -1045,15 +1028,14 @@ pub struct DiagnosticsConfig {
 pub struct ModelsConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
-    /// The pre-campaign `models.default` (merged user/managed/requirements)
-    /// captured when a campaign is overriding the default, so model resolution can
-    /// recover if the campaign points at a model missing from the catalog. `None`
-    /// when there is nothing to recover to. Runtime-only; never serialized.
+    /// The pre-campaign `models.default` (merged user/managed/requirements), captured when a campaign is overriding the default.
+    /// Model resolution recovers to it if the campaign points at a model missing from the catalog.
+    /// `None` when there is nothing to recover to. Runtime-only; never serialized.
     #[serde(skip)]
     pub pre_campaign_default: Option<String>,
-    /// Whether an active campaign is currently overriding `models.default`. The
-    /// authoritative campaign-driven-default signal (set from the resolved active
-    /// set), correct even when the user has no base default. Runtime-only.
+    /// Whether an active campaign is currently overriding `models.default`.
+    /// The authoritative campaign-driven-default signal (set from the resolved active set), correct even when the user has no base default.
+    /// Runtime-only.
     #[serde(skip)]
     pub default_is_campaign_driven: bool,
     /// Persisted effort for the default model; applied in `resolve_model_catalog`.
@@ -1063,23 +1045,20 @@ pub struct ModelsConfig {
     pub web_search: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_summary: Option<String>,
-    /// Vision model used to transcribe user-supplied
-    /// images via a separate endpoint.
+    /// Vision model used to transcribe user-supplied images via a separate endpoint.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_description: Option<String>,
     /// Model pin for next-prompt suggestions (tab-autocomplete ghost text).
-    /// Unset = remote pin, then the client hint / built-in `grok-4.6`
-    /// default with the catalog guard; see `ModelOverrideConfig::resolve`.
+    /// When unset: the remote pin, then the client hint / built-in `grok-4.6` default with the catalog guard; see `ModelOverrideConfig::resolve`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_suggestion: Option<String>,
-    /// Restricts which models are user-selectable for normal chat (picker,
-    /// `/model`, `-m`). Non-matching models stay in the catalog but are never
-    /// shown, defaulted to, or selectable. Special/internal models (web_search,
-    /// image_description, subagents, fork secondary) are exempt.
-    ///
-    /// Glob patterns (`*`, `?`, `[...]`) match the model id or catalog key,
-    /// case-sensitive. Empty = no restriction; an excluded explicit `default`/`-m`
-    /// is rejected at startup.
+    /// Restricts which models are user-selectable for normal chat (picker, `/model`, `-m`).
+    /// Non-matching models stay in the catalog but are never shown, defaulted to, or selectable.
+    /// Special/internal models (web_search, image_description, subagents, fork secondary)
+    /// are exempt. User-config globs (`*`, `?`, `[...]`) match the catalog key or model id,
+    /// case-sensitive. Empty = no restriction; an excluded explicit `default`/`-m` is
+    /// rejected once the model catalog is fetched. Fleet pins live on
+    /// [`Requirements::allowed_models`] and replace this list.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_models: Option<Vec<String>>,
     /// Soft shortlist for fast model cycling (Pi-style **scoped models**).
@@ -1099,16 +1078,12 @@ pub struct ModelsConfig {
     /// Fallback `agent_type` for models without a per-model override.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_type: Option<String>,
-    /// Global default request headers applied to every model. A per-model
-    /// `[model.<id>].extra_headers` entry overrides per key (case-insensitive).
+    /// Global default request headers applied to every model.
+    /// A per-model `[model.<id>].extra_headers` entry overrides per key (case-insensitive).
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub extra_headers: IndexMap<String, String>,
-    /// Global default values applied to every model that leaves the field
-    /// unset; a per-model `[model.<id>]` value always wins. A deliberately
-    /// small, allow-listed subset of the per-model fields (only `Option` ones,
-    /// so "unset" is unambiguous). Future: these could consolidate into a
-    /// `[models.defaults]` sub-table mirroring the per-model schema 1:1; kept
-    /// flat for now as that is a larger refactor.
+    /// Global default values applied to every model that leaves the field unset; a per-model `[model.<id>]` value always wins.
+    /// A deliberately small, allow-listed subset of the per-model fields (only `Option` ones, so "unset" is unambiguous).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1129,8 +1104,8 @@ pub struct ModelsConfig {
 pub struct HarnessConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub block_for_upload: Option<bool>,
-    /// Budget (seconds) for the turn-end upload flush when
-    /// `block_for_upload` is active. Default 60.
+    /// Budget (seconds) for the turn-end upload flush when `block_for_upload` is active.
+    /// Default 60.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upload_flush_timeout_secs: Option<u64>,
 }
@@ -1143,9 +1118,8 @@ pub struct RelayConfig {
 }
 /// `[hub]` section from config.toml.
 ///
-/// Optional default Computer Hub URL for **workspace provider** exposure
-/// (`grok workspace` / leader `with_default_hub_url`). Does **not** enable
-/// agent-side harness/client connections or alter local session behavior.
+/// Optional default Computer Hub URL for **workspace provider** exposure (`grok workspace` / leader `with_default_hub_url`).
+/// Does **not** enable agent-side harness/client connections or alter local session behavior.
 ///
 /// ```toml
 /// [hub]
@@ -1301,8 +1275,6 @@ pub struct MarketplaceSourceEntry {
     pub branch: Option<String>,
 }
 /// `[storage]` section from config.toml.
-///
-/// Controls session persistence settings like cleanup TTL.
 /// Read by `resolve_cleanup_ttl_days()` in `session/persistence.rs`.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
@@ -1314,8 +1286,7 @@ pub struct StorageConfig {
 ///
 /// These supplement the built-in scan locations (`.grok/skills/`,
 /// `.agents/skills/`, `~/.grok/skills/`). They're written by `/import-claude`
-/// to preserve previously-discovered Claude directories after the runtime
-/// `.claude/` cutoff (see `[claude_compat] imported`).
+/// to preserve previously-discovered Claude directories after the runtime `.claude/` cutoff (see `[claude_compat] imported`).
 ///
 /// Example:
 /// ```toml
@@ -1331,8 +1302,8 @@ pub struct PathsConfig {
     /// Additional directories to scan for rules (each contains `*.md`).
     pub extra_rule_dirs: Vec<String>,
 }
-/// `[permission]` known keys, declared for the unrecognized-key scan only;
-/// consumed out-of-band. Keys stay typed so a typo (e.g. `denny`) still warns.
+/// `[permission]` known keys, declared for the unrecognized-key scan only; consumed out-of-band.
+/// Keys stay typed so a typo (e.g. `denny`) still warns.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct PermissionKnownKeys {
@@ -1343,10 +1314,9 @@ pub struct PermissionKnownKeys {
     /// Verbose `[[permission.rules]]` form.
     pub rules: Option<toml::Value>,
 }
-/// `[shell_environment_policy]` known keys, for the unrecognized-key scan only;
-/// the value is parsed at spawn by [`crate::util::config::resolve_shell_env_policy`].
-/// `Option<toml::Value>` (no `deny_unknown_fields`) keeps a typo a warning, not a
-/// load failure, like [`PermissionKnownKeys`].
+/// `[shell_environment_policy]` known keys, for the unrecognized-key scan only.
+/// The value is parsed at spawn by [`crate::util::config::resolve_shell_env_policy`].
+/// `Option<toml::Value>` (no `deny_unknown_fields`) keeps a typo a warning, not a load failure, like [`PermissionKnownKeys`].
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ShellEnvironmentPolicyKnownKeys {
@@ -1364,9 +1334,9 @@ pub struct Config {
     pub goal: GoalConfig,
     #[serde(default)]
     pub workflows: WorkflowsConfig,
-    /// `[doom_loop_recovery]` section: the shared settings struct — ONE type
-    /// serves this TOML table and the remote remote settings `doom_loop_recovery`
-    /// object. See [`crate::util::config::DoomLoopRecoverySettings`].
+    /// `[doom_loop_recovery]` section: the shared settings struct.
+    /// ONE type serves this TOML table and the remote settings `doom_loop_recovery` object.
+    /// See [`crate::util::config::DoomLoopRecoverySettings`].
     #[serde(default)]
     pub doom_loop_recovery: crate::util::config::DoomLoopRecoverySettings,
     /// `[worktree]` section (currently `[worktree.auto_gc]` only).
@@ -1375,8 +1345,11 @@ pub struct Config {
     /// `[auto_mode]` section: Auto permission-mode configuration. See [`AutoModeConfig`].
     #[serde(default)]
     pub auto_mode: AutoModeConfig,
-    /// What `[features]` said in the merged layers. One tier of
-    /// [`Config::feature`].
+    /// Declared so documented sampling keys are not reported as unrecognized.
+    #[serde(default)]
+    pub prompt_suggestions: crate::util::config::PromptSuggestConfig,
+    /// What `[features]` said in the merged layers.
+    /// One tier of [`Config::feature`].
     #[serde(skip)]
     pub(crate) feature_values: BTreeMap<Feature, bool>,
     /// `[model.*]` overrides from config.toml. Resolve via `resolve_model_list()`.
@@ -1385,14 +1358,12 @@ pub struct Config {
     #[serde(skip)]
     pub config_warnings: Vec<super::config_model_override_parse::ConfigWarning>,
     pub grok_com_config: GrokComConfig,
-    /// `[auth_provider.<name>]` tables, populated by
-    /// [`parse_auth_providers`] from trusted config layers only.
+    /// `[auth_provider.<name>]` tables, populated by [`parse_auth_providers`] from trusted config layers only.
     #[serde(skip)]
     pub auth_providers: IndexMap<String, crate::auth::AuthProviderConfig>,
     #[serde(skip)]
     pub model_providers: IndexMap<String, ModelProviderConfig>,
-    /// Written by the client via `config_toml_edit`; absorbed so it isn't
-    /// flagged as an unrecognized key.
+    /// Written by the client via `config_toml_edit`; absorbed so it isn't flagged as an unrecognized key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hints: Option<toml::Value>,
     #[serde(default)]
@@ -1410,31 +1381,23 @@ pub struct Config {
     pub platforms: PlatformsConfig,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
-    /// Session behavior configuration.
     #[serde(default)]
     pub session: SessionConfig,
-    /// Agent definition selection configuration.
-    /// Set in `config.toml` under `[agent]` to choose which agent definition
-    /// is used for all sessions (unless overridden by CLI flag or ACP meta).
+    /// Set in `config.toml` under `[agent]` to choose which agent definition is used for all sessions (unless overridden by CLI flag or ACP meta).
     #[serde(default)]
     pub agent: AgentSelectionConfig,
     #[serde(default)]
     pub repo_changes_dedup: RepoChangesDedupConfig,
-    /// Skills discovery configuration.
     #[serde(default)]
     pub skills: SkillsConfig,
-    /// Raw `[compat]` vendor-compatibility config (per-vendor × per-surface
-    /// toggles). Resolved into [`Config::compat_resolved`] by
-    /// `resolve_runtime_fields`.
+    /// Raw `[compat]` vendor-compatibility config (per-vendor, per-surface toggles).
+    /// Resolved into [`Config::compat_resolved`] by `resolve_runtime_fields`.
     #[serde(default)]
     pub compat: CompatConfigToml,
-    /// Plugin system configuration.
     #[serde(default)]
     pub plugins: PluginsConfig,
-    /// Feedback submission configuration.
     #[serde(default)]
     pub feedback: FeedbackConfig,
-    /// Filesystem path overrides (`[paths]` in config.toml).
     #[serde(default)]
     pub paths: PathsConfig,
     #[serde(default, skip_serializing)]
@@ -1445,7 +1408,6 @@ pub struct Config {
     pub harness: HarnessConfig,
     #[serde(default, skip_serializing)]
     pub relay: RelayConfig,
-    /// Computer Hub configuration (`[hub]` in config.toml).
     #[serde(default, skip_serializing)]
     pub hub: HubConfig,
     /// Multi-user collab scaffold (`[collab]` in config.toml).
@@ -1469,35 +1431,34 @@ pub struct Config {
     pub compaction: CompactionConfig,
     #[serde(default, skip_serializing)]
     pub managed_mcps: crate::config::ManagedMcpsConfig,
-    /// `[auth]` alias — consumed by `expand_auth_alias` before serde.
+    /// `[auth]` alias: consumed by `expand_auth_alias` before serde.
     /// Typed as `GrokComConfig` (same schema) so sub-field typos are caught.
     #[serde(default, skip_serializing)]
     pub auth: Option<GrokComConfig>,
-    /// `[desktop]` section — owned by grok-desktop (Electron app), opaque to the CLI agent.
+    /// `[desktop]` section: owned by grok-desktop (Electron app), opaque to the CLI agent.
     #[serde(default, skip_serializing)]
     pub desktop: Option<toml::Value>,
-    /// Top-level `announcements` array — consumed by `resolve_announcements`.
+    /// Top-level `announcements` array: consumed by `resolve_announcements`.
     #[serde(default, skip_serializing)]
     pub announcements: Vec<xai_grok_announcements::RemoteAnnouncement>,
-    /// `[tips]` section — consumed by `merge_tips`.
+    /// `[tips]` section: consumed by `merge_tips`.
     #[serde(default, skip_serializing)]
     pub tips: Option<crate::util::config::TipsOverride>,
-    /// `[permission]` — consumed out-of-band; see [`PermissionKnownKeys`].
+    /// `[permission]`: consumed out-of-band; see [`PermissionKnownKeys`].
     #[serde(default, skip_serializing)]
     pub permission: PermissionKnownKeys,
-    /// `[tools]` — also read by `ToolsConfig::resolve()`.
+    /// `[tools]`: also read by `ToolsConfig::resolve()`.
     #[serde(default, skip_serializing)]
     pub tools: crate::config::ToolsConfig,
-    /// `[storage]` — also read by `resolve_cleanup_ttl_days()`.
+    /// `[storage]`: also read by `resolve_cleanup_ttl_days()`.
     #[serde(default, skip_serializing)]
     pub storage: StorageConfig,
-    /// `[marketplace]` — also read by `xai_grok_plugin_marketplace::load_sources()`.
+    /// `[marketplace]`: also read by `xai_grok_plugin_marketplace::load_sources()`.
     #[serde(default, skip_serializing)]
     pub marketplace: MarketplaceConfig,
-    /// `[diagnostics]` — crash handler toggle (`load_crash_handler_enabled_sync`).
+    /// `[diagnostics]`: crash handler toggle (`load_crash_handler_enabled_sync`).
     #[serde(default, skip_serializing)]
     pub diagnostics: DiagnosticsConfig,
-    /// Storage mode for session persistence.
     /// When running in relay/headless mode, this should be set to Writeback.
     /// Defaults to reading from GROK_STORAGE_MODE env var.
     #[serde(skip)]
@@ -1523,8 +1484,7 @@ pub struct Config {
     /// CLI memory override preserved across config and remote-setting refreshes.
     #[serde(skip)]
     pub memory_enabled_override: Option<bool>,
-    /// Original CLI `--subagents` tri-state, preserved for re-resolution
-    /// when remote settings settings are refreshed on /new.
+    /// Original CLI `--subagents` tri-state, preserved for re-resolution when remote settings are refreshed on /new.
     #[serde(skip)]
     pub cli_subagents: Option<bool>,
     /// Resolved memory configuration. `None` when memory is disabled.
@@ -1538,8 +1498,6 @@ pub struct Config {
     /// Set by the TUI/CLI launcher and used as fallback when clients don't provide clientVersion.
     #[serde(skip)]
     pub client_version: Option<String>,
-    /// The mode in which the agent is running.
-    /// Determines behavior like relay sync enablement (only enabled in TUI mode).
     #[serde(skip)]
     pub mode: AgentMode,
     /// Remote settings fetched from cli-chat-proxy at startup.
@@ -1550,19 +1508,18 @@ pub struct Config {
     pub cli_agents: Vec<xai_grok_agent::config::AgentDefinition>,
     #[serde(skip)]
     pub cli_agent_overrides: CliAgentOverrides,
-    /// Whether subagent (task tool) support is enabled. Enabled by default;
-    /// disabled only via `GROK_SUBAGENTS=0` or `[subagents] enabled = false`.
+    /// Whether subagent (task tool) support is enabled.
+    /// Enabled by default; disabled only via `GROK_SUBAGENTS=0` or `[subagents] enabled = false`.
     /// Not remotely gated.
     #[serde(skip)]
     pub subagents_enabled: bool,
-    /// Resolved max subagent nesting depth (see
-    /// [`crate::config::SubagentsConfig::resolve_max_depth`]).
+    /// Resolved max subagent nesting depth (see [`crate::config::SubagentsConfig::resolve_max_depth`]).
     #[serde(skip)]
     pub subagents_max_depth: u32,
     #[serde(skip)]
     pub subagents_max_concurrent: usize,
-    /// Resolved concurrent subagent turn-sampling limit feeding the shared
-    /// semaphore. See [`crate::config::SubagentsConfig::resolve_sampling_limit`].
+    /// Resolved concurrent subagent turn-sampling limit feeding the shared semaphore.
+    /// See [`crate::config::SubagentsConfig::resolve_sampling_limit`].
     #[serde(skip)]
     pub subagents_sampling_limit: usize,
     #[serde(skip)]
@@ -1573,8 +1530,8 @@ pub struct Config {
     #[serde(skip)]
     pub media_gen_batch_limits: xai_grok_tools::media_gen_limits::MediaGenBatchLimits,
     /// Per-subagent model ID overrides from `[subagents.models]` in config.toml.
-    /// Keys are agent names, values are model IDs. Set alongside `subagents_enabled`
-    /// from `SubagentsConfig::resolve()`.
+    /// Keys are agent names, values are model IDs.
+    /// Set alongside `subagents_enabled` from `SubagentsConfig::resolve()`.
     #[serde(skip)]
     pub subagent_model_overrides: std::collections::HashMap<String, String>,
     /// Per-subagent reasoning effort overrides from `[subagents.effort]` in
@@ -1595,82 +1552,71 @@ pub struct Config {
     pub subagent_personas:
         std::collections::HashMap<String, xai_grok_subagent_resolution::config::SubagentPersona>,
     /// Whether web search is force-disabled via `--disable-web-search` CLI flag.
-    /// When true, the web search tool is never added to the agent toolset
-    /// regardless of available credentials.
+    /// When true, the web search tool is never added to the agent toolset regardless of available credentials.
     #[serde(default)]
     pub disable_web_search: bool,
-    /// Whether the runtime turn-end TodoGate is force-enabled via the
-    /// `--todo-gate` CLI flag. Session-scoped — not persisted. When
-    /// true, flips the runtime policy's `enabled` bit on regardless of
-    /// remote settings or the built-in default (which is `false`).
-    /// The gate runs only while a `/goal` is active (goal reminders
-    /// inject `<task_completion_discipline>`); global built-in templates
-    /// do not activate it.
+    /// Whether the runtime turn-end TodoGate is force-enabled via the `--todo-gate` CLI flag.
+    /// Session-scoped, not persisted.
+    /// When true, flips the runtime policy's `enabled` bit on regardless of remote settings or the built-in default (which is `false`).
+    /// The gate runs only while a `/goal` is active (goal reminders inject `<task_completion_discipline>`).
+    /// Global built-in templates do not activate it.
     #[serde(skip)]
     pub todo_gate: bool,
-    /// Path for the Layer-3 LazinessDetector debug log
-    /// (`--laziness-debug-log`). When `Some`, the classifier fires
-    /// after every turn (bypassing the idle wait, the per-model
-    /// enable gate, and the nudge cap) and appends a JSONL line per
-    /// fire to this file. Observation-only — no nudges are injected
-    /// in this mode. Session-scoped, not persisted.
+    /// Path for the Layer-3 LazinessDetector debug log (`--laziness-debug-log`).
+    /// When `Some`, the classifier fires after every turn, bypassing the idle wait, the per-model enable gate, and the nudge cap.
+    /// It appends a JSONL line per fire to this file.
+    /// Observation-only: no nudges are injected in this mode. Session-scoped, not persisted.
     #[serde(skip)]
     pub laziness_debug_log: Option<std::path::PathBuf>,
     /// Whether tools should respect `.gitignore` patterns.
     /// When `true`, all tools including `read_file` block gitignored files.
-    /// When `false` (default), each tool applies its own default
-    /// (`read_file` allows, others block).
+    /// When `false` (default), each tool applies its own default (`read_file` allows, others block).
     /// Resolved by [`crate::config::ToolsConfig::resolve`].
     #[serde(skip)]
     pub respect_gitignore: bool,
-    /// When `true` (and no valid `zdr_video_output_s3` bucket is set),
-    /// `MvpAgent::prepare_video_gen_config` marks the video tools
-    /// zdr-restricted: they stay advertised but short-circuit at call time
-    /// with setup guidance. Resolved by [`crate::config::ToolsConfig::resolve`].
+    /// When `true` (and no valid `zdr_video_output_s3` bucket is set), `MvpAgent::prepare_video_gen_config` marks the video tools zdr-restricted.
+    /// They stay advertised but short-circuit at call time with setup guidance.
+    /// Resolved by [`crate::config::ToolsConfig::resolve`].
     #[serde(skip)]
     pub disable_zdr_incompatible_tools: bool,
     /// S3 config for ZDR video output (presigned upload to team bucket).
-    /// Only used when `disable_zdr_incompatible_tools` is `true` and the
-    /// config is valid. Resolved by [`crate::config::ToolsConfig::resolve`].
+    /// Only used when `disable_zdr_incompatible_tools` is `true` and the config is valid.
+    /// Resolved by [`crate::config::ToolsConfig::resolve`].
     #[serde(skip)]
     pub zdr_video_output_s3:
         Option<xai_grok_tools::implementations::grok_build::video_gen::ZdrVideoOutputS3Config>,
-    /// Whether to enrich path-not-found errors with CWD reminders,
-    /// "dropped repo folder" correction, and similar-name suggestions.
-    /// Default `false`. Enabled via remote settings.
-    /// Serialized to `config.json` on GCS so traces can distinguish
-    /// which sessions had path-not-found hints active.
+    /// Whether to enrich path-not-found errors with CWD reminders, "dropped repo folder" correction, and similar-name suggestions.
+    /// Default `false`.
+    /// Enabled via remote settings.
+    /// Serialized to `config.json` on GCS so traces can distinguish which sessions had path-not-found hints active.
     #[serde(default)]
     pub path_not_found_hints: bool,
     /// Whether to fetch managed MCP configs from the managed connectors service at startup.
-    /// Resolved by [`crate::config::ManagedMcpsConfig::resolve`]: env var >
-    /// config.toml > remote settings > default (off in headless, on in interactive).
+    /// Resolved by [`crate::config::ManagedMcpsConfig::resolve`].
+    /// Precedence: env var > config.toml > remote settings > default (off in headless, on in interactive).
     #[serde(skip)]
     pub managed_mcps_enabled: bool,
     #[serde(skip)]
     pub managed_mcp_gateway_tools_enabled: bool,
-    /// Resolved vendor-compat config (env → `[compat]` TOML → feature flag →
-    /// default ON), built from `compat` + `remote_settings` in
-    /// `resolve_runtime_fields`. Threaded into skills / rules / AGENTS.md
-    /// discovery.
+    /// Resolved vendor-compat config (env > `[compat]` TOML > feature flag > default ON).
+    /// Built from `compat` and `remote_settings` in `resolve_runtime_fields`.
+    /// Threaded into skills / rules / AGENTS.md discovery.
     #[serde(skip)]
     pub compat_resolved: CompatConfig,
     /// Enforced requirement pins from `requirements.toml`.
     #[serde(skip)]
     pub requirements: Requirements,
-    /// Model ID for web_search.
     #[serde(skip)]
     pub web_search_model: String,
-    /// Session title model. Resolved to the compiled default
-    /// (`default_session_summary_model`) when unset; see `ModelOverrideConfig::resolve`.
+    /// Session title model.
+    /// Resolved to the compiled default (`default_session_summary_model`) when unset; see `ModelOverrideConfig::resolve`.
     #[serde(skip)]
     pub session_summary_model: Option<String>,
     /// Image describe model (`grok-4.6` default via `ModelOverrideConfig::resolve`).
     #[serde(skip)]
     pub image_description_model: Option<String>,
-    /// Next-prompt suggestion model pin (`env > [models] prompt_suggestion >
-    /// remote`), consumed catalog-guarded by `handle_suggest_prompt`; see
-    /// `ModelOverrideConfig::resolve`.
+    /// Next-prompt suggestion model pin (`env > [models] prompt_suggestion > remote`).
+    /// Consumed with a catalog guard by `handle_suggest_prompt`; see `ModelOverrideConfig::resolve`.
     #[serde(skip)]
     pub prompt_suggest_model_pin: crate::config::PromptSuggestModelPin,
 }
@@ -1683,10 +1629,8 @@ pub struct CliAgentOverrides {
     pub permission_mode: Option<xai_grok_agent::config::PermissionMode>,
 }
 impl CliAgentOverrides {
-    /// Apply to the *main-session* agent, which the operator defines directly:
-    /// the flags are authoritative, so they replace the agent's own fields.
-    /// Spawned subagents instead layer these on top of an author's definition —
-    /// see [`Self::apply_to_subagent_definition`].
+    /// Apply to the *main-session* agent, which the operator defines directly: the flags are authoritative, so they replace the agent's own fields.
+    /// Spawned subagents instead layer these on top of an author's definition; see [`Self::apply_to_subagent_definition`].
     pub(crate) fn apply_to_definition(&self, def: &mut xai_grok_agent::config::AgentDefinition) {
         if let Some(ref tools) = self.tools {
             def.tools = tools.clone();
@@ -1698,9 +1642,9 @@ impl CliAgentOverrides {
             def.permission_mode = pm.clone();
         }
     }
-    /// Subagent variant of [`Self::apply_to_definition`]: records the flags as
-    /// session-clamp state (see [`AgentDefinition::session_tools_allowlist`])
-    /// instead of overwriting the agent author's own fields.
+    /// Subagent variant of [`Self::apply_to_definition`].
+    /// Records the flags as session-clamp state instead of overwriting the agent author's own fields.
+    /// See [`AgentDefinition::session_tools_allowlist`].
     pub(crate) fn apply_to_subagent_definition(
         &self,
         def: &mut xai_grok_agent::config::AgentDefinition,
@@ -1718,8 +1662,7 @@ impl CliAgentOverrides {
         self.tools.is_some() || self.disallowed_tools.is_some() || self.permission_mode.is_some()
     }
 }
-/// Parent bypassPermissions/acceptEdits/auto override the subagent's own mode
-/// (spec); any other parent mode keeps it.
+/// Parent bypassPermissions/acceptEdits/auto override the subagent's own mode; any other parent mode keeps it.
 fn resolve_subagent_permission_mode(
     own: PermissionMode,
     parent: &PermissionMode,
@@ -1735,8 +1678,6 @@ pub use xai_grok_agent::config::AgentDefinition;
 pub use xai_grok_agent::config::Effort;
 pub use xai_grok_agent::config::PermissionMode;
 pub use xai_grok_shared::ui_config::{ContextualHints, UiConfig};
-/// Configuration for selecting the agent definition.
-///
 /// Set in `config.toml` under `[agent]`:
 ///
 /// ```toml
@@ -1763,7 +1704,6 @@ pub struct AgentSelectionConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Path to an agent definition file (.md with YAML frontmatter).
-    /// When set, the agent is loaded from this file.
     /// Supports environment variable expansion (e.g., `$HOME/.grok/agents/my-agent.md`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub definition: Option<PathBuf>,
@@ -1771,45 +1711,33 @@ pub struct AgentSelectionConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt_label: Option<String>,
 }
-/// Configuration for session behavior.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct SessionConfig {
     /// Context window usage percentage (0-100) at which auto-compact is triggered.
-    /// When the session's token usage exceeds this percentage of the model's context window,
-    /// the conversation will be automatically summarized to free up space.
-    ///
-    /// `None` means "user didn't set it"; the resolver in
-    /// `crate::util::config::resolve_auto_compact_threshold_percent` falls
-    /// through to remote tiers and ultimately the hardcoded default 85.
-    /// Read this field via the resolver — not directly — to honor the full
-    /// precedence chain (env, per-model, remote, default).
+    /// `None` means the user didn't set it.
+    /// The resolver in `crate::util::config::resolve_auto_compact_threshold_percent` falls through to remote tiers and then the hardcoded default 85.
+    /// Read this field via the resolver, not directly, to honor the full precedence chain (env, per-model, remote, default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_compact_threshold_percent: Option<u8>,
-    /// Whether to load environment variables from .envrc files.
-    /// When enabled, the session will parse .envrc in the workspace directory
-    /// and inject the environment variables into bash commands.
-    /// Defaults to `true` when unset. `Option<bool>` so `None`
-    /// round-trips as absent on disk (managed config wins over default).
+    /// When enabled, the session will parse .envrc in the workspace directory and inject the environment variables into bash commands.
+    /// Defaults to `true` when unset.
+    /// `Option<bool>` so `None` round-trips as absent on disk (managed config wins over default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load_envrc: Option<bool>,
 }
-/// Configuration for change-archive deduplication.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RepoChangesDedupConfig {
     pub enabled: bool,
     /// Include inline content even when references exist.
     pub include_inline_fallback: bool,
-    /// Omit inline content larger than this (0 = no limit).
+    /// Omit inline content larger than this (0 means no limit).
     pub max_inline_bytes: usize,
-    /// Deduplicate untracked file content.
     pub dedup_untracked: bool,
-    /// Deduplicate binary file blobs.
     pub dedup_binary: bool,
-    /// Skip untracked files larger than this (0 = no limit).
+    /// Skip untracked files larger than this (0 means no limit).
     pub untracked_max_bytes: usize,
-    /// Optional glob patterns to exclude untracked paths.
     pub untracked_exclude_globs: Vec<String>,
 }
 impl RepoChangesDedupConfig {}
@@ -1836,6 +1764,7 @@ impl Default for Config {
             doom_loop_recovery: crate::util::config::DoomLoopRecoverySettings::default(),
             worktree: WorktreeConfigSection::default(),
             auto_mode: AutoModeConfig::default(),
+            prompt_suggestions: crate::util::config::PromptSuggestConfig::default(),
             feature_values: BTreeMap::new(),
             config_models: IndexMap::new(),
             config_warnings: Vec::new(),
@@ -1933,21 +1862,18 @@ impl Default for Config {
         cfg
     }
 }
-/// `[features]` booleans read straight off the raw TOML, with no [`Features`]
-/// field. The catch-all in [`Features`] types every such key, so this list only
-/// decides which of them are known enough not to warn. A key missing from it
-/// costs a visible false alarm, not a silent hole in the check. `image_edit` is
-/// left out on purpose, because only a pin sets it, so a plain entry in a
-/// user's config stays an unrecognized key.
+/// `[features]` booleans read straight off the raw TOML, with no [`Features`] field.
+/// The catch-all in [`Features`] types every such key, so this list only decides which of them are known enough not to warn.
+/// A key missing from it costs a visible false alarm, not a silent hole in the check.
+/// `image_edit` is left out on purpose, because only a pin sets it, so a plain entry in a user's config stays an unrecognized key.
 pub(crate) const UNMIRRORED_BOOLEAN_FEATURES: &[&str] = &[
     "campaigns",
     "remember_mode",
     "remote_fetch",
     "zdr_access_enabled",
 ];
-/// A value written where a boolean was meant. Only these fail the load, so a
-/// key carrying some later release's typed value does not stop an older build
-/// from starting on the same config.
+/// A value written where a boolean was meant.
+/// Only these fail the load, so a key carrying some later release's typed value does not stop an older build from starting on the same config.
 fn reads_as_a_boolean(value: &toml::Value) -> bool {
     match value {
         toml::Value::String(text) => {
@@ -1969,11 +1895,9 @@ fn non_boolean_feature_error(path: &str, value: &toml::Value) -> String {
     };
     format!("{path}: expected true or false, found {found}")
 }
-/// Config paths read by raw-layer resolvers, not [`Config`] serde fields, so
-/// `serde_ignored` must not report them as unrecognized keys.
+/// Config paths read by raw-layer resolvers, not [`Config`] serde fields, so `serde_ignored` must not report them as unrecognized keys.
 const NON_SERDE_CONFIG_PATHS: &[&str] = &[crate::util::config::SLASH_COMMAND_TAGS_CONFIG_PATH];
-/// [`NON_SERDE_CONFIG_PATHS`] plus the multi-path groups, every registered
-/// feature, and every [`UNMIRRORED_BOOLEAN_FEATURES`] key.
+/// [`NON_SERDE_CONFIG_PATHS`] plus the multi-path groups, every registered feature, and every [`UNMIRRORED_BOOLEAN_FEATURES`] key.
 fn is_non_serde_config_path(path: &str) -> bool {
     NON_SERDE_CONFIG_PATHS.contains(&path)
         || crate::util::config::WEB_SEARCH_DOMAIN_CONFIG_PATHS.contains(&path)
@@ -1982,9 +1906,8 @@ fn is_non_serde_config_path(path: &str) -> bool {
             .strip_prefix("features.")
             .is_some_and(|key| UNMIRRORED_BOOLEAN_FEATURES.contains(&key))
 }
-/// Parse `[auth_provider.<name>]` tables leniently: a malformed entry warns
-/// (surfaced by `grok inspect`) and is skipped, so it fails closed for the
-/// models referencing it instead of failing the whole config.
+/// Parse `[auth_provider.<name>]` tables leniently: a malformed entry warns (surfaced by `grok inspect`) and is skipped.
+/// Skipping fails closed for the models referencing the entry instead of failing the whole config.
 fn parse_auth_providers(
     raw_config: &toml::Value,
 ) -> (
@@ -2049,8 +1972,7 @@ fn parse_auth_providers(
     (providers, warnings)
 }
 impl Config {
-    /// Reject invalid glob patterns in the model-filter lists at config load, so
-    /// a typo fails loudly instead of silently changing availability.
+    /// Reject invalid glob patterns in the model-filter lists at config load, so a typo fails loudly instead of silently changing availability.
     pub fn validate_model_filters(&self) -> Result<(), String> {
         for (field, list) in [
             ("allowed_models", &self.models.allowed_models),
@@ -2058,7 +1980,7 @@ impl Config {
             ("disabled_models", &self.models.disabled_models),
             ("hidden_models", &self.models.hidden_models),
         ] {
-            if let Err(bad) = crate::agent::models::ModelGlobSet::compile(list.as_ref()) {
+            if let Err(bad) = crate::agent::models::ModelGlobSet::compile(list.as_deref()) {
                 return Err(format!(
                     "{field} has an invalid pattern: {}. Patterns use * and ? wildcards.",
                     bad.join(", ")
@@ -2075,10 +1997,8 @@ impl Config {
         )
         .with_proxy_base_url(&self.endpoints.proxy_url())
     }
-    /// Deserialize the merged `base` document, also returning the ignored key
-    /// paths whose top-level key appears in `user_config`. Paths outside it
-    /// can only come from the serialized-defaults half of the merge and must
-    /// not be blamed on the user.
+    /// Deserialize the merged `base` document, also returning the ignored key paths whose top-level key appears in `user_config`.
+    /// Paths outside it can only come from the serialized-defaults half of the merge and must not be blamed on the user.
     fn deserialize_collecting_unrecognized(
         base: toml::Value,
         user_config: &toml::Value,
@@ -2285,9 +2205,8 @@ impl Config {
     }
     /// Populate trust-independent `#[serde(skip)]` subagent base fields.
     ///
-    /// Must be called after `new_from_toml_cfg` on the **primary startup path**
-    /// before the config is handed to `MvpAgent`. Project definitions are overlaid
-    /// per cwd after that cwd's authoritative folder-trust resolve.
+    /// Must be called after `new_from_toml_cfg` on the **primary startup path** before the config is handed to `MvpAgent`.
+    /// Project definitions are overlaid per cwd after that cwd's authoritative folder-trust resolve.
     pub(crate) fn resolve_subagents(&mut self, cli_flag: bool, raw_config: &toml::Value) {
         let sa = crate::config::SubagentsConfig::resolve(cli_flag, raw_config);
         let remote_settings = self.remote_settings.clone();
@@ -2343,15 +2262,13 @@ impl Config {
     /// - disable_zdr_incompatible_tools via `ToolsConfig::resolve`
     /// - media_gen_batch_limits via `ToolsConfig::resolve_max_parallel_*`
     /// - managed_mcps_enabled via `ManagedMcpsConfig::resolve`
-    /// - web_search_model / session_summary_model / image_description_model /
-    ///   prompt_suggest_model_pin via `ModelOverrideConfig::resolve`
+    /// - web_search_model / session_summary_model / image_description_model / prompt_suggest_model_pin via `ModelOverrideConfig::resolve`
     /// - memory_config via typed `Config::resolve_memory`
     /// - disable_web_search (CLI flag ORed with config.toml)
     /// - storage_mode via `StorageMode::resolve`
     /// - path_not_found_hints from remote_settings
     ///
-    /// Note: `worktree_type` is resolved directly in `MvpAgent::new` via
-    /// `resolve_worktree_type` since it's an agent-level field, not a Config field.
+    /// Note: `worktree_type` is resolved directly in `MvpAgent::new` via `resolve_worktree_type` since it's an agent-level field, not a Config field.
     pub fn resolve_runtime_fields(&mut self, ctx: &RuntimeResolutionContext<'_>) {
         self.cli_subagents = ctx.cli_subagents;
         self.web_search_model_override = ctx.cli_web_search_model.map(|s| s.to_owned());
@@ -2460,9 +2377,8 @@ impl Config {
             remote,
         )
     }
-    /// Re-resolve eagerly-resolved runtime fields using the current `Config`
-    /// state and fresh `raw_config`. Builds a [`RuntimeResolutionContext`] from
-    /// the CLI flags already stored on this `Config`.
+    /// Re-resolve eagerly-resolved runtime fields using the current `Config` state and fresh `raw_config`.
+    /// Builds a [`RuntimeResolutionContext`] from the CLI flags already stored on this `Config`.
     ///
     /// Integration test coverage: `tests/test_settings_refresh.rs`.
     pub(crate) fn re_resolve_runtime_fields(&mut self, raw_config: &toml::Value) {
@@ -2588,7 +2504,7 @@ impl Config {
             .default(mode.value.is_enabled())
             .resolve()
     }
-    /// Resolve jemalloc heap-profile config from stored remote settings + gates.
+    /// Resolve jemalloc heap-profile config from stored remote settings and the current gates.
     pub fn resolve_jemalloc_heap_profile(
         &self,
         data_collection_disabled: bool,
@@ -2603,7 +2519,7 @@ impl Config {
             crate::heap_profile::prof_available(),
         )
     }
-    /// K12 scoped resolve: fresh jemalloc fields + current gates (no remote rewrite).
+    /// Scoped resolve: fresh jemalloc fields and current gates, with no remote-settings rewrite.
     pub(crate) fn resolve_jemalloc_heap_profile_from_partial(
         &self,
         jemalloc_enabled: Option<bool>,
@@ -2642,19 +2558,15 @@ impl Config {
             "has_remote_settings": self.remote_settings.is_some(),
         })
     }
-    /// Server-side doom-loop check policy (the `x-grok-doom-loop-check`
-    /// header, trigger parsing, and confident-signal resampling, all
-    /// applied by the sampler). Merged
-    /// PER-FIELD across the `[doom_loop_recovery]` TOML table and the
-    /// remote settings `doom_loop_recovery` object (a partial remote object only
-    /// overrides the fields it sets). Gate precedence: env
-    /// `GROK_DOOM_LOOP_RECOVERY` > TOML `enabled` > remote `enabled` >
-    /// default ON — each layer's `false` is an independent kill switch, and
-    /// `None` IS the off state, so disabled has exactly one spelling.
-    /// Tunables have no env layer (TOML > remote > default) and are clamped
-    /// to their documented ranges. Returns the composite runtime policy
-    /// rather than `Resolved` because each knob resolves from its own
-    /// source (the `resolve_reminder_policy` pattern).
+    /// Server-side doom-loop check policy.
+    /// It covers the `x-grok-doom-loop-check` header, trigger parsing, and confident-signal resampling, all applied by the sampler.
+    /// Merged PER-FIELD across the `[doom_loop_recovery]` TOML table and the remote settings `doom_loop_recovery` object.
+    /// A partial remote object only overrides the fields it sets.
+    /// Gate precedence: env `GROK_DOOM_LOOP_RECOVERY` > TOML `enabled` > remote `enabled` > default ON.
+    /// Each layer's `false` is an independent kill switch, and `None` IS the off state, so disabled has exactly one spelling.
+    /// Tunables have no env layer (TOML > remote > default) and are clamped to their documented ranges.
+    /// Returns the composite runtime policy rather than `Resolved`.
+    /// Each knob resolves from its own source (the `resolve_reminder_policy` pattern).
     pub(crate) fn resolve_doom_loop_recovery(
         &self,
     ) -> Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy> {
@@ -2690,10 +2602,9 @@ impl Config {
                 ),
         })
     }
-    /// Automatic worktree GC policy. Precedence: env kill/dry-run >
-    /// `[worktree.auto_gc]` TOML > remote `worktree_auto_gc` > defaults.
-    /// Platform age-expiry (`process_cwd_scan_available`: linux+macos) is enforced
-    /// inside `xai_fast_worktree::maybe_auto_gc`, not here.
+    /// Automatic worktree GC policy.
+    /// Precedence: env kill/dry-run > `[worktree.auto_gc]` TOML > remote `worktree_auto_gc` > defaults.
+    /// Platform age-expiry (`process_cwd_scan_available`: linux+macos) is enforced inside `xai_fast_worktree::maybe_auto_gc`, not here.
     pub(crate) fn resolve_worktree_auto_gc(&self) -> xai_fast_worktree::ResolvedWorktreeAutoGc {
         crate::util::config::resolve_worktree_auto_gc_from_settings(
             Some(&self.worktree.auto_gc),
@@ -2703,9 +2614,9 @@ impl Config {
         )
     }
     /// Gate first-run auto-registration of the official xAI marketplace source.
-    /// Precedence: env `GROK_OFFICIAL_MARKETPLACE_AUTO_REGISTER` > remote settings >
-    /// default off (so only remote settings-targeted teams get it pre-public). No
-    /// managed `.requirement` pin: `marketplace_allowlist` already gates sources.
+    /// Precedence: env `GROK_OFFICIAL_MARKETPLACE_AUTO_REGISTER` > remote settings > default off.
+    /// The off default means only remote settings-targeted teams get it pre-public.
+    /// No managed `.requirement` pin: `marketplace_allowlist` already gates sources.
     pub(crate) fn resolve_official_marketplace_auto_register(&self) -> Resolved<bool> {
         let ff = self
             .remote_settings
@@ -2716,8 +2627,8 @@ impl Config {
             .default(false)
             .resolve()
     }
-    /// Every tier this config can speak for. A caller with a different remote
-    /// snapshot overrides `remote` and leaves the rest.
+    /// Every tier this config can speak for.
+    /// A caller with a different remote snapshot overrides `remote` and leaves the rest.
     pub(crate) fn feature_sources(&self, feature: Feature) -> FeatureSources {
         FeatureSources {
             pin: self.requirements.pinned_feature(feature),
@@ -2738,9 +2649,9 @@ impl Config {
     pub(crate) fn is_title_refresh_enabled(&self) -> bool {
         self.resolve_title_refresh().value
     }
-    /// Not a registry row: a row's default is a value, this one is another
-    /// feature's answer read at call time. Pinnable anyway, the pin being its own
-    /// tier. Unset it follows `turn_summary`; set it to decouple them.
+    /// Not a registry row: a row's default is a value, this one is another feature's answer read at call time.
+    /// Pinnable anyway, the pin being its own tier.
+    /// Unset it follows `turn_summary`; set it to decouple them.
     pub(crate) fn resolve_title_refresh(&self) -> Resolved<bool> {
         let ff = self.remote_settings.as_ref().and_then(|s| s.title_refresh);
         BoolFlag::env("GROK_TITLE_REFRESH")
@@ -2750,11 +2661,10 @@ impl Config {
             .default(self.is_feature_enabled(Feature::TurnSummary))
             .resolve()
     }
-    /// `image_gen` (+ `/imagine`). Default on.
+    /// `image_gen` (and `/imagine`). Default on.
     ///
-    /// `imagine_tools_disabled` is a remote force-off (env/config cannot
-    /// re-enable). Otherwise: requirement > env > `[features]` > remote >
-    /// default.
+    /// `imagine_tools_disabled` is a remote force-off (env/config cannot re-enable).
+    /// Otherwise: requirement > env > `[features]` > remote > default.
     pub(crate) fn resolve_image_gen(&self) -> Resolved<bool> {
         use xai_grok_tools::implementations::grok_build::IMAGE_GEN_TOOL_NAME;
         if let Some(pinned) = self.requirements.image_gen.pinned() {
@@ -2777,8 +2687,8 @@ impl Config {
             .default(true)
             .resolve()
     }
-    /// `image_edit` tool gate. Same denylist / requirement pattern as
-    /// [`Self::resolve_image_gen`]; no `[features]` key (defaults on).
+    /// `image_edit` tool gate.
+    /// Same denylist / requirement pattern as [`Self::resolve_image_gen`]; no `[features]` key (defaults on).
     pub(crate) fn resolve_image_edit(&self) -> Resolved<bool> {
         use xai_grok_tools::implementations::grok_build::IMAGE_EDIT_TOOL_NAME;
         if let Some(pinned) = self.requirements.image_edit.pinned() {
@@ -2793,10 +2703,10 @@ impl Config {
         }
         BoolFlag::env("GROK_IMAGE_EDIT").default(true).resolve()
     }
-    /// `image_to_video` / `reference_to_video` (+ `/imagine-video`). Default on.
+    /// `image_to_video` / `reference_to_video` (and `/imagine-video`). Default on.
     ///
-    /// Registered as a pair; denylisting either tool name (or `video_gen`)
-    /// disables both. Otherwise same precedence as [`Self::resolve_image_gen`].
+    /// Registered as a pair; denylisting either tool name (or `video_gen`) disables both.
+    /// Otherwise same precedence as [`Self::resolve_image_gen`].
     pub(crate) fn resolve_video_gen(&self) -> Resolved<bool> {
         use xai_grok_tools::implementations::grok_build::{
             IMAGE_TO_VIDEO_TOOL_NAME, REFERENCE_TO_VIDEO_TOOL_NAME,
@@ -2821,11 +2731,8 @@ impl Config {
             .default(true)
             .resolve()
     }
-    /// Optional Imagine model override for `image_gen`. When set (non-empty),
-    /// `image_gen` calls this model slug instead of the default quality model.
-    /// Precedence: env `GROK_IMAGE_GEN_MODEL_OVERRIDE` > `[features]
-    /// image_gen_model_override` config > remote settings `image_gen_model_override`.
-    /// `None` → default model (`grok-imagine-image-quality`).
+    /// Precedence: env `GROK_IMAGE_GEN_MODEL_OVERRIDE` > `[features] image_gen_model_override` config > remote settings `image_gen_model_override`.
+    /// `None` falls back to the default model (`grok-imagine-image-quality`).
     pub(crate) fn resolve_image_gen_model_override(&self) -> Option<String> {
         resolve_string_flag(
             None,
@@ -2848,10 +2755,9 @@ impl Config {
         )
         .map(|r| r.value)
     }
-    /// Goal mode (`/goal`) master switch. Default ON: deployments that can't
-    /// reach cli-chat-proxy `/v1/settings` (custom `models_base_url`, external
-    /// `auth_provider_command`, air-gapped proxies) never receive the
-    /// remote settings `goal_enabled` flag, so the default must not carve them out.
+    /// Goal mode (`/goal`) master switch. Default ON.
+    /// Deployments that can't reach cli-chat-proxy `/v1/settings` never receive the remote settings `goal_enabled` flag.
+    /// The default must not carve those deployments out (custom `models_base_url`, external `auth_provider_command`, air-gapped proxies).
     pub(crate) fn resolve_goal(&self) -> Resolved<bool> {
         let ff = self.remote_settings.as_ref().and_then(|s| s.goal_enabled);
         if ff == Some(false) {
@@ -2863,10 +2769,8 @@ impl Config {
             .default(true)
             .resolve()
     }
-    /// Background workflows (`workflow` tool, `.grok/workflows/*.rhai`,
-    /// `/deep-research`, host-owned `/goal` driver). Default ON: deployments
-    /// that never receive remote settings still get workflows; `Some(false)`
-    /// remote / config / env remains a kill-switch.
+    /// Background workflows (`workflow` tool, `.grok/workflows/*.rhai`, `/deep-research`, host-owned `/goal` driver).
+    /// Default ON: deployments that never receive remote settings still get workflows; `Some(false)` remote / config / env remains a kill-switch.
     pub(crate) fn resolve_workflows(&self) -> Resolved<bool> {
         let ff = self
             .remote_settings
@@ -2881,11 +2785,9 @@ impl Config {
             .default(true)
             .resolve()
     }
-    /// Classifier, planner, and summary all default to goal mode itself: when
-    /// `/goal` is on they are on unless config/env/remote says otherwise.
-    /// `goal_enabled` is the session's already-resolved master switch (the same
-    /// value the actor stores), passed in so a sub-role default can never
-    /// disagree with whether `/goal` is on.
+    /// Classifier, planner, and summary all default to goal mode itself: when `/goal` is on they are on unless config/env/remote says otherwise.
+    /// `goal_enabled` is the session's already-resolved master switch (the same value the actor stores).
+    /// It is passed in so a sub-role default can never disagree with whether `/goal` is on.
     pub(crate) fn resolve_goal_classifier_enabled(&self, goal_enabled: bool) -> Resolved<bool> {
         BoolFlag::env("GROK_GOAL_CLASSIFIER")
             .config(self.goal.classifier_enabled)
@@ -2941,8 +2843,7 @@ impl Config {
         }
         Resolved::new(default, ConfigSource::Default)
     }
-    /// Per-attempt adversarial-skeptic count, clamped to
-    /// `[GOAL_VERIFIER_SKEPTIC_MIN, GOAL_VERIFIER_SKEPTIC_MAX]`.
+    /// Per-attempt adversarial-skeptic count, clamped to `[GOAL_VERIFIER_SKEPTIC_MIN, GOAL_VERIFIER_SKEPTIC_MAX]`.
     pub(crate) fn resolve_goal_verifier_count(&self) -> Resolved<u32> {
         use crate::session::goal_classifier::{
             GOAL_VERIFIER_SKEPTIC_COUNT, GOAL_VERIFIER_SKEPTIC_MAX, GOAL_VERIFIER_SKEPTIC_MIN,
@@ -2957,8 +2858,7 @@ impl Config {
             |v| v.clamp(GOAL_VERIFIER_SKEPTIC_MIN, GOAL_VERIFIER_SKEPTIC_MAX),
         )
     }
-    /// Per-goal classifier run cap, floored at `GOAL_CLASSIFIER_MAX_RUNS_MIN`
-    /// with no upper ceiling.
+    /// Per-goal classifier run cap, floored at `GOAL_CLASSIFIER_MAX_RUNS_MIN` with no upper ceiling.
     pub(crate) fn resolve_goal_classifier_max_runs(&self) -> Resolved<u32> {
         use crate::session::goal_classifier::{
             GOAL_CLASSIFIER_MAX_RUNS_DEFAULT, GOAL_CLASSIFIER_MAX_RUNS_MIN,
@@ -2973,9 +2873,8 @@ impl Config {
             |v| v.max(GOAL_CLASSIFIER_MAX_RUNS_MIN),
         )
     }
-    /// Stall-triggered strategist cadence N (fires every N consecutive
-    /// `NotAchieved`). Default tracks the resolved classifier cap
-    /// (`max(1, cap / 2)`); floored at 1 so it can never silently disable.
+    /// Stall-triggered strategist cadence N (fires every N consecutive `NotAchieved`).
+    /// Default tracks the resolved classifier cap (`max(1, cap / 2)`); floored at 1 so it can never silently disable.
     pub(crate) fn resolve_goal_strategist_every(&self, classifier_max_runs: u32) -> Resolved<u32> {
         Self::resolve_goal_u32(
             "GROK_GOAL_STRATEGIST_EVERY",
@@ -2997,18 +2896,17 @@ impl Config {
             |v| v.max(1),
         )
     }
-    /// When `true`, every `/goal` role inherits the current model regardless of
-    /// configured pairs.
+    /// When `true`, every `/goal` role inherits the current model regardless of configured pairs.
     pub(crate) fn resolve_goal_use_current_model_only(&self) -> Resolved<bool> {
         BoolFlag::env("GROK_GOAL_USE_CURRENT_MODEL_ONLY")
             .config(self.goal.use_current_model_only)
             .default(false)
             .resolve()
     }
-    /// Shared single-pair resolution. Precedence: kill-switch ⇒
-    /// `InheritCurrent`/`Config` > `config_pair` ⇒ `Explicit`/`Config` >
-    /// `remote_pair` ⇒ `Explicit`/`Remote` > `InheritCurrent`/`Default`. The
-    /// chosen pair is cloned only on its branch.
+    /// Shared single-pair resolution.
+    /// Precedence: the kill-switch yields `InheritCurrent`/`Config`, then `config_pair` yields `Explicit`/`Config`.
+    /// After those, `remote_pair` yields `Explicit`/`Remote`, else `InheritCurrent`/`Default`.
+    /// The chosen pair is cloned only on its branch.
     fn resolve_single_role_model(
         use_current_only: bool,
         config_pair: Option<&crate::util::config::GoalRoleModel>,
@@ -3031,12 +2929,12 @@ impl Config {
             None => Resolved::new(GoalRoleModelChoice::InheritCurrent, ConfigSource::Default),
         }
     }
-    /// Planner role model: `[goal]` config then remote. No env layer (only the
-    /// kill-switch reads env).
+    /// Planner role model: `[goal]` config then remote.
+    /// No env layer (only the kill-switch reads env).
     ///
-    /// An `Explicit` pair is applied as `runtime_overrides.model`, resolved before
-    /// `resolve_subagent_sampling_config`, so it wins over a user
-    /// `[subagents.models]` pin; `InheritCurrent` hands precedence back to that pin.
+    /// An `Explicit` pair is applied as `runtime_overrides.model`, resolved before `resolve_subagent_sampling_config`.
+    /// It therefore wins over a user `[subagents.models]` pin.
+    /// `InheritCurrent` hands precedence back to that pin.
     pub(crate) fn resolve_goal_planner_model(
         &self,
         use_current_only: bool,
@@ -3062,9 +2960,8 @@ impl Config {
                 .and_then(|s| s.goal_strategist_model.as_ref()),
         )
     }
-    /// Skeptic pool; same precedence as [`Self::resolve_goal_planner_model`] but
-    /// over a pool. Pool order is preserved for the round-robin expansion in
-    /// `expand_skeptic_assignment`.
+    /// Skeptic pool; same precedence as [`Self::resolve_goal_planner_model`] but over a pool.
+    /// Pool order is preserved for the round-robin expansion in `expand_skeptic_assignment`.
     pub(crate) fn resolve_goal_skeptic_models(
         &self,
         use_current_only: bool,
@@ -3090,9 +2987,8 @@ impl Config {
             _ => Resolved::new(Vec::new(), ConfigSource::Default),
         }
     }
-    /// Resolve the mode (env `GROK_COMPACTION_MODE` > config > remote settings >
-    /// default, unrecognized falling through) and, for `Segments`, attach the
-    /// separately-resolved detail level.
+    /// Resolve the mode: env `GROK_COMPACTION_MODE` > config > remote settings > default, with unrecognized values falling through.
+    /// For `Segments`, attach the separately-resolved detail level.
     pub(crate) fn resolve_compaction_mode(&self) -> xai_chat_state::CompactionMode {
         resolve_compaction_mode_from(
             env_string("GROK_COMPACTION_MODE").as_deref(),
@@ -3114,10 +3010,8 @@ impl Config {
                 .and_then(|r| r.compaction_tool_choice.as_deref()),
         )
     }
-    /// Precedence: env `GROK_COMPACTION_DETAIL`, then config
-    /// `features.compaction_detail`, then remote settings
-    /// `remote_settings.compaction_detail`, then default (`verbose`). Drives the
-    /// `segments` verbatim detail level.
+    /// Precedence: env `GROK_COMPACTION_DETAIL` > config `features.compaction_detail` > remote `compaction_detail` > default (`verbose`).
+    /// Drives the `segments` verbatim detail level.
     fn resolve_compaction_detail(&self) -> xai_chat_state::CompactionDetail {
         resolve_compaction_detail_from(
             env_string("GROK_COMPACTION_DETAIL").as_deref(),
@@ -3129,10 +3023,9 @@ impl Config {
     }
     /// Resolve whether to use grok's default OAuth2 (xAI auth.x.ai).
     ///
-    /// Enterprise OIDC (`oidc` in config.toml) always wins — this only gates
-    /// the default xAI OAuth2 fallback when no enterprise OIDC is configured.
+    /// Enterprise OIDC (`oidc` in config.toml) always wins; this only gates the default xAI OAuth2 fallback when no enterprise OIDC is configured.
     ///
-    /// Priority: `--oauth` > GROK_OAUTH_ENABLED env > default (true = OAuth).
+    /// Priority: `--oauth` > GROK_OAUTH_ENABLED env > default (true, meaning OAuth).
     pub(crate) fn resolve_grok_oauth(&self, cli_oidc: Option<bool>) -> Resolved<bool> {
         BoolFlag::env("GROK_OAUTH_ENABLED")
             .cli(cli_oidc)
@@ -3140,18 +3033,14 @@ impl Config {
             .resolve()
     }
 }
-/// Canonical resolver for `mcp.liveness_watchers`. Stacks the full
-/// 7-step `BoolFlag` precedence:
+/// Canonical resolver for `mcp.liveness_watchers`.
+/// Stacks the full 7-step `BoolFlag` precedence:
 ///
-/// `requirement > cli > env (GROK_MCP_LIVENESS_WATCHERS) > config >
-/// managed > feature_flag > default (true)`.
+/// `requirement > cli > env (GROK_MCP_LIVENESS_WATCHERS) > config > managed > feature_flag > default (true)`.
 ///
-/// `util::config::resolve_mcp_liveness_watchers` delegates here so the
-/// precedence is single-sourced.
+/// `util::config::resolve_mcp_liveness_watchers` delegates here so the precedence is single-sourced.
 ///
-/// The default is `true` — it gates the watcher + dispatcher
-/// default-on, with this flag existing primarily as a kill switch
-/// during the rollout.
+/// The default is `true`, turning the watcher and dispatcher on by default; the flag exists primarily as a kill switch during the rollout.
 pub(crate) fn resolve_mcp_liveness_watchers(
     requirement: Option<bool>,
     cli: Option<bool>,
@@ -3168,18 +3057,15 @@ pub(crate) fn resolve_mcp_liveness_watchers(
         .default(true)
         .resolve()
 }
-/// Canonical resolver for `mcp.auto_restart`. Stacks the full 7-step
-/// `BoolFlag` precedence:
+/// Canonical resolver for `mcp.auto_restart`.
+/// Stacks the full 7-step `BoolFlag` precedence:
 ///
-/// `requirement > cli > env (GROK_MCP_AUTO_RESTART) > config >
-/// managed > feature_flag > default (true)`.
+/// `requirement > cli > env (GROK_MCP_AUTO_RESTART) > config > managed > feature_flag > default (true)`.
 ///
-/// Mirrors [`resolve_mcp_liveness_watchers`]. Both
-/// `util::config::resolve_mcp_auto_restart` delegates here so the
-/// precedence is single-sourced.
+/// Mirrors [`resolve_mcp_liveness_watchers`].
+/// `util::config::resolve_mcp_auto_restart` delegates here so the precedence is single-sourced.
 ///
-/// Recovery is on by default; opt out via `GROK_MCP_AUTO_RESTART=false`,
-/// `[features] mcp_auto_restart`, or `requirements.toml`.
+/// Recovery is on by default; opt out via `GROK_MCP_AUTO_RESTART=false`, `[features] mcp_auto_restart`, or `requirements.toml`.
 pub(crate) fn resolve_mcp_auto_restart(
     requirement: Option<bool>,
     cli: Option<bool>,
@@ -3196,8 +3082,8 @@ pub(crate) fn resolve_mcp_auto_restart(
         .default(true)
         .resolve()
 }
-/// Kill switch for the transient turn-resubmit arm. Standard `BoolFlag`
-/// precedence; env `GROK_TURN_TRANSIENT_RETRY`; default on.
+/// Kill switch for the transient turn-resubmit arm.
+/// Standard `BoolFlag` precedence; env `GROK_TURN_TRANSIENT_RETRY`; default on.
 pub(crate) fn resolve_turn_transient_retry(
     requirement: Option<bool>,
     cli: Option<bool>,
@@ -3214,19 +3100,15 @@ pub(crate) fn resolve_turn_transient_retry(
         .default(true)
         .resolve()
 }
-/// Canonical resolver for `mcp.push_server_status`. Stacks the same
-/// 7-step `BoolFlag` precedence as
-/// [`resolve_mcp_liveness_watchers`]:
+/// Canonical resolver for `mcp.push_server_status`.
+/// Stacks the same 7-step `BoolFlag` precedence as [`resolve_mcp_liveness_watchers`]:
 ///
-/// `requirement > cli > env (GROK_MCP_PUSH_SERVER_STATUS) > config >
-/// managed > feature_flag > default (true)`.
+/// `requirement > cli > env (GROK_MCP_PUSH_SERVER_STATUS) > config > managed > feature_flag > default (true)`.
 ///
-/// `util::config::resolve_mcp_push_server_status` delegates here so
-/// the precedence is single-sourced.
+/// `util::config::resolve_mcp_push_server_status` delegates here so the precedence is single-sourced.
 ///
-/// The default is `true` — the pager's subscription to
-/// `x.ai/mcp/server_status` is wired default-on, with this
-/// flag existing primarily as a kill switch.
+/// The default is `true`: the pager's subscription to `x.ai/mcp/server_status` is wired on by default.
+/// The flag exists primarily as a kill switch.
 pub fn resolve_mcp_push_server_status(
     requirement: Option<bool>,
     cli: Option<bool>,
@@ -3243,29 +3125,20 @@ pub fn resolve_mcp_push_server_status(
         .default(true)
         .resolve()
 }
-/// Canonical resolver for `mcp.recursive_config_watch`. Stacks the
-/// same 7-step `BoolFlag` precedence as
-/// [`resolve_mcp_liveness_watchers`]:
+/// Canonical resolver for `mcp.recursive_config_watch`.
+/// Stacks the same 7-step `BoolFlag` precedence as [`resolve_mcp_liveness_watchers`]:
 ///
-/// `requirement > cli > env (GROK_MCP_RECURSIVE_CONFIG_WATCH) >
-/// config > managed > feature_flag > default (true)`.
+/// `requirement > cli > env (GROK_MCP_RECURSIVE_CONFIG_WATCH) > config > managed > feature_flag > default (true)`.
 ///
-/// `util::config::resolve_mcp_recursive_config_watch` delegates here
-/// so the precedence is single-sourced.
+/// `util::config::resolve_mcp_recursive_config_watch` delegates here so the precedence is single-sourced.
 ///
-/// The default is `true`. It enables the two narrow
-/// non-recursive cwd watches default-on. The flag exists primarily
-/// as a kill switch during the rollout: if the FSEvents flakiness
-/// on macOS or an inotify-quota issue on Linux causes a regression,
-/// operators flip this flag (e.g. via `GROK_MCP_RECURSIVE_CONFIG_
-/// WATCH=0`) and the leader falls back to the prior behavior (no cwd
-/// watches; user-triggered refresh is the only project-config
-/// reload path).
+/// The default is `true`. It turns the two narrow non-recursive cwd watches on by default.
+/// If FSEvents flakiness on macOS or an inotify-quota issue on Linux causes a regression, operators set `GROK_MCP_RECURSIVE_CONFIG_WATCH=0`.
+/// The leader then falls back to the prior behavior: no cwd watches, and user-triggered refresh is the only project-config reload path.
 ///
-/// Note the **name is a slight misnomer**: the watches themselves
-/// are non-recursive (by design, to avoid blowing through
-/// `fs.inotify.max_user_watches` on large repos). The flag name
-/// follows the rollout-gate naming convention.
+/// The **name is a slight misnomer**: the watches themselves are non-recursive.
+/// That is by design, to avoid blowing through `fs.inotify.max_user_watches` on large repos.
+/// The flag name follows the rollout-gate naming convention.
 pub(crate) fn resolve_mcp_recursive_config_watch(
     requirement: Option<bool>,
     cli: Option<bool>,
@@ -3282,13 +3155,11 @@ pub(crate) fn resolve_mcp_recursive_config_watch(
         .default(true)
         .resolve()
 }
-/// Sync analogue of [`BoolFlag`] for callers that run before the tokio
-/// runtime (e.g. `init_sentry`). Loads from disk + env directly rather than
-/// from a pre-built `Config`.
+/// Sync analogue of [`BoolFlag`] for callers that run before the tokio runtime (e.g. `init_sentry`).
+/// Loads from disk and env directly rather than from a pre-built `Config`.
 ///
 /// Same convention as [`BoolFlag`]: `resolve()` returns the *enabled* value.
-/// `disable_env` is sugar for "force-off if this env is truthy" and does not
-/// invert the convention.
+/// `disable_env` is sugar for "force-off if this env is truthy" and does not invert the convention.
 ///
 /// Layer precedence:
 /// 1. `requirements.toml`              (admin pin)
@@ -3314,14 +3185,14 @@ impl SyncBoolFlag {
             default: false,
         }
     }
-    /// Force-off env name (e.g. `"DISABLE_TELEMETRY"`). Truthy at this name
-    /// in `managed_settings.json` or process env disables the flag.
+    /// Force-off env name (e.g. `"DISABLE_TELEMETRY"`).
+    /// Truthy at this name in `managed_settings.json` or process env disables the flag.
     pub(crate) const fn disable_env(mut self, name: &'static str) -> Self {
         self.disable_env = Some(name);
         self
     }
-    /// Either-direction env resolver (typically `GROK_*`). Returns
-    /// `Some(enabled)` for an explicit signal, `None` to fall through.
+    /// Either-direction env resolver (typically `GROK_*`).
+    /// Returns `Some(enabled)` for an explicit signal, `None` to fall through.
     pub(crate) const fn enable_env(mut self, resolver: fn() -> Option<bool>) -> Self {
         self.enable_env = Some(resolver);
         self
@@ -3367,17 +3238,16 @@ impl SyncBoolFlag {
         self.inherit.map_or(self.default, |f| f())
     }
 }
-/// Sync slice of [`Config::resolve_telemetry_mode`] for use before the tokio
-/// runtime (e.g. `init_sentry`). `true` only when explicitly off.
+/// Sync slice of [`Config::resolve_telemetry_mode`] for use before the tokio runtime (e.g. `init_sentry`).
+/// `true` only when explicitly off.
 pub(crate) fn is_telemetry_disabled_sync() -> bool {
     !SyncBoolFlag::new(telemetry_enabled_from_toml)
         .disable_env("DISABLE_TELEMETRY")
         .enable_env(grok_telemetry_env_enabled)
         .resolve()
 }
-/// Like [`is_telemetry_disabled_sync`] but only `true` when telemetry is
-/// *explicitly* off; absence is not disabled (`.default(true)`) so remote-only
-/// enablement still builds the OTLP exporter (the runtime gate then governs it).
+/// Like [`is_telemetry_disabled_sync`] but only `true` when telemetry is *explicitly* off.
+/// Absence is not disabled (`.default(true)`), so remote-only enablement still builds the OTLP exporter (the runtime gate then governs it).
 pub(crate) fn is_telemetry_explicitly_disabled_sync() -> bool {
     !SyncBoolFlag::new(telemetry_enabled_from_toml)
         .disable_env("DISABLE_TELEMETRY")
@@ -3385,8 +3255,8 @@ pub(crate) fn is_telemetry_explicitly_disabled_sync() -> bool {
         .default(true)
         .resolve()
 }
-/// Sync sibling of [`is_telemetry_disabled_sync`] scoped to Sentry. Inherits
-/// from telemetry when no Sentry-specific signal is set.
+/// Sync sibling of [`is_telemetry_disabled_sync`] scoped to Sentry.
+/// Inherits from telemetry when no Sentry-specific signal is set.
 pub fn is_error_reporting_disabled_sync() -> bool {
     !SyncBoolFlag::new(error_reporting_enabled_from_toml)
         .disable_env("DISABLE_ERROR_REPORTING")
@@ -3394,8 +3264,9 @@ pub fn is_error_reporting_disabled_sync() -> bool {
         .inherit(|| !is_telemetry_disabled_sync())
         .resolve()
 }
-/// `[features] telemetry` as enabled bool. SessionMetrics counts as enabled
-/// — see ERROR_REPORTING_PLAN.md. `None` for absent or unparseable.
+/// `[features] telemetry` as enabled bool.
+/// SessionMetrics counts as enabled.
+/// `None` for absent or unparseable.
 fn telemetry_enabled_from_toml(root: &toml::Value) -> Option<bool> {
     match root.get("features")?.as_table()?.get("telemetry")? {
         toml::Value::Boolean(b) => Some(*b),
@@ -3403,38 +3274,34 @@ fn telemetry_enabled_from_toml(root: &toml::Value) -> Option<bool> {
         _ => None,
     }
 }
-/// `[diagnostics] error_reporting` as enabled bool. Bool-only; no
-/// `session_metrics` equivalent. `None` falls through to inheritance.
+/// `[diagnostics] error_reporting` as enabled bool.
+/// Bool-only; no `session_metrics` equivalent.
+/// `None` falls through to inheritance.
 fn error_reporting_enabled_from_toml(root: &toml::Value) -> Option<bool> {
     root.get("diagnostics")?
         .as_table()?
         .get("error_reporting")?
         .as_bool()
 }
-/// `GROK_TELEMETRY_ENABLED` resolved through `TelemetryMode::parse` so the
-/// extended string forms (e.g. `"session_metrics"`) are accepted.
+/// `GROK_TELEMETRY_ENABLED` resolved through `TelemetryMode::parse` so the extended string forms (e.g. `"session_metrics"`) are accepted.
 fn grok_telemetry_env_enabled() -> Option<bool> {
     env_telemetry_mode("GROK_TELEMETRY_ENABLED").map(|m| !m.is_disabled())
 }
 /// Load `~/.grok/requirements.toml` standalone so the admin pin can beat
-/// env vars. The merged config layer can't express that — last-merge-wins
-/// loses provenance.
+/// env vars.
+/// The merged config layer can't express that: last-merge-wins loses provenance.
 pub(crate) fn read_requirements_toml() -> Option<toml::Value> {
     let path = crate::util::grok_home::grok_home().join("requirements.toml");
     let content = std::fs::read_to_string(&path).ok()?;
     toml::from_str(&content).ok()
 }
-/// Resolve the external-OTEL master switch exactly the way the external
-/// stream's activation does: **requirement pin > `GROK_EXTERNAL_OTEL` env >
-/// `[telemetry].otel_enabled` config layer (managed config included) > off**.
+/// Resolve the external-OTEL master switch exactly the way the external stream's activation does.
+/// **Requirement pin > `GROK_EXTERNAL_OTEL` env > `[telemetry].otel_enabled` config layer (managed config included) > off**.
 ///
-/// The internal trace pipeline keys its "ignore `OTEL_EXPORTER_OTLP_*`"
-/// behavior off this value ([`EndpointsConfig::external_otel_master_switch`]),
-/// so an org enable distributed via managed config / requirements (no env
-/// var) flips **both** sides together. A desync here would leave the
-/// internally-authed firehose honoring legacy `OTEL_*` repointing while
-/// `internal_pipeline_consumed_otel_vars` simultaneously blocks the external
-/// stream — exactly the split this design forbids.
+/// The internal trace pipeline keys its "ignore `OTEL_EXPORTER_OTLP_*`" behavior off this value ([`EndpointsConfig::external_otel_master_switch`]).
+/// So an org enable distributed via managed config / requirements (no env var) flips **both** sides together.
+/// A desync here would leave the internally-authed firehose honoring legacy `OTEL_*` repointing.
+/// Meanwhile `internal_pipeline_consumed_otel_vars` would block the external stream, exactly the split this design forbids.
 pub(crate) fn external_otel_master_switch_resolved() -> bool {
     external_otel_master_switch_from(
         xai_grok_config::load_merged_requirements().as_ref(),
@@ -3459,29 +3326,78 @@ pub(crate) fn external_otel_master_switch_from(
     }
     table_enabled(effective_config).unwrap_or(false)
 }
-/// Resolve the external OTEL stream configuration at process startup
-/// (env + local config only — remote settings are not yet available when
-/// tracing init runs).
+fn telemetry_otel_str(t: &toml::Value, key: &str) -> Option<String> {
+    t.get(key).and_then(toml::Value::as_str).map(str::to_owned)
+}
+fn telemetry_otel_ms(t: &toml::Value, key: &str) -> Option<String> {
+    t.get(key).and_then(|v| {
+        v.as_integer()
+            .map(|i| i.to_string())
+            .or_else(|| v.as_str().map(str::to_owned))
+    })
+}
+fn telemetry_otel_file_config(
+    t: &toml::Value,
+) -> xai_grok_telemetry::external::ExternalOtelFileConfig {
+    xai_grok_telemetry::external::ExternalOtelFileConfig {
+        enabled: t.get("otel_enabled").and_then(toml::Value::as_bool),
+        metrics_exporter: telemetry_otel_str(t, "otel_metrics_exporter"),
+        logs_exporter: telemetry_otel_str(t, "otel_logs_exporter"),
+        endpoint: telemetry_otel_str(t, "otel_endpoint"),
+        protocol: telemetry_otel_str(t, "otel_protocol")
+            .or_else(|| telemetry_otel_str(t, "otel_transport")),
+        certificate: telemetry_otel_str(t, "otel_certificate"),
+        client_certificate: telemetry_otel_str(t, "otel_client_certificate"),
+        client_key: telemetry_otel_str(t, "otel_client_key"),
+        log_user_prompts: t
+            .get("otel_log_user_prompts")
+            .and_then(toml::Value::as_bool),
+        log_tool_details: t
+            .get("otel_log_tool_details")
+            .and_then(toml::Value::as_bool),
+        log_assistant_responses: t
+            .get("otel_log_assistant_responses")
+            .and_then(toml::Value::as_bool),
+        log_tool_content: t
+            .get("otel_log_tool_content")
+            .and_then(toml::Value::as_bool),
+        timeout: telemetry_otel_ms(t, "otel_timeout"),
+        metric_export_interval: telemetry_otel_ms(t, "otel_metric_export_interval"),
+        logs_endpoint: telemetry_otel_str(t, "otel_logs_endpoint"),
+        metrics_endpoint: telemetry_otel_str(t, "otel_metrics_endpoint"),
+        logs_protocol: telemetry_otel_str(t, "otel_logs_protocol"),
+        metrics_protocol: telemetry_otel_str(t, "otel_metrics_protocol"),
+        logs_certificate: telemetry_otel_str(t, "otel_logs_certificate"),
+        metrics_certificate: telemetry_otel_str(t, "otel_metrics_certificate"),
+        logs_client_certificate: telemetry_otel_str(t, "otel_logs_client_certificate"),
+        logs_client_key: telemetry_otel_str(t, "otel_logs_client_key"),
+        metrics_client_certificate: telemetry_otel_str(t, "otel_metrics_client_certificate"),
+        metrics_client_key: telemetry_otel_str(t, "otel_metrics_client_key"),
+        include_session_id: t
+            .get("otel_metrics_include_session_id")
+            .and_then(toml::Value::as_bool),
+    }
+}
+/// Resolve the external OTEL stream configuration at process startup.
+/// Env and local config only: remote settings are not yet available when tracing init runs.
 ///
-/// Layering follows `resolve_telemetry_mode`: **requirement > env > config >
-/// remote > default**, where the `[telemetry]` `otel_*` keys from the
-/// effective config (which already includes managed-config layers distributed
-/// by `grok setup`) sit under the env vars, requirements pins are applied on
-/// top, and the remote layer is restrictive-only + asynchronous
-/// ([`apply_external_otel_remote_policy`]).
+/// Layering follows `resolve_telemetry_mode`: **requirement > env > config > remote > default**.
+/// The `[telemetry]` `otel_*` keys from the effective config sit under the env vars.
+/// That config already includes managed-config layers distributed by `grok setup`.
+/// Requirements pins are applied on top, and the remote layer is restrictive-only and asynchronous ([`apply_external_otel_remote_policy`]).
 pub fn resolve_external_otel_config(
     client: xai_grok_telemetry::external::config::ExternalClientInfo,
 ) -> Option<xai_grok_telemetry::external::ExternalOtelConfig> {
+    let requirements = xai_grok_config::load_merged_requirements();
     resolve_external_otel_config_with(
         crate::config::load_effective_config().ok().as_ref(),
-        xai_grok_config::load_merged_requirements().as_ref(),
+        requirements.as_ref(),
         |name| std::env::var(name).ok(),
         client,
         EndpointsConfig::default().internal_otlp_consumed_standard_vars(),
     )
 }
-/// Testable core of [`resolve_external_otel_config`]: all inputs injected so
-/// tests don't race on process env / disk.
+/// Testable core of [`resolve_external_otel_config`]: all inputs injected so tests don't race on process env / disk.
 pub(crate) fn resolve_external_otel_config_with(
     effective_config: Option<&toml::Value>,
     requirements: Option<&toml::Value>,
@@ -3489,63 +3405,18 @@ pub(crate) fn resolve_external_otel_config_with(
     client: xai_grok_telemetry::external::config::ExternalClientInfo,
     internal_pipeline_consumed_otel_vars: bool,
 ) -> Option<xai_grok_telemetry::external::ExternalOtelConfig> {
+    let pins =
+        crate::agent::external_otel_pin::RequirementOtelPins::from_requirements(requirements);
     let file_cfg: Option<xai_grok_telemetry::external::ExternalOtelFileConfig> = effective_config
         .and_then(|cfg| cfg.get("telemetry"))
-        .map(|t| xai_grok_telemetry::external::ExternalOtelFileConfig {
-            enabled: t.get("otel_enabled").and_then(toml::Value::as_bool),
-            metrics_exporter: t
-                .get("otel_metrics_exporter")
-                .and_then(toml::Value::as_str)
-                .map(str::to_owned),
-            logs_exporter: t
-                .get("otel_logs_exporter")
-                .and_then(toml::Value::as_str)
-                .map(str::to_owned),
-            endpoint: t
-                .get("otel_endpoint")
-                .and_then(toml::Value::as_str)
-                .map(str::to_owned),
-            protocol: t
-                .get("otel_protocol")
-                .or_else(|| t.get("otel_transport"))
-                .and_then(toml::Value::as_str)
-                .map(str::to_owned),
-            certificate: t
-                .get("otel_certificate")
-                .and_then(toml::Value::as_str)
-                .map(str::to_owned),
-            client_certificate: t
-                .get("otel_client_certificate")
-                .and_then(toml::Value::as_str)
-                .map(str::to_owned),
-            client_key: t
-                .get("otel_client_key")
-                .and_then(toml::Value::as_str)
-                .map(str::to_owned),
-            log_user_prompts: t
-                .get("otel_log_user_prompts")
-                .and_then(toml::Value::as_bool),
-            log_tool_details: t
-                .get("otel_log_tool_details")
-                .and_then(toml::Value::as_bool),
+        .cloned()
+        .map(|mut telemetry| {
+            if let Some(table) = telemetry.as_table_mut() {
+                pins.hide_unlisted_file_siblings(table);
+            }
+            telemetry_otel_file_config(&telemetry)
         });
-    let req_get =
-        |key: &str| -> Option<bool> { requirements?.get("telemetry")?.get(key)?.as_bool() };
-    let req_enabled = req_get("otel_enabled");
-    let req_prompts = req_get("otel_log_user_prompts");
-    let req_details = req_get("otel_log_tool_details");
-    let getenv_pinned = |name: &str| -> Option<String> {
-        let pin = match name {
-            xai_grok_telemetry::external::config::ENV_MASTER_SWITCH => req_enabled,
-            "OTEL_LOG_USER_PROMPTS" => req_prompts,
-            "OTEL_LOG_TOOL_DETAILS" => req_details,
-            _ => None,
-        };
-        if let Some(v) = pin {
-            return Some(if v { "1" } else { "0" }.to_owned());
-        }
-        getenv(name)
-    };
+    let getenv_pinned = crate::agent::external_otel_pin::getenv_with_pins(&pins, getenv);
     let mut resolved = xai_grok_telemetry::external::ExternalOtelConfig::resolve_with(
         getenv_pinned,
         file_cfg.as_ref(),
@@ -3554,10 +3425,8 @@ pub(crate) fn resolve_external_otel_config_with(
     resolved.internal_pipeline_consumed_otel_vars = internal_pipeline_consumed_otel_vars;
     Some(resolved)
 }
-/// Apply the restrictive-only remote-settings policy for the external OTEL
-/// stream (fleet kill switch + content-gate lock). Tighten-only by
-/// construction — there is no remote enable direction — so it is safe to
-/// call on every settings refresh.
+/// Apply the restrictive-only remote-settings policy for the external OTEL stream (fleet kill switch and content-gate lock).
+/// Tighten-only by construction (there is no remote enable direction), so it is safe to call on every settings refresh.
 pub(crate) fn apply_external_otel_remote_policy(
     settings: Option<&crate::util::config::RemoteSettings>,
 ) {
@@ -3572,16 +3441,13 @@ pub(crate) fn apply_external_otel_remote_policy(
 }
 /// Seed free-function remote caches after writing `Config.remote_settings`.
 ///
-/// Called from `init.rs` at boot and from the agent when backgrounded settings
-/// arrive later, so every side effect here must be idempotent and safe to
-/// re-apply. The emission-gate flip is owned by
-/// [`crate::agent::otel_gate::OtelGate`], not here.
+/// Called from `init.rs` at boot and from the agent when backgrounded settings arrive later.
+/// So every side effect here must be idempotent and safe to re-apply.
+/// The emission-gate flip is owned by [`crate::agent::otel_gate::OtelGate`], not here.
 ///
-/// The `force_disable` write here is `Relaxed`; the synchronizing publish is
-/// `OtelGate::apply_and_open`, which applies the same tighten-only policy and then
-/// opens the gate with a `Release` swap. Removing that second application to
-/// deduplicate would leave only the `Relaxed` store and reopen an ARM
-/// visibility hole.
+/// The `force_disable` write here is `Relaxed`; the synchronizing publish is `OtelGate::apply_and_open`.
+/// That publish applies the same tighten-only policy and then opens the gate with a `Release` swap.
+/// Removing that second application to deduplicate would leave only the `Relaxed` store and reopen an ARM visibility hole.
 pub fn apply_remote_settings_side_effects(settings: Option<&crate::util::config::RemoteSettings>) {
     if let Some(s) = settings {
         let origin_trusted = crate::util::is_prod_cli_chat_proxy_url(
@@ -3599,6 +3465,9 @@ pub fn apply_remote_settings_side_effects(settings: Option<&crate::util::config:
         settings.and_then(|s| s.max_mcp_output_bytes),
     );
     crate::util::config::cache_remote_auto_mode(settings.and_then(|s| s.auto_mode.clone()));
+    crate::util::config::cache_remote_prompt_suggestions(
+        settings.and_then(|s| s.prompt_suggestions.clone()),
+    );
     crate::util::config::cache_remote_remember_tool_approvals(
         settings.and_then(|s| s.remember_tool_approvals),
     );
@@ -3612,8 +3481,8 @@ pub fn apply_remote_settings_side_effects(settings: Option<&crate::util::config:
     crate::session::normalize_cache::NormalizeCache::global()
         .set_enabled(image_normalize_cache_enabled);
 }
-/// Read `env.<key>` from Claude-compat `managed_settings.json`. `Some(true)`
-/// indicates a force-off signal from a Mac-MDM-style admin policy.
+/// Read `env.<key>` from Claude-compat `managed_settings.json`.
+/// `Some(true)` indicates a force-off signal from a Mac-MDM-style admin policy.
 fn managed_settings_env_flag(key: &str) -> Option<bool> {
     let path = xai_grok_config::claude_managed_settings_path()?;
     let content = std::fs::read_to_string(&path).ok()?;
@@ -4328,6 +4197,7 @@ fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
             reasoning_effort,
             supports_reasoning_effort,
             reasoning_efforts,
+            variants: Vec::new(),
             supports_backend_search: provider.adapter == xai_grok_models::AdapterKind::OpenAiCodex,
             compactions_remaining: None,
             compaction_at_tokens: None,
@@ -4547,10 +4417,9 @@ fn apply_global_extra_headers(resolved: &mut IndexMap<String, ModelEntry>, model
         }
     }
 }
-/// Layer 7 of [`resolve_model_list`]: fill scalar `[models]` defaults into any
-/// model that left the field unset. Per-model (Layer 3) and remote-prefetched
-/// (Layer 2) values already populated theirs, so they win via `get_or_insert`
-/// (the global default is a fallback, not a clamp).
+/// Layer 7 of [`resolve_model_list`]: fill scalar `[models]` defaults into any model that left the field unset.
+/// Per-model (Layer 3) and remote-prefetched (Layer 2) values already populated theirs, so they win via `get_or_insert`.
+/// The global default is a fallback, not a clamp.
 fn apply_global_scalar_defaults(
     resolved: &mut IndexMap<String, ModelEntry>,
     models: &ModelsConfig,
@@ -4595,13 +4464,12 @@ pub(crate) fn find_model_by_id<'a>(
 ) -> Option<&'a ModelEntry> {
     models
         .get(model_id)
-        .or_else(|| models.values().find(|m| m.model == model_id))
+        .or_else(|| models.values().find(|m| m.info.has_model_id(model_id)))
 }
-/// Whether the EFFECTIVE Auto-mode classifier model supports reasoning effort:
-/// the model actually routed to (`aux_model` when the aux sampler resolved) else
-/// the session model the worker falls back to. Not-found-in-catalog ⇒ `false`
-/// (conservative; also covers the Tier-2 synthetic proxy entry). Drives the
-/// built-in `low` effort default.
+/// Whether the EFFECTIVE Auto-mode classifier model supports reasoning effort.
+/// That is the model actually routed to (`aux_model` when the aux sampler resolved), else the session model the worker falls back to.
+/// A model not found in the catalog resolves `false` (conservative; also covers the Tier-2 synthetic proxy entry).
+/// Drives the built-in `low` effort default.
 pub(crate) fn effective_classifier_supports_re(
     aux_model: Option<&str>,
     session_model: &str,
@@ -4610,6 +4478,14 @@ pub(crate) fn effective_classifier_supports_re(
     find_model_by_id(models, aux_model.unwrap_or(session_model))
         .map(|e| e.info().supports_reasoning_effort)
         .unwrap_or(false)
+}
+/// One reasoning effort, and the model id that reaches it.
+/// Most models leave this list empty and send one id at every effort.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelVariant {
+    pub effort: ReasoningEffort,
+    pub model_id: String,
 }
 /// JSON-only subset of `ModelEntryConfig`.
 #[derive(Debug, Default, Deserialize)]
@@ -4634,6 +4510,8 @@ struct DefaultModelJson {
     supports_reasoning_effort: bool,
     #[serde(default)]
     reasoning_efforts: Vec<ReasoningEffortOption>,
+    #[serde(default)]
+    variants: Vec<ModelVariant>,
     /// When false, only OAuth users see this in the picker.
     #[serde(default = "default_true")]
     supported_in_api: bool,
@@ -4707,6 +4585,7 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
                 reasoning_effort: m.reasoning_effort,
                 supports_reasoning_effort: m.supports_reasoning_effort,
                 reasoning_efforts: m.reasoning_efforts,
+                variants: m.variants,
                 supports_backend_search: m.supports_backend_search,
                 compactions_remaining: m.compactions_remaining,
                 compaction_at_tokens: m.compaction_at_tokens,
@@ -4720,8 +4599,9 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelEntryConfig {
-    /// Stable unique identifier for this catalog entry. When present,
-    /// used as the catalog map key. Falls back to `model` when absent.
+    /// Stable unique identifier for this catalog entry.
+    /// When present, used as the catalog map key.
+    /// Falls back to `model` when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     /// The routing slug sent in API requests.
@@ -4769,10 +4649,13 @@ pub struct ModelEntryConfig {
     pub reasoning_effort: Option<ReasoningEffort>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub supports_reasoning_effort: bool,
-    /// Per-model reasoning-effort menu (source of truth). The two legacy fields
-    /// above are derived from this list when it is non-empty.
+    /// Per-model reasoning-effort menu (source of truth).
+    /// The two legacy fields above are derived from this list when it is non-empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasoning_efforts: Vec<ReasoningEffortOption>,
+    /// The id to send for each effort, empty unless the backend spells the effort into the model id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variants: Vec<ModelVariant>,
     /// Extra headers to send with requests to this model's endpoint.
     /// Useful for BYOK (Bring Your Own Key) scenarios.
     /// Example: { "x-anthropic-api-key" = "sk-ant-..." }
@@ -4783,13 +4666,12 @@ pub struct ModelEntryConfig {
     pub query_params: IndexMap<String, String>,
     /// The total context window size in tokens for this model.
     /// Used for auto-compact threshold calculations.
-    /// Required — BYOK users must explicitly set this in config.toml.
+    /// Required: BYOK users must explicitly set this in config.toml.
     pub context_window: NonZeroU64,
-    /// Per-model auto-compact threshold (0-100). When the session's token
-    /// usage exceeds this percentage of `context_window`, the conversation
-    /// is summarized. Resolver precedence:
-    /// requirements > env > user (per-model > global) > managed (per-model > global)
-    /// > remote per-model (this field) > remote global > 85.
+    /// Per-model auto-compact threshold (0-100).
+    /// When the session's token usage exceeds this percentage of `context_window`, the conversation is summarized.
+    /// Resolver precedence: requirements > env > user (per-model > global) > managed (per-model > global).
+    /// Below those: remote per-model (this field) > remote global > 85.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_compact_threshold_percent: Option<u8>,
     /// Per-model system-prompt identity label (not UI `name`).
@@ -4800,9 +4682,7 @@ pub struct ModelEntryConfig {
     /// When not set, `base_url` is used for all auth methods (e.g. BYOK / third-party models).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_base_url: Option<String>,
-    /// When true, this model uses concise mode (compact system prompt,
-    /// concise tool output, concise user message prefix, reduced toolset).
-    /// Defaults to false — when omitted or false, nothing changes.
+    /// When true, this model uses concise mode (compact system prompt, concise tool output, concise user message prefix, reduced toolset).
     #[serde(default, skip_serializing_if = "is_false")]
     pub use_concise: bool,
     /// The type of system prompt to use for this model.
@@ -4810,9 +4690,8 @@ pub struct ModelEntryConfig {
     #[serde(default = "default_agent_type")]
     pub agent_type: String,
     /// Maximum seconds to wait between SSE chunks during inference streaming.
-    /// When no chunk is received within this duration, the request fails with
-    /// a non-retryable `IdleTimeout` error. This is a per-chunk deadline that
-    /// resets on every received chunk — NOT a total-turn timeout.
+    /// When no chunk is received within this duration, the request fails with a non-retryable `IdleTimeout` error.
+    /// This is a per-chunk deadline that resets on every received chunk, NOT a total-turn timeout.
     /// Default: 300 seconds (5 minutes).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inference_idle_timeout_secs: Option<u64>,
@@ -4839,35 +4718,27 @@ pub struct ModelEntryConfig {
     pub compaction_at_tokens: Option<CompactionAtTokens>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub show_model_fingerprint: bool,
-    /// Inject `stream_tool_calls: true` into the request body
-    /// so the upstream emits per-chunk `function_call_arguments.delta`
-    /// Without this set, xAI API models send args as one delta
-    /// event, defeating the purpose of streaming.
+    /// Inject `stream_tool_calls: true` into the request body so the upstream emits per-chunk `function_call_arguments.delta`.
+    /// Without this set, xAI API models send args as one delta event, defeating the purpose of streaming.
     ///
-    /// Per-model opt-in -- BYOK endpoints that don't understand the
-    /// flag should leave this unset to avoid request errors.
+    /// Per-model opt-in: BYOK endpoints that don't understand the flag should leave this unset to avoid request errors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_tool_calls: Option<bool>,
-    /// Per-model Layer-3 LazinessDetector configuration. Defaults to
-    /// the all-disabled state via `#[serde(default)]`.
+    /// Per-model Layer-3 LazinessDetector configuration.
+    /// Defaults to the all-disabled state via `#[serde(default)]`.
     #[serde(default, skip_serializing_if = "is_default_laziness_detector")]
     pub laziness_detector: LazinessDetectorPerModelConfig,
 }
-/// True when `cfg` equals the all-disabled default. Derives `PartialEq`
-/// on `f32`, which is fine for the current shape because both `f32`
-/// fields default to `None` — there's no parsed-vs-literal `0.7` float
-/// equality footgun. If a future default introduces `Some(0.7)`, this
-/// helper must be reworked (e.g. compare on tolerance, or switch to a
-/// bit-pattern compare) so `skip_serializing_if` doesn't start emitting
-/// `[laziness_detector]` blocks for every model in `config.toml`.
+/// Derives `PartialEq` on `f32`, which is fine for the current shape.
+/// Both `f32` fields default to `None`, so there's no parsed-vs-literal `0.7` float equality footgun.
+/// If a future default introduces `Some(0.7)`, this helper must be reworked (e.g. compare on tolerance, or switch to a bit-pattern compare).
+/// Otherwise `skip_serializing_if` starts emitting `[laziness_detector]` blocks for every model in `config.toml`.
 fn is_default_laziness_detector(cfg: &LazinessDetectorPerModelConfig) -> bool {
     cfg == &LazinessDetectorPerModelConfig::default()
 }
-/// A `[model.foo]` entry from config.toml, parsed directly from raw TOML
-/// (bypassing deep merge). Scalar fields are `Option` so absent means "inherit
-/// from defaults/prefetched"; the collection fields (`extra_headers`,
-/// `reasoning_efforts`) merge only when non-empty and so cannot express
-/// "override to empty."
+/// A `[model.foo]` entry from config.toml, parsed directly from raw TOML (bypassing deep merge).
+/// Scalar fields are `Option` so absent means "inherit from defaults/prefetched".
+/// The collection fields (`extra_headers`, `reasoning_efforts`) merge only when non-empty and so cannot express "override to empty."
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ConfigModelOverride {
@@ -4877,11 +4748,10 @@ pub struct ConfigModelOverride {
     pub name: Option<String>,
     pub description: Option<String>,
     pub api_key: Option<String>,
-    /// Env var name(s) for the provider key — string or array in config.toml.
+    /// Env var name(s) for the provider key: string or array in config.toml.
     pub env_key: Option<EnvKeys>,
-    /// Name of a `[auth_provider.<name>]` credential helper that mints
-    /// this model's bearer token. Static `api_key` / `env_key` win when both
-    /// are set.
+    /// Name of a `[auth_provider.<name>]` credential helper that mints this model's bearer token.
+    /// Static `api_key` / `env_key` win when both are set.
     pub auth_provider: Option<String>,
     pub model_provider: Option<String>,
     pub api_base_url: Option<String>,
@@ -4899,9 +4769,8 @@ pub struct ConfigModelOverride {
     pub env_http_headers: IndexMap<String, String>,
     pub context_window: Option<u64>,
     /// Per-model auto-compact threshold override (0-100) from `[model.<id>]`.
-    /// Read directly by `resolve_auto_compact_threshold_percent`; intentionally
-    /// NOT merged into `ModelInfo.auto_compact_threshold_percent` so the
-    /// resolver can keep user-per-model distinct from GB-per-model.
+    /// Read directly by `resolve_auto_compact_threshold_percent`.
+    /// Intentionally NOT merged into `ModelInfo.auto_compact_threshold_percent` so the resolver can keep user-per-model distinct from GB-per-model.
     pub auto_compact_threshold_percent: Option<u8>,
     /// Per-model system-prompt identity; not merged into `ModelInfo` (tiered resolve).
     pub system_prompt_label: Option<String>,
@@ -4916,8 +4785,7 @@ pub struct ConfigModelOverride {
     pub supports_reasoning_effort: Option<bool>,
     pub reasoning_efforts: Vec<ReasoningEffortOption>,
     pub supports_backend_search: Option<bool>,
-    /// Aliases must be registered in `config_model_override_parse::ALIASES`;
-    /// serde rejects a table that contains both spellings otherwise.
+    /// Aliases must be registered in `config_model_override_parse::ALIASES`; serde rejects a table that contains both spellings otherwise.
     #[serde(alias = "send_compactions_remaining")]
     pub compactions_remaining: Option<CompactionsRemaining>,
     pub compaction_at_tokens: Option<CompactionAtTokens>,
@@ -5051,7 +4919,7 @@ impl ConfigModelOverride {
         entry
     }
 }
-/// Shared model metadata — the common fields across all model sources.
+/// Shared model metadata: the common fields across all model sources.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ModelInfo {
     /// Stable unique identifier for this catalog entry.
@@ -5060,15 +4928,13 @@ pub struct ModelInfo {
     pub id: Option<String>,
     /// The routing slug sent in API requests.
     pub model: String,
-    /// Provider family that mints this model's conversation items
-    /// (e.g. "xai"); `None` = unknown.
+    /// Provider family that mints this model's conversation items (e.g. "xai"); `None` means unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_family: Option<String>,
     /// The base URL of the model (session endpoint). e.g. "https://cli-chat-proxy.grok.com/v1"
     pub base_url: String,
-    /// Human-readable name of the model. Honored by both the picker
-    /// (`/model`) and `/session-info` -- when set, that's the label shown
-    /// to users in either consumer.
+    /// Human-readable name of the model.
+    /// Honored by both the picker (`/model`) and `/session-info`: when set, that's the label shown to users in either consumer.
     pub name: Option<String>,
     pub description: Option<String>,
     pub max_completion_tokens: Option<u32>,
@@ -5086,18 +4952,15 @@ pub struct ModelInfo {
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub env_http_headers: IndexMap<String, String>,
     pub context_window: NonZeroU64,
-    /// Per-model auto-compact threshold (0-100). `None` defers to the
-    /// global / default tiers in `resolve_auto_compact_threshold_percent`.
+    /// Per-model auto-compact threshold (0-100).
+    /// `None` defers to the global / default tiers in `resolve_auto_compact_threshold_percent`.
     pub auto_compact_threshold_percent: Option<u8>,
     /// Per-model system-prompt identity (not UI picker `name`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt_label: Option<String>,
-    /// When true, this model uses concise mode (compact system prompt,
-    /// concise tool output, concise user message prefix, reduced toolset).
+    /// When true, this model uses concise mode (compact system prompt, concise tool output, concise user message prefix, reduced toolset).
     pub use_concise: bool,
-    /// The type of agent configuration to use for this model.
-    /// Always has a value; defaults to `"grok-build-plan"` when the server
-    /// or user config doesn't specify one.
+    /// Always has a value; defaults to `"grok-build-plan"` when the server or user config doesn't specify one.
     #[serde(default = "default_agent_type")]
     pub agent_type: String,
     /// Per-chunk idle timeout for inference streaming (see `ModelEntryConfig`).
@@ -5106,8 +4969,8 @@ pub struct ModelInfo {
     pub subagent_rate_limit_max_attempts: Option<u32>,
     /// Never show in picker (any auth). See also `supported_in_api`.
     pub hidden: bool,
-    /// May the user select this model for normal chat? Derived from
-    /// `allowed_models` in `resolve_model_catalog`; never persisted.
+    /// May the user select this model for normal chat?
+    /// Derived from `allowed_models` in `resolve_model_catalog`; never persisted.
     #[serde(skip_serializing, default = "default_true")]
     pub user_selectable: bool,
     /// When false, only OAuth users see this in the picker.
@@ -5119,6 +4982,9 @@ pub struct ModelInfo {
     /// Per-model reasoning-effort menu (source of truth); legacy fields derived from it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasoning_efforts: Vec<ReasoningEffortOption>,
+    /// The id to send for each effort, empty unless the backend spells the effort into the model id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variants: Vec<ModelVariant>,
     pub supports_backend_search: bool,
     /// Per-model config for the `x-compactions-remaining` header; `None` disables it.
     pub compactions_remaining: Option<CompactionsRemaining>,
@@ -5127,10 +4993,9 @@ pub struct ModelInfo {
     pub show_model_fingerprint: bool,
     /// When `Some(true)`, the sampler injects `stream_tool_calls: true`
     pub stream_tool_calls: Option<bool>,
-    /// Per-model Layer-3 LazinessDetector configuration. Defaults to
-    /// the all-disabled state — the feature is per-model opt-in with a
-    /// second-step `max_nudges_per_session > 0` opt-in for actually
-    /// injecting nudges. See [`LazinessDetectorPerModelConfig`].
+    /// Per-model Layer-3 LazinessDetector configuration. Defaults to the all-disabled state.
+    /// The feature is per-model opt-in, with a second-step `max_nudges_per_session > 0` opt-in for actually injecting nudges.
+    /// See [`LazinessDetectorPerModelConfig`].
     #[serde(default)]
     pub laziness_detector: LazinessDetectorPerModelConfig,
 }
@@ -5169,6 +5034,7 @@ impl ModelInfo {
             reasoning_effort: None,
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
+            variants: Vec::new(),
             supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
@@ -5177,7 +5043,6 @@ impl ModelInfo {
             laziness_detector: LazinessDetectorPerModelConfig::default(),
         }
     }
-    /// Extract shared model metadata from a flat config entry.
     pub(crate) fn from_config(entry: &ModelEntryConfig) -> Self {
         ModelInfo {
             user_selectable: true,
@@ -5210,6 +5075,7 @@ impl ModelInfo {
             reasoning_effort: entry.reasoning_effort,
             supports_reasoning_effort: entry.supports_reasoning_effort,
             reasoning_efforts: entry.reasoning_efforts.clone(),
+            variants: entry.variants.clone(),
             supports_backend_search: entry.supports_backend_search,
             compactions_remaining: entry.compactions_remaining,
             compaction_at_tokens: entry.compaction_at_tokens,
@@ -5218,11 +5084,35 @@ impl ModelInfo {
             laziness_detector: entry.laziness_detector.clone(),
         }
     }
-    /// Derive the legacy effort gate/default from `reasoning_efforts` so the
-    /// shell's internal reads (support gate, wire default, session modes) treat
-    /// a menu-only model as supported. The single derive site; `to_acp_model_info`
-    /// then just reads these fields. Idempotent (the remote/CCP path already sets
-    /// them); the empty-list path leaves both legacy fields untouched.
+    /// Whether `id` is one of the ids this model sends: its own, or the one it uses at some effort.
+    pub(crate) fn has_model_id(&self, id: &str) -> bool {
+        self.model == id || self.variants.iter().any(|variant| variant.model_id == id)
+    }
+    /// The id to send at this effort.
+    ///
+    /// Every variant must name an effort this model offers and a non-empty id, or it routes to something nobody can select.
+    pub(crate) fn model_at(&self, effort: ReasoningEffort) -> &str {
+        debug_assert!(
+            self.variants.iter().all(|variant| {
+                !variant.model_id.is_empty()
+                    && (self.reasoning_efforts.is_empty()
+                        || self
+                            .reasoning_efforts
+                            .iter()
+                            .any(|option| option.value == variant.effort))
+            }),
+            "model {} has a variant with an empty id or an effort its menu does not offer",
+            self.model
+        );
+        self.variants
+            .iter()
+            .find(|variant| variant.effort == effort)
+            .map_or(self.model.as_str(), |variant| variant.model_id.as_str())
+    }
+    /// Derive the legacy effort gate/default from `reasoning_efforts`.
+    /// The shell's internal reads (support gate, wire default, session modes) then treat a menu-only model as supported.
+    /// The single derive site; `to_acp_model_info` then just reads these fields.
+    /// Idempotent (the remote/CCP path already sets them); the empty-list path leaves both legacy fields untouched.
     fn derive_reasoning_effort_fields(&mut self) {
         if self.reasoning_efforts.is_empty() {
             return;
@@ -5262,8 +5152,7 @@ pub struct ModelEntry {
     pub info: ModelInfo,
     pub api_key: Option<String>,
     pub env_key: Option<EnvKeys>,
-    /// Named credential helper (`[model.<id>] auth_provider = "<name>"`),
-    /// resolved against `[auth_provider.<name>]` by `resolve_model_list`.
+    /// Named credential helper (`[model.<id>] auth_provider = "<name>"`), resolved against `[auth_provider.<name>]` by `resolve_model_list`.
     /// Config-file models only: the built-in catalog never carries one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_provider: Option<crate::auth::AuthProviderRef>,
@@ -5338,24 +5227,22 @@ impl ModelEntry {
         self.info.visible_for_auth(is_session_auth)
     }
     /// Non-empty `api_key`, else first non-empty resolved `env_key`.
-    /// `None` → fall through to session / global key. Static only: never
-    /// consults auth-provider tokens.
+    /// `None` falls through to the session / global key.
+    /// Static only: never consults auth-provider tokens.
     pub(crate) fn own_credential(&self) -> Option<String> {
         first_own_credential(self.api_key.as_deref(), self.env_key.as_ref())
     }
-    /// The provider governing this model's bearer: `None` when a static
-    /// `api_key`/`env_key` resolves. The turn paths consult this, so a
-    /// shadowed provider never runs.
+    /// The provider governing this model's bearer: `None` when a static `api_key`/`env_key` resolves.
+    /// The turn paths consult this, so a shadowed provider never runs.
     pub(crate) fn effective_auth_provider(&self) -> Option<&crate::auth::AuthProviderRef> {
         if self.own_credential().is_some() {
             return None;
         }
         self.auth_provider.as_ref()
     }
-    /// `true` when the model has a non-empty `api_key`, an `env_key` that
-    /// resolves to a non-empty value, or a named auth provider.
-    /// Probes `std::env::var` at call time: result is not stable across env
-    /// changes. Never executes a provider command.
+    /// `true` when the model has a non-empty `api_key`, an `env_key` that resolves to a non-empty value, or a named auth provider.
+    /// Probes `std::env::var` at call time: result is not stable across env changes.
+    /// Never executes a provider command.
     pub(crate) fn has_own_credentials(&self) -> bool {
         self.own_credential().is_some() || self.auth_provider.is_some()
     }
@@ -5374,8 +5261,7 @@ fn default_true() -> bool {
 }
 /// Codebase indexing setting for `[features] codebase_indexing`.
 ///
-/// Patterns are matched against the git root when available, otherwise the cwd,
-/// which allows explicitly indexing non-git directories.
+/// Patterns are matched against the git root when available, otherwise the cwd, which allows explicitly indexing non-git directories.
 ///
 /// ```toml
 /// codebase_indexing = false                                          # disable
@@ -5419,9 +5305,8 @@ impl CodebaseIndexingSetting {
         }
     }
 }
-/// Optional role pair that drops a malformed value to `None` (with a warn)
-/// instead of failing the whole config parse — one typo must not wipe the
-/// config. Mirrors the remote tolerance in `util::config::remote`.
+/// Optional role pair that drops a malformed value to `None` (with a warn) instead of failing the whole config parse.
+/// One typo must not wipe the config. Mirrors the remote tolerance in `util::config::remote`.
 fn de_tolerant_goal_role_model<'de, D>(
     deserializer: D,
 ) -> Result<Option<crate::util::config::GoalRoleModel>, D::Error>
@@ -5435,9 +5320,8 @@ where
             .ok()
     }))
 }
-/// Skeptic pool variant of [`de_tolerant_goal_role_model`]: a non-array yields
-/// an empty pool; malformed entries are dropped, survivor order preserved (the
-/// skeptic round-robin depends on it).
+/// Skeptic pool variant of [`de_tolerant_goal_role_model`]: a non-array yields an empty pool.
+/// Malformed entries are dropped, survivor order preserved (the skeptic round-robin depends on it).
 fn de_tolerant_goal_role_models<'de, D>(
     deserializer: D,
 ) -> Result<Vec<crate::util::config::GoalRoleModel>, D::Error>
@@ -5459,9 +5343,9 @@ where
         _ => Vec::new(),
     })
 }
-/// `[goal]` section: the canonical home for `/goal` configuration. Field names
-/// mirror the remote `goal_*` keys with the prefix dropped, so config and remote
-/// stay 1:1. Per-key precedence is env > this config > remote > default.
+/// `[goal]` section: the canonical home for `/goal` configuration.
+/// Field names mirror the remote `goal_*` keys with the prefix dropped, so config and remote stay 1:1.
+/// Per-key precedence is env > this config > remote > default.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GoalConfig {
@@ -5509,34 +5393,33 @@ pub struct WorkflowsConfig {
     pub enabled: Option<bool>,
 }
 /// `[auto_mode]` section: server-side configuration for Auto permission mode.
-/// ONE struct serves both the local `[auto_mode]` TOML table and the remote
-/// remote settings `auto_mode` JSON object (coerced via `serde_json::from_value`), so
-/// the two stay 1:1. All fields are plain scalars/enums, so they deserialize
-/// cleanly from both formats (no custom tolerant deser needed). Unset fields stay
-/// `None` here; the wire fn applies the built-in defaults once auto mode is
-/// enabled (current model, `low` effort if the model supports it, `just_command`
-/// prompt). Precedence: local config > remote > those built-in defaults.
+/// ONE struct serves both the local `[auto_mode]` TOML table and the remote settings `auto_mode` JSON object, so the two stay 1:1.
+/// The remote object is coerced via `serde_json::from_value`.
+/// All fields are plain scalars/enums, so they deserialize cleanly from both formats (no custom tolerant deser needed).
+/// Unset fields stay `None` here.
+/// The wire fn applies the built-in defaults once auto mode is enabled (current model, `low` effort if the model supports it, `just_command` prompt).
+/// Precedence: local config > remote > those built-in defaults.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AutoModeConfig {
-    /// The Auto-mode gate. Lowest-precedence layer of the gate chain (env and
-    /// local `[auto_mode] enabled` config win over this remote value).
+    /// The Auto-mode gate.
+    /// Lowest-precedence layer of the gate chain (env and local `[auto_mode] enabled` config win over this remote value).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
-    /// How much context the classifier prompt includes. `None` ⇒ the wire fn's
-    /// built-in default (`just_command`).
+    /// How much context the classifier prompt includes.
+    /// `None` means the wire fn's built-in default (`just_command`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_type: Option<xai_grok_workspace::permission::ClassifierPromptType>,
-    /// Routing slug for a dedicated classifier model. `None` ⇒ inherit the
-    /// session model. Resolved via `resolve_aux_model_sampling_config`.
+    /// Routing slug for a dedicated classifier model.
+    /// `None` inherits the session model.
+    /// Resolved via `resolve_aux_model_sampling_config`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub classifier_model: Option<String>,
     /// Classifier side-query duration in milliseconds; resolved with bounded defaults.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub classify_timeout_ms: Option<u64>,
-    /// Classifier reasoning effort. Applies on BOTH the routed-model path and the
-    /// inherited session-model path; `None` ⇒ the wire fn's built-in default
-    /// (`low` if the effective model supports reasoning effort, else unset).
+    /// Classifier reasoning effort. Applies on BOTH the routed-model path and the inherited session-model path.
+    /// `None` means the wire fn's built-in default (`low` if the effective model supports reasoning effort, else unset).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
 }
@@ -5545,7 +5428,7 @@ pub struct Features {
     /// when set, the agent may ask permission for tool executions
     #[serde(default)]
     pub support_permission: bool,
-    /// `None` = defer to remote settings / default (off).
+    /// `None` defers to remote settings / default (off).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry: Option<TelemetryMode>,
     /// Codebase graph indexing for go-to-definition/references.
@@ -5554,26 +5437,26 @@ pub struct Features {
     #[serde(default)]
     pub codebase_indexing: CodebaseIndexingSetting,
     /// Show a blocking warning when Grok starts outside a Git repository.
-    /// Default: false. Used as the local fallback when the `non_git_warning` remote settings
-    /// flag in `grok_build_settings` is absent. When the remote flag is present it takes
-    /// precedence — `Some(false)` from remote settings overrides `true` here.
+    /// Default: false.
+    /// Used as the local fallback when the `non_git_warning` remote settings flag in `grok_build_settings` is absent.
+    /// When the remote flag is present it takes precedence: `Some(false)` from remote settings overrides `true` here.
     #[serde(default)]
     pub non_git_warning: bool,
-    /// Managed config fetching (managed_config.toml + requirements.toml).
-    /// `None` = defer to env / default (true).
+    /// Managed config fetching (managed_config.toml and requirements.toml).
+    /// `None` defers to env / default (true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed_config: Option<bool>,
-    /// Early-session auto-title refresh. `None` = defer to `resolve_title_refresh`.
+    /// Early-session auto-title refresh. `None` defers to `resolve_title_refresh`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title_refresh: Option<bool>,
-    /// `image_gen` / `/imagine`. `None` = env / remote / default (`true`).
+    /// `image_gen` / `/imagine`. `None` defers to env / remote / default (`true`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_gen: Option<bool>,
-    /// Video tools / `/imagine-video`. `None` = env / remote / default (`true`).
+    /// Video tools / `/imagine-video`. `None` defers to env / remote / default (`true`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_gen: Option<bool>,
-    /// `image_gen` Imagine model override. `None`/empty = defer to remote settings
-    /// (`image_gen_model_override`) / env / default (`grok-imagine-image-quality`).
+    /// `image_gen` Imagine model override.
+    /// `None`/empty defers to remote settings (`image_gen_model_override`) / env / default (`grok-imagine-image-quality`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_gen_model_override: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5591,126 +5474,95 @@ pub struct Features {
     /// env (`GROK_COMPACTION_MODE`). Parsed via `CompactionMode::parse`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction_mode: Option<String>,
-    /// `none` | `minimal` | `balanced` | `verbose` (default). `None` = defer to
-    /// env (`GROK_COMPACTION_DETAIL`). The `segments` verbatim detail level.
+    /// `none` | `minimal` | `balanced` | `verbose` (default).
+    /// `None` defers to env (`GROK_COMPACTION_DETAIL`).
+    /// The `segments` verbatim detail level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction_detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction_tool_choice: Option<String>,
-    /// Per-`Ready`-client transport-liveness pollers + the
-    /// session-actor `StatusDispatcher`.
+    /// Per-`Ready`-client transport-liveness pollers and the session-actor `StatusDispatcher`.
     ///
-    /// When `true` (default), each successfully-handshaken MCP
-    /// client gets a poller that detects rmcp service-loop
-    /// termination and pushes `x.ai/mcp/server_status` updates to
-    /// the client. When `false`, neither watchers nor the
-    /// dispatcher are spawned — useful as an emergency kill switch
-    /// for the rollout. `None` = defer to env / default (true).
+    /// When `true` (default), each successfully-handshaken MCP client gets a poller.
+    /// The poller detects rmcp service-loop termination and pushes `x.ai/mcp/server_status` updates to the client.
+    /// When `false`, neither watchers nor the dispatcher are spawned, useful as an emergency kill switch for the rollout.
+    /// `None` defers to env / default (true).
     ///
-    /// Not read through this struct: the live resolver re-reads the
-    /// `[features]` key out-of-band from raw TOML in
-    /// `util::config::resolve::mcp`. Declared so `serde_ignored`
-    /// does not report it as an unrecognized key.
+    /// Not read through this struct: the live resolver re-reads the `[features]` key out-of-band from raw TOML in `util::config::resolve::mcp`.
+    /// Declared so `serde_ignored` does not report it as an unrecognized key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_liveness_watchers: Option<bool>,
     /// Bounded stdio auto-restart task.
     ///
-    /// When `true`, the session-actor `StatusDispatcher` reacts to
-    /// `TransportClosed` / `HandshakeFailed` events on stdio MCP
-    /// servers by scheduling up to 3 respawn attempts with
-    /// `[1s, 4s, 16s]` backoff. HTTP / HttpAuth servers are NOT
-    /// auto-restarted (their existing `reset_transport` path
-    /// covers the recovery). `None` = defer to env / default
-    /// (recovery is on by default; set `false` here / via
-    /// `GROK_MCP_AUTO_RESTART` to opt out).
+    /// When `true`, the session-actor `StatusDispatcher` reacts to `TransportClosed` / `HandshakeFailed` events on stdio MCP servers.
+    /// It schedules up to 3 respawn attempts with `[1s, 4s, 16s]` backoff.
+    /// HTTP / HttpAuth servers are NOT auto-restarted (their existing `reset_transport` path covers the recovery).
+    /// `None` defers to env / default (recovery is on by default; set `false` here / via `GROK_MCP_AUTO_RESTART` to opt out).
     ///
-    /// Not read through this struct: the live resolver re-reads the
-    /// `[features]` key out-of-band from raw TOML in
-    /// `util::config::resolve::mcp`. Declared so `serde_ignored`
-    /// does not report it as an unrecognized key.
+    /// Not read through this struct: the live resolver re-reads the `[features]` key out-of-band from raw TOML in `util::config::resolve::mcp`.
+    /// Declared so `serde_ignored` does not report it as an unrecognized key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_auto_restart: Option<bool>,
-    /// Transient turn-retry kill switch (`None` = on). The resolver reads
-    /// raw TOML; declared only so `serde_ignored` allows the key.
+    /// Transient turn-retry kill switch (`None` means on).
+    /// The resolver reads raw TOML; declared only so `serde_ignored` allows the key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_transient_retry: Option<bool>,
     /// Pager-side subscription to the `x.ai/mcp/server_status` push.
     ///
-    /// When `true` (default), the pager subscribes to the per-server
-    /// status delta the shell emits via the dispatcher and
-    /// patches the MCP servers modal in-place (no re-fetch round
-    /// trip). When `false`, the pager ignores the push and falls
-    /// back to the legacy `x.ai/mcp/tools_changed` debounced refetch
-    /// path. `None` = defer to env / default (true).
+    /// When `true` (default), the pager subscribes to the per-server status delta the shell emits via the dispatcher.
+    /// It patches the MCP servers modal in-place (no re-fetch round trip).
+    /// When `false`, the pager ignores the push and falls back to the legacy `x.ai/mcp/tools_changed` debounced refetch path.
+    /// `None` defers to env / default (true).
     ///
-    /// Not read through this struct. The pager-side gate
-    /// (`acp_handler::push_server_status_enabled`) uses an
-    /// **env-only** OnceLock cache via
-    /// [`crate::util::config::resolve_mcp_push_server_status(None, None, None)`],
-    /// which consults `BoolFlag::env` and the default `true`. The
-    /// `[features]` key itself is honoured out-of-band, re-read from
-    /// raw TOML in `util::config::resolve::mcp`. This field is
-    /// declared so `serde_ignored` does not report the key as
-    /// unrecognized.
+    /// Not read through this struct.
+    /// The pager-side gate (`acp_handler::push_server_status_enabled`) uses an **env-only** OnceLock cache.
+    /// That cache is filled via [`crate::util::config::resolve_mcp_push_server_status(None, None, None)`].
+    /// The resolver consults `BoolFlag::env` and the default `true`.
+    /// The `[features]` key itself is honoured out-of-band, re-read from raw TOML in `util::config::resolve::mcp`.
+    /// This field is declared so `serde_ignored` does not report the key as unrecognized.
     ///
-    /// Practical consequence: setting
-    /// `[features] mcp_push_server_status = false` in
+    /// Practical consequence: setting `[features] mcp_push_server_status = false` in
     /// `~/.grok/config.toml` will NOT disable the pager's
-    /// subscription on a freshly-launched process. To disable the
-    /// pager subscription, set `GROK_MCP_PUSH_SERVER_STATUS=0` in
-    /// the env before launch.
+    /// subscription on a freshly-launched process.
+    /// To disable the pager subscription, set `GROK_MCP_PUSH_SERVER_STATUS=0` in the env before launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_push_server_status: Option<bool>,
-    /// Whether the leader's `ConfigFileWatcher` adds the two narrow
-    /// non-recursive watches for `<cwd>/` and `<cwd>/.grok/`.
+    /// Whether the leader's `ConfigFileWatcher` adds the two narrow non-recursive watches for `<cwd>/` and `<cwd>/.grok/`.
     ///
-    /// When `true` (default), edits to `<cwd>/.mcp.json`,
-    /// `<cwd>/.grok/config.toml`, or `<cwd>/.claude.json` flow
-    /// through the watcher → reloader → `ConfigUpdate::
-    /// ProjectMcpServersChanged { cwd }` → `app.rs` ACP-injection
-    /// pipeline and the affected sessions reload their MCP servers
-    /// within the debounce window (~ 1 s). When `false`, the leader
-    /// skips the cwd watches entirely and the only way to pick up a
-    /// project-config edit is the user-triggered refresh button.
+    /// When `true` (default), the watcher sees edits to `<cwd>/.mcp.json`, `<cwd>/.grok/config.toml`, or `<cwd>/.claude.json`.
+    /// The reloader turns them into `ConfigUpdate::ProjectMcpServersChanged { cwd }` for the `app.rs` ACP-injection pipeline.
+    /// The affected sessions then reload their MCP servers within the debounce window (about 1 s).
+    /// When `false`, the leader skips the cwd watches entirely.
+    /// The only way to pick up a project-config edit is then the user-triggered refresh button.
     ///
-    /// The watches are **always non-recursive** — the name follows
-    /// the convention for the rollout-gate flag. See
-    /// `crate::config::watcher::ConfigFileWatcher::watch_path` for
-    /// the inotify-quota rationale.
+    /// The watches are **always non-recursive**; the name follows the convention for the rollout-gate flag.
+    /// See `crate::config::watcher::ConfigFileWatcher::watch_path` for the inotify-quota rationale.
     ///
-    /// The name is a documented misnomer — it gates
-    /// the existence of the **cwd** watches, NOT their recursion
-    /// mode. A future rename to `mcp_cwd_config_watch` would align
-    /// name and behavior; deferred to a follow-up to avoid widening
-    /// the config surface across requirements.toml / managed configs.
+    /// The name is a documented misnomer: it gates the existence of the **cwd** watches, NOT their recursion mode.
     ///
-    /// Not read through this struct: the live resolver re-reads the
-    /// `[features]` key out-of-band from raw TOML in
-    /// `util::config::resolve::mcp`. Declared so `serde_ignored`
-    /// does not report it as an unrecognized key.
-    /// `None` = defer to env / default (true).
+    /// Not read through this struct: the live resolver re-reads the `[features]` key out-of-band from raw TOML in `util::config::resolve::mcp`.
+    /// Declared so `serde_ignored` does not report it as an unrecognized key.
+    /// `None` defers to env / default (true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_recursive_config_watch: Option<bool>,
-    /// Every remaining `[features]` key, typed. Private: a registry key must be
-    /// read through [`Config::feature`], which resolves the other tiers too.
+    /// Every remaining `[features]` key, typed.
+    /// Private: a registry key must be read through [`Config::feature`], which resolves the other tiers too.
     #[serde(flatten)]
     entries: FeatureEntries,
 }
-/// The `[features]` entries no field claims: the registry rows, the keys the
-/// raw-layer resolvers read, and whatever a typo or a later release leaves
-/// behind. Typing them here is what checks a key before anyone thinks to list
-/// it, which is the whole point: a quoted `remote_fetch` once read as absent
-/// and left an egress gate open.
+/// The `[features]` entries no field claims.
+/// Those are the registry rows, the keys the raw-layer resolvers read, and whatever a typo or a later release leaves behind.
+/// Typing them here is what checks a key before anyone thinks to list it, which is the whole point.
+/// A quoted `remote_fetch` once read as absent and left an egress gate open.
 ///
-/// Deserialized by hand for two reasons serde cannot cover: to name the key,
-/// which its message for a bad map value omits, and to fail only on a value
-/// that reads as a boolean, so a key holding a later release's typed value is
-/// ignored rather than fatal to a build that predates the field.
+/// Deserialized by hand for two reasons serde cannot cover.
+/// First, to name the key, which serde's message for a bad map value omits.
+/// Second, to fail only on a value that reads as a boolean.
+/// A key holding a later release's typed value is then ignored rather than fatal to a build that predates the field.
 #[derive(Clone, Debug, Default)]
 struct FeatureEntries {
     flags: BTreeMap<String, bool>,
-    /// Keys holding neither a boolean nor a mistaken one, kept so the operator
-    /// still hears about them.
+    /// Keys holding neither a boolean nor a mistaken one, kept so the operator still hears about them.
     ignored: std::collections::BTreeSet<String>,
 }
 impl Serialize for FeatureEntries {
@@ -5762,9 +5614,8 @@ pub(crate) struct ResolvedCredentials {
     pub auth_type: xai_chat_state::AuthType,
     pub auth_scheme: AuthScheme,
 }
-/// First usable BYOK credential: a non-empty (trimmed) api_key, else the first
-/// set, non-empty env_key value. Single source of truth for has_own_credentials,
-/// resolve_credentials, and the JWT-reload path.
+/// First usable BYOK credential: a non-empty (trimmed) api_key, else the first set, non-empty env_key value.
+/// Single source of truth for has_own_credentials, resolve_credentials, and the JWT-reload path.
 pub(crate) fn first_own_credential(
     api_key: Option<&str>,
     env_key: Option<&EnvKeys>,
@@ -5886,9 +5737,9 @@ pub(crate) fn resolve_credentials(
         auth_scheme,
     }
 }
-/// `disable_api_key_auth` at the credential seam: swap a first-party xAI API
-/// key for the IdP session (absent => request fails => forces login). BYOK
-/// (non-xAI `base_url`) is untouched; no-op when the switch is off.
+/// `disable_api_key_auth` at the credential seam: swap a first-party xAI API key for the IdP session.
+/// When no session is available the request fails and forces a login.
+/// BYOK (non-xAI `base_url`) is untouched; no-op when the switch is off.
 pub(crate) fn enforce_disable_api_key_auth(
     creds: &mut ResolvedCredentials,
     disable_api_key_auth: bool,
@@ -5910,9 +5761,8 @@ pub(crate) fn enforce_disable_api_key_auth(
         );
     }
 }
-/// Resolve credentials for an auxiliary sampling path (web search, image
-/// description) with the first-party API-key kill switch applied, so these
-/// paths honor `disable_api_key_auth` exactly like the main chat path.
+/// Resolve credentials for an auxiliary sampling path (web search, image description) with the first-party API-key kill switch applied.
+/// These paths then honor `disable_api_key_auth` exactly like the main chat path.
 fn resolve_credentials_enforced(
     entry: &ModelEntry,
     session_key: Option<&str>,
@@ -5924,9 +5774,8 @@ fn resolve_credentials_enforced(
 }
 pub use xai_grok_telemetry::config::deployment_id_from_key;
 /// Try to resolve credentials for a model by loading the effective config.
-/// Returns `None` (with a warning) if config loading, parsing, or model
-/// lookup fails. `session_key` should only be passed when `auth_type` is
-/// `SessionToken` — callers must guard this.
+/// Returns `None` (with a warning) if config loading, parsing, or model lookup fails.
+/// `session_key` should only be passed when `auth_type` is `SessionToken`; callers must guard this.
 pub(crate) fn try_resolve_model_credentials(
     model_id: &str,
     session_key: Option<&str>,
@@ -5947,8 +5796,7 @@ pub(crate) fn try_resolve_model_credentials(
     );
     Some(credentials)
 }
-/// Per-model auth facts (BYOK status + auth scheme) from one effective-config
-/// load, memoized by the session actor.
+/// Per-model auth facts (BYOK status and auth scheme) from one effective-config load, memoized by the session actor.
 #[derive(Clone, Copy)]
 pub(crate) struct ModelAuthFacts {
     pub byok: ModelByok,
@@ -5958,12 +5806,10 @@ pub(crate) struct ModelAuthFacts {
     /// Whether a hybrid provider selected OAuth rather than its static key.
     pub platform_oauth_active: bool,
 }
-/// Resolve `model_id` to its auth facts and auth-provider reference from one
-/// effective-config load; both ride the same memo (see
-/// `SessionActor::model_auth_memo`). Load/parse failure → `byok = Unknown`;
-/// model absent from the catalog → `NotByok`. An empty `model_id` (no sampling
-/// config yet) → `Unknown`, not `NotByok`, so the gate isn't activated for an
-/// unidentified model.
+/// Resolve `model_id` to its auth facts and auth-provider reference from one effective-config load.
+/// Both ride the same memo (see `SessionActor::model_auth_memo`).
+/// A load/parse failure yields `byok = Unknown`; a model absent from the catalog yields `NotByok`.
+/// An empty `model_id` (no sampling config yet) yields `Unknown`, not `NotByok`, so the gate isn't activated for an unidentified model.
 pub(crate) fn resolve_model_auth_facts_and_provider(
     model_id: &str,
 ) -> (ModelAuthFacts, Option<crate::auth::AuthProviderRef>) {
@@ -6013,9 +5859,8 @@ enum ModelLookup<'a> {
     Loaded(Option<&'a ModelEntry>),
     ConfigUnavailable,
 }
-/// Load + parse the effective config and hand the `model_id` lookup to `f`,
-/// keeping "config unavailable" distinct from "model absent" so callers can
-/// stay conservative on a transient config failure.
+/// Load and parse the effective config and hand the `model_id` lookup to `f`.
+/// Keeps "config unavailable" distinct from "model absent" so callers can stay conservative on a transient config failure.
 fn with_resolved_model<T>(model_id: &str, f: impl FnOnce(ModelLookup) -> T) -> T {
     with_resolved_model_loader(
         model_id,
@@ -6060,10 +5905,9 @@ fn with_resolved_model_loader<T>(
     let models = resolve_model_list(&cfg, None);
     f(ModelLookup::Loaded(find_model_by_id(&models, model_id)))
 }
-/// Resolve a standalone `SamplerConfig` for an auxiliary model slug (image
-/// description, session summary, ...), resolved through the catalog so a
-/// `[model.*]` override redirects it to its own endpoint, credentials, and
-/// routing `model`. `None` → caller falls back to the active session's model.
+/// Resolve a standalone `SamplerConfig` for an auxiliary model slug (image description, session summary, ...).
+/// Resolved through the catalog so a `[model.*]` override redirects it to its own endpoint, credentials, and routing `model`.
+/// On `None` the caller falls back to the active session's model.
 pub(crate) fn resolve_aux_model_sampling_config(
     model_id: &str,
     models: &IndexMap<String, ModelEntry>,
@@ -6102,7 +5946,7 @@ pub(crate) fn resolve_aux_model_sampling_config(
     if let Some(bearer) = xai_bearer {
         let entry = ModelEntry {
             info: ModelInfo {
-                user_selectable: true,
+                user_selectable: false,
                 id: None,
                 model_family: None,
                 model: catalog_entry
@@ -6134,6 +5978,7 @@ pub(crate) fn resolve_aux_model_sampling_config(
                 reasoning_effort: None,
                 supports_reasoning_effort: false,
                 reasoning_efforts: Vec::new(),
+                variants: Vec::new(),
                 supports_backend_search: false,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
@@ -6164,14 +6009,12 @@ pub(crate) fn resolve_aux_model_sampling_config(
     );
     None
 }
-/// Stamp the session-local fields (client id, attribution, bearer resolver,
-/// retries) from the active session onto a routed aux `SamplerConfig` so a
-/// helper model keeps the session's auth/attribution. Shared by image-describe
-/// and the auto-mode classifier so the two can't drift.
+/// Stamp the session-local fields (client id, attribution, bearer resolver, retries) from the active session onto a routed aux `SamplerConfig`.
+/// A helper model then keeps the session's auth/attribution.
+/// Shared by image-describe and the auto-mode classifier so the two can't drift.
 ///
-/// The resolver gate is host-based, stricter than `session_token_auth_gate`:
-/// a session-token deployment on a custom `models_base_url` loses aux-sampler
-/// refresh, rather than risk the session bearer on a third-party endpoint.
+/// The resolver gate is host-based, stricter than `session_token_auth_gate`.
+/// A session-token deployment on a custom `models_base_url` loses aux-sampler refresh, rather than risk the session bearer on a third-party endpoint.
 pub(crate) fn stamp_session_local_sampler_fields(
     cfg: &mut SamplerConfig,
     active_session_config: &SamplerConfig,
@@ -6185,14 +6028,12 @@ pub(crate) fn stamp_session_local_sampler_fields(
     }
     cfg.max_retries = max_retries;
 }
-/// Finalize image-describe model + sampler config for user attachments.
-/// Shared so the aux resolve happy path and the `None` fallback cannot
-/// diverge between those entry points.
+/// Finalize the image-describe model and sampler config for user attachments.
+/// Shared so the aux resolve happy path and the `None` fallback cannot diverge between those entry points.
 ///
 /// On aux resolve `Some`, stamp session-local fields onto the helper config.
-/// On `None`, fall back to the active session model and full config (not
-/// forcing `image_description_model` onto the agent endpoint, which 404s on
-/// BYOK / non-proxy routes for internal slugs like `grok-build`).
+/// On `None`, fall back to the active session model and full config.
+/// That avoids forcing `image_description_model` onto the agent endpoint, which 404s on BYOK / non-proxy routes for internal slugs like `grok-build`.
 pub(crate) fn finalize_image_describe_sampler_config(
     resolved_aux: Option<SamplerConfig>,
     active_session_config: &SamplerConfig,
@@ -6216,9 +6057,8 @@ pub(crate) fn finalize_image_describe_sampler_config(
         }
     }
 }
-/// Re-derive `auth_type` from the model's own credentials so BYOK env-key
-/// models stay on `ApiKey` even when a session token is present. Falls
-/// back to `fallback` when the model isn't in the on-disk catalog.
+/// Re-derive `auth_type` from the model's own credentials so BYOK env-key models stay on `ApiKey` even when a session token is present.
+/// Falls back to `fallback` when the model isn't in the on-disk catalog.
 pub(crate) fn resolve_chat_state_auth_type(
     model_id: &str,
     session_key: Option<&str>,
@@ -6253,8 +6093,8 @@ pub fn adapter_kind_for_model(model: &ModelEntry) -> xai_grok_models::AdapterKin
 
 /// Selects xAI-only Responses extensions for trusted backend-search routes.
 ///
-/// Third-party Responses providers reject `no_inline_citations`, so it must stay
-/// on a trusted first-party route and apply only to models with backend search.
+/// Third-party Responses providers reject `no_inline_citations`.
+/// So it must stay on a trusted first-party route and apply only to models with backend search.
 pub(crate) fn response_include_extensions(
     supports_backend_search: bool,
     api_backend: &ApiBackend,
@@ -6714,16 +6554,12 @@ pub fn open_platform_endpoint(base_url: &str) -> Option<&'static xai_grok_models
 }
 /// Fold URL-derived headers into `extra_headers`.
 ///
-/// The sampler crate is intentionally URL-agnostic: it does not inspect
-/// `base_url` to decide which auth or staging headers to add. Replicate the
-/// URL-derived header logic at the shell boundary so callers downstream see a
-/// single homogenous header bag.
+/// The sampler crate is intentionally URL-agnostic: it does not inspect `base_url` to decide which auth or staging headers to add.
+/// Replicate the URL-derived header logic at the shell boundary so callers downstream see a single homogenous header bag.
 ///
-/// * cli-chat-proxy bases get `X-XAI-Token-Auth` and
-///   `x-authenticateresponse` headers (mirrors the inline match in the legacy
-///   `sampling::Client::new` on `is_cli_chat_proxy_url`).
-/// * With the optional non-production feature, matching first-party hosts may
-///   get an extra access header from the corresponding key argument.
+/// * cli-chat-proxy bases get `X-XAI-Token-Auth` and `x-authenticateresponse` headers.
+///   This mirrors the inline match in the legacy `sampling::Client::new` on `is_cli_chat_proxy_url`.
+/// * With the optional non-production feature, matching first-party hosts may get an extra access header from the corresponding key argument.
 ///
 /// Existing entries are never overwritten so callers can pre-set a value.
 pub(crate) fn inject_url_derived_headers(
@@ -6891,11 +6727,12 @@ fn resolve_hidden_default_web_search_sampling_config(
             max_retries: None,
             subagent_rate_limit_max_attempts: None,
             hidden: true,
-            user_selectable: true,
+            user_selectable: false,
             supported_in_api: true,
             reasoning_effort: None,
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
+            variants: Vec::new(),
             supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
@@ -7028,24 +6865,20 @@ pub const RELOAD_MODEL_CONFIG_META_KEY: &str = "reloadModelConfig";
 
 /// Error code for model switch rejection due to agent type mismatch.
 pub const MODEL_SWITCH_INCOMPATIBLE_AGENT: &str = "MODEL_SWITCH_INCOMPATIBLE_AGENT";
-/// Error code for model switch failure during the zero-turn full harness
-/// rebuild path. Emitted when `RebuildAgentForDefinition` fails (definition
-/// could not be resolved at handler time, `AgentBuilder::build()` errored,
-/// or a turn started racing the rebuild).
+/// Error code for model switch failure during the zero-turn full harness rebuild path.
+/// Emitted when `RebuildAgentForDefinition` fails.
+/// That covers a definition that could not be resolved at handler time, an `AgentBuilder::build()` error, or a turn racing the rebuild.
 pub const MODEL_SWITCH_REBUILD_FAILED: &str = "MODEL_SWITCH_REBUILD_FAILED";
-/// Structured error payload for model switch rejection due to agent type
-/// incompatibility. Serialized into `acp::Error.data` by the shell and
-/// deserialized by the TUI for user-friendly error rendering.
+/// Structured error payload for model switch rejection due to agent type incompatibility.
+/// Serialized into `acp::Error.data` by the shell and deserialized by the TUI for user-friendly error rendering.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSwitchIncompatibleAgentError {
     /// Stable machine-readable error code (always `MODEL_SWITCH_INCOMPATIBLE_AGENT`).
     pub code: String,
-    /// The agent type currently active in the session.
     pub active_agent_type: String,
     /// The agent type required by the target model.
     pub required_agent_type: String,
-    /// The model ID that was requested.
     pub model_id: String,
     /// Remediation hint for the client.
     pub suggestion: String,
@@ -7284,6 +7117,7 @@ mod hyper_tests {
                 reasoning_effort: None,
                 supports_reasoning_effort: false,
                 reasoning_efforts: Vec::new(),
+                variants: Vec::new(),
                 supports_backend_search: false,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
@@ -8214,6 +8048,7 @@ default = 42
                 reasoning_effort: None,
                 supports_reasoning_effort: false,
                 reasoning_efforts: Vec::new(),
+                variants: Vec::new(),
                 supports_backend_search: false,
                 compactions_remaining: None,
                 compaction_at_tokens: None,

@@ -222,6 +222,43 @@ pub fn kill_process_with_signal(pid: u32, signal: KillSignal) -> std::io::Result
         terminate.map_err(|e| std::io::Error::other(format!("TerminateProcess({pid}): {e}")))
     }
 }
+/// Command-line arguments of `pid`. Exact on Linux (/proc); approximate on
+/// macOS/BSD (`ps`, whitespace-split — fine for flag lookups); `None` on
+/// Windows or when the process is gone.
+pub fn process_cmdline_args(pid: u32) -> Option<Vec<String>> {
+    #[cfg(target_os = "linux")]
+    {
+        let data = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        let args: Vec<String> = data
+            .split(|byte| *byte == 0)
+            .filter(|part| !part.is_empty())
+            .map(|part| String::from_utf8_lossy(part).into_owned())
+            .collect();
+        (!args.is_empty()).then_some(args)
+    }
+    #[cfg(all(not(target_os = "linux"), not(windows)))]
+    {
+        let mut cmd = std::process::Command::new("ps");
+        cmd.args(["-o", "args=", "-p", &pid.to_string()])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        xai_tty_utils::detach_std_command(&mut cmd);
+        let output = cmd.output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let args: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect();
+        (!args.is_empty()).then_some(args)
+    }
+    #[cfg(windows)]
+    {
+        let _ = pid;
+        None
+    }
+}
 /// True if `pid` is a Grok Build / Hyper product process.
 ///
 /// Pairs with [`kill_process_by_pid`] so leader cleanup does not treat a recycled

@@ -1,8 +1,7 @@
-//! Unit tests for [`super`] — minimal mode's commit pipeline.
+//! Unit tests for [`super`], minimal mode's commit pipeline.
 //!
-//! Split out of `commit.rs` to keep the production module scannable; the
-//! `#[path]` attribute there keeps this a plain child module (`super::*` still
-//! reaches the private items under test).
+//! Split out of `commit.rs` to keep the production module scannable.
+//! The `#[path]` attribute there keeps this a plain child module (`super::*` still reaches the private items under test).
 
 use super::*;
 use ratatui::style::Color;
@@ -50,7 +49,7 @@ fn commits_leading_finalized_run_and_stops_at_running() {
     s.push(finalized("a"));
     s.push(finalized("b"));
     s.push(running("c"));
-    s.push(finalized("d")); // after the running block — must NOT commit yet
+    s.push(finalized("d")); // after the running block: must NOT commit yet
 
     assert_eq!(commit_collect(&mut s), vec![0, 1]);
     assert_eq!(minimal_api::commit_scan_cursor(&s), 2);
@@ -83,24 +82,21 @@ fn pending_user_input_holds_the_frontier() {
 
 #[test]
 fn running_agent_message_commits_once_a_later_block_exists() {
-    // The tracker leaves an agent message's `is_running` flag set until turn
-    // end (handle_tool_call resets current_agent_msg without finishing the
-    // entry when a tool follows). Minimal must still commit that message
-    // mid-turn once a later *turn-progress* block proves it's complete —
-    // otherwise the rest of the turn piles up in the live tail and scrolls
-    // instead of accumulating into native scrollback.
+    // The tracker leaves an agent message's `is_running` flag set until turn end
+    // handle_tool_call resets current_agent_msg without finishing the entry when a tool follows
+    // Minimal must still commit that message mid-turn once a later *turn-progress* block proves it's complete
+    // Otherwise the rest of the turn piles up in the live tail and scrolls instead of accumulating into native scrollback
     let mut s = ScrollbackState::new();
     s.push(ScrollbackEntry::running(RenderBlock::agent_message(
         "answer text",
     )));
 
-    // While it's the last entry it may still be streaming → stays live.
+    // While it's the last entry it may still be streaming, so it stays live
     assert_eq!(commit_collect(&mut s), Vec::<usize>::new());
     assert_eq!(minimal_api::commit_scan_cursor(&s), 0);
 
-    // A later tool (the tracker moved on) proves the message is done → it
-    // commits even though its is_running flag still lingers. The new
-    // last/running entry stays in the live tail.
+    // A later tool (the tracker moved on) proves the message is done, so it commits even though its is_running flag still lingers
+    // The new last/running entry stays in the live tail
     s.push(running("tool"));
     assert_eq!(commit_collect(&mut s), vec![0]);
     assert!(minimal_api::is_committed(&s, s.get(0).unwrap()));
@@ -109,12 +105,9 @@ fn running_agent_message_commits_once_a_later_block_exists() {
 
 #[test]
 fn interleaved_thinking_does_not_commit_a_still_streaming_agent_message() {
-    // GBS-28: after a long subagent the model often emits a first response
-    // token, then more thinking, then the rest of the sentence. Thinking is
-    // pushed *after* the live agent entry without resetting
-    // `current_agent_msg`, so later chunks still append. "Any later block"
-    // used to trip print-once and freeze "The user" / "That" on the terminal
-    // while the rest of the stream landed only in memory.
+    // After a long subagent the model often emits a first response token, then more thinking, then the rest of the sentence
+    // Thinking is pushed *after* the live agent entry without resetting `current_agent_msg`, so later chunks still append
+    // "Any later block" used to trip print-once and freeze "The user" / "That" on the terminal while the rest of the stream landed only in memory
     let mut s = ScrollbackState::new();
     let msg = s.push(ScrollbackEntry::running(RenderBlock::agent_message(
         "The user",
@@ -129,9 +122,8 @@ fn interleaved_thinking_does_not_commit_a_still_streaming_agent_message() {
     assert!(!minimal_api::is_committed(&s, s.get(0).unwrap()));
     assert_eq!(minimal_api::commit_scan_cursor(&s), 0);
 
-    // Later tokens still append to the same entry (`current_agent_msg` is
-    // still set). Committing at the thinking boundary would have left this
-    // suffix invisible on the print-once terminal.
+    // Later tokens still append to the same entry (`current_agent_msg` is still set)
+    // Committing at the thinking boundary would have left this suffix invisible on the print-once terminal
     assert!(s.push_chunk_to_agent(msg, " asked me to wait."));
     assert_eq!(commit_collect(&mut s), Vec::<usize>::new());
     match &s.get(0).unwrap().block {
@@ -141,8 +133,7 @@ fn interleaved_thinking_does_not_commit_a_still_streaming_agent_message() {
         other => panic!("expected agent message, got {other:?}"),
     }
 
-    // A later tool is the real "tracker moved on" signal — now the prefix
-    // (whatever has arrived) is complete and must leave the live tail.
+    // A later tool is the real "tracker moved on" signal: now the prefix (whatever has arrived) is complete and must leave the live tail
     s.push(ScrollbackEntry::running(RenderBlock::execute("true")));
     assert_eq!(commit_collect(&mut s), vec![0]);
     assert!(minimal_api::is_committed(&s, s.get(0).unwrap()));
@@ -152,12 +143,12 @@ fn interleaved_thinking_does_not_commit_a_still_streaming_agent_message() {
 
 #[test]
 fn running_tool_still_holds_the_frontier_even_with_a_later_block() {
-    // The agent-message relaxation must NOT extend to tools: a running tool
-    // can still update its result, so committing it (print-once) would lose
-    // the update. It holds the frontier regardless of later blocks.
+    // The agent-message relaxation must NOT extend to tools
+    // A running tool can still update its result, so committing it (print-once) would lose the update
+    // It holds the frontier regardless of later blocks
     let mut s = ScrollbackState::new();
     s.push(finalized("a"));
-    s.push(running("running tool")); // stub == not an AgentMessage
+    s.push(running("running tool")); // the stub block is not an AgentMessage
     s.push(finalized("after"));
     assert_eq!(commit_collect(&mut s), vec![0]);
     assert_eq!(minimal_api::commit_scan_cursor(&s), 1);
@@ -170,7 +161,7 @@ fn plan_body_anchored_above_a_parked_tool_commits_while_it_is_still_running() {
     let tool = s.push(running("exit_plan_mode")); // parked on the decision
     s.insert_block_before(tool, RenderBlock::agent_message("PLAN BODY"));
 
-    // Prompt + plan commit; the running tool row still holds the frontier.
+    // Prompt and plan commit; the running tool row still holds the frontier
     assert_eq!(commit_collect(&mut s), vec![0, 1]);
     assert_eq!(minimal_api::commit_scan_cursor(&s), 2);
     assert!(matches!(
@@ -180,8 +171,7 @@ fn plan_body_anchored_above_a_parked_tool_commits_while_it_is_still_running() {
     assert!(minimal_api::is_committed(&s, s.get(1).unwrap()));
     assert!(!minimal_api::is_committed(&s, s.get(2).unwrap()));
 
-    // Answering the prompt finalizes the tool row, which then commits once,
-    // in its finished form — and the plan is NOT re-emitted.
+    // Answering the prompt finalizes the tool row, which then commits once, in its finished form; the plan is NOT re-emitted
     s.get_mut(2).unwrap().mark_completed();
     assert_eq!(commit_collect(&mut s), vec![2]);
     assert!(!scan_frontier(&s, false).will_commit);
@@ -189,15 +179,13 @@ fn plan_body_anchored_above_a_parked_tool_commits_while_it_is_still_running() {
 
 #[test]
 fn anchored_plan_body_is_not_left_in_the_live_tail() {
-    // Whatever the commit pass prints must leave the live tail, or the plan is
-    // painted under the prompt AND printed above it.
+    // Whatever the commit pass prints must leave the live tail, or the plan is painted under the prompt AND printed above it
     let mut s = ScrollbackState::new();
     s.push(finalized("user prompt"));
     let tool = s.push(running("exit_plan_mode"));
     s.insert_block_before(tool, RenderBlock::agent_message("PLAN BODY"));
 
-    // Sizing pass: the tail is just the tool row (index 2), and a commit is
-    // pending for the two entries above it.
+    // Sizing pass: the tail is just the tool row (index 2), and a commit is pending for the two entries above it
     let before = scan_frontier(&s, true);
     assert_eq!(before.tail_start, 2, "plan is excluded from the live tail");
     assert!(before.will_commit);
@@ -223,19 +211,16 @@ fn revised_plan_anchors_to_its_own_tool_row_and_neither_plan_re_emits() {
 
     // Tool #1 and plan two commit; tool #2 holds the frontier.
     assert_eq!(commit_collect(&mut s), vec![1, 2]);
-    // A third pass re-emits nothing.
     assert!(commit_collect(&mut s).is_empty());
     assert_eq!(minimal_api::commit_scan_cursor(&s), 3);
 }
 
 #[test]
 fn bg_task_started_commits_while_running_and_does_not_wedge_frontier() {
-    // A fresh background task is pushed as a running "started" block
-    // (`set_last_running(true)`). Its `is_running` flag is animation-only —
-    // the block is a finalized lifecycle event whose content never changes —
-    // so it must commit immediately even mid-turn. Otherwise it wedges the
-    // frontier and the task (plus everything after it) stays hidden in the
-    // live tail until the task finishes (the reported dogfood bug).
+    // A fresh background task is pushed as a running "started" block (`set_last_running(true)`)
+    // Its `is_running` flag is animation-only: the block is a finalized lifecycle event whose content never changes
+    // It must commit immediately even mid-turn
+    // Otherwise it wedges the frontier and the task (plus everything after it) stays hidden in the live tail until the task finishes
     let mut s = ScrollbackState::new();
     s.push(finalized("a"));
     s.push(ScrollbackEntry::running(RenderBlock::bg_task(
@@ -243,7 +228,7 @@ fn bg_task_started_commits_while_running_and_does_not_wedge_frontier() {
     )));
     s.push(running("later tool")); // more turn output after the bg task
 
-    // "a" + the running bg task commit; only the trailing running tool stays.
+    // "a" and the running bg task commit; only the trailing running tool stays
     assert_eq!(commit_collect(&mut s), vec![0, 1]);
     assert!(minimal_api::is_committed(&s, s.get(1).unwrap()));
     assert!(!minimal_api::is_committed(&s, s.get(2).unwrap()));
@@ -251,9 +236,8 @@ fn bg_task_started_commits_while_running_and_does_not_wedge_frontier() {
 
 #[test]
 fn bg_task_started_commits_as_last_running_entry() {
-    // Even as the last entry of a still-running turn the bg "started" block
-    // commits — a lifecycle block never streams more content (completion is
-    // a separate block).
+    // Even as the last entry of a still-running turn the bg "started" block commits
+    // A lifecycle block never streams more content (completion is a separate block)
     let mut s = ScrollbackState::new();
     s.push(finalized("a"));
     s.push(ScrollbackEntry::running(RenderBlock::bg_task(
@@ -271,9 +255,8 @@ fn no_double_commit_after_mid_list_shift_remove() {
     assert_eq!(commit_collect(&mut s), vec![0, 1, 2]);
     assert_eq!(minimal_api::commit_scan_cursor(&s), 3);
 
-    // Remove an already-committed entry below the cursor (shift_remove shifts
-    // the remaining indices down). The cursor is clamped; the per-entry
-    // `committed` flags travel with "b"/"c", so neither is re-emitted.
+    // Remove an already-committed entry below the cursor (shift_remove shifts the remaining indices down)
+    // The cursor is clamped; the per-entry `committed` flags travel with "b"/"c", so neither is re-emitted
     assert!(s.remove_entry(a));
     s.push(finalized("d")); // now at index 2
 
@@ -285,18 +268,16 @@ fn no_double_commit_after_mid_list_shift_remove() {
 
 #[test]
 fn mid_list_removal_below_cursor_does_not_strand_uncommitted_entries() {
-    // Regression (review bug 2): a committed placeholder ("Loading
-    // session...") is removed AFTER new uncommitted entries were appended
-    // past the cursor — the `/resume` / reconnect `SessionLoaded` ordering.
-    // Removing below the cursor shifts the uncommitted entries down one;
-    // without the cursor decrement in `remove_entry` the first of them
-    // slid below the cursor and was never committed NOR drawn in the live
-    // tail (silently missing from minimal mode).
+    // Regression: a committed placeholder ("Loading session...") is removed AFTER new uncommitted entries were appended past the cursor
+    // That is the `/resume` / reconnect `SessionLoaded` ordering
+    // Removing below the cursor shifts the uncommitted entries down one
+    // Without the cursor decrement in `remove_entry` the first of them slid below the cursor
+    // It was never committed NOR drawn in the live tail (silently missing from minimal mode)
     let mut s = ScrollbackState::new();
     s.push(finalized("old-1"));
     let placeholder = s.push(finalized("Loading session..."));
 
-    // A draw commits both; cursor = 2.
+    // A draw commits both; the cursor lands at 2
     let mut seen = Vec::new();
     commit_leading_run(&mut s, false, |_, i| {
         seen.push(i);
@@ -305,15 +286,14 @@ fn mid_list_removal_below_cursor_does_not_strand_uncommitted_entries() {
     assert_eq!(seen, vec![0, 1]);
     assert_eq!(minimal_api::commit_scan_cursor(&s), 2);
 
-    // Replay appends entries, then the placeholder is removed in the same
-    // event cycle (before the next commit pass).
+    // Replay appends entries, then the placeholder is removed in the same event cycle (before the next commit pass)
     s.push(finalized("replayed-A"));
     s.push(finalized("replayed-B"));
     assert!(s.remove_entry(placeholder));
     // The cursor moved down with the shifted entries.
     assert_eq!(minimal_api::commit_scan_cursor(&s), 1);
 
-    // The next pass commits BOTH replayed entries — none stranded.
+    // The next pass commits BOTH replayed entries; none are stranded
     let mut seen = Vec::new();
     commit_leading_run(&mut s, false, |_, i| {
         seen.push(i);
@@ -326,11 +306,9 @@ fn mid_list_removal_below_cursor_does_not_strand_uncommitted_entries() {
 
 #[test]
 fn pending_user_input_holds_the_frontier_even_when_idle() {
-    // A block awaiting a permission / question answer must never commit,
-    // even if the turn state reads idle (e.g. a prompt outliving its turn):
-    // its rendered form still changes when the prompt resolves, and a
-    // committed copy is frozen. The idle relaxation only applies to
-    // *stale-running* flags, not pending-input marks.
+    // A block awaiting a permission / question answer must never commit, even if the turn state reads idle (e.g. a prompt outliving its turn).
+    // Its rendered form still changes when the prompt resolves, and a committed copy is frozen
+    // The idle relaxation only applies to *stale-running* flags, not pending-input marks
     let mut s = ScrollbackState::new();
     s.push(finalized("a"));
     let tool = s.push(finalized("tool"));
@@ -356,10 +334,9 @@ fn pending_user_input_holds_the_frontier_even_when_idle() {
 
 #[test]
 fn failed_emit_leaves_entry_uncommitted_for_retry() {
-    // Regression (bugbot "Committed flag set on IO failure"): a terminal
-    // write failure must NOT mark the entry committed — print-once means a
-    // marked-but-unprinted block can never be emitted again. The walk stops
-    // with the cursor before the failed entry and retries next frame.
+    // Regression: a terminal write failure must NOT mark the entry committed
+    // Print-once means a marked-but-unprinted block can never be emitted again
+    // The walk stops with the cursor before the failed entry and retries next frame
     let mut s = ScrollbackState::new();
     s.push(finalized("a"));
     s.push(finalized("b"));
@@ -384,15 +361,14 @@ fn failed_emit_leaves_entry_uncommitted_for_retry() {
 
 #[test]
 fn scan_frontier_mirrors_commit_leading_run() {
-    // `scan_frontier` (read-only: viewport sizing + the will-commit gate)
-    // must agree exactly with the mutating walk, in every phase.
+    // `scan_frontier` (read-only: viewport sizing and the will-commit gate) must agree exactly with the mutating walk, in every phase
     let mut s = ScrollbackState::new();
     s.push(finalized("a"));
     s.push(finalized("b"));
     s.push(running("c"));
     s.push(finalized("d"));
 
-    // Pre-commit: the pass would commit a+b and stop at the running entry.
+    // Pre-commit: the pass would commit "a" and "b" and stop at the running entry
     let scan = scan_frontier(&s, true);
     assert!(scan.will_commit);
     assert_eq!(scan.tail_start, 2);
@@ -420,9 +396,8 @@ fn remove_from_below_frontier_then_push_still_commits() {
     s.push(finalized("c"));
     assert_eq!(commit_collect(&mut s), vec![0, 1, 2]);
 
-    // Rewind: drop everything from index 1 (keep only "a"). Without the
-    // cursor clamp this would strand the cursor at 3 and silently skip the
-    // next pushes.
+    // Rewind: drop everything from index 1 (keep only "a")
+    // Without the cursor clamp this would strand the cursor at 3 and silently skip the next pushes
     let removed = s.remove_from(1);
     assert_eq!(removed.len(), 2);
     assert_eq!(minimal_api::commit_scan_cursor(&s), 1);
@@ -493,11 +468,9 @@ fn commit_leading_run_advances_frontier_and_marks_committed_once() {
 
 #[test]
 fn idle_turn_commits_past_stale_running_entry() {
-    // Regression for the missing-edit/stuck-spinner bug: the agent tracker
-    // can leave an entry's `is_running` flag set after the turn ends (e.g. a
-    // thinking block whose finalize was missed at the thinking→tool
-    // transition). While the turn runs, that entry correctly holds the
-    // frontier; once the turn is idle the frontier must advance past it.
+    // Regression for the missing-edit/stuck-spinner bug: the agent tracker can leave an entry's `is_running` flag set after the turn ends
+    // For example, a thinking block's finalize can be missed at the thinking-to-tool transition
+    // While the turn runs, that entry correctly holds the frontier; once the turn is idle the frontier must advance past it
     let mut s = ScrollbackState::new();
     s.push(finalized("a"));
     s.push(running("stale")); // stale is_running flag
@@ -533,12 +506,10 @@ fn clear_resets_the_frontier() {
     assert_eq!(minimal_api::commit_scan_cursor(&s), 0);
 }
 
-/// Height-exactness guard (design K5 / risk #1). `commit_active` reserves
-/// exactly `desired_height(width)` rows via `insert_before`; if `render`
-/// paints real content beyond that, those rows are silently clipped (lost)
-/// from native scrollback. Render each block type into an over-tall buffer
-/// and assert no non-space glyph lands past `desired_height`. (Background
-/// fill of blank spaces past `h` is fine — only real content matters.)
+/// Height-exactness guard: `commit_active` reserves exactly `desired_height(width)` rows via `insert_before`.
+/// If `render` paints real content beyond that, those rows are silently clipped from native scrollback.
+/// Render each block type into an over-tall buffer and assert no non-space glyph lands past `desired_height`.
+/// Background fill of blank spaces past `h` is fine; only real content matters.
 fn assert_committed_fits(label: &str, block: RenderBlock, width: u16) {
     let mut entry = ScrollbackEntry::new(block);
     entry.set_display_mode(minimal_commit_display_mode(
@@ -559,9 +530,8 @@ fn assert_committed_fits_entry(label: &str, entry: &ScrollbackEntry, width: u16)
     let renderer = minimal_renderer(entry, &theme, appearance, test_cwd(), COMMITTED_TICK);
     let h = renderer.desired_height(width);
     assert!(h > 0, "{label}@{width}: desired_height was 0");
-    // The accent bar and background fill intentionally stretch to the given
-    // area height (chrome, not content). Only the content columns
-    // (x >= chrome_width) carry real text that `insert_before` would clip.
+    // The accent bar and background fill intentionally stretch to the given area height (chrome, not content)
+    // Only the content columns (x >= chrome_width) carry real text that `insert_before` would clip
     let chrome = renderer.chrome_width();
 
     let extra = 8u16;
@@ -614,8 +584,7 @@ fn committed_block_uses_owning_session_cwd_for_tool_paths() {
 #[test]
 fn committed_blocks_fit_desired_height() {
     // Thinking blocks render zero rows unless `show_thinking_blocks` is on.
-    // The toggle is a thread-local, so pin it on here so the thinking
-    // block's committed height is actually exercised.
+    // The toggle is a thread-local, so pin it on here so the thinking block's committed height is actually exercised
     minimal_api::set_show_thinking_blocks(true);
 
     let long = "Hello there — this is a longer message that should wrap across \
@@ -653,10 +622,8 @@ fn committed_blocks_fit_desired_height() {
     }
 }
 
-/// Regression pinned: `md_style::to_anstyle` used to map `Color::Reset`
-/// to a concrete ANSI-7 silver, washing out assistant/thinking markdown
-/// body text on light terminals; `highlight_bash_command` leaked raw
-/// syntect RGB.
+/// Regression pinned: `md_style::to_anstyle` used to map `Color::Reset` to a concrete ANSI-7 silver.
+/// That washed out assistant/thinking markdown body text on light terminals; `highlight_bash_command` leaked raw syntect RGB.
 #[test]
 fn terminal_native_lock_paints_only_native_colors() {
     use ratatui::buffer::Buffer;
@@ -756,9 +723,8 @@ fn large_commit_is_capped_with_footer() {
 
     let theme = Theme::current();
     let appearance = committed_appearance(&AppearanceConfig::default());
-    // A tall block: a fenced code block keeps each line on its own row
-    // (markdown would otherwise join soft-wrapped prose into one paragraph),
-    // so the block is comfortably taller than the cap.
+    // A tall block: a fenced code block keeps each line on its own row (markdown would otherwise join soft-wrapped prose into one paragraph)
+    // The block is comfortably taller than the cap
     let lines: Vec<String> = (0..60).map(|i| format!("line {i}")).collect();
     let body = format!("```\n{}\n```", lines.join("\n"));
     let mut entry = ScrollbackEntry::new(RenderBlock::agent_message(body));
@@ -775,8 +741,7 @@ fn large_commit_is_capped_with_footer() {
     let mut buf = Buffer::empty(area);
     paint_committed(&mut buf, renderer, width, full_h, theme.dim());
 
-    // The final row is the overflow footer naming the hidden line count and
-    // pointing at /transcript; the buffer is exactly `cap` rows (bounded).
+    // The final row is the overflow footer naming the hidden line count and pointing at /transcript; the buffer is exactly `cap` rows (bounded)
     let last: String = (0..width)
         .filter_map(|x| buf.cell((x, cap - 1)).map(|c| c.symbol().to_string()))
         .collect();
@@ -804,7 +769,7 @@ fn small_commit_is_not_capped() {
     let renderer = minimal_renderer(&entry, &theme, appearance, test_cwd(), COMMITTED_TICK);
     let full_h = renderer.desired_height(width);
 
-    // Buffer is exactly the block's height → no footer (uncapped path).
+    // Buffer is exactly the block's height, so there is no footer (uncapped path)
     let area = Rect::new(0, 0, width, full_h);
     let mut buf = Buffer::empty(area);
     paint_committed(&mut buf, renderer, width, full_h, theme.dim());
@@ -866,9 +831,8 @@ fn committed_edit_keeps_diff_line_backgrounds() {
     let mut buf = Buffer::empty(area);
     renderer.render(area, &mut buf);
 
-    // The committed edit uses a flat background (terminal transparency), but
-    // must still paint the per-line diff backgrounds — otherwise an added /
-    // removed line is indistinguishable from context.
+    // The committed edit uses a flat background (terminal transparency), but must still paint the per-line diff backgrounds
+    // Otherwise an added / removed line is indistinguishable from context
     let mut saw_insert = false;
     let mut saw_delete = false;
     for y in 0..h {
@@ -889,9 +853,8 @@ fn committed_edit_keeps_diff_line_backgrounds() {
     );
 }
 
-/// Asserted through `chrome_width` because that is what both `desired_height`
-/// and `render` subtract from the wrap width — one column is the whole cost of
-/// the rail, which is why restoring it is height-safe (K5).
+/// Asserted through `chrome_width` because that is what both `desired_height` and `render` subtract from the wrap width.
+/// One column is the whole cost of the rail, which is why restoring it is height-safe.
 #[test]
 fn only_thinking_spends_the_accent_column() {
     let theme = Theme::current();
@@ -930,10 +893,9 @@ fn only_thinking_spends_the_accent_column() {
         );
     }
 
-    // A column is reserved only where the block actually paints one. Reserving
-    // without painting leaves the content indented over a blank gutter — which
-    // is what a collapsed reasoning header did while `hide_accent` keyed off
-    // the block type alone.
+    // A column is reserved only where the block actually paints one
+    // Reserving without painting leaves the content indented over a blank gutter
+    // That is what a collapsed reasoning header did while `hide_accent` keyed off the block type alone
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     let rail = xai_grok_pager::glyphs::accent_bar();
@@ -1147,7 +1109,7 @@ fn collapsed_thinking_commit_is_one_advertised_row() {
         &collapsed_appearance(),
     ));
     assert_eq!(entry.display_mode(), DisplayMode::Collapsed);
-    // The mode `commit_active` records for the Ctrl+E ring.
+    // This is the mode `commit_active` records for the Ctrl+E ring
     assert!(matches!(
         entry.display_mode(),
         DisplayMode::Collapsed | DisplayMode::Truncated
@@ -1182,8 +1144,7 @@ fn collapsed_thinking_commit_is_one_advertised_row() {
     assert_eq!(renderer.desired_height(16), 1);
 }
 
-/// K5 guard: reasoning committed collapsed must still fit its reserved
-/// `insert_before` height.
+/// Reasoning committed collapsed must still fit its reserved `insert_before` height.
 #[test]
 fn collapsed_thinking_commit_fits_desired_height() {
     minimal_api::set_show_thinking_blocks(true);

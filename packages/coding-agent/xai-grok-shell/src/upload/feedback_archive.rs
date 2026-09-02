@@ -1,7 +1,5 @@
-//! Capped tar.gz archive of a session directory for a user-consented
-//! `/feedback` trace upload.
+//! Capped tar.gz archive of a session directory for a user-consented `/feedback` trace upload.
 
-/// Size caps for the one-shot feedback archive.
 pub(crate) struct ArchiveCaps {
     /// Total packed bytes; packing stops (truncating the archive) once hit.
     pub(crate) archive_bytes: u64,
@@ -14,7 +12,6 @@ pub(crate) const FEEDBACK_ARCHIVE_CAPS: ArchiveCaps = ArchiveCaps {
     file_bytes: 10 * 1024 * 1024,
 };
 
-/// Failure modes of the one-shot session-trace archive.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ArchiveError {
     #[error("pack session file: {0}")]
@@ -45,8 +42,7 @@ fn build_session_archive_with_caps(
         let encoder = GzEncoder::new(&mut archive_data, Compression::default());
         let mut archive = tar::Builder::new(encoder);
         let packed = add_dir_to_tar(&mut archive, session_dir, session_id, caps)?;
-        // Skips (oversized files, races with live writers) can leave nothing
-        // packed; an empty gzip helps nobody and must not report `uploaded`.
+        // Skips (oversized files, races with live writers) can leave nothing packed; an empty gzip helps nobody and must not report `uploaded`
         if packed == 0 {
             return Err(ArchiveError::Empty);
         }
@@ -93,12 +89,10 @@ fn add_dir_to_tar<W: std::io::Write>(
         let room = caps.archive_bytes.saturating_sub(total);
         let limit = caps.file_bytes.min(room);
         if limit == 0 {
-            // The cap truncates the archive; what is already packed is still
-            // useful for debugging, so stop instead of failing the upload.
+            // The cap truncates the archive; what is already packed is still useful for debugging, so stop instead of failing the upload
             break;
         }
-        // Skip-on-error: the session dir has live writers, so entries can be
-        // deleted or swapped for symlinks between the lstat and the open.
+        // Skip-on-error: the session dir has live writers, so entries can be deleted or swapped for symlinks between the lstat and the open
         let Ok(mut file) = open_regular_nofollow(path) else {
             continue;
         };
@@ -119,9 +113,8 @@ fn add_dir_to_tar<W: std::io::Write>(
     Ok(packed)
 }
 
-/// Open without following symlinks (TOCTOU: a walk entry can be replaced by a
-/// symlink after `symlink_metadata`), then re-check the opened fd is a
-/// regular file for platforms without `O_NOFOLLOW`.
+/// Open without following symlinks (TOCTOU: a walk entry can be replaced by a symlink after `symlink_metadata`).
+/// Then re-check the opened fd is a regular file, for platforms without `O_NOFOLLOW`.
 pub(crate) fn open_regular_nofollow(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     let mut opts = std::fs::OpenOptions::new();
     opts.read(true);
@@ -184,8 +177,7 @@ mod tests {
         assert!(open_regular_nofollow(&target).is_ok());
     }
 
-    /// Hitting the total cap truncates the archive instead of failing it: a
-    /// session just over the cap still uploads what was packed.
+    /// Hitting the total cap truncates the archive instead of failing it: a session just over the cap still uploads what was packed.
     #[test]
     fn archive_truncates_at_total_cap_instead_of_failing() {
         let dir = tempfile::tempdir().unwrap();
@@ -206,8 +198,7 @@ mod tests {
         );
     }
 
-    /// An archive where every file was skipped must fail, not upload an
-    /// empty gzip while reporting success.
+    /// An archive where every file was skipped must fail, not upload an empty gzip while reporting success.
     #[test]
     fn archive_with_nothing_packed_is_an_error() {
         let dir = tempfile::tempdir().unwrap();

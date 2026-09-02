@@ -1,36 +1,27 @@
 //! Shared git-repo dir-chain primitive.
 //!
-//! One `git2` discovery + one cwd→root walk, reused across the many repo-local
-//! config marker checks the folder-trust gate runs back-to-back. Lives in its
-//! own module (rather than `discovery`) because it is a generic repo-walk
-//! primitive consumed cross-crate by `xai-grok-workspace`, not agent-definition
-//! discovery.
+//! One `git2` discovery and one walk from cwd up to the root.
+//! The folder-trust gate reuses it across the many repo-local config marker checks it runs back-to-back.
+//! Lives in its own module (rather than `discovery`) because it is a generic repo-walk primitive, not agent-definition discovery.
+//! `xai-grok-workspace` consumes it cross-crate.
 
 use std::path::{Path, PathBuf};
 
-/// The git worktree root for `cwd` (if any) plus the directory chain from `cwd`
-/// up to that root (inclusive, cwd-first), resolved with ONE `git2` discovery
-/// and ONE upward walk.
+/// The git worktree root for `cwd` (if any) plus the directory chain from `cwd` up to that root (inclusive, cwd-first).
+/// Both come from ONE `git2` discovery and ONE upward walk.
 ///
-/// The folder-trust gate's `repo_configs_present` probes a dozen repo-local
-/// code-exec markers (`.mcp.json`, `.grok/config.toml`, `.claude/settings.json`,
-/// project plugin/agent dirs, …) back-to-back on the agent startup path. Each
-/// marker walker used to run its own `discover` + cwd→root walk; sharing one
-/// `RepoDirChain` collapses that to a single traversal (each redundant syscall
-/// is taxed 10-100x on Windows, and on a non-git dir each `discover` walks to
-/// the filesystem root). Both the gate and the real loaders consume the same
-/// chain via `*_in` walker variants, so detection can't drift from loading.
+/// The folder-trust gate's `repo_configs_present` probes a dozen repo-local code-exec markers back-to-back on the agent startup path.
+/// The markers are `.mcp.json`, `.grok/config.toml`, `.claude/settings.json`, the project plugin/agent dirs, and more.
+/// Each marker walker used to run its own `discover` and cwd-to-root walk; sharing one `RepoDirChain` collapses that to a single traversal.
+/// Each redundant syscall is taxed 10-100x on Windows, and on a non-git dir each `discover` walks to the filesystem root.
+/// Both the gate and the real loaders consume the same chain via `*_in` walker variants, so detection can't drift from loading.
 ///
-/// The public cwd-taking delegators (`find_project_configs`,
-/// `project_plugin_dirs`, `project_agent_dirs`, …) now resolve through this
-/// chain too, so their non-gate callers (config watcher, reloader, the mcp/
-/// config loaders, inspect, upload, mcp_doctor) gain the per-level canonicalize
-/// below. That is deliberate: all those callers are cold (startup / file-change /
-/// session-setup / manual commands), never per-keystroke, and the canonical stop
-/// is strictly more correct.
+/// The public cwd-taking delegators (`find_project_configs`, `project_plugin_dirs`, `project_agent_dirs`, …) resolve through this chain too.
+/// Their non-gate callers (config watcher, reloader, the mcp/config loaders, inspect, upload, mcp_doctor) gain the per-level canonicalize below.
+/// All those callers are cold (startup / file-change / session-setup / manual commands), never per-keystroke.
+/// The canonical stop is strictly more correct for them.
 ///
-/// Outside a git repo `git_root` is `None` and `dirs` is just `[cwd]`, matching
-/// every walker's no-repo branch (probe `cwd` only).
+/// Outside a git repo `git_root` is `None` and `dirs` is just `[cwd]`, matching every walker's no-repo branch (probe `cwd` only).
 #[derive(Debug, Clone)]
 pub struct RepoDirChain {
     /// Git worktree root (`workdir`), or `None` when `cwd` is not inside a repo.
@@ -40,28 +31,23 @@ pub struct RepoDirChain {
 }
 
 impl RepoDirChain {
-    /// Resolve the chain for `cwd`: ONE `git2` discovery + ONE upward walk.
+    /// Resolve the chain for `cwd`: ONE `git2` discovery and ONE upward walk.
     pub fn resolve(cwd: &Path) -> Self {
         let git_root = git2::Repository::discover(cwd)
             .ok()
             .and_then(|repo| repo.workdir().map(|p| p.to_path_buf()))
-            // Home-is-a-git-repo (dotfiles in $HOME): a discovery that walks up
-            // to $HOME must NOT treat the whole home subtree as one repo, or
-            // home-level `.grok`/`.mcp.json`/plugins would look repo-local. Drop
-            // it so cwd is handled as no-repo (probe cwd only). Home is compared
-            // canonically to match the symlink handling in the walk below.
+            // Home-is-a-git-repo (dotfiles in $HOME): a discovery that walks up to $HOME must NOT treat the whole home subtree as one repo
+            // Otherwise home-level `.grok`/`.mcp.json`/plugins would look repo-local
+            // Drop it so cwd is handled as no-repo (probe cwd only)
+            // Home is compared canonically to match the symlink handling in the walk below
             .filter(|root| !is_home_dir(root));
 
         let mut dirs = Vec::new();
         if let Some(ref root) = git_root {
-            // Canonicalize only for the stop test so a symlinked cwd/ancestor
-            // still halts AT the worktree root instead of over-walking to the
-            // filesystem root; pushed dirs keep their original spelling (callers
-            // `join` markers onto them, which resolve the same either way). The
-            // per-level canonicalize is required to stop at root through a
-            // symlinked ancestor while keeping raw spelling — do NOT reduce to a
-            // 2-call `starts_with` variant (it would mis-handle a mid-chain
-            // absolute symlink and reintroduce the over-walk).
+            // Canonicalize only for the stop test
+            // A symlinked cwd/ancestor then still halts at the worktree root instead of walking on to the filesystem root
+            // Pushed dirs keep their original spelling (callers `join` markers onto them, which resolve the same either way)
+            // Do NOT reduce this to a 2-call `starts_with` variant: it would mis-handle a mid-chain absolute symlink and walk past the root again
             let root_canonical = dunce::canonicalize(root).unwrap_or_else(|_| root.clone());
             let mut current = Some(cwd.to_path_buf());
             while let Some(dir) = current {
@@ -81,9 +67,9 @@ impl RepoDirChain {
     }
 }
 
-/// Whether `path` canonicalizes to the user's home directory. Local (not reused
-/// from `xai-grok-workspace`, which depends on THIS crate) to keep the dep edge
-/// one-way; backs the home-is-dotfiles guard in [`RepoDirChain::resolve`].
+/// Whether `path` canonicalizes to the user's home directory.
+/// It stays local (not reused from `xai-grok-workspace`, which depends on THIS crate) to keep the dep edge one-way.
+/// It backs the guard in [`RepoDirChain::resolve`] that drops a $HOME git root.
 fn is_home_dir(path: &Path) -> bool {
     let Some(home) = xai_dirs::home_dir() else {
         return false;
@@ -92,10 +78,9 @@ fn is_home_dir(path: &Path) -> bool {
     canon(path) == canon(&home)
 }
 
-/// Existing `<dir>/<subdir>` directories under each dir of a precomputed
-/// cwd→git-root chain ([`RepoDirChain::dirs`]), in chain order (cwd-first, then
-/// each `subdirs` entry in order). Shared body for the project plugin/agent dir
-/// walkers so the byte-identical double-loop lives in one place.
+/// Existing `<dir>/<subdir>` directories under each dir of a precomputed cwd-to-git-root chain ([`RepoDirChain::dirs`]).
+/// Results are in chain order: cwd-first, then each `subdirs` entry in order.
+/// The project plugin/agent dir walkers share this body so the byte-identical double-loop lives in one place.
 pub(crate) fn existing_subdirs_along(chain_dirs: &[PathBuf], subdirs: &[&str]) -> Vec<PathBuf> {
     let mut found = Vec::new();
     for dir in chain_dirs {
@@ -114,8 +99,8 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
-    /// RAII guard: set an env var, restore the prior value (or unset) on drop,
-    /// so a test never leaves process-global env pointing at a dropped tempdir.
+    /// RAII guard: set an env var, restore the prior value (or unset) on drop.
+    /// A test then never leaves process-global env pointing at a dropped tempdir.
     struct EnvVarGuard {
         key: &'static str,
         prev: Option<std::ffi::OsString>,
@@ -140,8 +125,7 @@ mod tests {
 
     #[test]
     fn resolve_in_repo_yields_cwd_to_root_chain() {
-        // A git-init'd tmp with a 2-deep subdir: the chain is cwd→root inclusive,
-        // cwd-first, in the dirs' original spelling, and `git_root` is the root.
+        // A git-init'd tmp with a 2-deep subdir: the chain is cwd to root inclusive, cwd-first, in the dirs' original spelling
         let tmp = tempfile::tempdir().unwrap();
         git2::Repository::init(tmp.path()).unwrap();
         let nested = tmp.path().join("a").join("b");
@@ -156,8 +140,8 @@ mod tests {
                 tmp.path().to_path_buf(),
             ]
         );
-        // `git_root` is the canonical worktree root (git2's `workdir`); compare by
-        // canonical form so a `/tmp`→`/private/tmp` symlink doesn't fail the test.
+        // `git_root` is the canonical worktree root (git2's `workdir`)
+        // Compare by canonical form so a `/tmp` to `/private/tmp` symlink doesn't fail the test
         let root = chain.git_root.expect("inside a repo");
         assert_eq!(
             dunce::canonicalize(&root).unwrap(),
@@ -167,10 +151,9 @@ mod tests {
 
     #[test]
     fn resolve_outside_repo_is_cwd_only() {
-        // A non-git tmp: no discovery hit, so the chain is just `[cwd]` and there
-        // is no git root. Only assert the no-repo shape when the temp dir is
-        // genuinely outside any repo (a dev/CI checkout may place $TMPDIR inside
-        // a larger git worktree).
+        // A non-git tmp: no discovery hit, so the chain is just `[cwd]` and there is no git root
+        // Only assert the no-repo shape when the temp dir is genuinely outside any repo
+        // A dev/CI checkout may place $TMPDIR inside a larger git worktree
         let tmp = tempfile::tempdir().unwrap();
         let plain = tmp.path().join("plain");
         std::fs::create_dir_all(&plain).unwrap();
@@ -184,10 +167,9 @@ mod tests {
     #[test]
     #[serial(home_env)]
     fn resolve_treats_home_git_repo_as_no_repo() {
-        // Home-is-a-git-repo (dotfiles in $HOME): discovery walks up to $HOME,
-        // but the guard drops that root so a subdir resolves as no-repo (probe
-        // cwd only) instead of spanning the whole home subtree. Pin HOME and
-        // USERPROFILE: xai_dirs::home_dir reads USERPROFILE on Windows.
+        // Home-is-a-git-repo (dotfiles in $HOME): discovery walks up to $HOME, but the guard drops that root
+        // A subdir then resolves as no-repo (probe cwd only) instead of spanning the whole home subtree
+        // Pin HOME and USERPROFILE: xai_dirs::home_dir reads USERPROFILE on Windows
         let tmp = tempfile::tempdir().unwrap();
         let home = dunce::canonicalize(tmp.path()).unwrap();
         git2::Repository::init(&home).unwrap();
@@ -204,9 +186,8 @@ mod tests {
     #[test]
     #[serial(home_env)]
     fn resolve_keeps_non_home_git_root() {
-        // The guard is home-EXACT: a git root that is NOT $HOME still resolves
-        // normally (no over-trigger). Pin both HOME and USERPROFILE so Windows
-        // home_dir() sees the unrelated tempdir too.
+        // The guard matches $HOME exactly: a git root that is NOT $HOME still resolves normally
+        // Pin both HOME and USERPROFILE so Windows home_dir() sees the unrelated tempdir too
         let home = tempfile::tempdir().unwrap();
         let _home_guard = EnvVarGuard::set("HOME", home.path());
         let _userprofile_guard = EnvVarGuard::set("USERPROFILE", home.path());

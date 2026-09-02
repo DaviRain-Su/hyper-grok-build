@@ -432,6 +432,8 @@ settings.contextual_hints.word_select.label: "単語選択"
 settings.contextual_hints.word_select.description: "テキスト選択が折りたたみ/ナビゲーションモードのときに会話テキストをダブルクリックした場合、単語選択が設定にあることをリマインドします。"
 settings.contextual_hints.ssh_wrap.label: "SSH ラップ"
 settings.contextual_hints.ssh_wrap.description: "SSH セッションのロード時、クリップボード転送とターミナル復元のために `grok wrap ssh` を推奨します。"
+settings.contextual_hints.export_copy.label: "コピーとエクスポート"
+settings.contextual_hints.export_copy.description: "会話テキストを近くで 3 回ドラッグコピーしたあと、/copy と /export があることをリマインドします。"
 settings.fork_secondary_model.label: "フォーク時のセカンダリモデル"
 settings.fork_secondary_model.description: "フォーク時にセカンダリエージェントが使用するモデル。「(上書きなし)」を選択するとクリアします。"
 

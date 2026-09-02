@@ -1,4 +1,4 @@
-//! Mixed plan.md edit + exit: approval snapshot matches the post-edit plan body.
+//! A batch mixing a plan.md edit and exit_plan_mode: the approval snapshot must match the plan body after the edit.
 
 use super::support::*;
 use super::*;
@@ -90,8 +90,7 @@ async fn seeded_active_plan_actor_with_edit_tools() -> (
             plan_path.clone(),
         ))
         .await;
-    // Phase-2 file tools dispatch through workspace_ops; without a bound
-    // session, search_replace hard-errors before writing plan.md.
+    // Phase-2 file tools dispatch through workspace_ops; without a bound session, search_replace hard-errors before writing plan.md
     actor
         .workspace_ops
         .bind_local_session(
@@ -188,8 +187,7 @@ fn bash_call(id: &str) -> ToolCallResponse {
         kind: "function".to_string(),
         function: crate::sampling::types::ToolCallFunction::new(
             "run_terminal_cmd",
-            // Must be a command the manager still prompts for (`echo` is
-            // safe-listed and auto-allows).
+            // Must be a command the manager still prompts for (`echo` is safe-listed and auto-allows)
             r#"{"command":"./probe-mixed-batch-reject.sh","description":"probe mixed-batch permission cancel"}"#,
         ),
     }
@@ -212,8 +210,7 @@ async fn mixed_permission_cancel_skips_exit_reverse_request() {
                 tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let mut actor =
                 create_test_actor(0, 256_000, 85, gateway_tx.clone(), persistence_tx).await;
-            // Disable background bash so finalize does not require the
-            // get_task_output / kill_task companion tools.
+            // Disable background bash so finalize does not require the get_task_output / kill_task companion tools
             *actor.agent.borrow_mut() = test_agent_with_tools(vec![
                 ToolConfig {
                     id: "GrokBuild:run_terminal_cmd".into(),

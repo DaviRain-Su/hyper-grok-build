@@ -1,18 +1,15 @@
 use regex::Regex;
 use xai_grok_tools::types::{claude_names_for, grok_names_for};
 
-/// A compiled hook matcher for tool names. The pattern semantics are chosen so that
-/// `matcher` entries in hooks migrated from other agent CLIs keep firing unchanged:
+/// A compiled hook matcher for tool names.
+/// The pattern semantics are chosen so that `matcher` entries in hooks migrated from other agent CLIs keep firing unchanged:
 ///
 /// - an empty pattern or `"*"` matches every tool;
-/// - a "simple" pattern (only `[A-Za-z0-9_|]`, i.e. a plain name or `|`-list) is an
-///   **exact** match against each name (after external→Grok alias expansion), NOT a regex;
-/// - anything else is an **unanchored** regex (also tested against the tool's external
-///   alias names, so e.g. `^Bash$` matches the Grok tool `run_terminal_command`).
+/// - a "simple" pattern (a plain name or `|`-list) is an **exact** match against each name (after external-to-Grok alias expansion), NOT a regex;
+/// - anything else is an **unanchored** regex, also tested against the tool's external aliases, so e.g. `^Bash$` matches `run_terminal_command`.
 ///
-/// The simple-vs-regex split is deliberate: it avoids anchoring a `|`-alternation (a
-/// naive `^a|b|c$` anchors only the first/last term and silently over-matches). Whitespace
-/// is significant (not trimmed): `"  "` is a regex that matches nothing.
+/// The simple-vs-regex split avoids anchoring a `|`-alternation (a naive `^a|b|c$` anchors only the first/last term and silently over-matches).
+/// Whitespace is significant (not trimmed): `"  "` is a regex that matches nothing.
 #[derive(Debug, Clone)]
 pub struct HookMatcher {
     kind: MatcherKind,
@@ -21,16 +18,16 @@ pub struct HookMatcher {
 #[derive(Debug, Clone)]
 enum MatcherKind {
     All,
-    /// Matches no tool names. Used when a configured matcher fails to compile
-    /// after deserialization; fail closed rather than widen to match-all.
+    /// Matches no tool names.
+    /// Used when a configured matcher fails to compile after deserialization; fail closed rather than widen to match-all.
     Never,
     Exact(Vec<String>),
     Regex(Regex),
 }
 
 impl HookMatcher {
-    /// Compile a matcher from a user pattern. Errors only when a regex-form pattern is
-    /// itself invalid regex (simple/empty/`*` forms never error).
+    /// Compile a matcher from a user pattern.
+    /// Errors only when a regex-form pattern is itself invalid regex (simple/empty/`*` forms never error).
     pub fn new(pattern: &str) -> Result<Self, regex::Error> {
         let kind = if pattern.is_empty() || pattern == "*" {
             MatcherKind::All
@@ -42,8 +39,8 @@ impl HookMatcher {
         Ok(Self { kind })
     }
 
-    /// Matcher that never matches. Prefer this over `None` on a [`HookSpec`] when a
-    /// pattern was configured but could not be compiled (fail-closed).
+    /// Matcher that never matches.
+    /// Prefer this over `None` on a [`HookSpec`] when a pattern was configured but could not be compiled (fail-closed).
     pub(crate) fn never() -> Self {
         Self {
             kind: MatcherKind::Never,
@@ -63,8 +60,7 @@ impl HookMatcher {
     }
 }
 
-/// Shared matcher-application rule: a missing matcher or missing value fires
-/// (fail-open); otherwise the compiled matcher decides.
+/// Shared matcher-application rule: a missing matcher or missing value fires (fail-open); otherwise the compiled matcher decides.
 pub fn matcher_allows(matcher: Option<&HookMatcher>, value: Option<&str>) -> bool {
     match (matcher, value) {
         (Some(matcher), Some(value)) => matcher.is_match(value),
@@ -72,8 +68,7 @@ pub fn matcher_allows(matcher: Option<&HookMatcher>, value: Option<&str>) -> boo
     }
 }
 
-/// A pattern is "simple" (exact/`|`-list, not regex) when it contains only
-/// ASCII alphanumerics, `_`, and `|`.
+/// A pattern is "simple" (exact/`|`-list, not regex) when it contains only ASCII alphanumerics, `_`, and `|`.
 fn is_simple_form(pattern: &str) -> bool {
     !pattern.is_empty()
         && pattern
@@ -81,10 +76,9 @@ fn is_simple_form(pattern: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'|')
 }
 
-/// Expand a simple-form pattern into the exact set of names it matches: each `|`-term
-/// plus any Grok tool names that term aliases (so `"Bash"` also matches
-/// `run_terminal_command`), per the shared external-name to Grok registry in
-/// `xai-grok-tools`. Empty terms and duplicates are dropped.
+/// Expand a simple-form pattern into the exact set of names it matches: each `|`-term plus any Grok tool names that term aliases.
+/// The alias mapping comes from the shared external-name registry in `xai-grok-tools`, so `"Bash"` also matches `run_terminal_command`.
+/// Empty terms and duplicates are dropped.
 fn exact_names(pattern: &str) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     let mut push = |name: &str| {

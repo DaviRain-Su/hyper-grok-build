@@ -1,17 +1,12 @@
-//! REAL host-clipboard plumbing shared by the OS-native paste e2e tests and
-//! the `paste_latency` bench: `pbcopy` / `pbpaste` / `osascript` on macOS,
-//! PowerShell `Set-Clipboard` / `Get-Clipboard` / WinForms `SetImage` on
-//! Windows.
+//! REAL host-clipboard helpers shared by the OS-native paste e2e tests and the `paste_latency` bench.
+//! They shell out to `pbcopy` / `pbpaste` / `osascript` on macOS and PowerShell `Set-Clipboard` / `Get-Clipboard` / WinForms `SetImage` on Windows.
 //!
-//! Everything here mutates or reads the MACHINE-GLOBAL clipboard, so callers
-//! must serialize against each other (e.g. `#[serial_test::serial]`) and
-//! should hold a [`HostClipboardTextGuard`] to restore the prior text. CI
-//! sessions without a usable clipboard are detected via
-//! [`clipboard_roundtrip_works`] so tests can skip instead of fail.
+//! Everything here mutates or reads the MACHINE-GLOBAL clipboard, so callers must serialize against each other (e.g. `#[serial_test::serial]`).
+//! Callers should hold a [`HostClipboardTextGuard`] to restore the prior text.
+//! CI sessions without a usable clipboard are detected via [`clipboard_roundtrip_works`] so tests can skip instead of fail.
 //!
-//! Compiles on every platform so cross-platform builds of the consumers stay
-//! green (the bench gates at runtime); on unsupported hosts the tool spawns
-//! simply fail.
+//! Compiles on every platform so cross-platform builds of the consumers stay green (the bench gates at runtime).
+//! On unsupported hosts the tool spawns fail.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -43,7 +38,7 @@ pub fn pbcopy(text: &str) -> Result<()> {
 /// Copy `text` to the host clipboard via PowerShell `Set-Clipboard`.
 #[cfg(target_os = "windows")]
 pub fn pbcopy(text: &str) -> Result<()> {
-    // Text travels over stdin, never inside the command line — no quoting.
+    // Text travels over stdin, never inside the command line, so no quoting is needed
     let mut cmd = Command::new("powershell");
     cmd.args([
         "-NoProfile",
@@ -80,13 +75,11 @@ pub fn pbpaste() -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Current host clipboard TEXT via PowerShell `Get-Clipboard` (`None` when
-/// unavailable).
+/// Current host clipboard TEXT via PowerShell `Get-Clipboard` (`None` when unavailable).
 #[cfg(target_os = "windows")]
 pub fn pbpaste() -> Option<String> {
     let mut cmd = Command::new("powershell");
-    // Console::Out.Write avoids the trailing newline PowerShell's pipeline
-    // output would append (roundtrip checks compare exact text).
+    // Console::Out.Write avoids the trailing newline PowerShell's pipeline output would append (roundtrip checks compare exact text)
     cmd.args([
         "-NoProfile",
         "-NonInteractive",
@@ -118,14 +111,13 @@ pub fn set_clipboard_png(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Put the PNG at `path` on the host clipboard as a raster via a WinForms
-/// `Clipboard::SetImage` PowerShell one-liner.
+/// Put the PNG at `path` on the host clipboard as a raster via a WinForms `Clipboard::SetImage` PowerShell one-liner.
 #[cfg(target_os = "windows")]
 pub fn set_clipboard_png(path: &Path) -> Result<()> {
     use base64::Engine as _;
-    // WinForms Clipboard requires an STA thread; -EncodedCommand (base64 of
-    // UTF-16LE) sidesteps every cmd/PowerShell quoting layer, leaving only
-    // the PS single-quote escape for the embedded path.
+    // WinForms Clipboard requires an STA thread
+    // -EncodedCommand (base64 of UTF-16LE) sidesteps every cmd/PowerShell quoting layer
+    // Only the PS single-quote escape for the embedded path remains
     let ps_path = path.display().to_string().replace('\'', "''");
     let script = format!(
         "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; \
@@ -164,10 +156,9 @@ pub fn write_fixture_png(dir: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Whether the host clipboard actually works in this session: sets a nonce
-/// via the text helper and reads it back. False on clipboard-less CI sessions
-/// (e.g. a Windows service session with no interactive desktop) so tests can
-/// SKIP loudly instead of failing on environment.
+/// Whether the host clipboard actually works in this session: sets a nonce via the text helper and reads it back.
+/// False on clipboard-less CI sessions (e.g. a Windows service session with no interactive desktop).
+/// Tests can then SKIP loudly instead of failing on environment.
 pub fn clipboard_roundtrip_works() -> bool {
     let nonce = format!("HOSTCLIPROUNDTRIP{}", std::process::id());
     if pbcopy(&nonce).is_err() {
@@ -177,9 +168,9 @@ pub fn clipboard_roundtrip_works() -> bool {
     pbpaste().is_some_and(|t| t.trim_end() == nonce)
 }
 
-/// Best-effort save/restore of the host TEXT clipboard around a test or bench
-/// run. Restores on drop (panic/unwind included). A prior IMAGE clipboard
-/// cannot be restored — `pbpaste` only reads the text representation.
+/// Best-effort save/restore of the host TEXT clipboard around a test or bench run.
+/// Restores on drop (panic/unwind included).
+/// A prior IMAGE clipboard cannot be restored; `pbpaste` only reads the text representation.
 pub struct HostClipboardTextGuard {
     prior: Option<String>,
 }

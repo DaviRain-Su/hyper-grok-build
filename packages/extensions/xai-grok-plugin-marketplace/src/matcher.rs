@@ -1,9 +1,5 @@
-//! Pure keyword matcher over marketplace plugin metadata.
-//!
-//! The matcher is a thin reader: matches live as data in the marketplace index
-//! (`keywords` and `domains`), augmented by the plugin's `name`. There is no
-//! `regex` dependency — matching is substring search guarded by ASCII word
-//! boundaries.
+//! The matches live as data in the marketplace index (`keywords` and `domains`), augmented by the plugin's `name`.
+//! There is no `regex` dependency; matching is substring search guarded by ASCII word boundaries.
 
 use std::cmp::Reverse;
 
@@ -17,10 +13,9 @@ pub struct KeywordCandidate<'a> {
 /// Return the index of the single candidate whose keyword matches `draft`.
 ///
 /// Returns `None` when `draft` has fewer than 3 characters or nothing matches.
-/// A candidate's effective keywords are its explicit `keywords`, its `domains`
-/// (each normalized: scheme, leading `www.`, and path stripped), and its
-/// `name`. Longer keywords take precedence; a keyword matches only when the
-/// occurrence is flanked by ASCII word boundaries.
+/// A candidate's effective keywords are its explicit `keywords`, its normalized `domains`, and its `name`.
+/// Domain normalization strips the scheme, a leading `www.`, and the path.
+/// Longer keywords take precedence; a keyword matches only when the occurrence is flanked by ASCII word boundaries.
 pub fn match_plugin_keyword(draft: &str, candidates: &[KeywordCandidate<'_>]) -> Option<usize> {
     if draft.chars().count() < 3 {
         return None;

@@ -1,5 +1,4 @@
-//! Session file-state / rewind methods (`workspace.begin_prompt`,
-//! `workspace.end_prompt`, `workspace.rewind_to`).
+//! Session file-state / rewind methods (`workspace.begin_prompt`, `workspace.end_prompt`, `workspace.rewind_to`).
 
 use serde::{Deserialize, Serialize};
 
@@ -53,7 +52,6 @@ pub enum ConflictType {
     ModifiedExternally,
 }
 
-/// A single conflict detected during file rewind.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileRewindConflict {
     pub path: String,

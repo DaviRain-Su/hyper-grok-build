@@ -133,7 +133,7 @@ impl ExpectationControl {
     }
 }
 
-/// Deterministic lifecycle handle for one registered inference expectation.
+/// Handle for one registered inference expectation: lets a test wait on its phases and release its terminal barrier.
 #[must_use = "expectation handles provide synchronization and satisfaction checks"]
 pub struct InferenceExpectation {
     control: Arc<ExpectationControl>,
@@ -159,7 +159,7 @@ impl InferenceExpectation {
         self.wait_for(ExpectationPhase::Blocked).await;
     }
 
-    /// Wait until the primary response pipeline crosses its terminal boundary.
+    /// Wait until the primary response crosses its terminal event.
     pub async fn wait_satisfied(&mut self) {
         self.wait_for(ExpectationPhase::Satisfied).await;
     }
@@ -174,7 +174,7 @@ impl InferenceExpectation {
         self.control.release();
     }
 
-    /// Panic with the expectation name and lifecycle state unless satisfied.
+    /// Panic with the expectation name and phase unless satisfied.
     pub fn assert_satisfied(&self) {
         assert!(
             self.is_satisfied(),
@@ -259,8 +259,7 @@ struct ExpectationState {
 type Expectations = Arc<std::sync::Mutex<ExpectationState>>;
 type ScriptQueues = Arc<std::sync::Mutex<HashMap<String, VecDeque<ScriptedResponse>>>>;
 
-/// Default-responder concurrency cap: over `cap` in-flight (each held for
-/// `hold`), extra requests get 429 + `Retry-After`.
+/// Default-responder concurrency cap: over `cap` in-flight (each held for `hold`), extra requests get a 429 with `Retry-After`.
 #[derive(Clone)]
 struct ConcurrencyCap {
     slots: Arc<tokio::sync::Semaphore>,

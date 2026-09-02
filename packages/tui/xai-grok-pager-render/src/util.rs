@@ -1,5 +1,3 @@
-//! Shared utility functions.
-
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -63,8 +61,7 @@ pub fn abbreviate_path(path: &str) -> Cow<'_, str> {
         return Cow::Owned(format!("{prefix}/{}", rest.display()));
     }
     if let Some(home) = xai_dirs::home_dir() {
-        // Path::strip_prefix is separator-aware; a string prefix plus
-        // `starts_with('/')` misses Windows `\` remainders after USERPROFILE.
+        // Path::strip_prefix is separator-aware; a string prefix plus `starts_with('/')` misses Windows `\` remainders after USERPROFILE
         if !home.as_os_str().is_empty()
             && let Ok(rest) = path_buf.strip_prefix(&home)
         {
@@ -128,8 +125,8 @@ pub fn format_time_ago(d: Duration) -> String {
     format!("{years}y")
 }
 
-/// Wall-clock [`SystemTime`] from unix-epoch millis. A non-positive value is
-/// the `#[serde(default)]` sentinel for a missing timestamp and reads as now.
+/// Wall-clock [`SystemTime`] from unix-epoch millis.
+/// A non-positive value is the `#[serde(default)]` sentinel for a missing timestamp and reads as now.
 pub fn system_time_from_unix_ms(unix_ms: i64) -> SystemTime {
     if unix_ms <= 0 {
         return SystemTime::now();
@@ -139,10 +136,9 @@ pub fn system_time_from_unix_ms(unix_ms: i64) -> SystemTime {
         .unwrap_or_else(SystemTime::now)
 }
 
-/// Project a monotonic [`Instant`] onto the wall clock, so live local anchors
-/// and on-disk timestamps (which can predate boot, and so have no `Instant`)
-/// compare in one space. The skew between the two `now()` samples is below
-/// [`format_time_ago`]'s minute granularity.
+/// Project a monotonic [`Instant`] onto the wall clock, so live local anchors and on-disk timestamps compare in one space.
+/// On-disk timestamps can predate boot, and so have no `Instant`.
+/// The skew between the two `now()` samples is below [`format_time_ago`]'s minute granularity.
 pub fn system_time_from_instant(instant: Instant) -> SystemTime {
     SystemTime::now()
         .checked_sub(instant.elapsed())
@@ -182,8 +178,8 @@ pub fn unix_now() -> i64 {
         .as_secs() as i64
 }
 
-/// Compact `N ago` age relative to `now`; future timestamps saturate to
-/// `0s ago`. [`format_time_ago`] buckets coarser and drops the `ago`.
+/// Compact `N ago` age relative to `now`; future timestamps saturate to `0s ago`.
+/// [`format_time_ago`] buckets coarser and drops the `ago`.
 pub fn format_age(created_at: i64, now: i64) -> String {
     let delta = now.saturating_sub(created_at).max(0);
     if delta < 60 {
@@ -197,8 +193,7 @@ pub fn format_age(created_at: i64, now: i64) -> String {
     }
 }
 
-/// Truncate to at most `max_width` display columns (CJK counts 2), ending
-/// with `…` when cut; a zero budget yields an empty string.
+/// Truncate to at most `max_width` display columns (CJK counts 2), ending with `…` when cut; a zero budget yields an empty string.
 pub fn truncate_to_width(s: &str, max_width: usize) -> Cow<'_, str> {
     if byte_offset_at_width(s, max_width) == s.len() {
         return Cow::Borrowed(s);
@@ -223,8 +218,8 @@ pub fn byte_offset_at_width(s: &str, max_width: usize) -> usize {
     s.len()
 }
 
-/// Left-align `s` in `width` display columns. `format!`'s `{:<width$}` pads
-/// by char count, which shears columns after wide (e.g. CJK) glyphs.
+/// Left-align `s` in `width` display columns.
+/// `format!`'s `{:<width$}` pads by char count, which shears columns after wide (e.g. CJK) glyphs.
 pub fn pad_to_width(s: &str, width: usize) -> String {
     let pad = width.saturating_sub(s.width());
     let mut out = String::with_capacity(s.len() + pad);
@@ -233,7 +228,7 @@ pub fn pad_to_width(s: &str, width: usize) -> String {
     out
 }
 
-/// Group a count's digits with commas for display: `1234567` → `"1,234,567"`.
+/// Group a count's digits with commas for display: `1234567` becomes `"1,234,567"`.
 pub fn group_thousands(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);

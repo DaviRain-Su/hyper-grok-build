@@ -21,6 +21,7 @@ xai-grok-workspace = { workspace = true }
 
 [dev-dependencies]
 rcgen = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true

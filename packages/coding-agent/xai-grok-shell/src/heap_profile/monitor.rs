@@ -1,4 +1,4 @@
-//! Threshold-triggered jemalloc heap dump + upload.
+//! Threshold-triggered jemalloc heap dump and upload.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -9,17 +9,17 @@ use crate::auth::AuthManager;
 use crate::session::repo_changes::{TraceExportConfig, UploadMethod};
 use crate::upload::gcs::WithAuth as _;
 
-/// Hard skip-cap for dump uploads (K4). Allowed sizes are `1..=HARD_DUMP_SIZE_CAP_BYTES`.
+/// Hard cap for dump uploads: allowed sizes are `1..=HARD_DUMP_SIZE_CAP_BYTES`; larger dumps are skipped.
 pub const HARD_DUMP_SIZE_CAP_BYTES: u64 = 128 * 1024 * 1024;
 
-/// Wall budget for `prof.dump` in `spawn_blocking` (K6).
+/// Wall budget for `prof.dump` in `spawn_blocking`.
 pub(super) const DUMP_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Wall budget for GCS heap+meta upload so a stalled proxy cannot pin
-/// `upload_in_flight` for the process lifetime (blocks later threshold dumps).
+/// Wall budget for the GCS heap and meta upload.
+/// A stalled proxy must not pin `upload_in_flight` for the process lifetime; that blocks later threshold dumps.
 pub(super) const UPLOAD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
-/// Scoped kill-switch poll cadence while profiling is enabled (K12).
+/// Scoped kill-switch poll cadence while profiling is enabled.
 pub const SCOPED_KILL_SWITCH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 30;
@@ -57,7 +57,7 @@ pub struct HeapProfileUploadHandles {
 /// Outcome of one threshold dump attempt (for latch decisions / tests).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DumpAttemptOutcome {
-    /// Missing session or upload handles — do not latch (K6 / defer).
+    /// Missing session or upload handles; do not latch.
     Deferred,
     DumpFailed,
     DumpTimeout,
@@ -66,12 +66,12 @@ pub enum DumpAttemptOutcome {
     UploadFailed,
 }
 
-/// Whether a dump-attempt outcome should latch the threshold (K6).
+/// Whether a dump-attempt outcome should latch the threshold.
 pub fn should_latch(outcome: DumpAttemptOutcome) -> bool {
     !matches!(outcome, DumpAttemptOutcome::Deferred)
 }
 
-/// True when `session_id` is a UUID (path_auth Session class leading segment).
+/// True when `session_id` is a UUID (the leading segment of a path_auth Session-class path).
 pub fn is_valid_session_id(session_id: &str) -> bool {
     uuid::Uuid::try_parse(session_id).is_ok()
 }
@@ -102,7 +102,7 @@ pub fn sanitize_version(version: &str) -> String {
     out
 }
 
-/// `{session_id}/jemalloc/{session_id}-{version}-{ts}.heap` (+ `.meta.json`).
+/// `{session_id}/jemalloc/{session_id}-{version}-{ts}.heap` and the matching `.meta.json`.
 pub fn object_paths(session_id: &str, version: &str, ts_unix: u64) -> (String, String) {
     let ver = sanitize_version(version);
     let base = format!("{session_id}/jemalloc/{session_id}-{ver}-{ts_unix}");
@@ -146,7 +146,7 @@ pub fn resolve_jemalloc_heap_profile(
     }
 }
 
-/// Process-lifetime latch + dump/upload orchestration for heap profiles.
+/// Holds the process-lifetime threshold latches and runs the dump and upload for heap profiles.
 pub struct HeapProfileMonitor {
     latched: BTreeSet<u64>,
     config: JemallocHeapProfileConfig,
@@ -213,8 +213,8 @@ impl HeapProfileMonitor {
         self.upload_in_flight = false;
     }
 
-    /// Apply resolved config + upload handles; toggle sampling. Does not touch
-    /// sticky `session_id` or clear latches.
+    /// Apply resolved config and upload handles; toggle sampling.
+    /// Does not touch the sticky `session_id` or clear latches.
     pub fn reconfigure(
         &mut self,
         config: JemallocHeapProfileConfig,
@@ -254,8 +254,8 @@ impl HeapProfileMonitor {
         self.session_id = Some(Arc::from(session_id));
     }
 
-    /// Start a dump when a threshold is crossed. Deferred paths return `None`
-    /// without latching.
+    /// Start a dump when a threshold is crossed.
+    /// Deferred paths return `None` without latching.
     pub(crate) fn begin_tick(&mut self) -> Option<PendingDump> {
         if !self.config.enabled || self.upload_in_flight {
             if self.upload_in_flight {
@@ -369,8 +369,8 @@ pub(crate) struct PendingDump {
 }
 
 impl PendingDump {
-    /// Dump + upload off the monitor borrow. On timeout, awaits the dump join
-    /// before returning so in-flight stays set until the private dir is safe.
+    /// Dump and upload without holding the monitor borrow.
+    /// On timeout, awaits the dump join before returning so `upload_in_flight` stays set until the private dir is safe.
     pub(crate) async fn execute(self) -> DumpAttemptOutcome {
         let threshold = self.threshold;
         let stats = self.stats;

@@ -38,8 +38,8 @@ const SOURCE_FIELD_ENCODED_BYTES: u64 =
 const LATER_ONE_DIGIT_METADATA: u64 = INITIAL_METADATA - SOURCE_FIELD_ENCODED_BYTES;
 const FIRST_TWO_DIGIT_GENERATION: u8 = 10;
 const TWO_DIGIT_GENERATION_BYTE_INCREMENT: u64 = 1;
-// Aligned reserves consume canonical `.1` codec limits from the row-byte tuples —
-// not `align16(exact)`. Complete and Claim `.1` exceed `align16(.0)`.
+// Aligned reserves consume canonical `.1` codec limits from the row-byte tuples, not `align16(exact)`
+// Complete and Claim `.1` exceed `align16(.0)`
 const COMPLETION_ALIGNED_PER_GENERATION: u64 = CompletionEffectV1::COUNT as u64
     * COMPLETION_ROW_BYTES[0].1 as u64
     + ProductClaimSlotV1::COUNT as u64 * COMPLETION_ROW_BYTES[1].1 as u64

@@ -1,9 +1,5 @@
-//! Re-encode decoded attachments that exceed [`MAX_IMAGE_BYTES`],
-//! [`MAX_ENCODE_PIXELS`], or [`MAX_ENCODE_SIDE_PX`] to fit the conversation
-//! caps. The primary dimension limit is the v9 pixel-area budget
-//! ([`MAX_ENCODE_PIXELS`]); [`MAX_ENCODE_SIDE_PX`] is a model-agnostic side
-//! clamp. Compute is amortised via
-//! [`NormalizeCache`](crate::session::normalize_cache).
+//! Re-encode decoded attachments that exceed [`MAX_IMAGE_BYTES`], [`MAX_ENCODE_PIXELS`], or [`MAX_ENCODE_SIDE_PX`] to fit the conversation caps.
+//! Compute is reused across calls via [`NormalizeCache`](crate::session::normalize_cache).
 use crate::session::normalize_cache::{
     HarnessVariant, NormalizeCache, NormalizeError, NormalizedEntry, run_blocking,
 };
@@ -15,51 +11,41 @@ use xai_grok_tools::util::format_bytes;
 use xai_grok_tools::util::image_compress::{FilterType, ReEncodeParams, re_encode_under_limit};
 /// Decoded attachment bytes above this are re-encoded to fit this cap.
 ///
-/// Kept low so many images fit under the inference proxy's ~50 MB request-body
-/// limit before byte-budget image eviction has to kick in downstream. Base64
-/// inflates raw bytes by ~4/3, so a 1.5 MB image is ~2 MB on the wire and ~25
-/// fit under the limit. A low per-image cost means a conversation rarely
-/// reaches the eviction threshold, so the server-side KV-cache prefix is rarely
-/// rewritten. (Was 5 MB, which let only ~7 images reach the limit and then
-/// forced cache-busting eviction on essentially every subsequent turn.)
+/// Kept low so many images fit under the inference proxy's ~50 MB request-body limit before the downstream byte budget starts evicting images.
+/// Base64 inflates raw bytes by ~4/3, so a 1.5 MB image is ~2 MB on the wire and ~25 fit under the limit.
+/// A low per-image cost means a conversation rarely reaches the eviction threshold, so the server-side KV-cache prefix is rarely rewritten.
 pub(crate) const MAX_IMAGE_BYTES: usize = 1_500_000;
 /// The attachment cap rendered the way the sizes beside it render.
 fn limit_label() -> String {
     format_bytes(MAX_IMAGE_BYTES as u64)
 }
-/// Total pixel budget (w*h) before downscaling. Mirrors the v9 tokenizer's
-/// `image_filter_max_pixels = 2_408_448` — larger images are downsampled
-/// server-side anyway, so extra pixels only waste request bytes.
+/// Total pixel budget (w*h) before downscaling.
+/// Mirrors the v9 tokenizer's `image_filter_max_pixels = 2_408_448`.
+/// Larger images are downsampled server-side anyway, so extra pixels only waste request bytes.
 const MAX_ENCODE_PIXELS: u64 = 2_408_448;
-/// Max width/height before downscaling. Model-agnostic side clamp because
-/// images are normalized once at ingest and models can switch mid-session.
-/// Not a v9 constraint — [`MAX_ENCODE_PIXELS`] is what the v9 encoder enforces.
+/// This is a model-agnostic side clamp because images are normalized once at ingest and models can switch mid-session.
+/// Not a v9 constraint; [`MAX_ENCODE_PIXELS`] is what the v9 encoder enforces.
 const MAX_ENCODE_SIDE_PX: u32 = 2000;
-/// External-harness image-resize path caps at 1024px before captioning.
+/// The image-resize path for external harnesses caps at 1024px before captioning.
 const STRICT_MAX_ENCODE_SIDE_PX: u32 = 1024;
 const MIN_ENCODE_SIDE_PX: u32 = 512;
 const DOWNSCALE_FILTER: FilterType = FilterType::CatmullRom;
 const JPEG_QUALITY_STEPS: &[u8] = &[88, 80, 72, 64, 56, 48, 40, 32];
-/// Upper bound on decoded pixel count before refusing to decode. Matches
-/// the API ceiling ([`MAX_VISION_TOTAL_PX`]) so any image the API would
-/// accept can be decoded for the downscale re-encode — a 20-48 Mpx camera
-/// photo must not be refused client-side (it downscales to the wire caps
-/// anyway). Worst case is a transient ~716 MB RGBA bitmap inside
-/// `spawn_blocking`, one image at a time.
+/// Upper bound on decoded pixel count before refusing to decode.
+/// Matches the API ceiling ([`MAX_VISION_TOTAL_PX`]) so any image the API would accept can be decoded for the downscale re-encode.
+/// A 20-48 Mpx camera photo must not be refused client-side (it downscales to the wire caps anyway).
+/// Worst case is a transient ~716 MB RGBA bitmap inside `spawn_blocking`, one image at a time.
 const MAX_DECODE_PIXELS: u64 = MAX_VISION_TOTAL_PX;
-/// Bounded ICO decode for load-time verification: real icons are far
-/// smaller; bytes claiming more are kept un-verified rather than decoded
-/// on the session-load path.
+/// Bounded ICO decode for load-time verification: real icons are far smaller.
+/// Bytes claiming more are kept un-verified rather than decoded on the session-load path.
 const MAX_LOAD_ICO_DECODE_PIXELS: u64 = 16_000_000;
-/// Backend APIs reject images with either side < 8 px.
+/// Backend APIs reject images with either side under 8 px.
 pub(crate) const MIN_VISION_SIDE_PX: u32 = 8;
-/// Backend APIs also reject images with fewer than 512 total pixels
-/// (`MIN_IMAGE_PIXELS`); e.g. a 16×16 icon is 256 px and draws a 400 that
-/// poisons the conversation on every following turn.
+/// Backend APIs also reject images with fewer than 512 total pixels (`MIN_IMAGE_PIXELS`).
+/// E.g. a 16×16 icon is 256 px and draws a 400 that poisons the conversation on every following turn.
 pub(crate) const MIN_VISION_TOTAL_PX: u64 = 512;
-/// Backend ceiling (`MAX_IMAGE_PIXELS`), header-checked server-side before
-/// any resize. Send paths re-encode far below this; only legacy/foreign
-/// history payloads can exceed it.
+/// Backend ceiling (`MAX_IMAGE_PIXELS`), header-checked server-side before any resize.
+/// Send paths re-encode far below this; only legacy/foreign history payloads can exceed it.
 pub(crate) const MAX_VISION_TOTAL_PX: u64 = 178_956_970;
 const NORMALIZE_PARAMS: ReEncodeParams = ReEncodeParams {
     max_bytes: MAX_IMAGE_BYTES,
@@ -69,7 +55,6 @@ const NORMALIZE_PARAMS: ReEncodeParams = ReEncodeParams {
     quality_steps: JPEG_QUALITY_STEPS,
     filter: DOWNSCALE_FILTER,
 };
-/// Resize target for the stricter image normalization path.
 const STRICT_NORMALIZE_PARAMS: ReEncodeParams = ReEncodeParams {
     max_bytes: MAX_IMAGE_BYTES,
     max_side_px: STRICT_MAX_ENCODE_SIDE_PX,
@@ -99,10 +84,9 @@ impl ImageCompressionInfo {
             (false, false) => Cow::Borrowed("compressed"),
         }
     }
-    /// User-facing one-liner (TUI toast, headless events). Leads with the
-    /// outcome, not the limit violation, so it doesn't read as an error;
-    /// the why lives in the model-facing [`render_compression_notice`],
-    /// which keeps [`Self::reason_label`].
+    /// User-facing one-liner (TUI toast, headless events).
+    /// Leads with the outcome, not the limit violation, so it doesn't read as an error.
+    /// The why lives in the model-facing [`render_compression_notice`], which keeps [`Self::reason_label`].
     pub(crate) fn display(&self) -> String {
         let verb = if self.compressed_width == self.original_width
             && self.compressed_height == self.original_height
@@ -129,7 +113,7 @@ pub(crate) struct NormalizeResult {
     pub compressed: Vec<ImageCompressionInfo>,
     pub re_encode_fallbacks: Vec<String>,
     /// Images dropped entirely (integrity failure, too small, etc.).
-    /// Surfaced via [`render_image_dropped_notice`].
+    /// Reported via [`render_image_dropped_notice`].
     pub dropped: Vec<String>,
 }
 pub(crate) async fn normalize_images(
@@ -138,8 +122,7 @@ pub(crate) async fn normalize_images(
 ) -> NormalizeResult {
     normalize_images_in(images, is_cursor, NormalizeCache::global()).await
 }
-/// [`normalize_images`] with an injected cache (tests use a fresh
-/// per-case instance to avoid singleton-state leakage).
+/// [`normalize_images`] with an injected cache (tests use a fresh per-case instance so state does not leak through the global cache).
 pub(crate) async fn normalize_images_in(
     images: Vec<ImageContent>,
     is_cursor: bool,
@@ -186,9 +169,8 @@ fn params_for(harness: HarnessVariant) -> &'static ReEncodeParams {
         HarnessVariant::Default => &NORMALIZE_PARAMS,
     }
 }
-/// Resolve the active reminder tag via the canonical constants in
-/// `xai_grok_tools::reminders` (free-fn shape because this module has no
-/// `SessionActor`; see `reminder_wrapper_tag`).
+/// Resolve the active reminder tag via the canonical constants in `xai_grok_tools::reminders`.
+/// A free function because this module has no `SessionActor`; see `reminder_wrapper_tag`.
 fn reminder_tag(is_cursor: bool) -> &'static str {
     let _ = is_cursor;
     xai_grok_tools::reminders::DEFAULT_REMINDER_TAG
@@ -211,9 +193,8 @@ fn render_notice(notes: &[String], is_cursor: bool, inner_tag: &str) -> String {
 pub(crate) fn render_image_dropped_notice(notes: &[String], is_cursor: bool) -> String {
     render_notice(notes, is_cursor, "image_dropped_notice")
 }
-/// Build the (system-reminder, owned-notes) pair for a
-/// `NormalizeResult.dropped` list. Shared by the user-attachment flow
-/// and the tool-result-extraction flow.
+/// Build the (system-reminder, owned-notes) pair for a `NormalizeResult.dropped` list.
+/// Shared by the user-attachment flow and the tool-result-extraction flow.
 pub(crate) fn dropped_to_envelope(
     dropped: Vec<String>,
     is_cursor: bool,
@@ -260,13 +241,10 @@ pub(crate) fn render_compression_notice(
         notes.join("\n"),
     )
 }
-/// Why persisted-history image bytes would be rejected by the API, or
-/// `None` when sendable. Cheap (format sniff + structural walk + header
-/// dimension probe; pixel decode only for ICO, bounded) — used at session
-/// load to strip payloads that draw a 400 on every subsequent turn,
-/// leaving the session bricked. The reason is logged when the loader
-/// strips an image — the strip is re-persisted (irreversible), so the
-/// evidence must reach logs.
+/// Why persisted-history image bytes would be rejected by the API, or `None` when sendable.
+/// Cheap: a format sniff, a structural walk, and a header dimension probe; a pixel decode only for ICO, bounded.
+/// Used at session load to strip payloads that draw a 400 on every subsequent turn, leaving the session unusable.
+/// The reason is logged when the loader strips an image; the strip is re-persisted (irreversible), so the evidence must reach logs.
 pub(crate) fn persisted_image_reject_reason(bytes: &[u8]) -> Option<String> {
     use image::ImageFormat as F;
     use xai_grok_tools::util::image_validate as iv;
@@ -310,12 +288,11 @@ pub(crate) fn persisted_image_reject_reason(bytes: &[u8]) -> Option<String> {
 pub(crate) enum InlineAttachVerdict {
     Attach,
     TooSmall,
-    /// Base64 or header probe failed. Fail closed: an unvalidatable image
-    /// must be withheld, not attached (the API 400s it on every turn).
+    /// Base64 or header probe failed.
+    /// Fail closed: an unvalidatable image must be withheld, not attached (the API 400s it on every turn).
     Unreadable,
 }
-/// Gate for attaching a `read_file` image to its tool result: enforce the
-/// API dimension floors on the decoded payload.
+/// Gate for attaching a `read_file` image to its tool result: enforce the API dimension floors on the decoded payload.
 pub(crate) fn inline_attach_verdict(data_b64: &str) -> InlineAttachVerdict {
     use base64::Engine as _;
     let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(data_b64) else {
@@ -420,9 +397,8 @@ async fn compute_normalized(
     let params = params_for(harness);
     run_blocking(move || compute_normalized_blocking(raw_bytes, params, index)).await
 }
-/// CPU-bound normalize work. `params` widens to `&'static
-/// ReEncodeParams` (instead of `HarnessVariant`) so tests can inject
-/// `max_bytes = 0` to drive the `ReEncodingOversized` branch.
+/// `params` widens to `&'static ReEncodeParams` (instead of `HarnessVariant`).
+/// Tests can then inject `max_bytes = 0` to drive the `ReEncodingOversized` branch.
 fn compute_normalized_blocking(
     raw_bytes: Vec<u8>,
     params: &'static ReEncodeParams,

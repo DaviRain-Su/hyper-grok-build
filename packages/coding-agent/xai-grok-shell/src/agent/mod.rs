@@ -5,6 +5,7 @@ pub mod chat_modes;
 pub mod config;
 pub(crate) mod config_model_override_parse;
 mod ext_parsers;
+pub mod external_otel_pin;
 pub mod feedback_client;
 pub mod folder_trust;
 pub(crate) mod handlers;

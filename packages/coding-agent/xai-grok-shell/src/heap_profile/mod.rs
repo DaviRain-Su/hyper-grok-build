@@ -1,8 +1,7 @@
-//! Heap-profile IoC seam + threshold monitor.
+//! Hook installation and a threshold monitor for jemalloc heap profiling.
 //!
-//! The composition root installs jemalloc ops; without a hook (tests, Windows,
-//! non-jemalloc builds) every seam API is inert. The monitor polls
-//! `stats.resident` and uploads dumps via `gcs::upload_file`.
+//! The composition root installs the jemalloc ops; without a hook (tests, Windows, non-jemalloc builds) every function here is inert.
+//! The monitor polls `stats.resident` and uploads dumps via `gcs::upload_file`.
 
 mod monitor;
 
@@ -13,10 +12,8 @@ pub use monitor::{
     resolve_jemalloc_heap_profile, sanitize_version, should_latch,
 };
 
-/// Recommended jemalloc `lg_prof_sample` (2^19 bytes ≈ 512 KiB).
-///
-/// Keep process `MALLOC_CONF` / `_RJEM_MALLOC_CONF` and dump meta in sync with
-/// this value (unit-test BUILD env and ops docs).
+/// Recommended jemalloc `lg_prof_sample` (2^19 bytes, about 512 KiB).
+/// Keep process `MALLOC_CONF` / `_RJEM_MALLOC_CONF` and dump metadata in sync with this value (unit-test BUILD env and ops docs).
 pub const LG_PROF_SAMPLE: u32 = 19;
 
 use std::path::Path;
@@ -57,7 +54,6 @@ pub fn set_prof_active(active: bool) -> bool {
         .unwrap_or(false)
 }
 
-/// Dump a heap profile to `path`.
 pub fn dump_to_path(path: &Path) -> Result<(), String> {
     HOOKS
         .get()
@@ -138,12 +134,10 @@ mod tests {
         FAKE_DUMP_PATH.lock().expect("dump path lock").clone()
     }
 
-    /// `HOOKS` is process-global `OnceLock` (first-wins). This test is the
-    /// **sole installer** under serial key `heap_profile_hooks` — do not call
-    /// `install` from other serial groups or the empty/inert phase is order-
-    /// sensitive. Inert API checks do not assert private lock emptiness so a
-    /// future install site only breaks the install-path assertions, not an
-    /// opaque `is_none` check.
+    /// `HOOKS` is a process-global `OnceLock`, first caller wins.
+    /// This test is the sole installer under serial key `heap_profile_hooks`.
+    /// Calling `install` from another serial group would make the empty/inert phase order-sensitive.
+    /// The inert checks do not assert `HOOKS` is empty, so a future install site breaks the install-path assertions, not an opaque `is_none` check.
     #[test]
     #[serial_test::serial(heap_profile_hooks)]
     fn heap_profile_inert_then_installed_hooks() {
@@ -161,8 +155,7 @@ mod tests {
 
         reset_fakes();
         install(fake_hooks());
-        // Second install is a no-op (first-wins); only meaningful when we
-        // installed fakes above.
+        // Second install is a no-op (first-wins); only meaningful when we installed fakes above
         install(HeapProfileHooks {
             stats: || None,
             set_prof_active: |_| false,

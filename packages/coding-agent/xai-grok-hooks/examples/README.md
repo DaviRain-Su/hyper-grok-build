@@ -61,7 +61,7 @@ chmod +x ~/.grok/hooks/bin/session-log.sh
 
 ### 4. Tool Activity Logger (`tool-logger.json`)
 
-**Type:** passive (`PreToolUse` + `PostToolUse`)
+**Type:** observe-only in this example (`PreToolUse` + `PostToolUse`) — logging only; it exits 0 and writes nothing to stdout, so it changes nothing the model sees
 
 Logs all tool calls to `~/.grok/tool-activity.log` — tool name, event type, effective tool name, backgrounded status.
 
@@ -136,9 +136,21 @@ or
 ```
 The turn ends after 8 consecutive continuations. The input carries `stopHookActive` (true once a block has already continued this turn) so a hook can give up.
 
-**Exit codes:** `0` = allow / no decision, `2` = deny (`PreToolUse`) or block-stop with stderr as the feedback, other = fail-open. Valid decision JSON on stdout wins over the exit code.
+**For `PostToolUse`:** the tool has already run, so nothing is blocked, but stdout decides what the model sees next:
+```json
+{"decision":"block","reason":"Feedback delivered to the model with the tool result"}
+```
+```json
+{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"A note for the model"}}
+```
+```json
+{"hookSpecificOutput":{"hookEventName":"PostToolUse","updatedMCPToolOutput":"[redacted]"}}
+```
+`updatedToolOutput` replaces a built-in tool's output and must match that tool's own output shape (the `toolResult` in the same event); `updatedMCPToolOutput` replaces an MCP tool's output and is not shape-checked. The scrollback and telemetry keep the original either way. Every hook's block reason and `additionalContext` are delivered in call order, each naming its hook; only the replacements are last-writer-wins.
 
-**For passive hooks:** stdout is informational only. Exit `0` for success.
+**Exit codes:** `0` = allow / no decision, `2` = deny (`PreToolUse`), block-stop with stderr as the feedback (`Stop`/`SubagentStop`), or stderr fed to the model as feedback (`PostToolUse`), other = fail-open. Valid decision JSON on stdout wins over the exit code, except that a `PostToolUse` hook that exits non-zero keeps only its block reason — its context and its replacement are dropped.
+
+**For passive hooks (`SessionStart`, `Notification`, …):** stdout is informational only. Exit `0` for success.
 
 ## Uninstall
 

@@ -9,11 +9,11 @@ use crate::auth::manager::AUTH_LOCK_TIMEOUT;
 use crate::auth::model::{GrokAuth, UserInfo, lookup_auth};
 use crate::auth::storage::{read_auth_json, write_auth_json};
 
-/// `/user` fetch budget, shared by the inline (login) and background paths.
+/// Timeout for the `/user` fetch, shared by the inline (login) and background paths.
 const USER_FETCH_TIMEOUT: StdDuration = StdDuration::from_secs(10);
 
-/// Logs `auth update enrichment dropped` if the task is cancelled
-/// mid-flight. Disarmed on normal completion.
+/// Logs `auth update enrichment dropped` if the task is cancelled before it finishes.
+/// Normal completion calls `disarm` first, which suppresses the log.
 pub(super) struct EnrichmentExitGuard {
     pub(super) started: std::time::Instant,
     pub(super) armed: bool,
@@ -123,7 +123,7 @@ async fn fetch_user_info(manager: &AuthManager, key: &str, log_label: &str) -> O
     }
 }
 
-/// Blocking login-time enrichment: merge `/user` fields before the first save.
+/// Blocking enrichment at login: merges `/user` fields into `auth` before the first save.
 pub(super) async fn enrich_inline(manager: &AuthManager, auth: &mut GrokAuth) {
     let Some(ui) = fetch_user_info(manager, &auth.key, "auth login enrichment").await else {
         return;
@@ -139,10 +139,10 @@ async fn run_user_info_enrichment(manager: &AuthManager, auth: GrokAuth) {
     };
     let user_elapsed_ms = started.elapsed().as_millis() as u64;
 
-    // R-M-W file lock. On timeout, drop the write rather than proceed
-    // unlocked: an unlocked R-M-W can silently revert a freshly rotated
-    // AT/RT on disk (a rolled-back RT is a future `invalid_grant` → forced
-    // re-login). Enrichment is cosmetic; it re-runs on the next refresh.
+    // Read-modify-write under the file lock. On timeout, skip the write rather than proceed unlocked.
+    // An unlocked read-modify-write can silently revert a freshly rotated access or refresh token on disk
+    // A rolled-back refresh token later fails with `invalid_grant` and forces a re-login
+    // Enrichment is cosmetic; it re-runs on the next refresh
     let lock_started = std::time::Instant::now();
     let lock_guard = try_lock_auth_file_async(&manager.path, AUTH_LOCK_TIMEOUT, Heartbeat::Skip)
         .await
@@ -176,18 +176,10 @@ async fn run_user_info_enrichment(manager: &AuthManager, auth: GrokAuth) {
         );
         return;
     };
-    // Sibling-stomp guard. If either the access token or refresh
-    // token on disk differs from the one we wrote, a sibling process
-    // rotated tokens since our update(). Skip enrichment to avoid
-    // writing stale profile data over the sibling's fresher entry.
-    //
-    // OR logic (not AND): a single-field rotation (key changes, RT
-    // stays) is the common case during concurrent refresh. The old
-    // AND logic required ALL three fields to differ, letting
-    // single-field rotations through.
-    //
-    // Team-login transitions (placeholder→real user_id) don't rotate
-    // tokens, so OR correctly allows enrichment for that case.
+    // If the access token or the refresh token on disk differs from the one we wrote, a sibling process rotated tokens since our update()
+    // Skip enrichment then, so stale profile data never overwrites the sibling's fresher entry
+    // OR, not AND: during a concurrent refresh usually only the key changes while the refresh token stays
+    // Team-login transitions (a placeholder user_id becoming real) rotate no tokens, so they still pass this check and get enriched
     if disk.key != auth.key || disk.refresh_token != auth.refresh_token {
         xai_grok_telemetry::unified_log::info(
             "auth update enrichment skipped",

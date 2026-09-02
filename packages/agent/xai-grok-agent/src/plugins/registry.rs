@@ -1,8 +1,6 @@
-//! In-memory registry of active plugins.
-//!
-//! The `PluginRegistry` is the single source of truth for which plugins
-//! are loaded in a session.  It is built once during `MvpAgent` initialization
-//! and can be rebuilt via `/plugins reload`.  Each session receives a snapshot.
+//! The `PluginRegistry` is the single source of truth for which plugins are loaded in a session.
+//! It is built once during `MvpAgent` initialization and can be rebuilt via `/plugins reload`.
+//! Each session receives a snapshot.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -24,9 +22,8 @@ pub struct LoadedPlugin {
     pub scope: PluginScope,
     /// The concrete discovery source this plugin came from.
     pub origin: PluginOrigin,
-    /// Whether the plugin is trusted for executable operations (hooks, MCP,
-    /// LSP). Derived from discovery scope: CLI and User plugins are auto-trusted;
-    /// Project plugins require explicit trust grant.
+    /// Whether the plugin is trusted for executable operations (hooks, MCP, LSP).
+    /// Derived from discovery scope: CLI and User plugins are auto-trusted; Project plugins require explicit trust grant.
     pub trusted: bool,
     /// Whether the plugin is enabled (not in `[plugins].disabled`).
     pub enabled: bool,
@@ -151,8 +148,6 @@ impl LoadedPlugin {
     }
 }
 
-/// In-memory registry of active plugins.
-///
 /// Keyed by `plugin_name` (the user-facing namespace).
 /// Handles enable/disable filtering and MCP server ownership lookups.
 #[derive(Debug, Clone)]
@@ -161,18 +156,14 @@ pub struct PluginRegistry {
     plugins: HashMap<String, LoadedPlugin>,
     /// Map from MCP server name to the plugin that owns it.
     mcp_owners: HashMap<String, String>,
-    /// Per-session dirs from `_meta.pluginDirs` that this registry was built
-    /// with, carried so per-session rebuilds can re-merge them.
+    /// Per-session dirs from `_meta.pluginDirs` that this registry was built with, carried so per-session rebuilds can re-merge them.
     session_plugin_dirs: Vec<std::path::PathBuf>,
 }
 
 impl PluginRegistry {
-    /// Build a new registry from discovered plugins.
-    ///
     /// Applies the `disabled` and `enabled` lists from config.
     /// Project-scope plugins are disabled by default unless explicitly in the `enabled` list.
-    /// Disabled plugins are still in the registry but their components are
-    /// not loaded into the session.
+    /// Disabled plugins are still in the registry but their components are not loaded into the session.
     pub fn from_discovered(
         discovered: Vec<DiscoveredPlugin>,
         disabled: &[String],
@@ -241,10 +232,8 @@ impl PluginRegistry {
             let has_runtime = runtime_wasm.is_some() || runtime_scheme.is_some();
 
             // Determine enabled status.
-            // Every plugin should be in either the `enabled` or `disabled` list
-            // (callers use `DiscoveryConfig::populate_plugin_lists` to ensure this).
-            // A plugin is enabled only if it is in the `enabled` list and NOT in
-            // the `disabled` list (disabled takes precedence on conflict).
+            // Every plugin should be in either the `enabled` or `disabled` list (`DiscoveryConfig::populate_plugin_lists` ensures this)
+            // A plugin is enabled only if it is in the `enabled` list and NOT in the `disabled` list (disabled takes precedence on conflict)
             let explicitly_enabled = enabled
                 .iter()
                 .any(|e| e == &dp.id.0 || e == &dp.manifest.name);
@@ -289,7 +278,7 @@ impl PluginRegistry {
                 conflict: dp.conflict,
             };
 
-            // Track MCP server ownership for enabled + trusted plugins
+            // Track MCP server ownership for enabled and trusted plugins
             if loaded.enabled && loaded.trusted {
                 for server_name in &mcp_server_names {
                     mcp_owners
@@ -328,7 +317,6 @@ impl PluginRegistry {
         &self.session_plugin_dirs
     }
 
-    /// Get a plugin by name.
     pub fn get(&self, name: &str) -> Option<&LoadedPlugin> {
         self.plugins.get(name)
     }
@@ -343,7 +331,7 @@ impl PluginRegistry {
         plugins
     }
 
-    /// List only enabled + trusted plugins (active for the session).
+    /// List only enabled and trusted plugins (active for the session).
     pub fn active_plugins(&self) -> Vec<&LoadedPlugin> {
         self.list()
             .into_iter()
@@ -357,17 +345,14 @@ impl PluginRegistry {
         self.list().into_iter().filter(|p| p.enabled).collect()
     }
 
-    /// Look up which plugin owns an MCP server by server name.
     pub fn mcp_server_owner(&self, server_name: &str) -> Option<&str> {
         self.mcp_owners.get(server_name).map(|s| s.as_str())
     }
 
-    /// Number of plugins in the registry.
     pub fn len(&self) -> usize {
         self.plugins.len()
     }
 
-    /// Whether the registry is empty.
     pub fn is_empty(&self) -> bool {
         self.plugins.is_empty()
     }
@@ -375,22 +360,17 @@ impl PluginRegistry {
 
 // ── Shared handle for cross-thread reload ─────────────────────────────
 
-/// Thread-safe handle for plugin registry lifecycle.
-///
-/// Stores the process-lifetime CLI plugin dirs (which survive reload)
-/// and provides methods to build per-session registries and rebuild
-/// the shared "latest" registry for new sessions.
+/// Builds per-session registries and rebuilds the shared "latest" registry for new sessions.
 #[derive(Debug, Clone)]
 pub struct SharedPluginRegistryHandle {
     /// The latest registry, rebuilt on `/plugins reload`.
     /// New sessions clone from here. Running sessions keep their snapshot.
     inner: std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<PluginRegistry>>>>,
-    /// CLI `--plugin-dir` paths from process startup. Preserved across reloads.
+    /// CLI `--plugin-dir` paths from process startup, preserved across reloads.
     cli_plugin_dirs: std::sync::Arc<Vec<std::path::PathBuf>>,
 }
 
 impl SharedPluginRegistryHandle {
-    /// Create a new handle with an initial registry and CLI plugin dirs.
     pub fn new(registry: Option<PluginRegistry>, cli_plugin_dirs: Vec<std::path::PathBuf>) -> Self {
         Self {
             inner: std::sync::Arc::new(std::sync::RwLock::new(registry.map(std::sync::Arc::new))),
@@ -403,19 +383,14 @@ impl SharedPluginRegistryHandle {
         self.inner.read().unwrap().clone()
     }
 
-    /// Build a fresh registry for a specific session cwd.
-    ///
-    /// Pure registry construction (no disk mutation): also used by the read-only
-    /// `commands/list` pull and the reload fan-out, so it must not refresh local
-    /// installs. Use [`Self::refresh_and_build_for_cwd`] at genuine session spawn.
+    /// The read-only `commands/list` pull and the reload fan-out also call this, so it must not refresh or mutate local installs on disk.
+    /// Use [`Self::refresh_and_build_for_cwd`] at genuine session spawn.
     /// CLI `--plugin-dir` paths from process startup are always included.
     ///
-    /// `session_plugin_dirs` are per-session dirs from `session/new` / `session/load`
-    /// `_meta.pluginDirs` — same CliOverride scope and trust as `--plugin-dir`, but
-    /// only for the session whose registry this builds.
+    /// `session_plugin_dirs` are per-session dirs from `session/new` / `session/load` `_meta.pluginDirs`.
+    /// They get the same CliOverride scope and trust as `--plugin-dir`, but only for the session whose registry this builds.
     ///
-    /// `project_trusted` is the folder-trust verdict for `cwd`, threaded into
-    /// discovery to gate Project-scope plugins.
+    /// `project_trusted` is the folder-trust verdict for `cwd`, threaded into discovery to gate Project-scope plugins.
     pub fn build_for_cwd(
         &self,
         cwd: &std::path::Path,
@@ -435,8 +410,7 @@ impl SharedPluginRegistryHandle {
         let discovered =
             super::discovery::discover_plugins(Some(cwd), &config, &trust_store, project_trusted);
         if discovered.is_empty() {
-            // Keep an empty registry alive when session dirs exist, so per-session
-            // rebuilds can still recover them (see `session_plugin_dirs` field docs).
+            // Keep an empty registry alive when session dirs exist, so per-session rebuilds can recover them (see `session_plugin_dirs`)
             (!session_plugin_dirs.is_empty()).then(|| {
                 std::sync::Arc::new(
                     PluginRegistry::empty().with_session_plugin_dirs(session_plugin_dirs.to_vec()),
@@ -453,10 +427,8 @@ impl SharedPluginRegistryHandle {
 
     /// Re-copy trusted / user-home local installs, then [`Self::build_for_cwd`].
     ///
-    /// The refresh is the session-spawn boundary for picking up agents/skills
-    /// added to a live local source after install (the snapshot is a copy, not a
-    /// symlink). Wired only to genuine session spawn — not the read-only
-    /// `commands/list` pull or the reload fan-out, which use the pure builder.
+    /// The refresh at session spawn picks up agents/skills added to a live local source after install (the snapshot is a copy, not a symlink).
+    /// Only genuine session spawn is wired here; the read-only `commands/list` pull and the reload fan-out use the pure builder.
     pub fn refresh_and_build_for_cwd(
         &self,
         cwd: &std::path::Path,
@@ -470,10 +442,9 @@ impl SharedPluginRegistryHandle {
         self.build_for_cwd(cwd, disk_config, session_plugin_dirs, project_trusted)
     }
 
-    /// Re-copy trusted local installs from disk and log the outcome. `force`
-    /// bypasses the skip-unchanged guard: only the explicit `/plugins reload`
-    /// passes `true`; session spawn and incidental rebuilds pass `false` (cheap
-    /// structural skip).
+    /// Re-copy trusted local installs from disk and log the outcome.
+    /// `force` bypasses the skip-unchanged guard: only the explicit `/plugins reload` passes `true`.
+    /// Session spawn and incidental rebuilds pass `false`, the cheap skip-unchanged path.
     fn run_local_refresh(trust_store: &super::trust::TrustStore, force: bool) {
         let refresh = super::local_refresh::refresh_local_installs_from_disk(trust_store, force);
         tracing::debug!(
@@ -493,13 +464,10 @@ impl SharedPluginRegistryHandle {
     ///
     /// Returns the count of plugins discovered.
     ///
-    /// `project_trusted` is the folder-trust verdict for `cwd`, threaded into
-    /// discovery to gate Project-scope plugins.
+    /// `project_trusted` is the folder-trust verdict for `cwd`, threaded into discovery to gate Project-scope plugins.
     ///
-    /// `force` controls the local-install refresh: only the explicit, user-initiated
-    /// `/plugins reload` passes `true` (guaranteed full re-copy — the manual remedy);
-    /// incidental rebuilds (boot, plugin enable/disable/add/remove) pass `false` for
-    /// the cheap structural skip-unchanged path.
+    /// `force` controls the local-install refresh: only the explicit, user-initiated `/plugins reload` passes `true`, a guaranteed full re-copy.
+    /// Incidental rebuilds (boot, plugin enable/disable/add/remove) pass `false` for the cheap skip-unchanged path.
     pub fn reload(
         &self,
         cwd: Option<&std::path::Path>,
@@ -532,11 +500,8 @@ impl SharedPluginRegistryHandle {
 
 /// Collect the SKILL.md paths that load from the given skill dirs.
 ///
-/// Discovery via `find_skill_md_paths`; deduped by the loader's per-plugin
-/// identity — the normalized parent-dir basename (`stamp_plugin_fields` names
-/// plugin skills by directory basename, and `merge_skills_with_plugins`
-/// dedupes on `plugin:<name>`) — so counts equal what actually loads, both
-/// for overlapping dir entries and same-basename dirs at different paths.
+/// Paths come from `find_skill_md_paths` and are deduped by normalized parent-dir basename, the identity the skill loader dedupes on.
+/// Counts therefore equal what actually loads, both for overlapping dir entries and for same-basename dirs at different paths.
 pub fn skill_md_paths(skill_dirs: &[PathBuf]) -> Vec<PathBuf> {
     use xai_grok_tools::implementations::skills::discovery::{
         find_skill_md_paths, normalize_skill_name,
@@ -557,7 +522,7 @@ pub fn skill_md_paths(skill_dirs: &[PathBuf]) -> Vec<PathBuf> {
     paths
 }
 
-/// Count skills under the skill dirs (each discovered SKILL.md = 1 skill).
+/// Count skills under the skill dirs (each discovered SKILL.md is one skill).
 fn count_skill_subdirs(skill_dirs: &[PathBuf]) -> usize {
     skill_md_paths(skill_dirs).len()
 }
@@ -593,7 +558,7 @@ fn collect_md_names(dirs: &[PathBuf]) -> Vec<String> {
 }
 
 fn collect_skill_names(skill_dirs: &[PathBuf]) -> Vec<String> {
-    // Skill name = basename of the directory containing SKILL.md.
+    // The skill name is the basename of the directory containing SKILL.md
     skill_md_paths(skill_dirs)
         .iter()
         .filter_map(|p| p.parent())
@@ -601,8 +566,8 @@ fn collect_skill_names(skill_dirs: &[PathBuf]) -> Vec<String> {
         .collect()
 }
 
-/// Deduped union of MCP server names from a plugin's `.mcp.json` file and its
-/// inline `mcpServers` manifest block (file names first, inline names appended).
+/// Deduped union of MCP server names from a plugin's `.mcp.json` file and its inline `mcpServers` manifest block.
+/// File names come first; inline names are appended.
 fn plugin_mcp_server_names(dp: &DiscoveredPlugin) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -684,11 +649,9 @@ fn read_mcp_server_names(path: &Path) -> Result<Vec<String>, ()> {
     Ok(names)
 }
 
-/// Check if a discovered plugin is in the disabled list.
-///
 /// Matches by:
 /// 1. Full `plugin_id` (e.g. `"user/a1b2c3d4/my-plugin"`)
-/// 2. `plugin_name` shorthand (e.g. `"my-plugin"`) — only for convenience
+/// 2. `plugin_name` shorthand (e.g. `"my-plugin"`), only for convenience
 fn is_disabled(dp: &DiscoveredPlugin, disabled: &[String]) -> bool {
     disabled
         .iter()
@@ -746,8 +709,7 @@ mod tests {
 
     #[test]
     fn skill_counts_include_root_level_skill_md() {
-        // Manifest `skills` entries pointing directly at skill dirs
-        // (SKILL.md at the dir root) must be counted and named.
+        // Manifest `skills` entries pointing directly at skill dirs (SKILL.md at the dir root) must be counted and named
         let tmp = tempfile::tempdir().unwrap();
         let one = tmp.path().join("one");
         let two = tmp.path().join("two");
@@ -769,9 +731,8 @@ mod tests {
 
     #[test]
     fn skill_counts_dedupe_same_basename_different_paths() {
-        // Two skill dirs with the same basename at different paths collide on
-        // the loader's per-plugin name identity — only one loads, so only one
-        // may be counted.
+        // Two skill dirs with the same basename at different paths collide on the loader's per-plugin name identity
+        // Only one loads, so only one may be counted
         let tmp = tempfile::tempdir().unwrap();
         for group in ["a", "b"] {
             let d = tmp.path().join(group).join("dup-skill");
@@ -786,8 +747,7 @@ mod tests {
 
     #[test]
     fn skill_counts_dedupe_overlapping_dirs() {
-        // Manifest lists both the parent skills dir and a child skill dir:
-        // the child's SKILL.md is reachable via both entries but must count once.
+        // Manifest lists both the parent skills dir and a child skill dir: the child's SKILL.md is reachable via both entries but must count once
         let tmp = tempfile::tempdir().unwrap();
         let parent = tmp.path().join("skills");
         let child = parent.join("one");
@@ -868,12 +828,11 @@ mod tests {
             &["enabled-plugin".to_string()],
         );
 
-        assert_eq!(reg.len(), 2); // Both in registry
+        assert_eq!(reg.len(), 2);
         let active = reg.active_plugins();
-        assert_eq!(active.len(), 1); // Only enabled one is active
+        assert_eq!(active.len(), 1);
         assert_eq!(active[0].name, "enabled-plugin");
 
-        // Disabled one is in list but marked disabled
         let disabled = reg.get("disabled-plugin").unwrap();
         assert!(!disabled.enabled);
     }
@@ -1006,7 +965,6 @@ mod tests {
         assert!(plugin.has_inline_mcp_only);
         assert!(plugin.mcp_config_path.is_none());
         assert_eq!(plugin.inline_mcp_servers.as_ref().unwrap(), &inline_json);
-        // Should track ownership from inline (plugin is enabled)
         assert_eq!(reg.mcp_server_owner("my-server"), Some("mcp-plugin"));
     }
 
@@ -1036,7 +994,6 @@ mod tests {
 
         let bad = reg.get("bad-plugin").unwrap();
         assert!(!bad.enabled);
-        // trusted is now propagated from discovery (was false for Project scope)
         assert!(!bad.trusted);
     }
 
@@ -1176,7 +1133,6 @@ mod tests {
         })));
 
         let reg = PluginRegistry::from_discovered(vec![dp], &["disabled-mcp".to_string()], &[]);
-        // Disabled plugins should NOT have MCP ownership tracked
         assert_eq!(reg.mcp_server_owner("my-server"), None);
     }
 
@@ -1192,7 +1148,6 @@ mod tests {
         })));
 
         let reg = PluginRegistry::from_discovered(vec![dp], &[], &[]);
-        // Untrusted plugins should NOT have MCP ownership tracked
         assert_eq!(reg.mcp_server_owner("blocked-server"), None);
     }
 
@@ -1208,12 +1163,12 @@ mod tests {
         let mut config = DiscoveryConfig::default();
         config.populate_plugin_lists(&plugins);
 
-        // CliOverride and ConfigPath → enabled; User and Project → disabled
+        // CliOverride and ConfigPath land in enabled; User and Project land in disabled
         assert!(config.enabled.contains(&"cli".to_string()));
         assert!(config.enabled.contains(&"config".to_string()));
         assert!(config.disabled.contains(&"user".to_string()));
         assert!(config.disabled.contains(&"project".to_string()));
-        // Every plugin accounted for
+        // Every plugin lands in exactly one of the two lists
         assert_eq!(config.enabled.len() + config.disabled.len(), 4);
     }
 
@@ -1232,7 +1187,7 @@ mod tests {
         };
         config.populate_plugin_lists(&plugins);
 
-        // Pre-existing entries untouched
+        // Pre-existing entries stay untouched
         assert!(config.enabled.contains(&"already-enabled".to_string()));
         assert!(config.disabled.contains(&"already-disabled".to_string()));
         // New user plugin defaults to disabled
@@ -1245,9 +1200,8 @@ mod tests {
 
     #[test]
     fn untrusted_project_plugin_excluded_from_active_even_when_enabled() {
-        // Simulates the attack: a project plugin is enabled (e.g. via
-        // pre-populated enabledPlugins) but NOT trusted. It must NOT
-        // appear in active_plugins() so its hooks never fire.
+        // Simulates the attack: a project plugin is enabled (e.g. via pre-populated enabledPlugins) but NOT trusted.
+        // It must NOT appear in active_plugins() so its hooks never fire
         let plugins = vec![
             make_discovered("malicious", PluginScope::Project, false), // untrusted
         ];
@@ -1257,12 +1211,10 @@ mod tests {
             &["malicious".to_string()], // attacker got it into enabled list
         );
 
-        // Plugin is enabled but not trusted
         let plugin = reg.get("malicious").unwrap();
         assert!(plugin.enabled);
         assert!(!plugin.trusted);
 
-        // Must NOT appear in active_plugins (hooks would fire)
         let active = reg.active_plugins();
         assert!(
             active.is_empty(),
@@ -1272,8 +1224,7 @@ mod tests {
 
     #[test]
     fn trusted_field_propagated_from_discovery() {
-        // Verify that from_discovered preserves the trust value from
-        // discovery rather than hardcoding it to true.
+        // Verify that from_discovered preserves the trust value from discovery rather than hardcoding it to true
         let trusted_plugin = make_discovered("user-tool", PluginScope::User, true);
         let untrusted_plugin = make_discovered("project-tool", PluginScope::Project, false);
 
@@ -1289,9 +1240,8 @@ mod tests {
 
     #[test]
     fn pre_enabled_project_plugin_blocked_without_trust() {
-        // End-to-end: populate_plugin_lists won't auto-disable a plugin
-        // that's already in the enabled list, but active_plugins() must
-        // still block it when untrusted.
+        // End-to-end: populate_plugin_lists won't auto-disable a plugin that's already in the enabled list
+        // active_plugins() must still block it when untrusted
         use super::super::discovery::DiscoveryConfig;
 
         let plugins = vec![make_discovered(

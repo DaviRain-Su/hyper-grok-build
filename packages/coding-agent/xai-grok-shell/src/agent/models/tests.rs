@@ -40,7 +40,6 @@ fn cold_manager(cfg: config::Config, endpoint: Arc<dyn ModelsEndpoint>) -> Model
     .build()
 }
 
-/// Never resolves.
 struct HangingEndpoint;
 impl ModelsEndpoint for HangingEndpoint {
     fn fetch_models(
@@ -53,7 +52,6 @@ impl ModelsEndpoint for HangingEndpoint {
     }
 }
 
-/// Fails every fetch immediately.
 struct FailingEndpoint;
 impl ModelsEndpoint for FailingEndpoint {
     fn fetch_models(
@@ -66,7 +64,6 @@ impl ModelsEndpoint for FailingEndpoint {
     }
 }
 
-/// Serves `catalog` after `delay`.
 struct SlowEndpoint {
     catalog: IndexMap<String, ModelEntry>,
     delay: std::time::Duration,
@@ -296,8 +293,6 @@ async fn hanging_fetch_does_not_block_refresh() {
 
 #[tokio::test(start_paused = true)]
 async fn slow_fetch_within_timeout_still_applies() {
-    // "Slow but succeeds": a fetch that returns just under STARTUP_FETCH_TIMEOUT
-    // must still be applied, not degraded to offline.
     let mgr = cold_manager(
         config::Config::default(),
         Arc::new(SlowEndpoint {
@@ -368,7 +363,7 @@ async fn etag_refresh_is_bounded_and_single_flighted() {
     tokio::time::sleep(crate::http::STARTUP_FETCH_TIMEOUT * 2).await;
     tokio::task::yield_now().await;
 
-    // Guard released → a later etag change fetches again.
+    // Once the guard is released, a later etag change fetches again
     mgr.spawn_fetch_inner(Some("etag-3".into()), /*remote_fetch_enabled*/ true);
     tokio::task::yield_now().await;
     assert_eq!(
@@ -389,8 +384,7 @@ async fn etag_refresh_is_bounded_and_single_flighted() {
 
 #[tokio::test(start_paused = true)]
 async fn first_catalog_wait_unblocks_on_fetch_and_skips_dead_dwell() {
-    // Deployment auth: a fetch can succeed without a session, so the wait
-    // dwells regardless of ambient API-key env.
+    // Deployment auth: a fetch can succeed without a session, so the wait dwells regardless of any API key in the environment
     let mgr = cold_manager(
         config_from_toml("[endpoints]\ndeployment_key = \"deploy-key\""),
         Arc::new(SlowEndpoint {
@@ -871,6 +865,59 @@ fn validate_selectable_rejects_bad_allowlists() {
     assert!(validate_selectable(&zero, &catalog).is_err());
 }
 
+#[test]
+fn from_config_defers_validate_without_prefetch() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let auth_manager = Arc::new(AuthManager::new(tmp.path(), GrokComConfig::default()));
+    let mut cfg = config::Config::default();
+    cfg.requirements.allowed_models.pin(
+        crate::agent::config::AllowlistPin::List(vec!["nomatch-*".into()]),
+        crate::config::RequirementSource::Unknown,
+    );
+
+    let mgr = ModelsManager::from_config(&cfg, None, auth_manager)
+        .expect("cold start must not validate against built-ins-only");
+    assert!(
+        !mgr.has_fetched_real_catalog(),
+        "no prefetch means the first-fetch gate has not run"
+    );
+    assert!(
+        mgr.allowlist_excludes_all(),
+        "from_config must latch the prompt-path guard on a builtins-only miss"
+    );
+}
+
+#[test]
+fn set_session_model_fleet_deny_uses_organization_message() {
+    let raw: toml::Value = toml::from_str(
+        r#"
+            [models]
+            [model.grok-3]
+            model = "grok-3"
+            base_url = "https://api.x.ai/v1"
+            context_window = 256000
+            [model.grok-4]
+            model = "grok-4"
+            base_url = "https://api.x.ai/v1"
+            context_window = 256000
+            "#,
+    )
+    .unwrap();
+    let mut cfg = config::Config::new_from_toml_cfg(&raw).unwrap();
+    cfg.requirements.allowed_models.pin(
+        crate::agent::config::AllowlistPin::List(vec!["grok-4".into()]),
+        crate::config::RequirementSource::Unknown,
+    );
+    let catalog = resolve_model_catalog(&cfg, None);
+    assert!(!catalog["grok-3"].info.user_selectable);
+    let msg = allowlist_denied_message(&cfg);
+    assert!(
+        msg.contains("organization"),
+        "set_session_model /model gate must use the fleet deny string: {msg}"
+    );
+    assert!(!msg.contains("allowed_models"));
+}
+
 #[tokio::test]
 async fn refresh_if_new_etag_skips_when_same() {
     let mgr = test_manager();
@@ -948,7 +995,7 @@ fn reselect_missing_current_model_bumps_watch() {
     mgr.apply_refresh_result(&cfg, Some(make_prefetched(&["grok-4", "grok-3"])), None);
     mgr.set_current_model_id(acp::ModelId::new("grok-4"));
     let start = mgr.model_switch_generation();
-    // A later catalog drops the current model → reselect_current_model_if_missing.
+    // A later catalog drops the current model, so reselect_current_model_if_missing runs
     mgr.apply_refresh_result(&cfg, Some(make_prefetched(&["grok-3"])), None);
     assert_ne!(mgr.current_model_id().0.as_ref(), "grok-4");
     assert!(
@@ -1312,9 +1359,8 @@ fn spawn_background_refresh_is_noop_when_real_catalog_present() {
     assert!(mgr.has_fetched_real_catalog());
 }
 
-// Guards the readiness-never-blocks invariant in CI; the e2e proofs are `#[ignore]`.
-// current_thread: the post-spawn `!polled` check relies on the task not being
-// polled until this test awaits.
+// Guards in CI that the background refresh never blocks the readiness path; the e2e proofs are `#[ignore]`
+// current_thread: the post-spawn `!polled` check relies on the task not being polled until this test awaits
 #[tokio::test(flavor = "current_thread")]
 async fn spawn_background_refresh_never_blocks_on_a_hanging_endpoint() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1947,12 +1993,12 @@ fn campaign_only_flip_does_not_reselect_live_session() {
     let mut cfg = config::Config::default();
     cfg.models.default = Some("alpha".to_string());
     mgr.apply_refresh_result(&cfg, Some(make_prefetched(&["alpha", "beta"])), None);
-    *mgr.inner.cfg.write() = cfg.clone(); // old_preferred = "alpha"
+    *mgr.inner.cfg.write() = cfg.clone(); // apply_config sees old_preferred as "alpha"
     assert_eq!(mgr.current_model_id().0.as_ref(), "alpha");
 
     let mut new_cfg = config::Config::default();
     new_cfg.models.default = Some("beta".to_string());
-    new_cfg.models.default_is_campaign_driven = true; // campaign overriding
+    new_cfg.models.default_is_campaign_driven = true;
     mgr.apply_config(new_cfg);
     assert_eq!(
         mgr.current_model_id().0.as_ref(),
@@ -2317,6 +2363,7 @@ fn make_entry_config_with_id(
         show_model_fingerprint: false,
         stream_tool_calls: None,
         laziness_detector: config::LazinessDetectorPerModelConfig::default(),
+        variants: Vec::new(),
     }
 }
 
@@ -2555,8 +2602,7 @@ fn test_available_keys(keys: &[&str]) -> IndexMap<acp::ModelId, acp::ModelInfo> 
 
 #[tokio::test(start_paused = true)]
 async fn bounded_auth_refresh_times_out_to_none() {
-    // A hung IdP (never-ready auth future) must degrade to None within the
-    // bound so a cold-cache boot fetch can't stall on it.
+    // A hung identity provider (a never-ready auth future) must degrade to None within the bound so a cold-cache boot fetch can't stall on it
     let started = tokio::time::Instant::now();
     let result =
         ModelsManager::bounded_auth_refresh(std::future::pending::<Option<GrokAuth>>()).await;
@@ -2579,8 +2625,7 @@ async fn bounded_auth_refresh_passes_through_ready_value() {
 
 #[tokio::test]
 async fn explicit_model_pick_survives_first_real_catalog() {
-    // Non-blocking boot lets the user pick a model before the first real
-    // catalog lands; that pick must not be clobbered by default reselection.
+    // Non-blocking boot lets the user pick a model before the first real catalog lands; that pick must not be clobbered by default reselection
     let mgr = test_manager();
     let cfg = config_from_toml("[models]\ndefault = \"grok-4.5\"");
     mgr.set_current_model_id(acp::ModelId::new("grok-4"));
@@ -2594,8 +2639,7 @@ async fn explicit_model_pick_survives_first_real_catalog() {
 
 #[tokio::test]
 async fn identity_switch_clears_user_pick_latch() {
-    // After an identity change (`clear()`), the new identity's first catalog must
-    // reselect its own default rather than inherit the prior user's pick.
+    // After an identity change (`clear()`), the new identity's first catalog must reselect its own default rather than inherit the prior user's pick
     let mgr = test_manager();
     let cfg = config_from_toml("[models]\ndefault = \"grok-4.5\"");
     mgr.set_current_model_id(acp::ModelId::new("grok-4"));

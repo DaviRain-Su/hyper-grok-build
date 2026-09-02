@@ -249,6 +249,34 @@
     }
 
     #[test]
+    fn interjection_does_not_rewrite_earlier_same_text_bubble() {
+        // Self-originated id plus matching text must not restyle an earlier bubble.
+        let mut app = make_app_with_agent("sess-view");
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.note_self_originated_prompt("queue-pid");
+        agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt("try again".to_string()));
+
+        let affected = handle_ext_notification(
+            &interjection_ext_with_id("sess-view", "try again", Some("queue-pid")),
+            &mut app,
+        );
+        assert!(affected, "must render a new interjection, not claim the old bubble");
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let prompts: Vec<_> = (0..agent.scrollback.len())
+            .filter_map(|i| match agent.scrollback.entry(i).map(|e| &e.block) {
+                Some(RenderBlock::UserPrompt(b)) => Some((b.text.clone(), b.is_interjection)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            prompts,
+            vec![("try again".into(), false), ("try again".into(), true)]
+        );
+    }
+
+    #[test]
     fn interjection_notification_with_foreign_id_renders() {
         // A broadcast carrying an id this client did NOT mint (another pane's interjection) must render; only the originator dedups by its own id
         let mut app = make_app_with_agent("sess-view");

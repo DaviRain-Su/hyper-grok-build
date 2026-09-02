@@ -5,12 +5,9 @@ use serde_json::Value;
 
 use super::{RpcActivityClass, WorkspaceRpc};
 
-/// `workspace.git_status`. The response value is a JSON string (branch,
-/// ahead/behind, staged files), capped server-side at ~1 KB.
+/// `workspace.git_status`. The response value is a JSON string (branch, ahead/behind, staged files), capped server-side at ~1 KB.
 ///
-/// **DEPRECATED**: This method is deprecated and will be removed in a future
-/// release. Use [`GitStatusExtReq`] with `format: GitStatusFormat::Prompt`
-/// instead, which provides the same compact JSON string output.
+/// **DEPRECATED**: Use [`GitStatusExtReq`] with `format: GitStatusFormat::Prompt` instead, which provides the same compact JSON string output.
 ///
 /// Migration:
 /// ```ignore
@@ -51,8 +48,7 @@ pub struct GitStatusExtReq {
     pub format: GitStatusFormat,
 }
 
-// Manual `Default` (not derived) so it matches serde: `ignore_submodules`
-// defaults to `true`, which a derived `Default` would set to `false`.
+// Manual `Default` (not derived) so it matches serde: `ignore_submodules` defaults to `true`, which a derived `Default` would set to `false`
 // Omitted `include_untracked` is false so sloppy clients skip the expensive walk.
 impl Default for GitStatusExtReq {
     fn default() -> Self {
@@ -181,22 +177,19 @@ pub struct GitCommitReq {
     pub push: bool,
     #[serde(default)]
     pub sync: bool,
-    /// Stage everything (`git add -A`, honoring `.gitignore` and
-    /// `info/exclude`) before committing. With this set, a tree with nothing
-    /// to commit is a result (`CommitOutcome::clean`), not an error, and the
-    /// push step still runs — so a retry can deliver an earlier unpushed
-    /// commit. Without it, committing with nothing staged is an error.
+    /// Stage everything (`git add -A`, honoring `.gitignore` and `info/exclude`) before committing.
+    /// With this set, a tree with nothing to commit is a result (`CommitOutcome::clean`), not an error.
+    /// The push step still runs, so a retry can deliver an earlier unpushed commit.
+    /// Without it, committing with nothing staged is an error.
     #[serde(default)]
     pub stage_all: bool,
-    /// Seed the local-only default excludes (`.env`, `node_modules/`, build
-    /// output, …) into `info/exclude` before staging, so `stage_all` can
-    /// never sweep them in. Idempotent: guarded by a marker line, shared
-    /// with environments that pre-seed the same block.
+    /// Seed the local-only default excludes (`.env`, `node_modules/`, build output, …) into `info/exclude` before staging.
+    /// This keeps `stage_all` from ever sweeping them in.
+    /// Idempotent: guarded by a marker line, shared with environments that pre-seed the same block.
     #[serde(default)]
     pub seed_default_excludes: bool,
-    /// Refuse to commit unless the workspace is on exactly this branch
-    /// (detached HEAD never matches). Guards single-writer conversation
-    /// branches.
+    /// Refuse to commit unless the workspace is on exactly this branch (detached HEAD never matches).
+    /// This guards single-writer conversation branches.
     #[serde(default)]
     pub expected_branch: Option<String>,
 }
@@ -207,25 +200,22 @@ impl WorkspaceRpc for GitCommitReq {
     type Response = CommitResult;
 }
 
-/// Merge the base branch into the current (conversation) branch. Merge,
-/// never rebase — conv-branch history must not be rewritten. On conflicts
-/// the merge is left in progress so an agent can resolve and commit it.
+/// Merge the base branch into the current (conversation) branch.
+/// Merge, never rebase: conv-branch history must not be rewritten.
+/// On conflicts the merge is left in progress so an agent can resolve and commit it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GitSyncBaseReq {
     #[serde(default)]
     pub git_root: Option<std::path::PathBuf>,
-    /// Ref on `origin` to merge in. `None` ⇒ the remote's default branch
-    /// (`git fetch origin HEAD`).
+    /// Ref on `origin` to merge in. `None` means the remote's default branch (`git fetch origin HEAD`).
     #[serde(default)]
     pub base_ref: Option<String>,
-    /// Roll back an in-progress merge (`git merge --abort`) instead of
-    /// merging. Idempotent: no merge in progress is still `Aborted`.
+    /// Roll back an in-progress merge (`git merge --abort`) instead of merging.
+    /// Idempotent: no merge in progress is still `Aborted`.
     #[serde(default)]
     pub abort: bool,
-    /// Refuse to merge unless the workspace is on exactly this branch
-    /// (detached HEAD never matches), mirroring `GitCommitReq`. Ignored for
-    /// `abort`, which must stay usable as a rollback wherever the merge
-    /// happened.
+    /// Refuse to merge unless the workspace is on exactly this branch (detached HEAD never matches), mirroring `GitCommitReq`.
+    /// Ignored for `abort`, which must stay usable as a rollback wherever the merge happened.
     #[serde(default)]
     pub expected_branch: Option<String>,
 }
@@ -248,8 +238,7 @@ pub enum GitSyncBaseOutcome {
     UpToDate,
     /// Clean merge; `sha` is the new merge commit (HEAD).
     Merged { sha: String },
-    /// The merge hit conflicts and was left in progress for resolution;
-    /// `files` are the unmerged paths.
+    /// The merge hit conflicts and was left in progress for resolution; `files` are the unmerged paths.
     Conflicts { files: Vec<String> },
     /// An in-progress merge was rolled back (or none existed).
     Aborted,
@@ -270,11 +259,11 @@ impl WorkspaceRpc for GitCheckoutReq {
     type Response = ();
 }
 
-// Explicit-git-surface ops (control plane → sandbox). Git mutates only through
-// these platform ops; there is no autonomous agent commit/push/merge.
+// Git ops the control plane invokes on the sandbox
+// Git mutates only through these platform ops; there is no autonomous agent commit/push/merge
 
-/// `EnsureBinding` — ensure the conversation branch (`conv/<id>`) exists and is
-/// checked out, forking it off `base_ref` if absent (never writing the base).
+/// `EnsureBinding`: ensure the conversation branch (`conv/<id>`) exists and is checked out.
+/// When the branch is absent it is forked off `base_ref`; the base itself is never written.
 /// Idempotent.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GitEnsureBindingReq {
@@ -282,8 +271,7 @@ pub struct GitEnsureBindingReq {
     pub git_root: Option<std::path::PathBuf>,
     /// The conversation branch to ensure, e.g. `conv/<conversation_id>`.
     pub session_branch: String,
-    /// Ref to fork the conv branch from when it does not yet exist locally: the
-    /// remote default branch, a branch tip, or a commit SHA.
+    /// Ref to fork the conv branch from when it does not yet exist locally: the remote default branch, a branch tip, or a commit SHA.
     pub base_ref: String,
 }
 
@@ -303,20 +291,18 @@ pub struct GitEnsureBindingResult {
     pub head_sha: Option<String>,
 }
 
-/// `MergeToMain` — merge the conversation branch into its target branch (the
-/// publish path, or an explicit "Merge" button). Merge, never rebase; never
-/// force. On conflicts the implementer aborts and restores `session_branch`
-/// (no `MERGE_HEAD` left on the integration branch).
+/// `MergeToMain`: merge the conversation branch into its target branch (the publish path, or an explicit "Merge" button).
+/// Merge, never rebase; never force.
+/// On conflicts the implementer aborts and restores `session_branch` (no `MERGE_HEAD` left on the integration branch).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitMergeToMainReq {
     #[serde(default)]
     pub git_root: Option<std::path::PathBuf>,
-    /// The conversation branch to merge (`conv/<id>`). Same identity as
-    /// [`super::super::binding::ResolvedRepoSource::session_branch`].
+    /// The conversation branch to merge (`conv/<id>`).
+    /// This is the same identity as [`super::super::binding::ResolvedRepoSource::session_branch`].
     pub session_branch: String,
-    /// Integration branch from the binding resolver
-    /// (`ResolvedRepoSource.merge_target`). `None` or empty is a hard error —
-    /// do not serde-default to `main` (BYO remotes use `master`/`trunk`).
+    /// Integration branch from the binding resolver (`ResolvedRepoSource.merge_target`).
+    /// `None` or empty is a hard error; do not serde-default to `main` (BYO remotes use `master`/`trunk`).
     #[serde(default)]
     pub target_branch: Option<String>,
     /// Push the target branch after a successful merge.
@@ -348,25 +334,22 @@ pub struct GitMergeToMainResult {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GitMergeToMainOutcome {
-    /// The conv branch is already an ancestor of the target; nothing to merge.
-    /// `sha` is the target HEAD.
+    /// The conv branch is already an ancestor of the target; nothing to merge. `sha` is the target HEAD.
     UpToDate { sha: String },
     /// Clean merge (or fast-forward); `sha` is the new target HEAD.
     Merged { sha: String },
-    /// The merge hit conflicts; the implementer aborted and restored
-    /// `session_branch`. `files` are the unmerged paths. The workspace must
-    /// not be left with `MERGE_HEAD` on the integration branch.
+    /// The merge hit conflicts; the implementer aborted and restored `session_branch`. `files` are the unmerged paths.
+    /// The workspace must not be left with `MERGE_HEAD` on the integration branch.
     Conflicts { files: Vec<String> },
 }
 
-/// `Push` — push a branch to `origin` after a commit, classifying the outcome.
-/// Never forces (a non-fast-forward on a single-writer conv branch is a
-/// conflict to surface, not to overwrite).
+/// `Push`: push a branch to `origin` after a commit, classifying the outcome.
+/// The op never forces (a non-fast-forward on a single-writer conv branch is a conflict to report, not to overwrite).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GitPushReq {
     #[serde(default)]
     pub git_root: Option<std::path::PathBuf>,
-    /// Branch to push. `None` ⇒ current `HEAD`.
+    /// Branch to push. `None` means the current `HEAD`.
     #[serde(default)]
     pub branch: Option<String>,
 }
@@ -380,7 +363,7 @@ impl WorkspaceRpc for GitPushReq {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitPushResult {
     pub status: PushStatus,
-    /// Combined git output (sanitized), for diagnostics/FE.
+    /// Combined git output (sanitized), for diagnostics and the frontend.
     pub output: String,
 }
 
@@ -422,7 +405,6 @@ impl WorkspaceRpc for GitBranchesReq {
     type Response = GitBranchListData;
 }
 
-/// Resolve the git root from a path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitResolveRootReq {
     pub cwd: std::path::PathBuf,
@@ -434,7 +416,6 @@ impl WorkspaceRpc for GitResolveRootReq {
     type Response = Option<std::path::PathBuf>;
 }
 
-/// Get the current commit hash for a git root.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitCurrentCommitReq {
     pub git_root: std::path::PathBuf,
@@ -446,7 +427,6 @@ impl WorkspaceRpc for GitCurrentCommitReq {
     type Response = Option<String>;
 }
 
-/// Detect VCS kind (git vs jj) for a path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DetectVcsKindReq {
     pub path: std::path::PathBuf,
@@ -458,7 +438,6 @@ impl WorkspaceRpc for DetectVcsKindReq {
     type Response = VcsKind;
 }
 
-/// Checkout a specific commit with optional auto-stash.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitCheckoutCommitReq {
     pub git_root: std::path::PathBuf,
@@ -481,8 +460,7 @@ pub struct CheckoutCommitResponse {
     pub error: Option<String>,
 }
 
-/// `workspace.git_branch_info`. The server returns the [`GitInfoData`]
-/// object, or `null` when the workspace root is not a git repo.
+/// `workspace.git_branch_info`. The server returns the [`GitInfoData`] object, or `null` when the workspace root is not a git repo.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GitBranchInfoReq {}
 
@@ -492,8 +470,7 @@ impl WorkspaceRpc for GitBranchInfoReq {
     type Response = Option<GitInfoData>;
 }
 
-/// `workspace.git_metadata`. The response value is the persisted session
-/// git metadata object (or `null`).
+/// `workspace.git_metadata`. The response value is the persisted session git metadata object (or `null`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GitMetadataReq {}
 
@@ -522,26 +499,23 @@ fn default_max_file_bytes() -> u64 {
 // Response data types
 // =========================================================================
 
-/// The kind of version control system detected for a workspace.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum VcsKind {
     /// Pure git repository (`.git/` only).
     #[default]
     Git,
-    /// Jujutsu colocated with git (`.jj/` + `.git/`).
+    /// Jujutsu colocated with git (`.jj/` and `.git/`).
     JujutsuColocated,
     /// No VCS detected.
     None,
 }
 
 impl VcsKind {
-    /// Returns `true` if this is a Jujutsu-managed repo (colocated).
     pub fn is_jj(&self) -> bool {
         matches!(self, VcsKind::JujutsuColocated)
     }
 
-    /// Returns `true` if any VCS was detected.
     pub fn is_repo(&self) -> bool {
         !matches!(self, VcsKind::None)
     }
@@ -556,7 +530,6 @@ pub enum ChangeType {
     Rename,
     Copy,
     Typechange,
-    /// Untracked file (not yet added to git)
     Untracked,
 }
 
@@ -584,9 +557,8 @@ pub struct CommitData {
 pub struct CommitResult {
     pub data: CommitData,
     pub warning: Option<String>,
-    /// Structured outcome of the commit + push, for machine callers.
-    /// `None` from servers predating the field and from the jj backend;
-    /// `data`/`warning` are the human-readable channel.
+    /// Structured outcome of the commit and push, for machine callers.
+    /// `None` comes from servers predating the field and from the jj backend; `data`/`warning` are the human-readable channel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<CommitOutcome>,
 }
@@ -595,8 +567,7 @@ pub struct CommitResult {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitOutcome {
-    /// Workspace HEAD after the op (full hex). `None` only when the repo has
-    /// no commits at all.
+    /// Workspace HEAD after the op (full hex). `None` only when the repo has no commits at all.
     pub sha: Option<String>,
     /// Nothing new was committed by this call (tree clean after staging).
     pub clean: bool,
@@ -605,17 +576,15 @@ pub struct CommitOutcome {
     pub push: PushStatus,
 }
 
-/// Push-step classification for [`CommitOutcome`]. A non-fast-forward
-/// rejection on a single-writer conversation branch means the remote
-/// diverged and needs resolution — the op never forces.
+/// Push-step classification for [`CommitOutcome`].
+/// A non-fast-forward rejection on a single-writer conversation branch means the remote diverged and needs resolution; the op never forces.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PushStatus {
     /// No push was requested.
     #[default]
     NotRequested,
-    /// A push was requested but skipped because a prior step (the `sync`
-    /// pull) failed; nothing was pushed.
+    /// A push was requested but skipped because a prior step (the `sync` pull) failed; nothing was pushed.
     Skipped,
     Ok,
     /// Rejected as non-fast-forward (remote diverged); never forced.
@@ -684,24 +653,20 @@ pub struct GitStatusData {
 
 /// Response wrapper for `git_status_ext` that always has the same shape regardless of format.
 ///
-/// This avoids the deserialization ambiguity of an untagged enum by using
-/// a tagged struct with optional fields. Callers check `format` to know
-/// which field to use.
-///
-/// `Deserialize` is implemented manually (see below) so that a legacy flat
-/// `GitStatusData` payload — returned by an older workspace server during a
-/// version skew — is recognized and wrapped as `format: Structured` rather than
-/// silently parsed as empty.
+/// A tagged struct with optional fields avoids the deserialization ambiguity of an untagged enum.
+/// Callers check `format` to know which field to use.
+/// `Deserialize` is implemented manually (see below): an older workspace server returns a legacy flat `GitStatusData` payload during version skew.
+/// That payload is recognized and wrapped as `format: Structured` rather than silently parsed as empty.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct GitStatusExtResponse {
     /// The format of this response (echoed from request for convenience).
     pub format: GitStatusFormat,
 
-    /// Structured status data (present when format = "structured").
+    /// Structured status data (present when `format` is "structured").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<GitStatusData>,
 
-    /// Prompt-formatted string (present when format = "prompt").
+    /// Prompt-formatted string (present when `format` is "prompt").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
 }
@@ -711,14 +676,11 @@ impl<'de> Deserialize<'de> for GitStatusExtResponse {
     where
         D: serde::Deserializer<'de>,
     {
-        // Deserialize into a generic value first so we can distinguish the new
-        // envelope from a legacy flat `GitStatusData` payload (version skew with
-        // an older workspace server that still returns flat status for
-        // `git_status_ext`).
+        // Deserialize into a generic value first to distinguish the new envelope from a legacy flat `GitStatusData` payload
+        // An older workspace server still returns flat status for `git_status_ext` during version skew
         let value = Value::deserialize(deserializer)?;
 
-        // The new envelope is identified by any of its own keys; `format` is
-        // always serialized, and `data`/`prompt` cover any hand-written payload.
+        // The new envelope is identified by any of its own keys; `format` is always serialized, and `data`/`prompt` cover any hand-written payload
         // A legacy flat `GitStatusData` (root/branch/staged/...) has none of them.
         let is_new_envelope = value.as_object().is_some_and(|obj| {
             obj.contains_key("format") || obj.contains_key("data") || obj.contains_key("prompt")
@@ -754,7 +716,6 @@ impl<'de> Deserialize<'de> for GitStatusExtResponse {
 }
 
 impl GitStatusExtResponse {
-    /// Create a structured response.
     pub fn structured(data: GitStatusData) -> Self {
         Self {
             format: GitStatusFormat::Structured,
@@ -763,7 +724,6 @@ impl GitStatusExtResponse {
         }
     }
 
-    /// Create a prompt-formatted response.
     pub fn prompt(text: String) -> Self {
         Self {
             format: GitStatusFormat::Prompt,
@@ -815,7 +775,6 @@ impl GitDiffsData {
     }
 }
 
-/// Scope for discard operations
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DiscardScope {
@@ -865,12 +824,11 @@ pub struct GitBranchListData {
 // Git Collect Changes RPC Types
 // =========================================================================
 
-/// Request to collect repository changes for serialization.
 /// This is the workspace-side half of `serialize_changes`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitCollectChangesReq {
     /// Any path inside the repo/worktree. The git root is discovered from this path.
-    /// Named `repo_path` (not `git_root`) to match `SerializeRepoChangesRequest`.
+    /// The field is named `repo_path` (not `git_root`) to match `SerializeRepoChangesRequest`.
     pub repo_path: String,
 
     /// Include commit series (typically commits ahead of upstream).
@@ -882,15 +840,14 @@ pub struct GitCollectChangesReq {
     pub include_uncommitted: bool,
 
     /// Optional public base revision override (like `origin/main` or a commit SHA).
-    /// If omitted, auto-detects the latest public commit on HEAD's first-parent history.
+    /// If omitted, the server auto-detects the latest public commit on HEAD's first-parent history.
     #[serde(default)]
     pub base_ref: Option<String>,
 
-    /// Maximum bytes to inline for a single file blob in commit/uncommitted
-    /// patches. `0` (default) means no limit; larger blobs are truncated with a
-    /// warning. Untracked file content is governed separately by the fixed
-    /// [`UNTRACKED_CONTENT_THRESHOLD`]: oversize untracked files are excluded
-    /// (not truncated) rather than capped by this value.
+    /// Maximum bytes to inline for a single file blob in commit/uncommitted patches.
+    /// `0` (default) means no limit; larger blobs are truncated with a warning.
+    /// Untracked file content is governed separately by the fixed [`UNTRACKED_CONTENT_THRESHOLD`].
+    /// Oversize untracked files are excluded (not truncated) rather than capped by this value.
     #[serde(default = "default_max_file_bytes")]
     pub max_file_bytes: u64,
 
@@ -905,9 +862,7 @@ impl WorkspaceRpc for GitCollectChangesReq {
     type Response = GitCollectChangesResponse;
 }
 
-/// Response containing collected repository changes as serializable wire types.
-/// The conversion is lossless for all fields needed by the shell to build the
-/// archive and upload.
+/// The conversion to these wire types is lossless for all fields the shell needs to build the archive and upload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitCollectChangesResponse {
@@ -923,7 +878,7 @@ pub struct GitCollectChangesResponse {
     /// Commits ahead of base (with patches).
     pub commits: Vec<CommitWithPatchData>,
 
-    /// Uncommitted changes (staged + unstaged).
+    /// Uncommitted changes (staged and unstaged).
     pub uncommitted: Option<UncommittedChangesData>,
 
     /// Untracked files with content (base64-encoded if included).
@@ -937,9 +892,6 @@ pub struct GitCollectChangesResponse {
 }
 
 /// Repository info for wire transfer.
-///
-/// Contains metadata about the repository including root path, branch,
-/// remotes, and ahead/behind counts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepoInfo {
@@ -994,8 +946,6 @@ pub struct PublicBaseData {
 }
 
 /// Commit data for wire transfer.
-///
-/// Serializable fields; the `patch` is base64-encoded for binary safety.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitWithPatchData {
@@ -1087,8 +1037,7 @@ pub struct UncommittedChangesData {
 /// Untracked file info for wire transfer.
 ///
 /// Content inclusion rules:
-/// - Files larger than [`UNTRACKED_CONTENT_THRESHOLD`] (1 MB) have
-///   `content_base64: None` and `content_included: false`.
+/// - Files larger than [`UNTRACKED_CONTENT_THRESHOLD`] (1 MB) have `content_base64: None` and `content_included: false`.
 /// - Binary files (`is_binary: true`) have `content_base64: None` regardless of size.
 /// - Omitted content can be fetched via `workspace.fs_read_file`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1227,48 +1176,6 @@ mod tests {
     }
 
     #[test]
-    fn git_status_ext_response_roundtrip_structured() {
-        let data = GitStatusData {
-            branch: Some("main".to_string()),
-            ahead: Some(1),
-            behind: Some(0),
-            ..Default::default()
-        };
-        let original = GitStatusExtResponse::structured(data);
-        let json = serde_json::to_string(&original).unwrap();
-        let deserialized: GitStatusExtResponse = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(deserialized.format, GitStatusFormat::Structured);
-        assert!(deserialized.data.is_some());
-        let data = deserialized.data.unwrap();
-        assert_eq!(data.branch, Some("main".to_string()));
-        assert_eq!(data.ahead, Some(1));
-        assert_eq!(data.behind, Some(0));
-    }
-
-    #[test]
-    fn git_status_ext_response_roundtrip_prompt() {
-        let original = GitStatusExtResponse::prompt("Changes not staged for commit".to_string());
-        let json = serde_json::to_string(&original).unwrap();
-        let deserialized: GitStatusExtResponse = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(deserialized.format, GitStatusFormat::Prompt);
-        assert!(deserialized.data.is_none());
-        assert_eq!(
-            deserialized.prompt,
-            Some("Changes not staged for commit".to_string())
-        );
-    }
-
-    #[test]
-    fn git_status_ext_response_default() {
-        let response = GitStatusExtResponse::default();
-        assert_eq!(response.format, GitStatusFormat::Structured);
-        assert!(response.data.is_none());
-        assert!(response.prompt.is_none());
-    }
-
-    #[test]
     fn git_status_ext_response_deserializes_new_structured_envelope() {
         let json = serde_json::json!({
             "format": "structured",
@@ -1294,9 +1201,8 @@ mod tests {
 
     #[test]
     fn git_status_ext_response_deserializes_legacy_flat_status() {
-        // A legacy workspace server returns flat `GitStatusData` JSON for
-        // `git_status_ext`; it must be wrapped as a structured envelope rather
-        // than parsed as an empty response.
+        // A legacy workspace server returns flat `GitStatusData` JSON for `git_status_ext`
+        // It must be wrapped as a structured envelope rather than parsed as an empty response
         let legacy = serde_json::to_value(GitStatusData {
             branch: Some("main".to_string()),
             ahead: Some(2),

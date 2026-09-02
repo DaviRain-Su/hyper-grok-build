@@ -1,5 +1,5 @@
-//! `x.ai/session/state` reads a session's metadata columns; `x.ai/session/import`
-//! writes them, with the transcript, to recreate a session on another host.
+//! `x.ai/session/state` reads a session's metadata columns.
+//! `x.ai/session/import` writes them, with the transcript, to recreate a session on another host.
 
 use std::path::{Path, PathBuf};
 
@@ -14,13 +14,14 @@ use crate::session::storage as st;
 /// The summary column, required to load a session.
 const SUMMARY_COLUMN: &str = "summary";
 
-/// Logical column name to its file under the session directory. Paths come from the
-/// storage layer so import and load never disagree about the on-disk layout. `summary`
-/// is last so import writes it last, as the commit marker; keep it there.
+/// Logical column name to its file under the session directory.
+/// Paths come from the storage layer so import and load never disagree about the on-disk layout.
+/// `summary` is last so import writes it last, as the commit marker; keep it there.
 const COLUMNS: &[(&str, &str)] = &[
     ("plan", st::PLAN_FILE),
     ("planMode", st::PLAN_MODE_FILE),
     ("signals", st::SIGNALS_FILE),
+    ("usage", st::USAGE_FILE),
     ("goal", st::GOAL_STATE_FILE),
     ("announcement", st::ANNOUNCEMENT_STATE_FILE),
     (SUMMARY_COLUMN, st::SUMMARY_FILE),
@@ -33,17 +34,15 @@ struct StateRequest {
     cwd: String,
 }
 
-/// A session id is a UUID (see acp_agent's new_session); requiring that keeps it safe
-/// to join into a filesystem path.
+/// A session id is a UUID (see acp_agent's new_session); requiring that keeps it safe to join into a filesystem path.
 fn validate_session_uuid(session_id: &str) -> Result<(), acp::Error> {
     uuid::Uuid::try_parse(session_id)
         .map(|_| ())
         .map_err(|_| acp::Error::invalid_params().data("sessionId must be a UUID"))
 }
 
-/// `x.ai/session/state`: return metadata columns keyed by logical name. Errors when
-/// the session isn't found on this host, since it reads a single record whose absence
-/// is not an empty result (unlike the collection returned by `x.ai/session/updates`).
+/// `x.ai/session/state`: return metadata columns keyed by logical name.
+/// Errors when the session isn't found on this host; a single record's absence is an error, unlike the empty collection `x.ai/session/updates` returns.
 pub(crate) async fn handle_state(args: &acp::ExtRequest) -> ExtResult {
     let request: StateRequest = super::parse_params(args)?;
     validate_session_uuid(&request.session_id)?;
@@ -74,8 +73,8 @@ struct ImportRequest {
     updates: Vec<Value>,
 }
 
-/// `x.ai/session/import`: recreate a session on this host from mirrored columns and
-/// transcript. A session that already exists locally is left unchanged.
+/// `x.ai/session/import`: recreate a session on this host from mirrored columns and transcript.
+/// A session that already exists locally is left unchanged.
 pub(crate) async fn handle_import(args: &acp::ExtRequest) -> ExtResult {
     let mut request: ImportRequest = super::parse_params(args)?;
     validate_session_uuid(&request.session_id)?;
@@ -86,8 +85,8 @@ pub(crate) async fn handle_import(args: &acp::ExtRequest) -> ExtResult {
     };
     let dir = crate::session::persistence::session_dir(&info);
 
-    // resolve_session_dir gates on summary.json, so an interrupted import (dir created,
-    // summary not yet written) is recreated on retry rather than skipped forever.
+    // resolve_session_dir requires summary.json to count a session as present
+    // An interrupted import (dir created, summary not yet written) is therefore recreated on retry rather than skipped forever
     let has_local_session = resolve_session_dir(&request.session_id, &request.cwd).is_some();
     if !has_local_session {
         let Some(summary_value) = request.state.get_mut(SUMMARY_COLUMN) else {
@@ -101,16 +100,14 @@ pub(crate) async fn handle_import(args: &acp::ExtRequest) -> ExtResult {
             );
         };
         sanitize_summary_for_host(summary, &request.session_id, &request.cwd);
-        // Reject a summary that would not load rather than persist one that bricks the
-        // session and blocks re-import.
+        // Reject a summary that would not load rather than persist one that makes the session unloadable and blocks re-import
         if Summary::deserialize(&*summary_value).is_err() {
             return Err(acp::Error::invalid_params().data("summary column is not a valid summary"));
         }
-        // Write the `.cwd` sidecar for hash-based (long-path) dirs so the session stays
-        // recoverable by id, not just by (id, cwd).
+        // Write the `.cwd` sidecar for hash-based (long-path) dirs so the session stays recoverable by id, not just by (id, cwd)
         crate::util::grok_home::ensure_sessions_cwd_dir(&request.cwd)
             .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
-        write_import(&dir, &request.state, &request.updates)
+        write_import(&dir, &request.state, &request.updates, &request.session_id)
             .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
     }
     super::to_raw_response(&json!({ "imported": !has_local_session }))
@@ -161,17 +158,17 @@ fn set_or_remove(obj: &mut serde_json::Map<String, Value>, key: &str, value: Opt
     }
 }
 
-/// Writes summary.json last, and each file to a temporary name first, so an interrupted
-/// import leaves an incomplete session that load treats as absent.
+/// Writes summary.json last, and each file to a temporary name first.
+/// An interrupted import therefore leaves an incomplete session that load treats as absent.
 fn write_import(
     dir: &Path,
     state: &std::collections::HashMap<String, Value>,
     updates: &[Value],
+    session_id: &str,
 ) -> std::io::Result<()> {
     crate::util::grok_home::create_dir_all_owner_only(dir)?;
 
-    // Clear every file this import owns so a leftover from a failed attempt can't
-    // merge with the new snapshot; this import is authoritative.
+    // Clear every file this import owns so a leftover from a failed attempt can't merge with the new snapshot; this import is authoritative
     let _ = std::fs::remove_file(dir.join(st::CHAT_HISTORY_FILE));
     let _ = std::fs::remove_file(dir.join(st::UPDATES_FILE));
     for (_, rel) in COLUMNS {
@@ -187,7 +184,28 @@ fn write_import(
             write_column(dir, rel, value)?;
         }
     }
+    restamp_imported_usage(dir, session_id)?;
     Ok(())
+}
+
+fn restamp_imported_usage(dir: &Path, session_id: &str) -> std::io::Result<()> {
+    let path = dir.join(st::USAGE_FILE);
+    let data = match std::fs::read(&path) {
+        Ok(data) => data,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let Ok(mut file) =
+        serde_json::from_slice::<crate::session::usage_file::SessionUsageFile>(&data)
+    else {
+        return Ok(());
+    };
+    file.session_id = session_id.to_string();
+    st::write_bytes_atomic(
+        &path,
+        &serde_json::to_vec_pretty(&file)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
+    )
 }
 
 fn write_column(dir: &Path, rel: &str, value: &Value) -> std::io::Result<()> {
@@ -198,9 +216,9 @@ fn write_column(dir: &Path, rel: &str, value: &Value) -> std::io::Result<()> {
     st::write_bytes_atomic(&path, value.to_string().as_bytes())
 }
 
-/// The session's directory, or `None` when it isn't found on this host. Falls back to
-/// an id scan when `(id, cwd)` has no summary (subagents use their own cwd); both
-/// branches require summary.json so a bare directory doesn't count as present.
+/// The session's directory, or `None` when it isn't found on this host.
+/// Falls back to an id scan when `(id, cwd)` has no summary (subagents use their own cwd).
+/// Both branches require summary.json so a bare directory doesn't count as present.
 fn resolve_session_dir(session_id: &str, cwd: &str) -> Option<PathBuf> {
     let info = crate::session::info::Info {
         id: acp::SessionId::new(session_id.to_string()),
@@ -279,7 +297,7 @@ mod tests {
             json!({ "method": "session/update", "params": { "b": 2 } }),
         ];
 
-        write_import(dir, &state, &updates).unwrap();
+        write_import(dir, &state, &updates, "s1").unwrap();
 
         #[cfg(unix)]
         assert_eq!(
@@ -311,5 +329,29 @@ mod tests {
             !dir.join("signals.json").exists(),
             "orphan column from a failed import dropped"
         );
+    }
+
+    #[test]
+    fn write_import_restamps_usage_session_id() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        let mut state = std::collections::HashMap::new();
+        state.insert(
+            "summary".to_string(),
+            json!({ "info": { "id": "imported-id", "cwd": "/work" } }),
+        );
+        state.insert(
+            "usage".to_string(),
+            json!({
+                "sessionId": "source-id",
+                "session": { "inputTokens": 10, "turnCount": 1 },
+                "turns": [{ "turnNumber": 1, "inputTokens": 10 }]
+            }),
+        );
+        write_import(dir, &state, &[], "imported-id").unwrap();
+        let usage: crate::session::usage_file::SessionUsageFile =
+            serde_json::from_slice(&std::fs::read(dir.join("usage.json")).unwrap()).unwrap();
+        assert_eq!(usage.session_id, "imported-id");
+        assert_eq!(usage.session.input_tokens, 10);
     }
 }

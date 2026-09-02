@@ -31,6 +31,7 @@ reqwest = { workspace = true, features = ["stream", "rustls-tls-native-roots"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+strum = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
 tokio-util = { workspace = true }
 token-source = { workspace = true }
@@ -40,6 +41,7 @@ uuid = { workspace = true, features = ["v4"] }
 [dev-dependencies]
 # Mock HTTP server for actor / request_task integration tests.
 axum = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["registry"] }
 # Shared SSE generators for the happy-path mock payloads.
 xai-grok-test-support = { workspace = true }
 # `start_paused = true` for deterministic timeout testing; `net` for

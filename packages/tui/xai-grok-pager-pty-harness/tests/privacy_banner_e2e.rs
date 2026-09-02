@@ -1,15 +1,11 @@
-//! E2E: the coding-data privacy upsell banner — shown on the welcome screen
-//! for an opted-out OAuth user under the `privacy_notice_rollout` flag,
-//! persisting into the agent view, and acked (never re-shown) via both
-//! buttons: `[Opt out]` dismisses on the spot, stamping
-//! `[privacy].privacy_banner_acked` without waiting on the server; `[Opt in]`
-//! opts the user in through the shell's `PUT /privacy/coding-data-retention`
-//! round trip and acks only once that succeeds.
+//! E2E: the coding-data privacy upsell banner.
+//! It shows on the welcome screen for an opted-out OAuth user under the `privacy_notice_rollout` flag and persists into the agent view.
+//! Both buttons ack it so it is never re-shown.
+//! `[Opt out]` dismisses on the spot, stamping `[privacy].privacy_banner_acked` without waiting on the server.
+//! `[Opt in]` opts the user in through the shell's `PUT /privacy/coding-data-retention` round trip and acks only once that succeeds.
 //!
-//! Drives the real pager binary through a PTY against the shared mock
-//! inference server (isolated `$HOME`), with a seeded opted-out OAuth entry
-//! as the active auth (`XAI_API_KEY` removed) and the rollout forced on via
-//! `GROK_PRIVACY_NOTICE_ROLLOUT=1`.
+//! Drives the real pager binary through a PTY against the shared mock inference server (isolated `$HOME`).
+//! A seeded opted-out OAuth entry is the active auth (`XAI_API_KEY` removed) and the rollout is forced on via `GROK_PRIVACY_NOTICE_ROLLOUT=1`.
 //!
 //! ```bash
 //! cargo test -p xai-grok-pager-pty-harness --test privacy_banner_e2e \
@@ -44,9 +40,8 @@ async fn privacy_banner_persists_into_agent_view_and_opt_in_shares() {
     run_opt_in().await.expect("privacy banner opt-in e2e");
 }
 
-/// Rollout flag forced on (env override beats remote settings) and the
-/// sandbox's fake `XAI_API_KEY` removed so the seeded opted-out OAuth entry
-/// is the active auth — the banner's two preconditions.
+/// The banner's two preconditions: force the rollout flag on (the env override beats remote settings) and remove the sandbox's fake `XAI_API_KEY`.
+/// Removing the key makes the seeded opted-out OAuth entry the active auth.
 fn banner_env_ops() -> [EnvOp<'static>; 2] {
     [
         EnvOp::set("GROK_PRIVACY_NOTICE_ROLLOUT", "1"),
@@ -74,8 +69,7 @@ async fn run_opt_out() -> Result<()> {
 
     click_text(&mut pager, OPT_OUT).context("click Opt out")?;
 
-    // Dismissal is local and immediate — it must not wait on the server, and
-    // must not detour into settings.
+    // Dismissal is local and immediate: it must not wait on the server, and must not detour into settings
     pager
         .wait_for_text_absent(BANNER_TITLE, Duration::from_secs(10))
         .context("banner dismissed by [Opt out]")?;
@@ -85,16 +79,15 @@ async fn run_opt_out() -> Result<()> {
         pager.screen_contents()
     );
 
-    // The config write is async — poll for it.
+    // The config write is async, so poll for it
     wait_for_ack_on_disk(&mut pager, content.home(), Duration::from_secs(10))?;
 
     quit_via_double_ctrl_c(&mut pager)?;
     drop(pager);
 
     // Relaunch with the same sandbox: the acked banner must not re-show.
-    // Sync on "New worktree" — rendered only on the authenticated welcome
-    // menu ("Quit" also appears while auth is still pending, where the
-    // banner is gated off regardless of the ack).
+    // Sync on "New worktree", which renders only on the authenticated welcome menu
+    // "Quit" also appears while auth is still pending, where the banner is gated off regardless of the ack
     let mut relaunched =
         spawn_pager(&binary, &content, project.path()).context("relaunch pager")?;
     relaunched
@@ -170,8 +163,7 @@ fn spawn_pager(binary: &Path, content: &ContentController, project: &Path) -> Re
     )
 }
 
-/// Wait for the welcome menu first (auth resolved) so a missing banner is a
-/// real failure rather than an early frame, then for the banner itself.
+/// Wait for the welcome menu first (auth resolved) so a missing banner is a real failure rather than an early frame, then for the banner itself.
 fn wait_for_banner(pager: &mut PtyHarness) -> Result<()> {
     pager
         .wait_for_text("Quit", Duration::from_secs(20))
@@ -181,10 +173,9 @@ fn wait_for_banner(pager: &mut PtyHarness) -> Result<()> {
         .context("privacy banner on screen")
 }
 
-/// Click `needle` by injecting an SGR (DECSET 1006) press + release at its
-/// first character. The wire encoding is 1-based `col;row`
-/// (`screen_contents` line 0 = row 1); the banner region is ASCII-only, so
-/// the byte offset within the line is the column.
+/// Click `needle` by injecting an SGR (DECSET 1006) press and release at its first character.
+/// The wire encoding is 1-based `col;row` (`screen_contents` line 0 is row 1).
+/// The banner region is ASCII-only, so the byte offset within the line is the column.
 fn click_text(pager: &mut PtyHarness, needle: &str) -> Result<()> {
     let screen = pager.screen_contents();
     let (row0, col0) = screen
@@ -200,9 +191,8 @@ fn click_text(pager: &mut PtyHarness, needle: &str) -> Result<()> {
     Ok(())
 }
 
-/// Poll `<home>/.grok/config.toml` for the async `privacy_banner_acked`
-/// write, pumping PTY output between polls so the pager never blocks on a
-/// full output buffer.
+/// Poll `<home>/.grok/config.toml` for the async `privacy_banner_acked` write.
+/// Pumps PTY output between polls so the pager never blocks on a full output buffer.
 fn wait_for_ack_on_disk(pager: &mut PtyHarness, home: &Path, timeout: Duration) -> Result<()> {
     let path = home.join(".grok").join("config.toml");
     let deadline = Instant::now() + timeout;
@@ -223,8 +213,8 @@ fn wait_for_ack_on_disk(pager: &mut PtyHarness, home: &Path, timeout: Duration) 
     }
 }
 
-/// First Ctrl+C arms the quit confirmation on the empty prompt, the second
-/// confirms; retry the pair in case an overlay swallowed the first one.
+/// The first Ctrl+C opens the quit confirmation on the empty prompt, the second confirms.
+/// Retry the pair in case an overlay swallowed the first one.
 fn quit_via_double_ctrl_c(pager: &mut PtyHarness) -> Result<()> {
     for _ in 0..3 {
         pager.inject_keys(keys::CTRL_C).context("ctrl-c arm")?;

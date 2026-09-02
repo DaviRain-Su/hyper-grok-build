@@ -14,8 +14,7 @@ fn external_stream_http_mtls_end_to_end() {
     col::init_test_tracing();
 
     // Pin aws-lc (same provider as the workspace `rustls` / gRPC mTLS tests).
-    // The test binary links ring (reqwest) + aws-lc (tonic/rustls workspace),
-    // so rustls will not auto-select a process default.
+    // The test binary links ring (reqwest) and aws-lc (tonic/rustls workspace), so rustls will not auto-select a process default
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let tls = col::generate_tls_material();

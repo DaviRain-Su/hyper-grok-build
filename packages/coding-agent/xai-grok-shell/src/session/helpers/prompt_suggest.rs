@@ -1,114 +1,118 @@
-//! Next-prompt prediction helpers (tab autocomplete ghost text).
-//!
-//! After a turn completes, the client asks the session to predict what the
-//! user is likely to type next. The prediction renders as dim ghost text in
-//! the empty prompt input; Tab accepts it. Modelled on common coding-agent
-//! prompt suggestion features, but instead of replaying the full conversation prefix
-//! it sends a *compact text-only transcript* — the call always routes to a
-//! small dedicated model (configurable, [`DEFAULT_SUGGEST_MODEL`] by
-//! default, never the session model — see [`effective_suggest_model`]),
-//! where the parent session's prompt cache would not apply anyway, so a
-//! small request wins on both cost and latency.
-//!
-//! The pure helpers here build the request items and filter the model output;
-//! the actual model call lives on the `SessionActor`
-//! (`handle_suggest_prompt`).
+//! Helpers for next-prompt suggestions.
 
 use crate::config::PromptSuggestModelPin;
 use crate::sampling::ConversationItem;
 use crate::session::helpers::chat::floor_char_boundary;
+use xai_grok_sampling_types::ReasoningEffort;
 
-/// Model used for suggestion calls when nothing pins one (no env /
-/// `[models] prompt_suggestion` / remote setting / client hint — see
-/// [`effective_suggest_model`]). Suggestion requests must stay on a small,
-/// fast model: falling back to the session model would multiply the per-turn
-/// cost of the feature and add reasoning-model latency for a throwaway
-/// prediction.
-pub(crate) const DEFAULT_SUGGEST_MODEL: &str = "grok-4.6";
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SuggestReasoning {
+    pub(crate) effort: Option<ReasoningEffort>,
+    pub(crate) reserve_budget: bool,
+}
 
-/// Resolve the model for one suggestion request, or `None` to skip the
-/// request entirely (controlled disable).
-///
-/// Precedence: env pin > config.toml/remote pin > client hint (the request's
-/// `model` param) > [`DEFAULT_SUGGEST_MODEL`]. Every tier except the env pin
-/// is catalog-guarded via `in_catalog`: firing a model this shell cannot
-/// sample (the default, or any unavailable pin) would send a doomed
-/// per-turn request that can never render ghost text. Skipping keeps the
-/// per-turn cost at zero; deliberately NOT a session-model fallback — a
-/// per-turn background call must stay on a small cheap model. The env pin
-/// bypasses the guard so `GROK_PROMPT_SUGGESTIONS_MODEL` keeps working for
-/// models the catalog does not list (mirrors the pager, which forwards the
-/// env value unchecked).
+/// Unset effort becomes low only on a reasoning model that is not the
+/// non-reasoning alias. That alias stays off even if the catalog lists effort.
+/// An explicit value is kept.
+pub(crate) fn suggest_request_effort(
+    configured: Option<ReasoningEffort>,
+    model: &str,
+    model_supports_reasoning: bool,
+) -> Option<ReasoningEffort> {
+    let alias = crate::util::config::NON_REASONING_PROMPT_SUGGEST_MODEL;
+    match configured {
+        Some(effort) => Some(effort),
+        None if model_supports_reasoning && model != alias => Some(ReasoningEffort::Low),
+        None => None,
+    }
+}
+
+pub(crate) fn resolve_suggest_reasoning(
+    configured: Option<ReasoningEffort>,
+    model: &str,
+    supports_reasoning_effort: bool,
+    supports_none: bool,
+) -> SuggestReasoning {
+    if let Some(effort) = configured
+        && !matches!(effort, ReasoningEffort::None)
+    {
+        return SuggestReasoning {
+            effort: supports_reasoning_effort.then_some(effort),
+            reserve_budget: supports_reasoning_effort,
+        };
+    }
+
+    if model != crate::util::config::NON_REASONING_PROMPT_SUGGEST_MODEL && supports_reasoning_effort
+    {
+        return SuggestReasoning {
+            effort: supports_none.then_some(ReasoningEffort::None),
+            reserve_budget: !supports_none,
+        };
+    }
+
+    SuggestReasoning {
+        effort: None,
+        reserve_budget: false,
+    }
+}
+
 pub(crate) fn effective_suggest_model(
     pin: &PromptSuggestModelPin,
     client_hint: Option<&str>,
+    session_model: Option<&str>,
+    reasoning_is_off: bool,
     in_catalog: impl Fn(&str) -> bool,
 ) -> Option<String> {
     let client_hint = client_hint.map(str::trim).filter(|s| !s.is_empty());
-    let (model, catalog_guarded) = match pin {
-        PromptSuggestModelPin::Env(m) => (m.as_str(), false),
-        PromptSuggestModelPin::Pinned(m) => (m.as_str(), true),
-        PromptSuggestModelPin::Unpinned => (client_hint.unwrap_or(DEFAULT_SUGGEST_MODEL), true),
-    };
-    if catalog_guarded && !in_catalog(model) {
-        return None;
+    let session_model = session_model.map(str::trim).filter(|s| !s.is_empty());
+    match pin {
+        PromptSuggestModelPin::Env(model) | PromptSuggestModelPin::Pinned(model) => {
+            in_catalog(model).then(|| model.to_owned())
+        }
+        PromptSuggestModelPin::Unpinned => match client_hint {
+            Some(model) => in_catalog(model).then(|| model.to_owned()),
+            None if reasoning_is_off => {
+                let alias = crate::util::config::NON_REASONING_PROMPT_SUGGEST_MODEL;
+                in_catalog(alias).then(|| alias.to_owned()).or_else(|| {
+                    session_model
+                        .filter(|model| in_catalog(model))
+                        .map(str::to_owned)
+                })
+            }
+            None => session_model
+                .filter(|model| in_catalog(model))
+                .map(str::to_owned),
+        },
     }
-    Some(model.to_owned())
 }
 
-/// Total character budget for the compact transcript (~6k tokens at the
-/// bytes/4 estimate). Keeps the per-turn cost of the feature trivial even on
-/// long sessions.
+/// Total character budget for the compact transcript (~6k tokens at the bytes/4 estimate).
+/// It keeps the per-turn cost of the feature trivial even on long sessions.
 const TRANSCRIPT_BUDGET_CHARS: usize = 24_000;
 
-/// Per-message character cap inside the transcript. Long messages (pasted
-/// logs, big diffs) carry little signal for next-prompt prediction.
+/// Per-message character cap inside the transcript.
+/// Long messages (pasted logs, big diffs) carry little signal for next-prompt prediction.
 const MESSAGE_CAP_CHARS: usize = 1_500;
 
-/// Reject suggestions longer than this — a prompt suggestion should be a
-/// short, obvious next step, not an essay.
-const SUGGESTION_MAX_CHARS: usize = 120;
+/// The model sees a compact transcript and must reply with ONLY the predicted next user message (or nothing).
+pub(crate) const SUGGEST_PROMPT_SYSTEM: &str = "You predict the next line the USER will type into their coding agent.\n\
+    You see a transcript. The last line is from the agent.\n\
+    Write only that next user line, or NONE.\n\n\
+    Predict what they would type, not what you think they should do.\n\
+    A wrong line is worse than NONE.\n\
+    Write NONE if the next line is long, new, or not obvious.\n\
+    Write NONE after an error or a misunderstanding.\n\n\
+    Never write a line the user already sent.\n\
+    Never write filler, a question, or agent voice.\n\
+    Never write a new idea they did not ask for.\n\n\
+    If you write a line, use 2-12 words in their style.\n\
+    Reply with only the line or NONE.";
 
-/// Reject suggestions with more words than this (mirrors common
-/// "2-12 words" guidance with a little slack).
-const SUGGESTION_MAX_WORDS: usize = 16;
+pub(crate) fn suggestion_size(s: &str) -> (usize, usize) {
+    (s.chars().count(), s.split_whitespace().count())
+}
 
-/// Short replies that are useful suggestions despite being a single word.
-const ONE_WORD_ALLOWLIST: &[&str] = &[
-    "yes", "yeah", "yep", "no", "ok", "okay", "continue", "proceed", "push", "commit", "deploy",
-    "stop", "check", "retry", "undo", "merge",
-];
-
-/// System prompt for the suggestion call. The model sees a compact transcript
-/// and must reply with ONLY the predicted next user message (or nothing).
-pub(crate) const SUGGEST_PROMPT_SYSTEM: &str = "You predict what the USER will type next into their coding agent CLI.\n\
-    You are shown a transcript of the conversation so far. The agent's latest reply ends the transcript.\n\n\
-    FIRST: look at the user's recent messages and original request.\n\
-    Your job is to predict what THEY would type next — not what you think they should do.\n\
-    THE TEST: would they think \"I was just about to type that\"?\n\n\
-    EXAMPLES:\n\
-    - User asked \"fix the bug and run tests\", bug is fixed -> \"run the tests\"\n\
-    - After code was written -> \"try it out\"\n\
-    - Agent offers options -> the option the user would likely pick, based on the conversation\n\
-    - Agent ends by asking a yes/no question (continue? delete it? print it?) -> the user's likely answer: \"yes\" or \"no\"\n\
-    - Task complete with an obvious follow-up -> \"commit this\" or \"push it\"\n\
-    - After an error or a misunderstanding -> NONE (let them assess)\n\n\
-    Be specific: \"run the tests\" beats \"continue\".\n\
-    When the agent's reply ends with a question, a suggestion almost always exists — predict the answer.\n\n\
-    NEVER SUGGEST:\n\
-    - A message the user already sent, or a rephrasing of one — the transcript is history, not a menu. \
-Once a request was handled, predict the step AFTER it, never the request again \
-(short confirmations like \"yes\" or \"continue\" are the only acceptable repeats)\n\
-    - Evaluative filler (\"looks good\", \"thanks\")\n\
-    - Questions back to the agent (\"what about...?\")\n\
-    - Agent-voice phrasing (\"Let me...\", \"I'll...\", \"Here's...\")\n\
-    - New ideas the user never asked about\n\
-    - Multiple sentences\n\n\
-    Stay silent if the next step is not obvious from what the user said: reply with the single word NONE.\n\n\
-    Format: 2-12 words, matching the user's own style and casing.\n\
-    Reply with ONLY the suggestion text (or NONE) — no quotes, no markdown, no explanation.";
-
-/// One transcript line: role label + flattened text content.
+/// One transcript line: role label and flattened text content.
 fn transcript_line(role: &str, text: &str) -> Option<String> {
     let text = text.trim();
     if text.is_empty() {
@@ -122,16 +126,12 @@ fn transcript_line(role: &str, text: &str) -> Option<String> {
     Some(format!("{role}: {text}"))
 }
 
-/// Build the compact transcript from a conversation snapshot.
+/// Keeps genuine `User` messages (skipping runtime-synthesized ones) and `Assistant` text, newest-last.
+/// Walks backwards until the character budget is exhausted.
+/// Tool calls/results, reasoning, and the system prompt are dropped.
+/// The user/assistant dialogue carries the signal for "what will the user type next", and dropping the rest keeps the request cheap.
 ///
-/// Keeps genuine `User` messages (skipping runtime-synthesized ones) and
-/// `Assistant` text, newest-last, walking backwards until the character
-/// budget is exhausted. Tool calls/results, reasoning, and the system prompt
-/// are dropped — the user/assistant dialogue carries the signal for "what
-/// will the user type next", and dropping the rest keeps the request cheap.
-///
-/// Returns `None` when the conversation has no assistant reply yet (nothing
-/// to predict from).
+/// Returns `None` when the conversation has no assistant reply yet (nothing to predict from).
 pub(crate) fn build_transcript(conversation: &[ConversationItem]) -> Option<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut used = 0usize;
@@ -170,7 +170,6 @@ pub(crate) fn build_transcript(conversation: &[ConversationItem]) -> Option<Stri
     Some(lines.join("\n\n"))
 }
 
-/// Build the user message for the suggestion request.
 pub(crate) fn suggest_prompt_user_message(transcript: &str, cwd: &str) -> String {
     format!(
         "CWD: {cwd}\n\nTranscript:\n\n{transcript}\n\n\
@@ -178,65 +177,19 @@ pub(crate) fn suggest_prompt_user_message(transcript: &str, cwd: &str) -> String
     )
 }
 
-/// Minimum word count for the deterministic repeat filter. Short
-/// command-like replies ("yes", "run tests", "try again") legitimately
-/// recur across a session; a repeated multi-word task prompt is the
-/// "it suggested my old prompt back to me" failure mode.
-const REPEAT_MIN_WORDS: usize = 4;
-
-/// Case- and whitespace-insensitive form used for repeat comparison, with
-/// trailing sentence punctuation dropped.
-fn normalize_for_repeat(text: &str) -> String {
-    text.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim_end_matches(['.', '!', '?'])
-        .to_ascii_lowercase()
-}
-
-/// Whether a sanitized suggestion merely repeats a message the user already
-/// sent. Deterministic backstop behind the system prompt's anti-repeat rule:
-/// prompt guidance reduces repeats, this guarantees an exact (normalized)
-/// re-suggestion of a past multi-word prompt never renders as ghost text.
-/// Short suggestions (< [`REPEAT_MIN_WORDS`] words) are exempt — repeating
-/// "yes" or "run tests" is often exactly what the user is about to type.
-pub(crate) fn is_repeat_of_user_message(
-    suggestion: &str,
-    conversation: &[ConversationItem],
-) -> bool {
-    if suggestion.split_whitespace().count() < REPEAT_MIN_WORDS {
-        return false;
-    }
-    let needle = normalize_for_repeat(suggestion);
-    conversation.iter().any(|item| match item {
-        ConversationItem::User(u) if u.synthetic_reason.is_none() => {
-            normalize_for_repeat(&item.text_content()) == needle
-        }
-        _ => false,
-    })
-}
-
-/// Filter/normalize the raw model output into a usable suggestion.
-///
-/// Returns `None` for anything that should not be shown as ghost text:
-/// meta/no-op replies, agent-voice phrasing, multi-sentence or multi-line
-/// output, markdown, or over-long text. Mirrors typical coding-agent suggestion
-/// filters, adapted to the compact-transcript prompt above.
+/// Returns `None` when there is nothing to show. Matches the eval: empty or a
+/// silence token is NONE. Other text is shown as the first line.
 pub(crate) fn sanitize_suggestion(raw: &str) -> Option<String> {
-    // First line only; the prompt asks for a single line but models drift.
     let line = raw.trim().lines().next()?.trim();
-
-    // Strip common wrappers the prompt forbids but models still emit.
     let line = line
         .trim_start_matches(['"', '\'', '`', '“', '‘'])
         .trim_end_matches(['"', '\'', '`', '”', '’'])
         .trim();
 
-    if line.is_empty() || line.len() >= SUGGESTION_MAX_CHARS {
+    if line.is_empty() {
         return None;
     }
 
-    // Meta / "no suggestion" replies.
     let lowered = line.to_ascii_lowercase();
     let meta = [
         "none",
@@ -254,61 +207,6 @@ pub(crate) fn sanitize_suggestion(raw: &str) -> Option<String> {
         return None;
     }
 
-    // Markdown / formatting — ghost text renders on a single styled line.
-    if line.contains('*') || line.contains("```") || line.starts_with('#') || line.starts_with('-')
-    {
-        return None;
-    }
-
-    // Agent-voice phrasing — the suggestion must be in the USER's voice.
-    let agent_voice = [
-        "i'll ",
-        "i will ",
-        "let me ",
-        "here's ",
-        "here is ",
-        "i'm going to ",
-    ];
-    if agent_voice.iter().any(|p| lowered.starts_with(p)) {
-        return None;
-    }
-
-    // Parenthetical/bracketed meta replies like "(no suggestion)".
-    if (line.starts_with('(') && line.ends_with(')'))
-        || (line.starts_with('[') && line.ends_with(']'))
-    {
-        return None;
-    }
-
-    // Label prefixes like "Suggestion: ..." / "User: ...".
-    if let Some((head, _)) = line.split_once(':')
-        && !head.contains(' ')
-        && head.chars().all(|c| c.is_ascii_alphabetic())
-    {
-        return None;
-    }
-
-    // Multiple sentences read as agent prose, not a prompt.
-    let multi_sentence = line
-        .as_bytes()
-        .windows(3)
-        .any(|w| matches!(w[0], b'.' | b'!' | b'?') && w[1] == b' ' && w[2].is_ascii_uppercase());
-    if multi_sentence {
-        return None;
-    }
-
-    // Word-count bounds: 1 word only from the allowlist, and never a wall of text.
-    let words = line.split_whitespace().count();
-    if words > SUGGESTION_MAX_WORDS {
-        return None;
-    }
-    if words == 1 {
-        let bare = lowered.trim_end_matches(['.', '!']);
-        if !ONE_WORD_ALLOWLIST.contains(&bare) && !bare.starts_with('/') {
-            return None;
-        }
-    }
-
     Some(line.to_owned())
 }
 
@@ -320,68 +218,131 @@ mod tests {
     // -- effective_suggest_model ---------------------------------------------
 
     #[test]
-    fn effective_model_default_requires_catalog() {
-        // No pin, no hint: the built-in default fires only when this shell's
-        // catalog can sample it.
+    fn effective_model_explicit_pin_beats_client_hint_when_reasoning_is_off() {
         assert_eq!(
-            effective_suggest_model(&Pin::Unpinned, None, |m| m == DEFAULT_SUGGEST_MODEL)
-                .as_deref(),
-            Some(DEFAULT_SUGGEST_MODEL)
-        );
-        // A catalog without the default → skip the request entirely,
-        // never a doomed call (and never the session model).
-        assert_eq!(
-            effective_suggest_model(&Pin::Unpinned, None, |_| false),
-            None
-        );
-    }
-
-    #[test]
-    fn effective_model_client_hint_beats_default_and_is_guarded() {
-        assert_eq!(
-            effective_suggest_model(&Pin::Unpinned, Some("hinted"), |m| m == "hinted").as_deref(),
-            Some("hinted")
-        );
-        // A hint the shell can't sample skips — no silent fall-through.
-        assert_eq!(
-            effective_suggest_model(&Pin::Unpinned, Some("hinted"), |_| false),
-            None
-        );
-        // Blank hints are ignored: the default tier applies.
-        assert_eq!(
-            effective_suggest_model(&Pin::Unpinned, Some("  "), |m| m == DEFAULT_SUGGEST_MODEL)
-                .as_deref(),
-            Some(DEFAULT_SUGGEST_MODEL)
-        );
-    }
-
-    #[test]
-    fn effective_model_pin_beats_client_hint_and_is_guarded() {
-        assert_eq!(
-            effective_suggest_model(&Pin::Pinned("pinned".into()), Some("hinted"), |m| m
-                == "pinned"
-                || m == "hinted")
+            effective_suggest_model(
+                &Pin::Pinned("pinned".into()),
+                Some("hinted"),
+                Some("session"),
+                true,
+                |m| m == "pinned"
+            )
             .as_deref(),
             Some("pinned")
         );
-        // A pinned-but-unavailable model skips — the pin is an explicit
-        // choice, not a preference list; no fall-through to hint or default.
+    }
+
+    #[test]
+    fn effective_model_default_prefers_catalogued_non_reasoning_alias() {
+        let alias = crate::util::config::NON_REASONING_PROMPT_SUGGEST_MODEL;
         assert_eq!(
-            effective_suggest_model(&Pin::Pinned("pinned".into()), Some("hinted"), |m| m
-                == "hinted"),
+            effective_suggest_model(&Pin::Unpinned, None, Some("session"), true, |m| m == alias)
+                .as_deref(),
+            Some(alias)
+        );
+    }
+
+    #[test]
+    fn effective_model_default_falls_back_to_catalogued_session_model() {
+        assert_eq!(
+            effective_suggest_model(&Pin::Unpinned, None, Some("session"), true, |m| m
+                == "session")
+            .as_deref(),
+            Some("session")
+        );
+        assert_eq!(
+            effective_suggest_model(&Pin::Unpinned, None, Some("session"), true, |_| false),
             None
         );
     }
 
     #[test]
-    fn effective_model_env_pin_bypasses_catalog_guard() {
-        // GROK_PROMPT_SUGGESTIONS_MODEL is the explicit escape hatch: used
-        // verbatim even when the catalog does not list the model (mirrors
-        // the pager, which forwards the env value unchecked).
+    fn effective_model_default_uses_alias_without_session_catalog_entry() {
+        let alias = crate::util::config::NON_REASONING_PROMPT_SUGGEST_MODEL;
         assert_eq!(
-            effective_suggest_model(&Pin::Env("custom-model".into()), Some("hinted"), |_| false)
-                .as_deref(),
-            Some("custom-model")
+            effective_suggest_model(&Pin::Unpinned, None, Some("missing-session"), true, |m| {
+                m == alias
+            })
+            .as_deref(),
+            Some(alias)
+        );
+    }
+
+    #[test]
+    fn configured_reasoning_reserves_budget() {
+        assert_eq!(
+            resolve_suggest_reasoning(Some(ReasoningEffort::Low), "session", true, true),
+            SuggestReasoning {
+                effort: Some(ReasoningEffort::Low),
+                reserve_budget: true,
+            }
+        );
+    }
+
+    #[test]
+    fn reasoning_off_uses_none_when_the_fallback_supports_it() {
+        assert_eq!(
+            resolve_suggest_reasoning(None, "session", true, true),
+            SuggestReasoning {
+                effort: Some(ReasoningEffort::None),
+                reserve_budget: false,
+            }
+        );
+    }
+
+    #[test]
+    fn reasoning_off_reserves_budget_when_the_fallback_has_no_none_effort() {
+        assert_eq!(
+            resolve_suggest_reasoning(None, "session", true, false),
+            SuggestReasoning {
+                effort: None,
+                reserve_budget: true,
+            }
+        );
+    }
+
+    #[test]
+    fn alias_keeps_the_small_non_reasoning_budget() {
+        assert_eq!(
+            resolve_suggest_reasoning(
+                None,
+                crate::util::config::NON_REASONING_PROMPT_SUGGEST_MODEL,
+                true,
+                false,
+            ),
+            SuggestReasoning {
+                effort: None,
+                reserve_budget: false,
+            }
+        );
+    }
+
+    #[test]
+    fn effective_model_client_hint_beats_session_and_is_guarded() {
+        assert_eq!(
+            effective_suggest_model(
+                &Pin::Unpinned,
+                Some("hinted"),
+                Some("session"),
+                false,
+                |m| m == "hinted"
+            )
+            .as_deref(),
+            Some("hinted")
+        );
+    }
+
+    #[test]
+    fn effective_model_env_pin_is_catalog_guarded() {
+        assert_eq!(
+            effective_suggest_model(
+                &Pin::Env("custom-model".into()),
+                Some("hinted"),
+                Some("session"),
+                true,
+                |_| false
+            ),
+            None
         );
     }
 
@@ -420,57 +381,27 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_rejects_agent_voice() {
-        for s in [
-            "I'll run the tests",
-            "Let me check the output",
-            "Here's what to do next",
-        ] {
-            assert_eq!(sanitize_suggestion(s), None, "should reject {s:?}");
-        }
-    }
-
-    #[test]
-    fn sanitize_rejects_markdown_and_labels() {
-        for s in [
-            "**run tests**",
-            "- run tests",
-            "# next",
-            "Suggestion: run tests",
-            "```run```",
-        ] {
-            assert_eq!(sanitize_suggestion(s), None, "should reject {s:?}");
-        }
-    }
-
-    #[test]
-    fn sanitize_rejects_multi_sentence_and_overlong() {
+    fn unset_effort_is_low_only_on_a_reasoning_model() {
         assert_eq!(
-            sanitize_suggestion("Run the tests. Then commit the changes."),
+            suggest_request_effort(None, "grok-4.6", true),
+            Some(ReasoningEffort::Low)
+        );
+        assert_eq!(suggest_request_effort(None, "grok-4.6", false), None);
+        assert_eq!(
+            suggest_request_effort(
+                None,
+                crate::util::config::NON_REASONING_PROMPT_SUGGEST_MODEL,
+                true
+            ),
             None
         );
-        let long = "word ".repeat(20);
-        assert_eq!(sanitize_suggestion(&long), None);
-        let chars = "x".repeat(200);
-        assert_eq!(sanitize_suggestion(&chars), None);
-    }
-
-    #[test]
-    fn sanitize_one_word_allowlist() {
-        assert_eq!(sanitize_suggestion("yes").as_deref(), Some("yes"));
-        assert_eq!(sanitize_suggestion("commit").as_deref(), Some("commit"));
-        // Bare one-word verbs outside the allowlist are too ambiguous.
-        assert_eq!(sanitize_suggestion("refactor"), None);
-        // Slash commands are fine.
-        assert_eq!(sanitize_suggestion("/review").as_deref(), Some("/review"));
-    }
-
-    #[test]
-    fn sanitize_allows_colon_after_multiword_head() {
-        // Only single-word alphabetic label heads are rejected.
         assert_eq!(
-            sanitize_suggestion("fix the parse error: line 42").as_deref(),
-            Some("fix the parse error: line 42")
+            suggest_request_effort(Some(ReasoningEffort::High), "grok-4.6", true),
+            Some(ReasoningEffort::High)
+        );
+        assert_eq!(
+            suggest_request_effort(Some(ReasoningEffort::None), "grok-4.6", true),
+            Some(ReasoningEffort::None)
         );
     }
 
@@ -482,47 +413,6 @@ mod tests {
 
     fn assistant(text: &str) -> ConversationItem {
         ConversationItem::assistant(text.to_owned())
-    }
-
-    // -- is_repeat_of_user_message -------------------------------------------
-
-    #[test]
-    fn repeat_filter_rejects_verbatim_past_prompt() {
-        let conv = vec![user("fix the flaky auth test"), assistant("Fixed it")];
-        assert!(is_repeat_of_user_message("fix the flaky auth test", &conv));
-    }
-
-    #[test]
-    fn repeat_filter_is_case_whitespace_and_punctuation_insensitive() {
-        let conv = vec![user("Fix  the flaky\nauth test."), assistant("Fixed it")];
-        assert!(is_repeat_of_user_message("fix the flaky auth test!", &conv));
-    }
-
-    #[test]
-    fn repeat_filter_exempts_short_suggestions() {
-        let conv = vec![user("run the tests"), assistant("3 failures")];
-        // 3 words — legitimately recurs after new changes.
-        assert!(!is_repeat_of_user_message("run the tests", &conv));
-        assert!(!is_repeat_of_user_message("yes", &conv));
-    }
-
-    #[test]
-    fn repeat_filter_allows_novel_suggestions() {
-        let conv = vec![user("fix the flaky auth test"), assistant("Fixed it")];
-        assert!(!is_repeat_of_user_message("commit and push the fix", &conv));
-    }
-
-    #[test]
-    fn repeat_filter_ignores_synthetic_user_messages() {
-        let mut synthetic = user("please review the changes now");
-        if let ConversationItem::User(u) = &mut synthetic {
-            u.synthetic_reason = Some(crate::sampling::SyntheticReason::SystemReminder);
-        }
-        let conv = vec![synthetic, assistant("done")];
-        assert!(!is_repeat_of_user_message(
-            "please review the changes now",
-            &conv
-        ));
     }
 
     #[test]

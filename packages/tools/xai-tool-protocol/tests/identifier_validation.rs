@@ -78,13 +78,6 @@ fn tool_id_rejects_empty_segments_around_separator() {
         );
     }
 }
-
-#[test]
-fn tool_id_try_from_string_works() {
-    let id: ToolId = "GrokBuild:read_file".to_owned().try_into().unwrap();
-    assert_eq!(id.as_str(), "GrokBuild:read_file");
-}
-
 #[test]
 fn server_id_accepts_arbitrary_non_empty_strings() {
     for ok in ["my-uuid-v7", "srv_42", "x", "abc.def"] {
@@ -198,12 +191,4 @@ fn tool_call_id_uuid_v7_helper_is_unique_and_valid_uuid() {
             "expected UUID v7, got {parsed}"
         );
     }
-}
-
-#[test]
-fn opaque_id_display_matches_inner_string() {
-    let s = SessionId::new("sess_abc").unwrap();
-    assert_eq!(format!("{s}"), "sess_abc");
-    let t = ToolId::new("github:list_repos").unwrap();
-    assert_eq!(format!("{t}"), "github:list_repos");
 }

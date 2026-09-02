@@ -1,15 +1,12 @@
 //! MCP extension methods and business logic.
 //!
-//! - `x.ai/mcp/list` — list available MCP servers (agent-scoped or session-annotated)
-//! - `x.ai/mcp/call` — invoke an MCP tool directly, outside the LLM loop
-//! - `x.ai/mcp/servers_updated` — local/plugin catalog after launch-dir discovery
-//!   or a folder-trust grant (not gateway connectors)
-//! - `x.ai/mcp/server_status` — per-server delta pushed by the
-//!   `StatusDispatcher` (transport-closed pollers, handshake failures,
-//!   config diffs, server-pushed list-changed notifications). See
-//!   [`crate::session::mcp_dispatcher`] for the coalescing /
-//!   payload-shaping logic. Re-exported below so other crates have a
-//!   single import point.
+//! - `x.ai/mcp/list`: list available MCP servers (agent-scoped or session-annotated)
+//! - `x.ai/mcp/call`: invoke an MCP tool directly, outside the LLM loop
+//! - `x.ai/mcp/servers_updated`: the local and plugin catalog after launch-dir discovery or a folder-trust grant (not gateway connectors)
+//! - `x.ai/mcp/server_status`: per-server delta pushed by the `StatusDispatcher`.
+//!   The triggers: transport-closed pollers, handshake failures, config diffs, and server-pushed list-changed notifications.
+//!   See [`crate::session::mcp_dispatcher`] for the coalescing and payload-shaping logic.
+//!   Re-exported below so other crates have a single import point.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -19,18 +16,16 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as TokioMutex;
 // rmcp is quarantined in xai-grok-mcp; see that crate's docs.
 use xai_grok_mcp::rmcp;
-// `wire::MCP_CALL` is the one cross-SDK contract literal; the agent-only siblings
-// live in `mcp_methods` below.
+// `wire::MCP_CALL` is the one cross-SDK contract literal; the agent-only siblings live in `mcp_methods` below
 use xai_grok_mcp::wire;
 
 use super::{ExtResult, parse_params, to_ext_response};
 
 /// Agent-only `x.ai/mcp/*` ACP method/notification names.
 ///
-/// Unlike [`wire::MCP_CALL`] (the cross-SDK contract, which stays in
-/// `xai_grok_mcp::wire`), these methods are private to the agent↔client channel and
-/// are NOT spoken by the SDK. They are centralized here only to avoid scattering the
-/// same string literal across dispatch and notification send sites.
+/// Unlike [`wire::MCP_CALL`] (the cross-SDK contract, which stays in `xai_grok_mcp::wire`), these methods are NOT spoken by the SDK.
+/// They are private to the channel between the agent and the client.
+/// They are centralized here only to avoid scattering the same string literal across dispatch and notification send sites.
 pub mod mcp_methods {
     /// Shared prefix that routes every MCP ext method to this module's dispatcher.
     pub const PREFIX: &str = "x.ai/mcp/";
@@ -59,9 +54,8 @@ use crate::session::mcp_servers::{MCP_TOOL_NAME_DELIMITER, McpClient, McpState};
 pub struct McpListRequest {
     #[serde(default)]
     pub session_id: Option<String>,
-    /// When false, bypass cache and refetch from cli-chat-proxy, then sync
-    /// into live sessions so `search_tool` sees new tools. Use after OAuth
-    /// enrollment or disconnect.
+    /// When false, bypass cache and refetch from cli-chat-proxy, then sync into live sessions so `search_tool` sees new tools.
+    /// Use after OAuth enrollment or disconnect.
     #[serde(default = "default_true")]
     pub cache: bool,
 }
@@ -100,7 +94,7 @@ pub struct McpServerEntry {
 /// MCP server config for the `mcp/list` catalog response.
 ///
 /// Distinct from `acp::McpServer` (session/new input) because:
-/// - HTTP: exposes `scope`/`scope_id`/`scope_name` for connector selection, NOT headers (auth tokens stay private)
+/// - HTTP: exposes `scope`, `scope_id`, and `scope_name` for connector selection, NOT headers (auth tokens stay private)
 /// - Stdio: same structure but optimized for JSON wire format
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -188,7 +182,7 @@ pub(crate) struct McpCallRequest {
     #[serde(default)]
     pub session_id: Option<String>,
     pub server: String,
-    /// Endpoint URL — disambiguates when multiple servers share a name.
+    /// Endpoint URL; disambiguates when multiple servers share a name.
     #[serde(default)]
     pub server_url: Option<String>,
     pub tool: String,
@@ -239,53 +233,39 @@ pub struct McpServersUpdated {
 
 /// Per-server tool-list change push.
 ///
-/// Emitted by [`crate::session::acp_session::AcpSession`] on the
-/// post-handshake / auth-recovery and toggle-tool paths. The
-/// `session_id` field lets the pager route
-/// the push to the owning agent via `find_session_match` rather than
-/// falling back to `app.active_view` (a latent multi-agent bug).
+/// Emitted by [`crate::session::acp_session::AcpSession`] on the post-handshake, auth-recovery, and toggle-tool paths.
+/// The `session_id` field lets the pager route the push to the owning agent via `find_session_match`.
+/// Falling back to `app.active_view` was a latent multi-agent bug.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct McpToolsChanged {
-    /// Session that owns this push. Pager routes via
-    /// `find_session_match` so a background-agent push does not land
-    /// on the foregrounded agent's modal.
+    /// Session that owns this push.
+    /// The pager routes via `find_session_match` so a background-agent push does not land on the foregrounded agent's modal.
     pub session_id: String,
     /// MCP server whose tool list changed.
     ///
-    /// Currently unread by the pager — the pager treats every
-    /// `tools_changed` push uniformly as a "schedule a debounced
-    /// `mcp/list` refetch" trigger and re-reads the full catalog.
-    /// The toggle-tool path therefore leaves this empty for
-    /// forward-compat; any future field-aware optimization on the
-    /// pager side would need to special-case empty as
-    /// "non-server-scoped". No consumer reads that sentinel today.
+    /// Currently unread by the pager.
+    /// The pager treats every `tools_changed` push as a trigger to schedule a debounced `mcp/list` refetch and re-reads the full catalog.
+    /// The toggle-tool path therefore leaves this empty for forward-compat.
+    /// A future field-aware pager optimization would need to special-case empty as "not scoped to one server"; no consumer reads that today.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub server_name: String,
     /// New tool entries for the named server.
     ///
-    /// Currently unread by the pager for the same reason as
-    /// `server_name` above. Empty on the toggle-tool path; populated
-    /// on the post-handshake / auth-recovery paths so future
-    /// field-aware consumers can avoid the `mcp/list` round trip.
+    /// Currently unread by the pager for the same reason as `server_name` above.
+    /// Empty on the toggle-tool path.
+    /// Populated on the post-handshake and auth-recovery paths so future field-aware consumers can avoid the `mcp/list` round trip.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<McpToolEntry>,
 }
 
-// Re-export the `x.ai/mcp/server_status` schema +
-// method constant from the dispatcher module so external callers
-// have a single import point alongside the other `x.ai/mcp/*`
-// types.
+// Re-export the `x.ai/mcp/server_status` schema and method constant from the dispatcher module
+// External callers then have a single import point alongside the other `x.ai/mcp/*` types
 //
-// The canonical definitions still live in
-// [`crate::session::mcp_dispatcher`] because their primary consumer
-// is the dispatcher loop (and the unit tests there). The
-// `session → extensions` direction is the inverse of the typical
-// `extensions → session` flow, but moving the types here would
-// require either making the dispatcher import from `extensions`
-// (same inversion) or duplicating the schema. Leaving the
-// re-export here keeps the single import-point ergonomic without
-// duplicating definitions.
+// The canonical definitions stay in [`crate::session::mcp_dispatcher`]: their primary consumer is the dispatcher loop and its unit tests
+// This import from `session` into `extensions` inverts the typical `extensions` to `session` flow
+// Moving the types here would require either making the dispatcher import from `extensions` (the same inversion) or duplicating the schema
+// Leaving the re-export here keeps the single import point without duplicating definitions
 pub use crate::session::mcp_dispatcher::{
     McpServerStatus, McpServerStatusPayload, McpServerStatusReason, SERVER_STATUS_METHOD,
 };
@@ -320,8 +300,8 @@ pub struct McpReadResourceContent {
     pub meta: Option<serde_json::Value>,
 }
 
-/// Push the full MCP catalog to the client. Called in the background after
-/// launch-dir MCP discovery so `initialize()` isn't blocked by config walks.
+/// Push the full MCP catalog to the client.
+/// Called in the background after launch-dir MCP discovery so `initialize()` isn't blocked by config walks.
 pub async fn notify_servers_updated(
     gateway: &xai_acp_lib::AcpAgentGatewaySender,
     local_servers: &[acp::McpServer],
@@ -341,10 +321,10 @@ pub async fn notify_servers_updated(
 
 /// Inbound `x.ai/mcp/*` methods this agent services, resolved from the wire string.
 ///
-/// Single source of truth for forward-method routing: [`handle`] maps each variant to
-/// its handler, and an unknown method yields `None` → `method_not_found`. The reverse
-/// method [`wire::MCP_SDK_CALL`] is emit-only (agent→client) and has no variant here,
-/// so a stray inbound reverse call is never misrouted to the forward `handle_call`.
+/// Single source of truth for forward-method routing: [`handle`] maps each variant to its handler.
+/// An unknown method yields `None`, which `handle` answers with `method_not_found`.
+/// The reverse method [`wire::MCP_SDK_CALL`] is emit-only (agent to client) and has no variant here.
+/// A stray inbound reverse call is therefore never misrouted to the forward `handle_call`.
 #[derive(Debug, PartialEq, Eq)]
 enum McpRoute {
     List,
@@ -394,7 +374,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 
 // ── Catalog (shared by mcp/list and InitializeResponse._meta) ───────
 
-/// Extract URL from an MCP server (HTTP/SSE only, None for Stdio).
+/// Extract URL from an MCP server (HTTP and SSE only, None for Stdio).
 fn mcp_server_url(server: &acp::McpServer) -> Option<&str> {
     match server {
         acp::McpServer::Http(acp::McpServerHttp { url, .. })
@@ -405,9 +385,8 @@ fn mcp_server_url(server: &acp::McpServer) -> Option<&str> {
     }
 }
 
-/// Build MCP server catalog: gateway rows + local servers, deduplicated by name.
-/// Pure function — no I/O. Used by `mcp/list`, `InitializeResponse._meta`,
-/// and `mcp/servers_updated`.
+/// Build the MCP server catalog: gateway rows and local servers, deduplicated by name.
+/// Pure function, no I/O. Used by `mcp/list`, `InitializeResponse._meta`, and `mcp/servers_updated`.
 pub fn build_mcp_catalog(local_servers: &[acp::McpServer]) -> Vec<McpServerEntry> {
     build_mcp_catalog_with_gateway_tools(local_servers, None, &Default::default())
 }
@@ -576,7 +555,7 @@ fn disabled_server_placeholder_entry(name: &str) -> McpServerEntry {
 // ── Session-level operations (called via SessionCommand) ────────────
 
 /// Build session MCP status: which servers are enabled, healthy, and what tools they expose.
-/// Clones state under lock then releases — does not hold lock across awaits.
+/// Clones state under lock then releases; it does not hold the lock across awaits.
 pub(crate) async fn build_mcp_status(
     mcp_state: &Arc<TokioMutex<McpState>>,
     tool_bridge: &Arc<xai_grok_tools::bridge::ToolBridge>,
@@ -607,8 +586,7 @@ pub(crate) async fn build_mcp_status(
             state.mcp_tool_icons.clone(),
             state.auth_required.clone(),
             state.init_failed.clone(),
-            // Collect (qualified_name, description) for disabled tools so we
-            // can include them in the snapshot without cloning the full registration.
+            // Collect (qualified_name, description) for disabled tools so we can include them in the snapshot without cloning the full registration
             state
                 .disabled_tool_registrations
                 .iter()
@@ -632,11 +610,9 @@ pub(crate) async fn build_mcp_status(
                 client_state: Some(if healthy { "ready" } else { "unavailable" }.to_string()),
             });
         }
-        // A server whose background init failed (handshake/`tools/list`
-        // error or timeout) is reported as Unavailable even when the
-        // transport is still technically alive — otherwise a server that
-        // connected but wedged on `tools/list` (0 tools registered) would
-        // misleadingly show as Ready.
+        // A server whose background init failed (a handshake or `tools/list` error, or a timeout) is reported as Unavailable even when the
+        // transport is still alive
+        // Otherwise a server that connected but hung on `tools/list` (0 tools registered) would misleadingly show as Ready
         let ready = healthy && !init_failed.contains_key(name.as_str());
         let (status, tools) = if ready {
             let _tool_defs_timer = crate::instrumentation::timer("mcp_status_tool_definitions");
@@ -684,8 +660,7 @@ pub(crate) async fn build_mcp_status(
                 }
             }
 
-            // Stable alphabetical order so tools don't jump around
-            // when toggled between enabled and disabled.
+            // Stable alphabetical order so tools don't jump around when toggled between enabled and disabled
             tools.sort_by(|a, b| a.name.cmp(&b.name));
 
             (McpSessionStatus::Ready, tools)
@@ -702,9 +677,9 @@ pub(crate) async fn build_mcp_status(
         });
     }
 
-    // Configured but not yet handshaked (either global init or per-server bg init) → Initializing.
-    // We use initializing_servers (populated before spawning handshakes) so that
-    // slow servers continue showing Initializing after we call finish_init() early.
+    // A server configured but not yet handshaked (either global init or per-server background init) reports Initializing
+    // We use initializing_servers (populated before spawning handshakes) so that slow servers continue showing Initializing after we call
+    // finish_init() early
     for config in &configs {
         let cname = crate::session::mcp_servers::mcp_server_name(config);
         if !client_statuses.iter().any(|c| c.name == cname) && initializing_servers.contains(cname)
@@ -725,8 +700,7 @@ pub(crate) async fn build_mcp_status(
     }
 }
 
-/// Ensure the agent-level MCP pool is initialized, waiting if another
-/// caller is already initializing. Safe to call concurrently.
+/// Ensure the agent-level MCP pool is initialized, waiting if another caller is already initializing. Safe to call concurrently.
 async fn ensure_agent_pool_initialized(mcp_state: &Arc<TokioMutex<McpState>>) {
     loop {
         let state = mcp_state.lock().await;
@@ -734,7 +708,7 @@ async fn ensure_agent_pool_initialized(mcp_state: &Arc<TokioMutex<McpState>>) {
             return;
         }
         if state.is_initializing() {
-            // Another call is initializing — wait and retry.
+            // Another call is initializing; wait and retry
             drop(state);
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             continue;
@@ -746,8 +720,7 @@ async fn ensure_agent_pool_initialized(mcp_state: &Arc<TokioMutex<McpState>>) {
     }
 }
 
-/// Spawn config.toml MCP clients into the agent pool. Handshakes happen
-/// lazily on first `CallMcpTool`.
+/// Spawn config.toml MCP clients into the agent pool. Handshakes happen lazily on first `CallMcpTool`.
 pub(crate) async fn init_agent_mcp_pool(
     mcp_state: &Arc<TokioMutex<McpState>>,
     cwd: &std::path::Path,
@@ -875,11 +848,9 @@ pub async fn call_mcp_tool(
 // ── mcp/list handler ────────────────────────────────────────────────
 
 async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
-    // Latency layout: gateway catalog fetch and the session-state branch
-    // (conditional `retry_auth_required_servers` then `build_mcp_status`)
-    // run concurrently via tokio::join!. OAuth retries only fire on explicit
-    // refresh (cache=false); cached opens skip them so the warm path stays
-    // fast.
+    // The gateway catalog fetch and the session-state branch run concurrently via tokio::join!
+    // The session-state branch is a conditional `retry_auth_required_servers` followed by `build_mcp_status`
+    // OAuth retries only fire on explicit refresh (cache=false); cached opens skip them so the warm path stays fast
     let req = parse_params::<McpListRequest>(args)?;
 
     let cwd = req
@@ -888,8 +859,7 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         .and_then(|sid| agent.get_session_cwd(&acp::SessionId::new(sid.clone())))
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-    // Resolve the session handle synchronously up front so the session-state
-    // future can be polled alongside the gateway catalog fetch.
+    // Resolve the session handle synchronously up front so the session-state future can be polled alongside the gateway catalog fetch
     let session_handle = req.session_id.as_ref().and_then(|sid| {
         let acp_id = acp::SessionId::new(sid.clone());
         agent.get_session_handle(&acp_id)
@@ -904,8 +874,7 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let cache = req.cache;
     let session_state_fut = async {
         let handle = session_handle.as_ref()?;
-        // Auth retries belong on explicit refresh: skipping them on cached
-        // opens saves ~500ms when multiple OAuth servers are configured.
+        // Auth retries belong on explicit refresh: skipping them on cached opens saves ~500ms when multiple OAuth servers are configured
         if !cache {
             handle.retry_auth_required_servers().await;
         }
@@ -984,8 +953,8 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         });
     }
 
-    // Disabled stubs: only names Space enable can still resolve (see
-    // `crate::util::config::mcp_reenable`). Orphans with no definition stay hidden.
+    // Disabled stubs: only names Space enable can still resolve (see `crate::util::config::mcp_reenable`)
+    // Orphans with no definition stay hidden
     let catalog_names: HashSet<String> = servers.iter().map(|s| s.name.clone()).collect();
     let discovery = crate::session::managed_mcp::McpDiscoveryInputs {
         cwd: &cwd,
@@ -1024,14 +993,12 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 }
             }
         }
-        // `session_snapshot` is `Some` only when `session_handle` resolved,
-        // which requires `req.session_id` to have been `Some`. Rather than
-        // assert that non-local invariant with `expect` (which a future
-        // refactor of `session_state_fut` could silently turn into a panic
-        // in a request handler), use a local `if let` guard around the only
-        // consumer — the debug log. We emit `%sid` (Display) to match the
-        // sibling "session not found" log; `?req.session_id` would wrap the
-        // bare string as `Some("...")` and diverge from the earlier format.
+        // `session_snapshot` is `Some` only when `session_handle` resolved, which requires `req.session_id` to have been `Some`
+        // An `expect` would assert that non-local invariant here
+        // A future refactor of `session_state_fut` could silently turn that `expect` into a panic in a request handler
+        // So use a local `if let` guard around the only consumer, the debug log
+        // We emit `%sid` (Display) to match the sibling "session not found" log
+        // `?req.session_id` would wrap the bare string as `Some("...")` and diverge from the earlier format
         if let Some(sid) = req.session_id.as_ref() {
             tracing::debug!(session_id = %sid, "Annotating mcp/list with session state");
         }
@@ -1108,8 +1075,8 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         }
     }
 
-    // Tag servers with the owning plugin (covers both a plugin's .mcp.json and
-    // its inline plugin.json mcpServers via the registry's deduped owner map).
+    // Tag servers with the owning plugin
+    // This covers both a plugin's .mcp.json and its inline plugin.json mcpServers via the registry's deduped owner map
     if let Some(registry) = plugin_registry_snapshot.as_ref() {
         for entry in &mut servers {
             if entry.source_label.is_none()
@@ -1130,8 +1097,7 @@ async fn handle_call(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let result = match req.session_id {
         Some(sid) => {
             // Session-provided servers: route through the session's MCP pool.
-            // Load-race-tolerant: waits for an in-flight `session/load`
-            // (reconnect replay after a leader restart) before failing.
+            // Waits for an in-flight `session/load` (a reconnect replay after a leader restart) before failing
             let acp_id = acp::SessionId::new(sid);
             let handle = agent
                 .session_handle_waiting_for_load(&acp_id)
@@ -1164,7 +1130,7 @@ async fn handle_read_resource(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
     let req = parse_params::<McpReadResourceRequest>(args)?;
 
     let result = if let Some(ref sid) = req.session_id {
-        // Load-race-tolerant: see `handle_call` above.
+        // Waits for an in-flight `session/load`; see `handle_call` above
         let acp_id = acp::SessionId::new(sid.clone());
         let handle = agent
             .session_handle_waiting_for_load(&acp_id)
@@ -1241,9 +1207,8 @@ pub(crate) async fn read_mcp_resource(
                 blob: Some(blob),
                 meta: meta.and_then(|m| serde_json::to_value(m).ok()),
             }),
-            // `ResourceContents` is non_exhaustive; skip unknown variants so
-            // the rest of the resource still renders, but log the drop so the
-            // missing content is diagnosable.
+            // `ResourceContents` is non_exhaustive; skip unknown variants so the rest of the resource still renders
+            // Log the drop so the missing content is diagnosable
             _ => {
                 tracing::warn!(
                     server = server_name,
@@ -1264,14 +1229,13 @@ pub(crate) async fn read_mcp_resource(
 
 // ── McpResourceProvider bridge ───────────────────────────────────────
 //
-// Implements the `McpResourceProvider` trait from xai-grok-tools so that
-// `ListMcpResources` / `FetchMcpResource` tools can access MCP
-// servers without depending on `xai-grok-mcp` directly.
+// Implements the `McpResourceProvider` trait from xai-grok-tools
+// The `ListMcpResources` and `FetchMcpResource` tools can then access MCP servers without depending on `xai-grok-mcp` directly
 
 /// Bridge from `McpState` to the `McpResourceProvider` trait.
 ///
-/// Injected into the agent's `SharedResources` via `tool_bridge.update_resource()`
-/// at session startup so tools can enumerate and fetch MCP resources.
+/// Injected into the agent's `SharedResources` via `tool_bridge.update_resource()` at session startup.
+/// Tools can then enumerate and fetch MCP resources.
 pub(crate) struct McpStateResourceProvider(pub Arc<TokioMutex<McpState>>);
 
 #[async_trait::async_trait]
@@ -1356,6 +1320,9 @@ impl xai_grok_tools::types::resources::McpResourceProvider for McpStateResourceP
             .await
             .map_err(|e| format!("MCP init failed: {e}"))?;
 
+        // `RunningService::read_resource` (not `Peer::read_resource`) drives SEP-2322
+        // `input_required` rounds through the client handler, so elicitation requests on
+        // resource reads reach the HITL bridge like tool calls do.
         let result = mcp_service
             .read_resource(rmcp::model::ReadResourceRequestParams::new(uri.clone()))
             .await
@@ -1409,14 +1376,13 @@ impl xai_grok_tools::types::resources::McpResourceProvider for McpStateResourceP
                     blob.into_bytes(),
                 )),
             }),
-            // Unreachable: `first` is pre-filtered to supported variants, but
-            // `ResourceContents` is non_exhaustive so the match must be total.
+            // Unreachable: `first` is pre-filtered to supported variants, but `ResourceContents` is non_exhaustive so the match must be total
             _ => Err(format!("Unsupported resource content type for: {uri}")),
         }
     }
 }
 
-// ── Auth status / trigger ────────────────────────────────────────────
+// ── Auth status and trigger ──────────────────────────────────────────
 
 #[derive(serde::Deserialize)]
 struct McpAuthStatusRequest {
@@ -1455,8 +1421,8 @@ struct McpAuthTriggerResponse {
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     setup: Option<crate::util::config::McpSetupConfig>,
-    /// Descriptive failure reason from the shell. `None` on success and on
-    /// failures with no detail; surfaced verbatim by the TUI.
+    /// Descriptive failure reason from the shell.
+    /// `None` on success and on failures with no detail; the TUI shows it verbatim.
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -1623,8 +1589,7 @@ async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         return Err(acp::Error::invalid_params().data(reason.to_string()));
     }
 
-    // Clear disable only after resolve succeeds, then merge for a spawnable
-    // transport.
+    // Clear disable only after resolve succeeds, then merge for a spawnable transport
     let was_disabled =
         crate::util::config::disabled_mcp_server_names(&cwd).contains(&req.server_name);
     let enable_paths = if was_disabled {
@@ -1659,7 +1624,7 @@ async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         }
     };
 
-    // Prefs + enable-tier restore for failures after enable wrote config.
+    // Restores both the preferences and the enable state for failures after enable wrote config
     let rollback_after_enable = || async {
         rollback_prefs().await;
         restore_disable().await;
@@ -1725,8 +1690,7 @@ async fn handle_toggle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 
     let gateway_connector_id = managed_gateway_connector_id(&req.server_name);
 
-    // Persist re-enable outside the session actor (async I/O). Config mutation
-    // happens atomically inside via ToggleMcpServer.
+    // Persist re-enable outside the session actor (async I/O). Config mutation happens atomically inside via ToggleMcpServer.
     let server_config = if req.enabled {
         let cwd = agent
             .get_session_cwd(&acp_id)
@@ -1830,8 +1794,8 @@ async fn handle_toggle_tool(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResu
         .get_session_handle(&acp_id)
         .ok_or_else(|| acp::Error::invalid_params().data("session not found"))?;
 
-    // `managed_gateway:` is reserved, so route by prefix alone — never consult
-    // the catalog, or a stale tool toggle would fall back to the local path.
+    // `managed_gateway:` is reserved, so route by prefix alone
+    // Never consult the catalog, or a stale tool toggle would fall back to the local path
     let gateway_connector_id = managed_gateway_connector_id(&req.server_name);
     let is_managed_gateway = gateway_connector_id.is_some();
 
@@ -1925,8 +1889,8 @@ async fn handle_delete(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         .await
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
 
-    // The toggle path spawns a task that adds the server to
-    // `disabled_mcp_servers`. Clear user list only — do not unstick project.
+    // The toggle path spawns a task that adds the server to `disabled_mcp_servers`
+    // Clear the user list only; leave any project-level disable in place
     let _ = crate::util::config::save_user_mcp_server_enabled(&req.server_name, true).await;
 
     to_ext_response(Ok(McpToggleResponse { ok: true }))
@@ -1936,11 +1900,10 @@ async fn handle_delete(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 mod tests {
     use super::*;
 
-    /// The emit-only reverse method (`x.ai/mcp/sdk_call`) shares the `x.ai/mcp/`
-    /// prefix, so `mvp_agent`'s dispatcher routes an inbound copy of it to this
-    /// module's `handle`. It must NOT collide with any forward route — i.e. it has no
-    /// `McpRoute`, so `handle` returns `method_not_found` instead of misrouting a stray
-    /// inbound reverse call to `handle_call`.
+    /// The emit-only reverse method (`x.ai/mcp/sdk_call`) shares the `x.ai/mcp/` prefix.
+    /// `mvp_agent`'s dispatcher therefore routes an inbound copy of it to this module's `handle`.
+    /// It must NOT collide with any forward route, so it has no `McpRoute`.
+    /// `handle` then returns `method_not_found` instead of misrouting a stray inbound reverse call to `handle_call`.
     #[test]
     fn inbound_sdk_call_has_no_forward_route() {
         assert!(
@@ -1977,28 +1940,19 @@ mod tests {
 
     /// **Pattern-regression test, not an end-to-end `handle_list` test.**
     ///
-    /// `handle_list` takes an `&MvpAgent`, which has no lightweight test
-    /// constructor; spinning up a fake agent here would be a much larger
-    /// refactor than this test warrants. Instead this test mirrors the exact
-    /// production structure (resolve session handle synchronously, then
-    /// `tokio::join!` a managed-fetch arm with a session-state arm whose
-    /// inner future conditionally awaits `retry_auth_required_servers` then
-    /// `build_mcp_status`) using stand-in futures, and asserts the two
-    /// latency invariants `handle_list` guarantees:
+    /// `handle_list` takes an `&MvpAgent`, which has no lightweight test constructor.
+    /// Spinning up a fake agent here would be a much larger refactor than this test warrants.
+    /// Instead this test mirrors the production structure with stand-in futures and asserts the two latency invariants `handle_list` guarantees.
+    /// The mirrored structure: resolve the session handle synchronously, then `tokio::join!` a managed-fetch arm with a session-state arm.
+    /// The session-state arm conditionally awaits `retry_auth_required_servers` and then `build_mcp_status`.
     ///
-    /// 1. The two `tokio::join!` arms — gateway catalog fetch on one
-    ///    side, and the session-state branch (`retry_auth_required_servers?`
-    ///    + `build_mcp_status`) on the other — are polled concurrently, so
-    ///    total wall-time ≈ max(t_catalog, t_session) rather than the sum.
-    /// 2. `retry_auth_required_servers` is gated on `cache=false`. On cached
-    ///    opens it is skipped entirely, removing ~500ms of OAuth retry
-    ///    overhead when multiple OAuth servers are configured.
+    /// 1. The two `tokio::join!` arms, the gateway catalog fetch and the session-state branch, are polled concurrently.
+    ///    Total wall-time is therefore about the max of the two arms rather than their sum.
+    /// 2. `retry_auth_required_servers` is gated on `cache=false`.
+    ///    Cached opens skip it entirely, removing ~500ms of OAuth retry overhead when multiple OAuth servers are configured.
     ///
-    /// If a future refactor of `handle_list` changes the structure (e.g.
-    /// awaits the arms sequentially, or runs auth retry on cache=true),
-    /// this test will *not* fail — it only guards the pattern. The real
-    /// behavioural guard is reading the diff against the structure
-    /// documented here.
+    /// If a future refactor of `handle_list` awaits the arms sequentially or runs the auth retry on cache=true, this test will *not* fail.
+    /// It only guards the pattern; the real behavioural guard is reading the diff against the structure documented here.
     #[tokio::test(start_paused = true)]
     async fn handle_list_parallel_join_pattern_regression() {
         use std::sync::Arc;
@@ -2036,9 +1990,8 @@ mod tests {
                 }
             };
 
-            // Stand-in for the session-state branch: conditional auth retry
-            // followed by `build_mcp_status`. Mirrors the closure in
-            // `handle_list`.
+            // Stand-in for the session-state branch: conditional auth retry followed by `build_mcp_status`
+            // Mirrors the closure in `handle_list`
             let session_fut = {
                 let auth_retried = Arc::clone(&auth_retried);
                 let bump = bump.clone();
@@ -2064,7 +2017,7 @@ mod tests {
             )
         }
 
-        // cache=true: no auth retry, total ≈ managed fetch alone.
+        // cache=true: no auth retry; the total is about the managed fetch alone
         let (cached_elapsed, cached_auth, cached_overlap) = run(true).await;
         assert!(!cached_auth, "auth retry must be skipped on cache=true");
         assert_eq!(cached_overlap, 2, "futures must run concurrently");
@@ -2074,8 +2027,8 @@ mod tests {
             cached_elapsed
         );
 
-        // cache=false: auth retry runs, but still concurrent with managed
-        // fetch — total ≈ max(1500, 500+50) ≈ 1500ms, not 2050ms.
+        // cache=false: the auth retry runs, but still concurrent with the managed fetch
+        // The total is about max(1500, 500+50), roughly 1500ms, not 2050ms
         let (refresh_elapsed, refresh_auth, refresh_overlap) = run(false).await;
         assert!(refresh_auth, "auth retry must run on cache=false");
         assert_eq!(refresh_overlap, 2, "futures must run concurrently");

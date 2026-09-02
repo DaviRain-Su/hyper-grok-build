@@ -14,17 +14,15 @@ type ExtResult = Result<acp::ExtResponse, acp::Error>;
 
 /// Wire DTO for the `x.ai/task/kill` ext request.
 ///
-/// `pub` (with both serde directions) so ACP clients (xai-grok-pager) build
-/// the request from the same type the agent parses — keeping the wire
-/// contract typed end-to-end instead of duplicated `json!` literals.
+/// `pub` (with both serde directions) so ACP clients (xai-grok-pager) build the request from the same type the agent parses.
+/// That keeps the wire contract typed end-to-end instead of duplicated `json!` literals.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KillTaskRequest {
     pub session_id: String,
     pub task_id: String,
     /// Single-task UI `[×]` omits this (defaults to [`TaskKillSource::ClientUi`]).
-    /// Bulk teardown (dashboard stop-all, session delete, headless reap)
-    /// must send [`TaskKillSource::Teardown`].
+    /// Bulk teardown (dashboard stop-all, session delete, headless reap) must send [`TaskKillSource::Teardown`].
     #[serde(default)]
     pub source: TaskKillSource,
 }
@@ -47,11 +45,9 @@ impl From<TaskKillSource> for KillSource {
     }
 }
 
-/// Wire DTO for the `x.ai/task/kill` ext response payload (nested under
-/// `result` in the `ExtMethodResult` envelope).
+/// Wire DTO for the `x.ai/task/kill` ext response payload (nested under `result` in the `ExtMethodResult` envelope).
 ///
-/// `pub` (with both serde directions) so ACP clients deserialize the typed
-/// outcome instead of probing raw JSON.
+/// `pub` (with both serde directions) so ACP clients deserialize the typed outcome instead of probing raw JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KillTaskResponse {
@@ -73,35 +69,33 @@ struct ListTasksResponse {
 
 /// Wire DTO for the `x.ai/subagent/cancel` ext request.
 ///
-/// `pub` (with both serde directions) so ACP clients (xai-grok-pager) build
-/// the request from the same type the agent parses.
+/// `pub` (with both serde directions) so ACP clients (xai-grok-pager) build the request from the same type the agent parses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CancelSubagentRequest {
     pub subagent_id: String,
 }
 
-/// Wire mirror of the coordinator's [`SubagentCancelOutcome`], `kind`-tagged so
-/// a client can branch and read the already-finished `status`. Sent alongside
-/// the legacy `cancelled` bool: a new pager prefers this, an old one ignores it.
+/// Wire mirror of the coordinator's [`SubagentCancelOutcome`], `kind`-tagged so a client can branch and read the already-finished `status`.
+/// It is sent alongside the legacy `cancelled` bool: a new pager prefers this, an old one ignores it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SubagentCancelOutcomeDto {
-    /// A live subagent was cancelled — a real `SubagentFinished` is coming.
+    /// A live subagent was cancelled; a real `SubagentFinished` is coming.
     Cancelled,
-    /// Already finished — no finish coming; `status` is the real terminal status.
+    /// The subagent already finished, so no finish event is coming; `status` is the real terminal status.
     AlreadyFinished { status: String },
-    /// The id is unknown (never existed / evicted) — no finish coming.
+    /// The id is unknown (never existed, or evicted), so no finish event is coming.
     NotFound,
-    /// Unknown future `kind` (`#[serde(other)]`): lets an old client still parse
-    /// and fall back to the legacy bool. Never produced by `From`.
+    /// Unknown future `kind` (`#[serde(other)]`): lets an old client still parse and fall back to the legacy bool.
+    /// `From` never produces this variant.
     #[serde(other)]
     Unknown,
 }
 
 impl SubagentCancelOutcomeDto {
     /// Legacy bool for older pagers: true only when a live subagent was stopped.
-    /// Already-finished / not-found → false so an old pager finalizes the row.
+    /// Already-finished and not-found map to false so an old pager finalizes the row.
     fn cancelled_bool(&self) -> bool {
         matches!(self, Self::Cancelled)
     }
@@ -117,8 +111,8 @@ impl From<SubagentCancelOutcome> for SubagentCancelOutcomeDto {
     }
 }
 
-/// Wire DTO for the `x.ai/subagent/cancel` response payload (under `result` in
-/// the `ExtMethodResult` envelope). `pub` + both serde dirs so clients read it typed.
+/// Wire DTO for the `x.ai/subagent/cancel` response payload (under `result` in the `ExtMethodResult` envelope).
+/// `pub` with both serde directions so clients read it typed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CancelSubagentResponse {
@@ -222,8 +216,7 @@ struct GetSubagentResponse {
 
 /// ACP DTO for a single subagent snapshot (any status).
 ///
-/// Extends the identity fields from `SubagentLiveSnapshotDto` with
-/// status-dependent fields for completed/failed/cancelled states.
+/// Extends the identity fields from `SubagentLiveSnapshotDto` with status-dependent fields for completed/failed/cancelled states.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SubagentSnapshotDto {
@@ -867,12 +860,12 @@ mod tests {
 
     #[test]
     fn subagent_cancel_outcome_dto_maps_from_coordinator_outcome() {
-        // Cancelled → legacy bool true (a real finish is coming).
+        // Cancelled maps to legacy bool true (a real finish is coming)
         let dto = SubagentCancelOutcomeDto::from(SubagentCancelOutcome::Cancelled);
         assert_eq!(dto, SubagentCancelOutcomeDto::Cancelled);
         assert!(dto.cancelled_bool());
 
-        // AlreadyFinished carries the terminal status; legacy bool false.
+        // AlreadyFinished carries the terminal status; the legacy bool is false
         let dto = SubagentCancelOutcomeDto::from(SubagentCancelOutcome::AlreadyFinished {
             status: "completed".into(),
         });
@@ -884,7 +877,7 @@ mod tests {
         );
         assert!(!dto.cancelled_bool());
 
-        // NotFound → legacy bool false.
+        // NotFound maps to legacy bool false
         let dto = SubagentCancelOutcomeDto::from(SubagentCancelOutcome::NotFound);
         assert_eq!(dto, SubagentCancelOutcomeDto::NotFound);
         assert!(!dto.cancelled_bool());
@@ -906,9 +899,8 @@ mod tests {
         assert_eq!(json["outcome"]["status"], "failed");
     }
 
-    /// Wire-compat: a payload from an older shell (no `outcome`) still
-    /// deserializes, leaving `outcome` as `None` so the client falls back to
-    /// the legacy `cancelled` bool.
+    /// Wire-compat: a payload from an older shell (no `outcome`) still deserializes.
+    /// `outcome` stays `None` so the client falls back to the legacy `cancelled` bool.
     #[test]
     fn cancel_subagent_response_deserializes_without_outcome() {
         let resp: CancelSubagentResponse =

@@ -71,8 +71,7 @@ impl OwnedClients {
     }
 }
 
-/// An evicted client's liveness watcher holds a strong `Arc` to it; cancel
-/// the watcher so the client, its `Ready` state, and its gauge slot can drop.
+/// An evicted client's liveness watcher holds a strong `Arc` to it; cancel the watcher so the client, its `Ready` state, and its gauge slot can drop.
 fn cancel_watcher(client: &McpClient) {
     client.set_liveness_handle(None);
 }

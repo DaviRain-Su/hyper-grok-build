@@ -1,11 +1,17 @@
-//! Turn-execution concern for `SessionActor` (`handle_prompt`, turn-end,
-//! sampling loop).
+//! Turn execution for `SessionActor`: `handle_prompt`, the sampling loop, and turn-end handling.
 use super::*;
 use crate::session::InputAuthority;
 use crate::util::dual_clock::DualClock;
 use tracing::Instrument;
 use xai_grok_tools::implementations::grok_build::LoopFireMode;
+use xai_grok_tools::implementations::grok_build::task::types::{
+    SubagentEvent, SubagentMarkUsageNotAppliedRequest, SubagentWaitPromptDrainedRequest,
+};
 use xai_grok_tools::types::tool::ToolKind;
+static TURNS_ACTIVE: xai_grok_telemetry::activity::ActivityGauge =
+    xai_grok_telemetry::activity::ActivityGauge::work(
+        xai_grok_telemetry::activity::TURNS_ACTIVE_KEY,
+    );
 /// Synthetic tool the model calls to return its schema-constrained final answer
 /// on backends that can't constrain output natively (Messages API). Intercepted
 /// in the loop, never executed as a real tool.
@@ -13,15 +19,19 @@ pub(crate) const STRUCTURED_OUTPUT_TOOL: &str = "StructuredOutput";
 /// Max times the model may re-call `StructuredOutput` with non-conforming args
 /// before the turn ends with the last validation error.
 pub(crate) const STRUCTURED_OUTPUT_MAX_RETRIES: u32 = 3;
+/// Turn-freeze usage drain: bounds a wedged foreground child at turn end;
+/// folds normally land in one or two polls because they run before worktree
+/// dispose. The child completion path's bounded parent awaits are sized to
+/// fit inside this (compile-time asserted at `PARENT_ACK_TIMEOUT`).
+pub(crate) const SUBAGENT_USAGE_DRAIN: std::time::Duration = std::time::Duration::from_secs(120);
 /// What a `StructuredOutput` tool call means for the turn (see
 /// `handle_structured_output_tool_call`).
 enum StructuredOutputStep {
     /// Accepted, or retries exhausted: the carried result is the final output.
     Complete(Result<serde_json::Value, String>),
-    /// Non-conforming args; a corrective tool_result was pushed — re-sample.
+    /// Non-conforming args; a corrective tool_result was pushed, so re-sample.
     Retry,
-    /// No sole StructuredOutput call (absent, or co-emitted with real tools that
-    /// should run this round).
+    /// No sole StructuredOutput call (absent, or co-emitted with real tools that should run this round).
     Proceed,
 }
 /// Parse `raw` as JSON and validate it against a `validator` compiled once per
@@ -60,30 +70,63 @@ where
 {
     Box::pin(build())
 }
+
+/// Heap-split of `handle_turn_input_core` after slash resolution so the
+/// slash-setup future and the turn-run future stay independently under ~2 MiB.
+struct TurnAfterSlash {
+    prompt_id: String,
+    input_origin: InputOrigin,
+    prompt_blocks: Vec<acp::ContentBlock>,
+    trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
+    artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
+    prompt_client_identifier: Option<String>,
+    prompt_screen_mode: Option<String>,
+    verbatim: bool,
+    send_now: bool,
+    json_schema: Option<serde_json::Value>,
+    persist_ack: Option<tokio::sync::oneshot::Sender<()>>,
+    parsed_prompt_tx: Option<tokio::sync::oneshot::Sender<ParsedPromptInfo>>,
+    pending_skill_information: Option<String>,
+    original_prompt_text: String,
+    handle_prompt_start: std::time::Instant,
+    otel_command_name: Option<String>,
+}
+struct TurnRunArgs {
+    prompt_id: String,
+    prompt_block: Option<(String, String)>,
+    redirect_kind: Option<crate::session::events::RedirectKind>,
+    prompt_text_for_hook: String,
+    trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
+    artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
+    json_schema: Option<serde_json::Value>,
+    current_prompt_index: usize,
+    handle_prompt_start: std::time::Instant,
+}
+
+
+
 /// Result of the turn-end usage drain (and cancel's no-drain snapshot).
 ///
-/// **Ledger marks** only when [`Self::fail_closed`]. Sticky and background
-/// live are **report-level only** (tokens still land on the session ledger).
+/// Only [`Self::fail_closed`] marks the ledgers.
+/// Sticky and background live are **report-level only** (tokens still land on the session ledger).
 pub(super) struct UsageDrainOutcome {
-    /// Query failure, FG still live after timeout/cancel. Marks both
-    /// the prompt and session bills incomplete. (True apply-miss stains
-    /// ledgers at fold time via `mark_apply_miss_incomplete`, not here.)
+    /// Query failure, or a foreground child still live after timeout/cancel.
+    /// Marks both the prompt and session bills incomplete.
+    /// (True apply-miss stains ledgers at fold time via `mark_apply_miss_incomplete`, not here.)
     pub(super) fail_closed: bool,
-    /// A background child is still running: only this prompt's report is
-    /// incomplete; its spend reaches the session ledger at completion.
+    /// A background child is still running: only this prompt's report is incomplete; its spend reaches the session ledger at completion.
     pub(super) background_live: bool,
     /// Pin-scoped sticky (session-only attribution or apply-miss report).
-    /// Report incomplete only — does not stain ledgers by itself.
+    /// Marks the report incomplete only; it does not stain ledgers by itself.
     pub(super) sticky_report: bool,
 }
 impl UsageDrainOutcome {
-    /// Wire / attach incomplete: fail-closed ∪ background ∪ sticky.
+    /// Wire / attach incomplete: fail-closed, background, or sticky.
     pub(super) fn report_incomplete(&self) -> bool {
         self.fail_closed || self.background_live || self.sticky_report
     }
     /// Map an outstanding reply without a multi-second drain (cancel path).
-    /// Same policy as freeze's terminal outcome: FG live → fail-closed;
-    /// sticky and background → report only.
+    /// Same policy as freeze's terminal outcome: a live foreground child is fail-closed; sticky and background are report-only.
     pub(super) fn from_outstanding_reply(
         reply: Option<
             &xai_grok_tools::implementations::grok_build::task::types::SubagentOutstandingReply,
@@ -103,9 +146,8 @@ impl UsageDrainOutcome {
         }
     }
 }
-/// Accumulates a turn's per-call token usage and tool-call presence across the
-/// agentic loop's model calls, recording running totals on the turn span. Kept
-/// out of the loop body so telemetry bookkeeping doesn't obscure control flow.
+/// Accumulates a turn's per-call token usage and tool-call presence across the agentic loop's model calls, recording running totals on the turn span.
+/// Kept out of the loop body so telemetry bookkeeping doesn't obscure control flow.
 #[derive(Default)]
 struct TurnSpanTotals {
     input_tokens: i64,
@@ -114,9 +156,9 @@ struct TurnSpanTotals {
     has_tool_call: bool,
 }
 impl TurnSpanTotals {
-    /// Fold one model response into the totals (tokens sum — each call is billed
-    /// its full prompt; has_tool_call OR-s — the final call has none) and update
-    /// the span. `stop_reason` is last-wins (the terminal reason), not summed.
+    /// Fold one model response into the totals and update the span.
+    /// Tokens sum (each call is billed its full prompt); has_tool_call ORs (the final call has none).
+    /// `stop_reason` is last-wins (the terminal reason), not summed.
     fn record(&mut self, span: &tracing::Span, response: &ConversationResponse) {
         if let Some(u) = response.usage.as_ref() {
             self.input_tokens += i64::from(u.prompt_tokens);
@@ -144,8 +186,7 @@ impl TurnSpanTotals {
         );
     }
 }
-/// Single writer for the `last_sample.*` fields, shared by the delivered and
-/// failed paths so the field set cannot drift between them.
+/// Single writer for the `last_sample.*` fields, shared by the delivered and failed paths so the field set cannot drift between them.
 fn record_last_sample(
     span: &tracing::Span,
     stop_reason: &str,
@@ -164,8 +205,8 @@ fn record_last_sample(
 const LAST_SAMPLE_STOP_REASON_UNREPORTED: &str = "unreported";
 /// `last_sample.stop_reason` for a failed call with no reported stop reason.
 const LAST_SAMPLE_STOP_REASON_ERROR: &str = "error";
-/// Record `last_sample.*` for a failed call `TurnSpanTotals::record` never sees —
-/// otherwise the span keeps describing the previous sample; a resubmit's next response overwrites.
+/// Record `last_sample.*` for a failed call `TurnSpanTotals::record` never sees; otherwise the span keeps describing the previous sample.
+/// A resubmit's next response overwrites these fields.
 pub(super) fn record_failed_sample_on_turn_span(
     span: &tracing::Span,
     kind: xai_grok_sampler::SamplingErrorKind,
@@ -178,23 +219,19 @@ pub(super) fn record_failed_sample_on_turn_span(
     };
     record_last_sample(span, stop_reason, false, 0);
 }
-/// How the turn's per-block user-message echo is published to clients /
-/// `updates.jsonl`.
+/// How the turn's per-block user-message echo is published to clients / `updates.jsonl`.
 ///
-/// Every turn consumes a `prompt_index`, and rewind / fork truncation
-/// (`replay_to_prompt`, `truncate_for_prompt_by`) recover turn
-/// boundaries by counting persisted `UserMessageChunk` runs — so every mode
-/// persists the echo. Turns whose content must not render as a user prompt
-/// (notification drain) are hidden by the *pager* via the
-/// `hideFromScrollback` chunk meta, not by omitting the persisted line.
+/// Rewind / fork truncation (`replay_to_prompt`, `truncate_for_prompt_by`) recovers turn boundaries by counting persisted `UserMessageChunk` runs.
+/// Every turn consumes a `prompt_index`, so every mode persists the echo.
+/// Turns whose content must not render as a user prompt (notification drain) are hidden by the *pager* via the `hideFromScrollback` chunk meta.
+/// The persisted line is never omitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UserEchoMode {
-    /// Live + persist (real user / cron / skill turns).
+    /// Broadcast live and persist (real user / cron / skill turns).
     Broadcast,
-    /// Persist without live broadcast. Interject-fallback: panes already
-    /// rendered the text, so a live echo would duplicate it. Notification
-    /// drain: model-only content (the UI surfaces it via side channels:
-    /// monitor gutter, task pane) that no pane should render live.
+    /// Persist without live broadcast.
+    /// Interject-fallback: panes already rendered the text, so a live echo would duplicate it.
+    /// Notification drain: model-only content (the UI shows it via side channels: monitor gutter, task pane) that no pane should render live.
     PersistOnly,
 }
 fn user_echo_mode(prompt_id: &str, input_origin: &InputOrigin) -> UserEchoMode {
@@ -224,13 +261,10 @@ impl SessionActor {
             contributor.on_turn_abort(&input).await;
         }
     }
-    /// Run the image-normalization pipeline (re-encode caps, min-side and
-    /// integrity checks) and surface its outcomes: compression / re-encode
-    /// fallback / dropped notices are appended to `text_out` (TEXT only —
-    /// image data never enters a string) and mirrored as
-    /// `ImageCompressed`/`ImageDropped` notifications. Returns the surviving
-    /// images. Single owner of the notice/notify wiring, shared by the
-    /// prompt path and the interjection drain.
+    /// Run the image-normalization pipeline (re-encode caps, min-side and integrity checks) and return the surviving images.
+    /// Compression, re-encode-fallback, and dropped notices are appended to `text_out` and mirrored as `ImageCompressed`/`ImageDropped`.
+    /// Only text is appended; image data never enters a string.
+    /// Single owner of the notice/notify wiring, shared by the prompt path and the interjection drain.
     pub(crate) async fn normalize_images_with_notices(
         &self,
         text_out: &mut String,
@@ -374,15 +408,31 @@ impl SessionActor {
                 &serde_json::json!({ "traceparent": tp }),
             );
         }
-        // Fork: pin the large inner state machine from a thin never-inlined
-        // frame so construction does not sit under the caller's stack load
-        // (docs/test-isolation.md §8.3).
         box_turn_future(|| self.handle_turn_input_inner(request).instrument(span)).await
     }
     async fn handle_turn_input_inner(
         self: &Arc<Self>,
         request: TurnInputRequest,
     ) -> PromptTurnResult {
+        let _active = TURNS_ACTIVE.enter();
+        let _work = crate::session::handle::WorkGuard::new(self.active_work.clone());
+        box_turn_future(|| self.handle_turn_input_core(request)).await
+    }
+    async fn handle_turn_input_core(
+        self: &Arc<Self>,
+        request: TurnInputRequest,
+    ) -> PromptTurnResult {
+        match box_turn_future(|| self.resolve_slash(request)).await {
+            Ok(args) => {
+                box_turn_future(|| self.handle_turn_input_after_slash(args)).await
+            }
+            Err(done) => done,
+        }
+    }
+    async fn resolve_slash(
+        self: &Arc<Self>,
+        request: TurnInputRequest,
+    ) -> Result<TurnAfterSlash, PromptTurnResult> {
         let TurnInputRequest {
             prompt_id,
             input_origin,
@@ -428,7 +478,9 @@ impl SessionActor {
         if policy.authority.is_human_intent() {
             self.invalidate_side_calls_for_new_prompt();
         }
-        self.ensure_session_disk_writable().await?;
+        self.ensure_session_disk_writable()
+            .await
+            .map_err(Err)?;
         self.signals_handle().increment_turn();
         let prompt_mode =
             self.resolve_turn_prompt_mode(input_origin.as_prompt_origin(), prompt_mode);
@@ -462,9 +514,10 @@ impl SessionActor {
         if policy.authority != InputAuthority::ModelAuthoredUntrusted
             && let Some(bash_command) = Self::extract_bash_command(&prompt_blocks)
         {
-            return self
-                .handle_direct_bash_command(prompt_id, bash_command, &prompt_blocks)
-                .await;
+            return Err(box_turn_future(|| {
+                self.handle_direct_bash_command(prompt_id, bash_command, &prompt_blocks)
+            })
+            .await);
         }
         let mut pending_skill_information: Option<String> = None;
         let original_prompt_text = prompt_blocks.iter().fold(String::new(), |mut acc, b| {
@@ -482,6 +535,7 @@ impl SessionActor {
         // human-intent resolution alongside built-ins, skills and workflows.
         let wasm_cmds = self.wasm_registered_commands.borrow().clone();
         let scheme_cmds = self.scheme_registered_commands.borrow().clone();
+        let mut otel_command_name: Option<String> = None;
         let (resolved, slash_skills, workflow_registry) = match policy.authority {
             InputAuthority::HumanIntent => {
                 let slash_skills = self.slash_skills_for_resolve().await;
@@ -576,6 +630,7 @@ impl SessionActor {
                     span.record("command_name", action.command_name());
                     span.record("command_source", "builtin");
                 }
+                otel_command_name = Some(action.command_name().to_string());
                 match action {
                     BuiltinAction::GoalSet {
                         objective,
@@ -596,7 +651,7 @@ impl SessionActor {
                                 self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
                                 self.mark_front_message_committed().await;
                                 self.send_host_turn_slash_command_output(&msg).await;
-                                return ok_end_turn(0, None);
+                                return Err(ok_end_turn(0, None));
                             }
                         }
                     }
@@ -610,13 +665,21 @@ impl SessionActor {
                             .launch_named_workflow(workflow_registry, &name, &input)
                             .await;
                         self.send_host_turn_slash_command_output(&msg).await;
-                        return ok_end_turn(0, None);
+                        return Err(ok_end_turn(0, None));
                     }
                     _ => {
                         if policy.authority.is_human_intent() {
                             self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
                         }
-                        return self.execute_builtin_slash_command(action).await;
+                        let this = Arc::clone(self);
+                        return Err(tokio::task::spawn_local(async move {
+                            box_turn_future(|| this.execute_builtin_slash_command(action)).await
+                        })
+                        .await
+                        .map_err(|_| {
+                            acp::Error::internal_error().data("slash command cancelled")
+                        })
+                        .map_err(Err)?);
                     }
                 }
             }
@@ -626,6 +689,7 @@ impl SessionActor {
             }) => {
                 if let Some(first) = parsed_skills.first() {
                     *self.active_skill.lock() = Some(first.name.clone());
+                    otel_command_name = Some(first.name.clone());
                     let span = tracing::Span::current();
                     span.record("command_name", first.name.as_str());
                     span.record(
@@ -693,6 +757,60 @@ impl SessionActor {
                 original_blocks
             }
         };
+        Ok(TurnAfterSlash {
+            prompt_id: prompt_id.to_string(),
+            input_origin,
+            prompt_blocks,
+            trace_gcs_config,
+            artifact_tracker,
+            prompt_client_identifier,
+            prompt_screen_mode,
+            verbatim,
+            send_now,
+            json_schema,
+            persist_ack,
+            parsed_prompt_tx,
+            pending_skill_information,
+            original_prompt_text,
+            handle_prompt_start,
+            otel_command_name,
+        })
+    }
+    async fn handle_turn_input_after_slash(
+        self: &Arc<Self>,
+        args: TurnAfterSlash,
+    ) -> PromptTurnResult {
+        match box_turn_future(|| self.after_slash_prepare(args)).await {
+            Ok(run) => {
+                box_turn_future(|| self.handle_turn_run(run)).await
+            }
+            Err(done) => done,
+        }
+    }
+    async fn after_slash_prepare(
+        self: &Arc<Self>,
+        args: TurnAfterSlash,
+    ) -> Result<TurnRunArgs, PromptTurnResult> {
+        let TurnAfterSlash {
+            prompt_id,
+            input_origin,
+            prompt_blocks,
+            trace_gcs_config,
+            artifact_tracker,
+            prompt_client_identifier,
+            prompt_screen_mode,
+            verbatim,
+            send_now,
+            json_schema,
+            mut persist_ack,
+            parsed_prompt_tx,
+            mut pending_skill_information,
+            original_prompt_text,
+            handle_prompt_start,
+            otel_command_name,
+        } = args;
+        let prompt_id = prompt_id.as_str();
+        let policy = input_origin.policy();
         *self.doom_loop_turn_tally.lock() = Default::default();
         self.retain_timed_out_image_strips_for_new_turn();
         self.turn_stream_drained.lock().clear();
@@ -859,7 +977,7 @@ impl SessionActor {
                 Ok(v) => v,
                 Err(err) => {
                     tracing::warn!("Invalid prompt: {}", err.message);
-                    return Err(err);
+                    return Err(Err(err));
                 }
             };
             let recovered = if policy.authority == InputAuthority::ModelAuthoredUntrusted {
@@ -977,7 +1095,9 @@ impl SessionActor {
                     model_id,
                     client_identifier: effective_client_identifier,
                     screen_mode: prompt_screen_mode,
-                    prompt_text: None,
+                    prompt_text: xai_grok_telemetry::external::is_active()
+                        .then(|| user_message.to_owned()),
+                    command_name: otel_command_name,
                 };
                 xai_grok_telemetry::session_ctx::log_event_dual(self.telemetry_enabled, ev);
             }
@@ -1003,7 +1123,8 @@ impl SessionActor {
                 user_message
             } else if self.is_cursor_harness() {
                 self.transcribe_user_images(user_message, &user_images)
-                    .await?
+                    .await
+                    .map_err(Err)?
             } else {
                 let session_dir = crate::session::persistence::ensure_owner_only_session_dir(
                     &crate::session::info::Info {
@@ -1012,7 +1133,8 @@ impl SessionActor {
                     },
                 )
                 .map_err(|e| {
-                    acp::Error::internal_error().data(format!("failed to create session dir: {e}"))
+                    Err(acp::Error::internal_error()
+                        .data(format!("failed to create session dir: {e}")))
                 })?;
                 crate::session::image_describe::persist_and_prepend_image_files(
                     &session_dir,
@@ -1020,8 +1142,8 @@ impl SessionActor {
                     &user_message,
                 )
                 .map_err(|e| {
-                    acp::Error::internal_error()
-                        .data(format!("failed to save user images to assets dir: {e}"))
+                    Err(acp::Error::internal_error()
+                        .data(format!("failed to save user images to assets dir: {e}")))
                 })?
             };
             let attached_image_refs = if self.is_cursor_harness() {
@@ -1189,6 +1311,32 @@ impl SessionActor {
                 }
             }
         }
+        Ok(TurnRunArgs {
+            prompt_id: prompt_id.to_string(),
+            prompt_block,
+            redirect_kind,
+            prompt_text_for_hook,
+            trace_gcs_config,
+            artifact_tracker,
+            json_schema,
+            current_prompt_index,
+            handle_prompt_start,
+        })
+    }
+
+    async fn handle_turn_run(self: &Arc<Self>, args: TurnRunArgs) -> PromptTurnResult {
+        let TurnRunArgs {
+            prompt_id,
+            prompt_block,
+            redirect_kind,
+            prompt_text_for_hook,
+            trace_gcs_config,
+            artifact_tracker,
+            json_schema,
+            current_prompt_index,
+            handle_prompt_start,
+        } = args;
+        let prompt_id = prompt_id.as_str();
         let turn_scope_guard =
             TurnSubagentScopeGuard::new(self.current_prompt_id.clone(), prompt_id.to_string());
         self.open_subagent_spawn_admission();
@@ -1288,14 +1436,35 @@ impl SessionActor {
                 model_id: turn_model_id.clone(),
             })
             .await;
+        if xai_grok_telemetry::external::is_active() {
+            let committed = self
+                .chat_state_handle
+                .get_assistant_text_in_turn()
+                .await
+                .unwrap_or_default();
+            let captured = self.streaming_turn_capture.lock().assembled_response_text();
+            let trust_committed = matches!(
+                &result,
+                Ok(TurnOutcome::Completed { .. }) | Ok(TurnOutcome::StationarityEnded { .. })
+            );
+            let response_text = crate::session::streaming_capture::StreamingTurnCapture::merge_assistant_response_for_otel(
+                committed,
+                &captured,
+                trust_committed,
+            );
+            xai_grok_telemetry::external::emit(&xai_grok_telemetry::events::AssistantResponse {
+                response_length: response_text.len(),
+                response_text: (!response_text.is_empty()).then_some(response_text),
+            });
+        }
         match &result {
-            Ok(TurnOutcome::Completed { refusal, .. }) => {
+            Ok(TurnOutcome::Completed { stop, .. }) => {
                 self.emit_turn_ended(
                     crate::session::events::TurnOutcomeLabel::Completed,
                     None,
                     None,
                 );
-                if let Some(explanation) = refusal {
+                if let CompletedStop::Refusal(explanation) = stop {
                     self.report_turn_end(
                         prompt_id,
                         TurnEnd::Failed {
@@ -1535,6 +1704,7 @@ impl SessionActor {
             }
         }
         let usage = self.freeze_prompt_usage(prompt_id).await;
+        self.persist_live_usage().await;
         drop(turn_scope_guard);
         match result {
             Ok(outcome) => {
@@ -1545,13 +1715,13 @@ impl SessionActor {
                     TurnOutcome::Completed {
                         snapshot,
                         structured_output,
-                        refusal,
+                        stop,
                         ..
                     } => (
-                        if refusal.is_some() {
-                            acp::StopReason::Refusal
-                        } else {
-                            acp::StopReason::EndTurn
+                        match stop {
+                            CompletedStop::Refusal(_) => acp::StopReason::Refusal,
+                            CompletedStop::MaxTokens => acp::StopReason::MaxTokens,
+                            CompletedStop::EndTurn => acp::StopReason::EndTurn,
                         },
                         *snapshot,
                         PromptCompletionKind::Completed,
@@ -1592,10 +1762,10 @@ impl SessionActor {
             Err(e) => Err(crate::sampling::error::attach_prompt_usage(e, usage)),
         }
     }
-    /// Wait for turn-blocking subagents (up to 120s on the turn task),
-    /// snapshot, clear sticky. Background children never gate the drain: the
-    /// prompt report is marked incomplete immediately and their spend reaches
-    /// the session ledger when they finish.
+    /// Wait for turn-blocking subagents (up to [`SUBAGENT_USAGE_DRAIN`] on the
+    /// turn task), snapshot, clear sticky. Background children never gate the
+    /// drain: the prompt report is marked incomplete immediately and their
+    /// spend reaches the session ledger when they finish.
     /// Cancel intentionally skips this multi-second drain (actor-loop safety).
     #[tracing::instrument(
         name = "session.freeze_prompt_usage",
@@ -1606,8 +1776,8 @@ impl SessionActor {
         &self,
         prompt_id: &str,
     ) -> Option<crate::extensions::notification::PromptUsage> {
-        const DRAIN: std::time::Duration = std::time::Duration::from_secs(120);
-        self.freeze_prompt_usage_bounded(prompt_id, DRAIN).await
+        self.freeze_prompt_usage_bounded(prompt_id, SUBAGENT_USAGE_DRAIN)
+            .await
     }
     /// [`freeze_prompt_usage`] with an explicit drain bound, for tests.
     pub(super) async fn freeze_prompt_usage_bounded(
@@ -1620,61 +1790,63 @@ impl SessionActor {
             .await;
         self.finalize_usage_from_outcome(prompt_id, drain).await
     }
-    /// Waits for turn-blocking folds only.
-    /// `fail_closed` on timeout or query failure; sticky and `background_live`
-    /// are report-level only (no ledger mark). Must run on the turn task (not
-    /// the session actor loop) so folds can land.
+    /// Must run on the turn task, not the session actor loop, so folds can land.
     pub(super) async fn drain_subagent_usage_for_prompt_bounded(
         &self,
         prompt_id: &str,
         max_wait: std::time::Duration,
     ) -> UsageDrainOutcome {
-        const POLL: std::time::Duration = std::time::Duration::from_millis(50);
-        let deadline = std::time::Instant::now() + max_wait;
-        loop {
-            let reply = self.outstanding_reply_for_prompt(prompt_id).await;
-            match reply.as_ref() {
-                None => {
-                    tracing::warn!(
-                        prompt_id,
-                        "outstanding subagent query failed; treating usage as incomplete"
-                    );
-                    return UsageDrainOutcome {
-                        fail_closed: true,
-                        background_live: false,
-                        sticky_report: false,
-                    };
-                }
-                Some(r) if r.live_ids.is_empty() => {
-                    return UsageDrainOutcome {
-                        fail_closed: false,
-                        background_live: r.background_live,
-                        sticky_report: r.subagent_usage_not_applied,
-                    };
-                }
-                Some(r) => {
-                    if std::time::Instant::now() >= deadline {
-                        tracing::warn!(
-                            prompt_id,
-                            count = r.live_ids.len(),
-                            max_wait_ms = max_wait.as_millis() as u64,
-                            "subagent usage drain timed out; usage may under-count"
-                        );
-                        return UsageDrainOutcome {
-                            fail_closed: true,
-                            background_live: r.background_live,
-                            sticky_report: r.subagent_usage_not_applied,
-                        };
-                    }
+        let Some(tx) = &self.tool_context.subagent_event_tx else {
+            return UsageDrainOutcome {
+                fail_closed: false,
+                background_live: false,
+                sticky_report: false,
+            };
+        };
+        let coordinator_gone = || {
+            tracing::warn!(
+                prompt_id,
+                "outstanding subagent query failed; treating usage as incomplete"
+            );
+            UsageDrainOutcome {
+                fail_closed: true,
+                background_live: false,
+                sticky_report: false,
+            }
+        };
+        let (respond_to, rx) = tokio::sync::oneshot::channel();
+        if tx
+            .send(SubagentEvent::WaitPromptDrained(
+                SubagentWaitPromptDrainedRequest {
+                    parent_session_id: self.session_id_string(),
+                    prompt_id: prompt_id.to_string(),
+                    respond_to,
+                },
+            ))
+            .is_err()
+        {
+            return coordinator_gone();
+        }
+        match tokio::time::timeout(max_wait, rx).await {
+            Ok(Ok(reply)) => UsageDrainOutcome {
+                fail_closed: false,
+                background_live: reply.background_live,
+                sticky_report: reply.subagent_usage_not_applied,
+            },
+            Ok(Err(_)) => coordinator_gone(),
+            Err(_) => {
+                tracing::warn!(
+                    prompt_id,
+                    max_wait_ms = max_wait.as_millis() as u64,
+                    "subagent usage drain timed out; usage may under-count"
+                );
+                UsageDrainOutcome {
+                    fail_closed: true,
+                    background_live: false,
+                    sticky_report: false,
                 }
             }
-            tokio::time::sleep(POLL).await;
         }
-    }
-    pub(super) async fn snapshot_prompt_usage(
-        &self,
-    ) -> Option<crate::extensions::notification::PromptUsage> {
-        self.snapshot_prompt_usage_marked(false).await
     }
     pub(super) async fn snapshot_prompt_usage_marked(
         &self,
@@ -1734,9 +1906,6 @@ impl SessionActor {
         let Some(tx) = &self.tool_context.subagent_event_tx else {
             return false;
         };
-        use xai_grok_tools::implementations::grok_build::task::types::{
-            SubagentEvent, SubagentMarkUsageNotAppliedRequest,
-        };
         let (respond_to, ack) = tokio::sync::oneshot::channel();
         if tx
             .send(SubagentEvent::MarkUsageNotApplied(
@@ -1752,14 +1921,11 @@ impl SessionActor {
         }
         ack.await.is_ok()
     }
-    /// Drain this session's buffered mid-turn monitor events
-    /// (`drain_owned` — leader mode shares the buffer) into ONE hidden
-    /// synthetic user message, tagged `SyntheticReason::SystemReminder` so
-    /// compaction/fork/pruning skip it. Deliberately a bare
-    /// `push_user_message`, NOT `inject_synthetic_user_message`: the latter
-    /// persists a `UserMessageChunk` to `updates.jsonl`, which resume
-    /// replays — the raw XML would render as a user prompt. Clients see
-    /// monitor events only via the structured `x.ai/monitor_event` channel.
+    /// Drain this session's buffered mid-turn monitor events (`drain_owned`; leader mode shares the buffer) into one hidden synthetic user message.
+    /// The message is tagged `SyntheticReason::SystemReminder` so compaction/fork/pruning skip it.
+    /// Deliberately a bare `push_user_message`, not `inject_synthetic_user_message`.
+    /// The latter persists a `UserMessageChunk` to `updates.jsonl`, which resume replays; the raw XML would render as a user prompt.
+    /// Clients see monitor events only via the structured `x.ai/monitor_event` channel.
     pub(crate) async fn inject_pending_monitor_events(&self) {
         let Some(buffer) = &self.tool_context.monitor_event_buffer else {
             return;
@@ -1786,30 +1952,21 @@ impl SessionActor {
             "injected mid-turn monitor events as hidden synthetic user message"
         );
     }
-    /// Per-turn hook called from the event-loop completion handler
-    /// after every turn finishes. Two terminal branches when the
-    /// goal is `Active` (`goal_active_now == true`):
+    /// Per-turn hook called from the event-loop completion handler after every turn finishes.
+    /// Two terminal branches when the goal is `Active` (`goal_active_now == true`):
     ///
-    /// 1. **Success.** Reset `goal_continuation_streak` to 0, then call
-    ///    `maybe_queue_goal_continuation` unless `suppress_goal_continuation`
-    ///    (stationarity silent EndTurn). That helper verifies any pending
-    ///    completion via its turn-end drain, queues the continuation reminder
-    ///    if the goal is still `Active`, and runs the stop-detector to select
-    ///    the nudge flavor (generic vs. bail-specific) and emit
-    ///    `Event::GoalPrematureStopDetected`.
-    /// 2. **Non-success.** Increment `goal_continuation_streak`. At
-    ///    [`GOAL_CONTINUATION_BACKOFF_THRESHOLD`] consecutive hits,
-    ///    reset the streak and auto-pause with
-    ///    `GoalPauseReason::BackOff`. No continuation is queued on this path: an
-    ///    infra-error / cancelled turn rarely carries a deliberate
-    ///    turn-final message, and stop-detection lives on the success
-    ///    path inside `maybe_queue_goal_continuation`.
+    /// 1. **Success.** Reset `goal_continuation_streak` to 0.
+    ///    Then call `maybe_queue_goal_continuation` unless `suppress_goal_continuation` (stationarity silent EndTurn).
+    ///    That helper verifies any pending completion via its turn-end drain and queues the continuation reminder if the goal is still `Active`.
+    ///    It also runs the stop-detector to select the nudge flavor (generic vs. bail-specific) and emit `Event::GoalPrematureStopDetected`.
+    /// 2. **Non-success.** Increment `goal_continuation_streak`.
+    ///    At [`GOAL_CONTINUATION_BACKOFF_THRESHOLD`] consecutive hits, reset the streak and auto-pause with `GoalPauseReason::BackOff`.
+    ///    No continuation is queued on this path: an infra-error / cancelled turn rarely carries a deliberate turn-final message.
+    ///    Stop-detection lives on the success path inside `maybe_queue_goal_continuation`.
     ///
-    /// When the goal is not `Active` (`goal_active_now == false` —
-    /// the doom-loop / infra-error branches in the event loop ran
-    /// before this method and already transitioned the goal out of
-    /// Active), both branches are skipped: neither streak moves and the
-    /// existing pause cause is preserved.
+    /// When the goal is not `Active` (`goal_active_now == false`), both branches are skipped.
+    /// Neither streak moves and the existing pause cause is preserved.
+    /// In that case the doom-loop / infra-error branches in the event loop ran before this method and already moved the goal out of Active.
     pub(crate) async fn handle_turn_end(
         &self,
         turn_succeeded: bool,
@@ -1867,104 +2024,156 @@ impl SessionActor {
         let mut round_trace = trace_gcs_config;
         let mut round_artifact = artifact_tracker;
         let mut stop_continuations_this_turn: u32 = 0;
-        // First outer-loop round uses the original user text for Hypercore seed
-        // stripping; goal/stop continuations inject new user rows that Hypercore
-        // must see as the current turn text.
         let mut round_user_text = user_text.to_string();
         let mut outer_round: u32 = 0;
+        let mut salvage =
+            super::length_salvage::LengthSalvage::new(self.length_salvage_budget());
         loop {
-            // Per-round extension inject (`BeforeModelInject`): wasm then scheme,
-            // both as system reminders — never a history rewrite. Fires on every
-            // outer round (incl. goal/stop continuations), unlike the once-per-
-            // prompt before_agent_start inject.
-            {
-                let input = xai_grok_extension_api::BeforeAgentStartIn {
-                    prompt: round_user_text.clone(),
-                };
-                let ext_rt = self.extension_runtime.borrow().clone();
-                if ext_rt.has_capability(xai_grok_extension_api::Capability::BeforeModelInject) {
-                    let d = ext_rt.dispatch_before_model(&input).await;
-                    if let Some(ctx) = d.out.inject_context.as_deref() {
-                        self.push_system_reminder(ctx);
-                    }
-                    if let Some(sys) = d.out.append_system.as_deref() {
-                        self.push_system_reminder_with_tag(sys, "system-extension");
-                    }
-                }
-                let scheme_rt = self.scheme_runtime.clone();
-                if scheme_rt.has_capability(xai_grok_extension_api::Capability::BeforeModelInject)
-                {
-                    let d = scheme_rt.dispatch_before_model(&input).await;
-                    if let Some(ctx) = d.out.inject_context.as_deref() {
-                        self.push_system_reminder(ctx);
-                    }
-                    if let Some(sys) = d.out.append_system.as_deref() {
-                        self.push_system_reminder_with_tag(sys, "system-extension");
-                    }
-                }
-            }
-            if self.goal_harness_enabled() {
-                let goal_loop_active = self.goal_tracker.lock().status()
-                    == Some(crate::session::goal_tracker::GoalStatus::Active);
-                self.set_goal_loop_active_resource(goal_loop_active).await;
-            }
-            let round = self
-                .run_one_agent_round(
+            box_turn_future(|| self.outer_round_preamble(&round_user_text)).await;
+            let round = box_turn_future(|| {
+                self.run_one_agent_round(
                     prompt_id,
                     &round_user_text,
                     round_trace.take(),
                     round_artifact.take(),
                     json_schema.clone(),
                     outer_round,
+                    &mut salvage,
                 )
-                .await;
-            if !matches!(round, Ok(TurnOutcome::Completed { .. })) {
-                break round;
-            }
-            if matches!(
-                round,
-                Ok(TurnOutcome::Completed {
-                    refusal: Some(_),
-                    ..
-                })
-            ) {
-                self.auto_pause_goal_if_active_with_message(
-                    crate::session::goal_tracker::GoalPauseReason::Infra,
-                    "The model provider refused this goal round. Use /goal resume to retry."
-                        .to_string(),
+            })
+            .await;
+            match box_turn_future(|| {
+                self.outer_round_after(
+                    prompt_id,
+                    round,
+                    &mut round_user_text,
+                    &mut outer_round,
+                    &mut stop_continuations_this_turn,
+                    &mut salvage,
                 )
-                .await;
-                break round;
+            })
+            .await
+            {
+                Some(result) => break result,
+                None => {}
             }
-            let goal_active = laziness_injection_active(
-                self.goal_harness_enabled(),
-                self.goal_tracker.lock().status(),
-            );
-            if goal_active {
+        }
+    }
+
+    async fn outer_round_preamble(&self, round_user_text: &str) {
+        // Per-round extension inject (`BeforeModelInject`): wasm then scheme,
+        // both as system reminders — never a history rewrite. Fires on every
+        // outer round (incl. goal/stop continuations), unlike the once-per-
+        // prompt before_agent_start inject.
+        let input = xai_grok_extension_api::BeforeAgentStartIn {
+            prompt: round_user_text.to_string(),
+        };
+        let ext_rt = self.extension_runtime.borrow().clone();
+        if ext_rt.has_capability(xai_grok_extension_api::Capability::BeforeModelInject) {
+            let d = ext_rt.dispatch_before_model(&input).await;
+            if let Some(ctx) = d.out.inject_context.as_deref() {
+                self.push_system_reminder(ctx);
+            }
+            if let Some(sys) = d.out.append_system.as_deref() {
+                self.push_system_reminder_with_tag(sys, "system-extension");
+            }
+        }
+        let scheme_rt = self.scheme_runtime.clone();
+        if scheme_rt.has_capability(xai_grok_extension_api::Capability::BeforeModelInject) {
+            let d = scheme_rt.dispatch_before_model(&input).await;
+            if let Some(ctx) = d.out.inject_context.as_deref() {
+                self.push_system_reminder(ctx);
+            }
+            if let Some(sys) = d.out.append_system.as_deref() {
+                self.push_system_reminder_with_tag(sys, "system-extension");
+            }
+        }
+        if self.goal_harness_enabled() {
+            let goal_loop_active = self.goal_tracker.lock().status()
+                == Some(crate::session::goal_tracker::GoalStatus::Active);
+            self.set_goal_loop_active_resource(goal_loop_active).await;
+        }
+    }
+
+    async fn outer_round_after(
+        &self,
+        prompt_id: &str,
+        round: Result<TurnOutcome, acp::Error>,
+        round_user_text: &mut String,
+        outer_round: &mut u32,
+        stop_continuations_this_turn: &mut u32,
+        salvage: &mut super::length_salvage::LengthSalvage,
+    ) -> Option<Result<TurnOutcome, acp::Error>> {
+        if !matches!(round, Ok(TurnOutcome::Completed { .. })) {
+            return Some(round);
+        }
+        if matches!(
+            round,
+            Ok(TurnOutcome::Completed {
+                stop: CompletedStop::Refusal(_),
+                ..
+            })
+        ) {
+            self.auto_pause_goal_if_active_with_message(
+                crate::session::goal_tracker::GoalPauseReason::Infra,
+                "The model provider refused this goal round. Use /goal resume to retry."
+                    .to_string(),
+            )
+            .await;
+            return Some(round);
+        }
+        let goal_active = laziness_injection_active(
+            self.goal_harness_enabled(),
+            self.goal_tracker.lock().status(),
+        );
+        if goal_active {
+            if self.has_runnable_queued_user_row().await {
+                xai_grok_telemetry::unified_log::info(
+                    "shell.goal.yielded_to_queued_input",
+                    Some(self.session_info.id.0.as_ref()),
+                    Some(serde_json::json!({ "prompt_id": prompt_id })),
+                );
+                tracing::info!(
+                    "goal turn: yielding to queued user prompts; continuation re-arms \
+                     at turn end"
+                );
+                return Some(round);
+            }
+            if crate::session::PromptOrigin::from_prompt_id(prompt_id).is_synthetic()
+                || !self.has_pending_goal_continuation().await
+            {
                 let decision = if self.goal_runs_on_workflow_engine() {
                     self.run_goal_round_end().await
                 } else {
                     self.run_goal_round_end_legacy().await
                 };
                 if let GoalRoundDecision::Continue(directive) = decision {
-                    round_user_text = directive.clone();
+                    salvage.round_boundary();
+                    *round_user_text = directive.clone();
                     self.inject_goal_continuation_message(directive).await;
-                    outer_round = outer_round.saturating_add(1);
-                    continue;
+                    *outer_round = outer_round.saturating_add(1);
+                    return None;
                 }
+            } else {
+                tracing::info!(
+                    "goal turn: user prompt runs standalone; a queued continuation \
+                     resumes the goal"
+                );
             }
-            match self
-                .run_stop_gate(prompt_id, stop_continuations_this_turn)
-                .await
-            {
-                StopGateDecision::AllowStop => break round,
-                StopGateDecision::KeepWorking { feedback } => {
-                    stop_continuations_this_turn += 1;
-                    round_user_text = feedback.clone();
-                    self.chat_state_handle
-                        .push_user_message(ConversationItem::stop_hook_feedback(feedback));
-                    outer_round = outer_round.saturating_add(1);
-                }
+        }
+        match self
+            .run_stop_gate(prompt_id, *stop_continuations_this_turn)
+            .await
+        {
+            StopGateDecision::AllowStop => Some(round),
+            StopGateDecision::KeepWorking { feedback } => {
+                *stop_continuations_this_turn += 1;
+                salvage.round_boundary();
+                *round_user_text = feedback.clone();
+                self.chat_state_handle
+                    .push_user_message(ConversationItem::stop_hook_feedback(feedback));
+                *outer_round = outer_round.saturating_add(1);
+                None
             }
         }
     }
@@ -1983,12 +2192,9 @@ impl SessionActor {
         artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
         json_schema: Option<serde_json::Value>,
         outer_round: u32,
+        salvage: &mut super::length_salvage::LengthSalvage,
     ) -> Result<TurnOutcome, acp::Error> {
-        let conversation = self.chat_state_handle.get_conversation().await;
-        let decision = super::hypercore_turn::hypercore_path_decision_for_conversation(
-            user_text,
-            &conversation,
-        );
+        let decision = box_turn_future(|| self.hypercore_path_decision(user_text)).await;
         if decision.uses_hypercore() {
             let core_turn_id =
                 super::hypercore_turn::hypercore_round_turn_id(prompt_id, outer_round, None);
@@ -1997,9 +2203,15 @@ impl SessionActor {
                 "propagate"
             );
             // Entered Hypercore: any non-Abort error propagates upward.
-            let outcome = self
-                .run_hypercore_plain_turn(prompt_id, user_text, json_schema.clone(), &core_turn_id)
-                .await?;
+            let outcome = box_turn_future(|| {
+                self.run_hypercore_plain_turn(
+                    prompt_id,
+                    user_text,
+                    json_schema.clone(),
+                    &core_turn_id,
+                )
+            })
+            .await?;
             tracing::info!(
                 session_id = %self.session_info.id.0,
                 path = "hypercore",
@@ -2043,17 +2255,21 @@ impl SessionActor {
                 trace_gcs_config,
                 artifact_tracker,
                 json_schema,
+                salvage,
             )
         })
         .await
     }
 
+    async fn hypercore_path_decision(&self, user_text: &str) -> super::hypercore_turn::HypercorePathDecision {
+        let conversation = self.chat_state_handle.get_conversation().await;
+        super::hypercore_turn::hypercore_path_decision_for_conversation(user_text, &conversation)
+    }
+
     /// Wraps `process_conversation_turn` with auto-recovery for agents that opt in.
     ///
-    /// Agents with a `completion_requirement` in their definition require the model
-    /// to call a specific tool before finishing. If a prompt turn ends without that
-    /// tool having been called, this method injects the recovery prompt and re-runs
-    /// the turn with exponential backoff.
+    /// Agents with a `completion_requirement` in their definition require the model to call a specific tool before finishing.
+    /// If a prompt turn ends without that tool called, this method injects the recovery prompt and re-runs the turn with exponential backoff.
     ///
     /// Agents without `completion_requirement` bypass this entirely.
     #[tracing::instrument(
@@ -2068,6 +2284,7 @@ impl SessionActor {
         trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
         artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
         json_schema: Option<serde_json::Value>,
+        salvage: &mut super::length_salvage::LengthSalvage,
     ) -> Result<TurnOutcome, acp::Error> {
         let _ = self.compaction.auto_compact_suppressed.compare_exchange(
             crate::session::compaction_config::SUPPRESS_TURN,
@@ -2085,6 +2302,7 @@ impl SessionActor {
                         trace_gcs_config,
                         artifact_tracker.as_ref(),
                         json_schema,
+                        &mut *salvage,
                     )
                     .await;
             }
@@ -2098,6 +2316,7 @@ impl SessionActor {
                         trace_gcs_config,
                         artifact_tracker.as_ref(),
                         json_schema,
+                        &mut *salvage,
                     )
                     .await;
             }
@@ -2110,6 +2329,7 @@ impl SessionActor {
                 trace_gcs_config.clone(),
                 artifact_tracker.as_ref(),
                 json_schema.clone(),
+                &mut *salvage,
             )
             .await;
         if matches!(
@@ -2169,6 +2389,7 @@ impl SessionActor {
             })
             .await;
             sleep(delay).await;
+            salvage.round_boundary();
             let recovery_message = ConversationItem::auto_recovery(recovery_prompt.clone());
             self.chat_state_handle.push_user_message(recovery_message);
             result = self
@@ -2177,6 +2398,7 @@ impl SessionActor {
                     trace_gcs_config.clone(),
                     artifact_tracker.as_ref(),
                     None,
+                    &mut *salvage,
                 )
                 .await;
             if matches!(
@@ -2209,6 +2431,7 @@ impl SessionActor {
         trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
         artifact_tracker: Option<&'a crate::upload::manifest::ArtifactTracker>,
         json_schema: Option<serde_json::Value>,
+        salvage: &'a mut super::length_salvage::LengthSalvage,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TurnOutcome, acp::Error>> + 'a>>
     {
         box_turn_future(|| {
@@ -2217,6 +2440,7 @@ impl SessionActor {
                 trace_gcs_config,
                 artifact_tracker,
                 json_schema,
+                salvage,
             )
         })
     }
@@ -2226,9 +2450,8 @@ impl SessionActor {
     }
     /// Compute the first-turn memory reminder, if one should be injected.
     ///
-    /// A block persisted by an earlier session segment (a prior `--resume`
-    /// process, or a turn before a compaction) is reused verbatim — see
-    /// [`conversation_has_memory_context`] for why re-searching is harmful.
+    /// A block persisted by an earlier session segment (a prior `--resume` process, or a turn before a compaction) is reused verbatim.
+    /// See [`conversation_has_memory_context`] for why re-searching is harmful.
     ///
     /// [`conversation_has_memory_context`]: crate::session::helpers::memory_context::conversation_has_memory_context
     pub(crate) async fn first_turn_memory_reminder(&self) -> Option<String> {
@@ -2353,10 +2576,9 @@ impl SessionActor {
         );
         crate::session::helpers::memory_context::format_memory_reminder(&inject_results)
     }
-    /// Inspect `tool_calls` for a `StructuredOutput` call and decide the turn's
-    /// next step, pushing the call's `tool_result` (correction / retry error /
-    /// terminal) as a side effect. Validates the args against `validator` and
-    /// bumps `retries` on a non-conforming retry.
+    /// Inspect `tool_calls` for a `StructuredOutput` call and decide the turn's next step, pushing the call's `tool_result` as a side effect.
+    /// The pushed result is a correction, a retry error, or the terminal answer.
+    /// Validates the args against `validator` and bumps `retries` on a non-conforming retry.
     async fn handle_structured_output_tool_call(
         &self,
         tool_calls: &mut Vec<xai_grok_sampling_types::conversation::ToolCall>,
@@ -2425,6 +2647,31 @@ impl SessionActor {
             _ => false,
         }
     }
+    async fn persist_live_usage(&self) {
+        let Some(signals) = self.signals_handle().snapshot().await else {
+            return;
+        };
+        if signals.turn_count == 0 {
+            return;
+        }
+        match self.chat_state_handle.try_get_session_usage().await {
+            Ok(ledger) => {
+                let _ = self
+                    .notifications
+                    .persistence_tx
+                    .send(PersistenceMsg::UsageTurn {
+                        turn_number: signals.turn_count,
+                        live: crate::session::usage_file::UsageSummary::from_ledger(&ledger),
+                    });
+            }
+            Err(()) => {
+                tracing::warn!(
+                    turn_number = signals.turn_count,
+                    "failed to snapshot session usage for persist"
+                );
+            }
+        }
+    }
     /// Shared turn-completion bookkeeping (plan cleanup, signals snapshot +
     /// persistence, BigQuery turn delta, feedback prompt). Runs identically for
     /// the native and StructuredOutput-tool completion paths. Returns the
@@ -2487,6 +2734,7 @@ impl SessionActor {
         trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
         artifact_tracker: Option<&crate::upload::manifest::ArtifactTracker>,
         json_schema: Option<serde_json::Value>,
+        salvage: &mut super::length_salvage::LengthSalvage,
     ) -> Result<TurnOutcome, acp::Error> {
         // Pin the large body from a never-inlined frame (docs §8.3).
         box_turn_future(|| {
@@ -2495,6 +2743,7 @@ impl SessionActor {
                 trace_gcs_config,
                 artifact_tracker,
                 json_schema,
+                salvage,
             )
         })
         .await
@@ -2541,6 +2790,7 @@ impl SessionActor {
         trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
         artifact_tracker: Option<&crate::upload::manifest::ArtifactTracker>,
         json_schema: Option<serde_json::Value>,
+        salvage: &mut super::length_salvage::LengthSalvage,
     ) -> Result<TurnOutcome, acp::Error> {
         let conv_turn_start = std::time::Instant::now();
         let conv_turn_clock = DualClock::now();
@@ -2741,9 +2991,11 @@ impl SessionActor {
                     .unwrap_or_else(|| ACTION_STATIONARITY_NUDGE_TEMPLATE.to_string());
                 self.push_system_reminder(&reminder);
             }
-            self.drain_interjections_at_safe_point().await;
-            self.flush_pending_skill_reminders().await;
-            self.inject_pending_monitor_events().await;
+            if !salvage.awaiting_continuation() {
+                self.drain_interjections_at_safe_point().await;
+                self.flush_pending_skill_reminders().await;
+                self.inject_pending_monitor_events().await;
+            }
             let memory_reminder = self.first_turn_memory_reminder().await;
             if memory_reminder.is_some() {
                 self.memory
@@ -2754,7 +3006,9 @@ impl SessionActor {
                     "MEMORY_INJECT: first-turn memory context injected"
                 );
             }
-            self.maybe_inject_mcp_reminder().await;
+            if !salvage.awaiting_continuation() {
+                self.maybe_inject_mcp_reminder().await;
+            }
             if self.tool_context.task_output_token_budget.is_none()
                 && self.two_pass_active()
                 && !self.compaction.prefire.has_cache()
@@ -2771,6 +3025,7 @@ impl SessionActor {
                 self.refresh_token_if_expired().await;
             }
             if self.tool_context.task_output_token_budget.is_none()
+                && !salvage.awaiting_continuation()
                 && let Some(trigger_info) = self.check_auto_compact_needed().await
                 && let Err(e) = self.run_compact_only(trigger_info, false).await
             {
@@ -2871,6 +3126,9 @@ impl SessionActor {
                 .tool_context
                 .clamp_task_model_request(request.max_output_tokens)
                 .map_err(|message| acp::Error::internal_error().data(message))?;
+            if salvage.enabled() {
+                request.length_policy = xai_grok_sampling_types::LengthPolicy::CompletePartial;
+            }
             self.emit_event(crate::session::events::Event::PhaseChanged {
                 phase: crate::session::events::Phase::WaitingForModel,
             });
@@ -2887,13 +3145,13 @@ impl SessionActor {
                 Some(serde_json::json!({
                     "loop_index": loop_index,
                     "elapsed_since_turn_start_ms": conv_turn_start.elapsed().as_millis() as u64,
-                    // Nonzero = this submission is a transient resubmit.
+                    // Nonzero means this submission is a transient resubmit
                     "transient_retry_attempts": transient_retry_attempts,
                 })),
             );
             let model_timer = std::time::Instant::now();
-            let (response, latency) = match self
-                .run_turn_via_sampler(
+            let (response, latency) = match box_turn_future(|| {
+                self.run_turn_via_sampler(
                     (*request).clone(),
                     &mut rate_limit_waits,
                     TransientRetryState {
@@ -2902,11 +3160,69 @@ impl SessionActor {
                         episode_start: self.transient_episode_start.get(),
                         enabled: transient_retry_enabled,
                     },
+                    salvage.awaiting_continuation(),
                 )
-                .await
+            })
+            .await
             {
-                Ok(SamplerTurnOutcome::Response(r, latency)) => (Box::new(r), latency),
+                Ok(SamplerTurnOutcome::Response(r, latency)) => {
+                    salvage.response_arrived();
+                    (r, latency)
+                }
                 Err(error) => {
+                    if salvage.awaiting_continuation()
+                        && crate::sampling::error::is_max_tokens_turn_error(&error)
+                    {
+                        salvage.response_arrived();
+                        xai_grok_telemetry::unified_log::warn(
+                            "shell.turn.length_empty_continuation",
+                            Some(self.session_info.id.0.as_ref()),
+                            Some(serde_json::json!({
+                                "continue_attempts": salvage.continues(),
+                                "continue_budget": salvage.budget(),
+                                "cause": error
+                                    .data
+                                    .as_ref()
+                                    .and_then(|d| {
+                                        d.get(crate::sampling::error::SALVAGE_CAUSE_KEY)
+                                    })
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(crate::sampling::error::SALVAGE_CAUSE_EMPTY),
+                            })),
+                        );
+                        if self.drain_interjections_at_safe_point().await {
+                            salvage.round_boundary();
+                            tracing::info!(
+                                "Drained interjection(s) after an empty continuation; continuing"
+                            );
+                            continue;
+                        }
+                        self.chat_state_handle.pop_stranded_continue_reminder();
+                        let structured_output = match structured_output_validator.as_ref() {
+                            Some(validator) => self
+                                .chat_state_handle
+                                .get_trailing_assistant_report()
+                                .await
+                                .map(|text| validate_structured_output(validator, &text)),
+                            None => None,
+                        };
+                        let snapshot = self
+                            .finalize_turn_bookkeeping(
+                                req_id,
+                                conv_turn_start,
+                                &turn_span_totals,
+                                model_fingerprint.clone(),
+                            )
+                            .await;
+                        return Ok(TurnOutcome::Completed {
+                            snapshot: Box::new(snapshot),
+                            tools_called: turn_tools_called,
+                            structured_output,
+                            stop: CompletedStop::MaxTokens,
+                        });
+                    }
+                    salvage.response_arrived();
+                    salvage.step_boundary();
                     self.tool_context.fail_task_output_usage_closed();
                     return Err(error);
                 }
@@ -2948,6 +3264,7 @@ impl SessionActor {
                             attempt: transient_retry_attempts,
                             max_retries: display_max,
                             reason: format!("{cause}; retrying request"),
+                            error_type: Some(kind.as_str().to_string()),
                         },
                     ))
                     .await;
@@ -2990,6 +3307,7 @@ impl SessionActor {
                                     reason: "Re-authenticated after 401 (request carried no \
                                              credential); retrying request"
                                         .to_string(),
+                                    error_type: None,
                                 },
                             ))
                             .await;
@@ -3019,6 +3337,7 @@ impl SessionActor {
                                     max_retries: AuthRetrySchedule::MAX_RETRIES,
                                     reason: "Re-authenticated after 401; retrying request"
                                         .to_string(),
+                                    error_type: None,
                                 },
                             ))
                             .await;
@@ -3158,6 +3477,11 @@ impl SessionActor {
                             .usage
                             .as_ref()
                             .map(|u| u.cached_prompt_tokens),
+                        cache_creation_tokens: response
+                            .usage
+                            .as_ref()
+                            .map(|u| u.cache_creation_prompt_tokens),
+                        cost_usd_ticks: response.cost_usd_ticks,
                     },
                 );
             }
@@ -3187,6 +3511,11 @@ impl SessionActor {
                     .get_prompt_index()
                     .await
                     .saturating_sub(1) as u32;
+                if turn_index == 0
+                    && let Some(repo_status_wait_ms) = self.repo_status_prefetch.take_wait_ms()
+                {
+                    pt.record_repo_status_wait(repo_status_wait_ms);
+                }
                 pt.emit(
                     model_duration_ms,
                     turn_index,
@@ -3229,6 +3558,7 @@ impl SessionActor {
                         attempt: media_gen_resamples,
                         max_retries: MAX_MEDIA_GEN_OVER_CAP_RESAMPLES,
                         reason: "Too many parallel media-gen calls; retrying".to_string(),
+                        error_type: None,
                     },
                 ))
                 .await;
@@ -3306,9 +3636,81 @@ impl SessionActor {
                 .await;
             }
             self.send_buffered_xai_update(response_completed).await;
+            let schema_complete_at_cap = if stop_reason
+                == Some(xai_grok_sampling_types::StopReason::Length)
+                && tool_calls.is_empty()
+                && salvage.enabled()
+                && let Some(validator) = structured_output_validator.as_ref()
+            {
+                let report = self.chat_state_handle.get_trailing_assistant_report().await;
+                report.and_then(|text| validate_structured_output(validator, &text).ok())
+            } else {
+                None
+            };
+            if let Some(value) = &schema_complete_at_cap {
+                xai_grok_telemetry::unified_log::info(
+                    "shell.turn.length_schema_complete_at_cap",
+                    Some(self.session_info.id.0.as_ref()),
+                    Some(serde_json::json!({
+                        "continue_attempts": salvage.continues(),
+                        "continue_budget": salvage.budget(),
+                        "document_len": value.to_string().len(),
+                    })),
+                );
+            }
+            if stop_reason == Some(xai_grok_sampling_types::StopReason::Length)
+                && tool_calls.is_empty()
+                && schema_complete_at_cap.is_none()
+            {
+                match salvage.on_length_stop() {
+                    super::length_salvage::SalvageStep::Continue { inject_reminder } => {
+                        if inject_reminder {
+                            let tag = self.reminder_wrapper_tag();
+                            self.chat_state_handle.push_user_message(
+                                ConversationItem::length_continue_reminder(format!(
+                                    "<{tag}>{}</{tag}>",
+                                    super::length_salvage::LENGTH_CONTINUE_REMINDER_BODY
+                                )),
+                            );
+                        }
+                        tracing::warn!(
+                            session_id = %self.session_info.id,
+                            retry = salvage.continues(),
+                            max = salvage.budget(),
+                            "Output token limit exceeded — injecting reminder and retrying"
+                        );
+                        xai_grok_telemetry::unified_log::warn(
+                            "shell.turn.length_truncation_continue",
+                            Some(self.session_info.id.0.as_ref()),
+                            Some(serde_json::json!({
+                                "continue_attempts": salvage.continues(),
+                                "continue_budget": salvage.budget(),
+                            })),
+                        );
+                        continue;
+                    }
+                    super::length_salvage::SalvageStep::Exhaust => {
+                        tracing::error!(
+                            session_id = %self.session_info.id,
+                            retries = salvage.continues(),
+                            "Output token limit retries exhausted, completing the turn truncated"
+                        );
+                        xai_grok_telemetry::unified_log::warn(
+                            "shell.turn.length_truncation_exhausted",
+                            Some(self.session_info.id.0.as_ref()),
+                            Some(serde_json::json!({
+                                "continue_attempts": salvage.continues(),
+                                "continue_budget": salvage.budget(),
+                            })),
+                        );
+                    }
+                    super::length_salvage::SalvageStep::None => {}
+                }
+            }
             if tool_calls.is_empty() {
                 if !schema_ok
                     && !turn_refused
+                    && !salvage.is_truncated()
                     && let Some(gate_cfg) = self.todo_gate_policy()
                 {
                     let collected = self.collect_todo_gate_input(req_id).await;
@@ -3341,6 +3743,7 @@ impl SessionActor {
                                 .await
                                 .unwrap_or(reminder);
                             self.push_system_reminder(&rendered);
+                            salvage.step_boundary();
                             continue;
                         }
                         let cap = gate_cfg.max_fires_per_prompt;
@@ -3362,6 +3765,7 @@ impl SessionActor {
                     }
                 }
                 if self.drain_interjections_at_safe_point().await {
+                    salvage.round_boundary();
                     tracing::info!("Drained interjection(s) before turn completion; continuing");
                     continue;
                 }
@@ -3373,9 +3777,10 @@ impl SessionActor {
                         model_fingerprint.clone(),
                     )
                     .await;
-                if self.drain_pending_interjections().await {
+                if self.drain_admitted_messages_at_safe_point().await {
+                    salvage.round_boundary();
                     tracing::info!(
-                        "Drained late interjection(s) during turn-end bookkeeping; continuing"
+                        "Drained late interjection(s) or parent Steer(s) during turn-end bookkeeping; continuing"
                     );
                     continue;
                 }
@@ -3383,8 +3788,17 @@ impl SessionActor {
                     structured_output_validator.as_ref(),
                     final_answer_text.as_ref(),
                 ) {
+                    _ if schema_complete_at_cap.is_some() => schema_complete_at_cap.map(Ok),
                     (Some(validator), Some(text)) => {
-                        Some(validate_structured_output(validator, text))
+                        let joined = if salvage.any_continues() {
+                            self.chat_state_handle.get_trailing_assistant_report().await
+                        } else {
+                            None
+                        };
+                        Some(validate_structured_output(
+                            validator,
+                            joined.as_deref().unwrap_or(text),
+                        ))
                     }
                     _ => None,
                 };
@@ -3392,9 +3806,16 @@ impl SessionActor {
                     snapshot: Box::new(snapshot),
                     tools_called: turn_tools_called,
                     structured_output,
-                    refusal: turn_refused.then(|| refusal_explanation.clone().unwrap_or_default()),
+                    stop: if turn_refused {
+                        CompletedStop::Refusal(refusal_explanation.clone().unwrap_or_default())
+                    } else if salvage.is_truncated() {
+                        CompletedStop::MaxTokens
+                    } else {
+                        CompletedStop::EndTurn
+                    },
                 });
             }
+            salvage.step_boundary();
             if structured_output_tool
                 && let Some(validator) = structured_output_validator.as_ref().as_ref()
             {
@@ -3420,7 +3841,11 @@ impl SessionActor {
                             snapshot: Box::new(snapshot),
                             tools_called: turn_tools_called,
                             structured_output: Some(validated),
-                            refusal: None,
+                            stop: if salvage.is_truncated() {
+                                CompletedStop::MaxTokens
+                            } else {
+                                CompletedStop::EndTurn
+                            },
                         });
                     }
                     StructuredOutputStep::Retry => continue,
@@ -3484,7 +3909,16 @@ impl SessionActor {
                     },
                 )
                 .await;
-            let execute_tool_calls_result = self.execute_tool_calls(tool_call_responses).await;
+            let execute_tool_calls_result = {
+                let this = Arc::clone(self);
+                tokio::task::spawn_local(async move {
+                    box_turn_future(|| this.execute_tool_calls(tool_call_responses)).await
+                })
+                .await
+                .map_err(|_| {
+                    acp::Error::internal_error().data("tool execution cancelled")
+                })?
+            };
             match execute_tool_calls_result {
                 Ok(ToolLoop::PermissionReject { tool_name, reason }) => {
                     return Ok(TurnOutcome::Cancelled {
@@ -3541,32 +3975,25 @@ impl SessionActor {
         }
     }
 }
-/// Discard an egregious (2× cap) media-gen generation and re-sample this
-/// many times; later over-caps in the same turn use first-K.
+/// Discard an egregious (2x cap) media-gen generation and re-sample this many times; later over-caps in the same turn use first-K.
 const MAX_MEDIA_GEN_OVER_CAP_RESAMPLES: u32 = 1;
-/// Tool kinds whose identical repeats are almost never productive, so they get tighter
-/// thresholds than everything else. A production turn repeated one `ToolKind::Plan` call
-/// (`todo_write`) with byte-identical arguments 12 times — 224 in the turn — and replaying
-/// it showed the model answers the user as soon as it is interrupted. `ToolKind::Read`
-/// behaves the same way: re-reading the same path with the same range returns the same
-/// bytes.
+/// Tool kinds whose identical repeats are almost never productive, so they get tighter thresholds than everything else.
+/// A production turn repeated one `ToolKind::Plan` call (`todo_write`) with byte-identical arguments 12 times (224 in the turn).
+/// Replaying it showed the model answers the user as soon as it is interrupted.
+/// `ToolKind::Read` behaves the same way: re-reading the same path with the same range returns the same bytes.
 ///
-/// Matched by kind, not by wire name, because names are client-renameable and vary by
-/// toolset (`read_file`, `hashline_read`, `Read`; `todo_write`, `todowrite`) while the
-/// registered kind does not. Unregistered names (MCP tools) resolve to `None` and fall
-/// through to the looser tier, as does any kind added later — an identical repeat there
-/// can be legitimate, such as polling a job or re-running a command after an external
-/// change.
+/// Matched by kind, not by wire name.
+/// Names are client-renameable and vary by toolset (`read_file`, `hashline_read`, `Read`; `todo_write`, `todowrite`); the registered kind does not.
+/// Unregistered names (MCP tools) resolve to `None` and fall through to the looser tier, as does any kind added later.
+/// An identical repeat there can be legitimate, such as polling a job or re-running a command after an external change.
 fn is_problematically_repeating_kind(kind: Option<ToolKind>) -> bool {
     matches!(kind, Some(ToolKind::Read | ToolKind::Plan))
 }
-/// Whether a whole sampling step belongs in the tight tier: every call in it must be a
-/// problematically repeating kind.
+/// Whether a whole sampling step belongs in the tight tier: every call in it must be a problematically repeating kind.
 ///
-/// Order-insensitive, like [`step_signature`] — a reordered step is the same step, so it
-/// must not flip tiers. Requiring *every* call, rather than any, keeps a mixed step in the
-/// looser tier: one call that can legitimately repeat (polling a job) makes repeating the
-/// whole step legitimate.
+/// Order-insensitive, like [`step_signature`]: a reordered step is the same step, so it must not flip tiers.
+/// Requiring *every* call, rather than any, keeps a mixed step in the looser tier.
+/// One call that can legitimately repeat (polling a job) makes repeating the whole step legitimate.
 fn step_is_problematically_repeating(kinds: &[Option<ToolKind>]) -> bool {
     !kinds.is_empty()
         && kinds
@@ -3599,13 +4026,11 @@ fn hash_step_signature(signature: &str) -> u64 {
 fn command_is_true(cmd: &str) -> bool {
     cmd.trim().eq_ignore_ascii_case("true")
 }
-/// Recursively sort object keys so the same arguments compare equal however the model
-/// happened to serialize them — `{"path":"x","limit":10}` and `{"limit":10,"path":"x"}`
-/// are the same call. Array order is left alone: it is semantic (a todo list, a batch of
-/// edits), so reordering one is a real change.
+/// Recursively sort object keys so the same arguments compare equal however the model happened to serialize them.
+/// `{"path":"x","limit":10}` and `{"limit":10,"path":"x"}` are the same call.
+/// Array order is left alone: it is semantic (a todo list, a batch of edits), so reordering one is a real change.
 ///
-/// `serde_json` is built with `preserve_order` here, so a `Map` keeps insertion order and
-/// re-inserting in sorted order is what makes this canonical.
+/// `serde_json` is built with `preserve_order` here, so a `Map` keeps insertion order and re-inserting in sorted order is what makes this canonical.
 fn canonicalize_json(value: serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Object(map) => {
@@ -3624,12 +4049,10 @@ fn canonicalize_json(value: serde_json::Value) -> serde_json::Value {
         other => other,
     }
 }
-/// Signature of one sampling step: every tool call it emitted, each canonicalized, then
-/// sorted so that re-emitting the same set of parallel calls in a different order does not
-/// read as progress.
+/// Signature of one sampling step: every tool call it emitted, each canonicalized, then sorted.
+/// Re-emitting the same set of parallel calls in a different order thus does not read as progress.
 ///
-/// Arguments that do not parse as JSON fall back to their trimmed raw text, which is the
-/// pre-canonicalization behaviour.
+/// Arguments that do not parse as JSON fall back to their trimmed raw text, which is the pre-canonicalization behaviour.
 fn step_signature(tool_calls: &[xai_grok_sampling_types::conversation::ToolCall]) -> String {
     let mut parts: Vec<String> = tool_calls
         .iter()
@@ -3647,8 +4070,8 @@ fn step_signature(tool_calls: &[xai_grok_sampling_types::conversation::ToolCall]
 struct IdenticalToolCallRun {
     last_signature_hash: Option<u64>,
     tool_name: String,
-    /// Whether the repeated step is in the tight threshold tier, decided by the registered
-    /// kinds of every call in it (see [`step_is_problematically_repeating`]).
+    /// Whether the repeated step is in the tight threshold tier.
+    /// Decided by the registered kinds of every call in it (see [`step_is_problematically_repeating`]).
     problematically_repeating_step: bool,
     run_len: u32,
     is_true_noop_run: bool,
@@ -3679,8 +4102,7 @@ impl IdenticalToolCallRun {
         self.problematically_repeating_step = problematically_repeating_step;
         self.run_len
     }
-    /// Whether this run gets the tighter nudge and hard-stop thresholds (see
-    /// [`step_is_problematically_repeating`]).
+    /// Whether this run gets the tighter nudge and hard-stop thresholds (see [`step_is_problematically_repeating`]).
     fn is_problematically_repeating(&self) -> bool {
         !self.is_true_noop_run && self.problematically_repeating_step
     }
@@ -3693,8 +4115,7 @@ impl IdenticalToolCallRun {
     }
     /// Once per identical run at/after the nudge threshold. Call only after results are committed.
     ///
-    /// `true` keepalive runs are exempt: they end the turn silently at
-    /// [`MAX_CONSECUTIVE_TRUE_NOOPS`] rather than being told to stop polling.
+    /// `true` keepalive runs are exempt: they end the turn silently at [`MAX_CONSECUTIVE_TRUE_NOOPS`] rather than being told to stop polling.
     fn take_nudge(&mut self) -> bool {
         let fire = !self.is_true_noop_run && self.run_len >= self.nudge_threshold() && !self.nudged;
         self.nudged |= fire;
@@ -3745,8 +4166,8 @@ mod identical_tool_call_run_tests {
         assert_eq!(run.observe("squeue", "bash", false, false), 1);
         assert!(!run.is_true_noop_run);
     }
-    /// Reordering argument keys, or reordering the calls within one step, is the same
-    /// step — otherwise a loop could evade the counter by shuffling either one.
+    /// Reordering argument keys, or reordering the calls within one step, is the same step.
+    /// Otherwise a loop could evade the counter by shuffling either one.
     #[test]
     fn step_signature_ignores_key_order_and_call_order() {
         let call = |name: &str, args: &str| xai_grok_sampling_types::conversation::ToolCall {
@@ -3816,8 +4237,8 @@ mod identical_tool_call_run_tests {
         assert!(!run.nudged);
         assert!(!run.take_nudge());
     }
-    /// `ToolKind::Read` / `ToolKind::Plan` (`read_file` / `todo_write`) nudge and stop
-    /// earlier than everything else, including tools with no registered kind.
+    /// `ToolKind::Read` / `ToolKind::Plan` (`read_file` / `todo_write`) nudge and stop earlier than everything else.
+    /// Everything else includes tools with no registered kind.
     #[test]
     fn problematically_repeating_tools_use_the_tighter_thresholds() {
         for tool in ["read_file", "todo_write"] {
@@ -3856,8 +4277,8 @@ mod identical_tool_call_run_tests {
             MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS
         );
     }
-    /// A step is in the tight tier only when every call in it is `Read`/`Plan`, and the
-    /// answer must not depend on the order the model emitted them in.
+    /// A step is in the tight tier only when every call in it is `Read`/`Plan`.
+    /// The answer must not depend on the order the model emitted them in.
     #[test]
     fn step_tier_needs_every_call_and_ignores_order() {
         let read = Some(ToolKind::Read);
@@ -3872,8 +4293,8 @@ mod identical_tool_call_run_tests {
         assert!(!step_is_problematically_repeating(&[read, exec]));
         assert!(!step_is_problematically_repeating(&[exec, read]));
     }
-    /// A `true` keepalive run must end the turn silently at MAX_CONSECUTIVE_TRUE_NOOPS
-    /// instead of being told to stop polling, even though it passes the nudge threshold.
+    /// A `true` keepalive run must end the turn silently at MAX_CONSECUTIVE_TRUE_NOOPS instead of being told to stop polling.
+    /// This holds even though it passes the nudge threshold.
     #[test]
     fn true_noop_runs_are_never_nudged() {
         let mut run = IdenticalToolCallRun::default();
@@ -3899,9 +4320,8 @@ mod user_echo_broadcast_tests {
     fn origin(prompt_id: &str) -> InputOrigin {
         InputOrigin::new(PromptOrigin::from_prompt_id(prompt_id))
     }
-    /// Notification-drain: persisted (rewind/fork count user-chunk runs as
-    /// turn boundaries) but never broadcast live; the pager hides it via the
-    /// `hideFromScrollback` chunk meta.
+    /// Notification-drain: persisted (rewind/fork count user-chunk runs as turn boundaries) but never broadcast live.
+    /// The pager hides it via the `hideFromScrollback` chunk meta.
     #[test]
     fn notification_drain_turn_is_persist_only() {
         assert_eq!(
@@ -3912,8 +4332,7 @@ mod user_echo_broadcast_tests {
             UserEchoMode::PersistOnly
         );
     }
-    /// Real user prompts, cron (`/loop`) fires, and other turns still broadcast
-    /// live so multi-client / dashboard viewers stay in sync.
+    /// Real user prompts, cron (`/loop`) fires, and other turns still broadcast live so multi-client / dashboard viewers stay in sync.
     #[test]
     fn user_and_cron_turns_broadcast_live() {
         assert_eq!(
@@ -3933,9 +4352,8 @@ mod user_echo_broadcast_tests {
             UserEchoMode::Broadcast
         );
     }
-    /// Interject-fallback turns are persist-only: every pane already rendered
-    /// the text from the `x.ai/session/interjection` broadcast, so a live
-    /// echo would duplicate the block.
+    /// Interject-fallback turns are persist-only.
+    /// Every pane already rendered the text from the `x.ai/session/interjection` broadcast, so a live echo would duplicate the block.
     #[test]
     fn interject_fallback_turn_is_persist_only() {
         assert_eq!(
@@ -3993,7 +4411,7 @@ mod last_sample_span_tests {
     use xai_grok_sampling_types::conversation::{
         ConversationItem, ConversationResponse, StopReason, TokenUsage, ToolCall,
     };
-    /// Last-write value per field — the view the OTel bridge exports.
+    /// Last-write value per field, the view the OTel bridge exports.
     #[derive(Default)]
     struct Fields {
         strs: BTreeMap<String, String>,
@@ -4137,7 +4555,7 @@ mod last_sample_span_tests {
         assert_eq!(f.bools.get("last_sample.has_tool_call"), Some(&false));
         assert_eq!(f.i64s.get("last_sample.output_tokens"), Some(&0));
     }
-    /// `error` / `unreported` sentinels overwrite — no stale previous-sample value survives.
+    /// `error` / `unreported` sentinels overwrite; no stale previous-sample value survives.
     #[test]
     fn non_length_failure_and_unreported_stop_reason_overwrite_last_sample() {
         let (fields, _guard) = capture();

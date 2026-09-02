@@ -1,5 +1,5 @@
-//! `list_running_subagents` must heal a live parent's stale `running` meta
-//! (tray / reconnect). Deleting that hook leaves the 10-12h Responding hole.
+//! `list_running_subagents` must heal a live parent's stale `running` meta (tray / reconnect).
+//! Deleting that hook leaves the tray showing a dead subagent as Responding for 10-12 hours.
 
 use super::{build_minimal_agent_for_tests, make_live_session_handle};
 use crate::agent::subagent::{LIVE_ORPHAN_RECONCILE_REASON, SubagentMeta};

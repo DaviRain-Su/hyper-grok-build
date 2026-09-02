@@ -1,8 +1,7 @@
 //! Named scenarios that drive content into the pager and measure frame timing.
 //!
-//! Each scenario is a function `async fn run(&mut PtyHarness, &ContentController)`
-//! returning a [`BenchResults`]. Scenarios are dispatched by name via the
-//! [`Scenario`] enum for the `pty-bench` CLI and for ad-hoc test usage.
+//! Each scenario is a function `async fn run(&mut PtyHarness, &ContentController)` returning a [`BenchResults`].
+//! Scenarios are dispatched by name via the [`Scenario`] enum for the `pty-bench` CLI and for ad-hoc test usage.
 
 use std::time::Duration;
 
@@ -22,7 +21,6 @@ pub mod scroll_stress;
 pub mod streaming_render;
 pub mod x10_mouse_leak;
 
-/// Enumerates every benchmark scenario that can be dispatched by name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Scenario {
@@ -36,7 +34,7 @@ pub enum Scenario {
     LargeCodeblock,
     /// After content settles, measure CPU cost while idle.
     IdleCost,
-    /// Scroll while streaming — the real-world worst case.
+    /// Scroll while streaming, the real-world worst case.
     MixedInteraction,
 }
 
@@ -80,8 +78,8 @@ impl Scenario {
     }
 }
 
-/// Wait for the pager to render the initial welcome screen. All scenarios
-/// that prompt / stream content rely on the pager being past startup.
+/// Wait for the pager to render the initial welcome screen.
+/// All scenarios that prompt or stream content rely on the pager being past startup.
 pub(crate) async fn wait_for_welcome(harness: &mut PtyHarness) -> Result<()> {
     // English chrome is forced by ContentController config, but accept a few
     // common quit labels as belt-and-suspenders for host-locale leakage.

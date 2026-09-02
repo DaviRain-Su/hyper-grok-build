@@ -1,7 +1,6 @@
 //! Environment-based delivery and toast policy for clipboard writes.
 //!
-//! Writes still multi-fire every backend; this module classifies whether a
-//! successful leg is known to reach the destination named by the UI.
+//! A copy still writes to every backend at once; this module classifies whether a successful leg is known to reach the destination named by the UI.
 
 use crate::host::{DisplayServer, HostOs};
 use crate::terminal::TerminalName;

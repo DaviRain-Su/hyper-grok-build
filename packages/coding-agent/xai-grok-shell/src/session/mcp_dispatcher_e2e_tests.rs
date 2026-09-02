@@ -1,26 +1,20 @@
-//! End-to-end failure-scenario suite for the MCP status dispatcher +
-//! bounded auto-restart pipeline.
+//! End-to-end failure-scenario suite for the MCP status dispatcher and bounded auto-restart pipeline.
 //!
-//! Every test drives the **real** [`run_dispatcher`] loop —
-//! `collect_window` (50 ms coalesce) → `collect_close_candidates` +
-//! `drop_dead_clients` → `flush_window` (status push + `shutting_down`
-//! book-keeping) → `maybe_schedule_restart` → `auto_restart_stdio`
-//! bounded `[1,4,16]s` backoff — against a single mock that wires the
-//! same three observation points production uses:
+//! Every test drives the **real** [`run_dispatcher`] loop.
+//! One pass runs `collect_window` (50 ms coalesce), then `collect_close_candidates` and `drop_dead_clients`.
+//! `flush_window` then pushes status and does the `shutting_down` book-keeping.
+//! `maybe_schedule_restart` schedules `auto_restart_stdio`, whose backoff is bounded at `[1,4,16]s`.
+//! All of it runs against a single mock that wires the same three observation points production uses:
 //!
-//! 1. `mcp_state.owned_clients`  — did the dead `Arc<McpClient>` get torn down?
-//! 2. the shared [`SharedShutdownState`] — did the teardown classify as intentional?
-//! 3. the mock's recorded `respawn_stdio` calls + wire pushes — did auto-restart
-//!    do the right thing (fire / skip / exhaust / retry)?
+//! 1. `mcp_state.owned_clients`: did the dead `Arc<McpClient>` get torn down?
+//! 2. the shared [`SharedShutdownState`]: did the teardown classify as intentional?
+//! 3. the mock's recorded `respawn_stdio` calls and wire pushes: did auto-restart do the right thing (fire / skip / exhaust / retry)?
 //!
-//! The mock shares the same `SharedShutdownState` the dispatcher
-//! mutates, so the dispatcher ↔ restart-actions binding is genuinely
-//! exercised rather than stubbed on both sides.
+//! The mock shares the same `SharedShutdownState` the dispatcher mutates.
+//! The dispatcher and the restart actions therefore meet through real shared state rather than stubs on both sides.
 //!
 //! All tests run under `start_paused = true, flavor = "current_thread"`:
-//! time only advances via explicit `tokio::time::advance`, so the
-//! 50 ms window and the 1/4/16 s backoff fire deterministically with no
-//! wall-clock sleeps.
+//! time only advances via `tokio::time::advance`, so the 50 ms window and the 1/4/16 s backoff fire deterministically with no wall-clock sleeps.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -40,11 +34,8 @@ use crate::session::mcp_restart::RestartActions;
 /// Past the 50 ms `collect_window` deadline so the window flushes.
 const PAST_WINDOW: Duration = Duration::from_millis(60);
 
-/// `RestartActions` mock for the e2e tests. It reads
-/// `is_in_shutting_down` from the shared dispatcher state, scripts
-/// per-server respawn outcomes, and captures every wire push — so a
-/// single instance can observe the full crash → drop → restart loop
-/// across multiple coalesce windows (flapping).
+/// The mock reads `is_in_shutting_down` from the shared dispatcher state, scripts per-server respawn outcomes, and captures every wire push.
+/// A single instance can therefore observe the full loop from crash to drop to restart across multiple coalesce windows (flapping).
 struct E2eActions {
     configured: RefCell<HashSet<String>>,
     outcomes: RefCell<HashMap<String, VecDeque<Result<(), String>>>>,
@@ -52,15 +43,11 @@ struct E2eActions {
     pushes: RefCell<Vec<McpServerStatusPayload>>,
     /// Servers configured as HTTP/SSE (for `is_http_server_configured`).
     http_configured: RefCell<HashSet<String>>,
-    /// Scripted `reset_http_client` outcomes, per server.
     reset_outcomes: RefCell<HashMap<String, VecDeque<Result<(), String>>>>,
-    /// Recorded `reset_http_client` calls.
     reset_calls: RefCell<Vec<String>>,
     shutdown: SharedShutdownState,
-    /// Shared `McpState` so a scripted-`Ok` `respawn_stdio` can mirror
-    /// production by re-inserting the freshly-handshook client into
-    /// `owned_clients` — letting flapping scenarios start each cycle
-    /// from an "available" state without manual re-seeding.
+    /// Shared `McpState` so a scripted-`Ok` `respawn_stdio` can mirror production by re-inserting the freshly-handshook client into `owned_clients`.
+    /// Flapping scenarios then start each cycle from an "available" state without manual re-seeding.
     mcp_state: Arc<TokioMutex<McpState>>,
 }
 
@@ -97,10 +84,8 @@ impl E2eActions {
     fn unconfigure(&self, name: &str) {
         self.configured.borrow_mut().remove(name);
     }
-    /// Queue one `respawn_stdio` outcome for `name`. Popped FIFO per
-    /// attempt; an empty queue surfaces `Err("not scripted")` so a test
-    /// that under-scripts fails loudly instead of passing on a silent
-    /// default.
+    /// Queue one `respawn_stdio` outcome for `name`.
+    /// Popped FIFO per attempt.
     fn script(&self, name: &str, outcome: Result<(), String>) {
         self.outcomes
             .borrow_mut()
@@ -136,11 +121,8 @@ impl RestartActions for E2eActions {
     }
     async fn respawn_stdio(&self, server: &str) -> Result<(), String> {
         self.respawn_calls.borrow_mut().push(server.to_string());
-        // Panic on an unscripted call: a test that under-scripts its
-        // outcomes is a test bug, and `Err("not scripted")` would
-        // silently masquerade as a real respawn failure (e.g. inflating
-        // a `RestartFailed`/`exhausted` count) and pass the wrong
-        // assertion. A panic fails the test loudly at the exact call.
+        // Panic on an unscripted call: a test that under-scripts its outcomes is a test bug
+        // `Err("not scripted")` would silently masquerade as a real respawn failure and pass the wrong assertion
         let outcome = {
             let mut outcomes = self.outcomes.borrow_mut();
             outcomes
@@ -150,9 +132,7 @@ impl RestartActions for E2eActions {
                     panic!("respawn_stdio({server}) called with no scripted outcome")
                 })
         };
-        // Mirror production on success: re-insert the recovered client
-        // into `owned_clients` so the next crash cycle starts from an
-        // "available" state without the test manually re-seeding.
+        // Mirror production on success: re-insert the recovered client into `owned_clients`
         if outcome.is_ok() {
             self.mcp_state
                 .lock()
@@ -178,41 +158,33 @@ impl RestartActions for E2eActions {
     }
 }
 
-/// Discarding gateway: these tests assert on the drop / shutdown /
-/// restart observation points, not on the ACP pushes `flush_window`
-/// emits, so the gateway receiver is dropped.
+/// The receiver is dropped: these tests assert on the drop / shutdown / restart observation points, not on the ACP pushes `flush_window` emits.
 fn discard_gateway() -> xai_acp_lib::AcpAgentGatewaySender {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     xai_acp_lib::AcpAgentGatewaySender::new(tx)
 }
 
-/// Yield enough times for the dispatcher task + any spawned
-/// `auto_restart_stdio` task to make progress after a clock advance.
+/// Yield enough times for the dispatcher task and any spawned `auto_restart_stdio` task to make progress after a clock advance.
 ///
-/// Why 8: after a `tokio::time::advance`, the work hops across several
-/// independent `spawn_local` tasks, one task per `yield_now`. The
-/// longest chain in these tests is:
+/// Why 8: after a `tokio::time::advance`, the work hops across several independent `spawn_local` tasks, one task per `yield_now`.
+/// The longest chain in these tests is:
 ///   1. dispatcher wakes from `collect_window`'s timer,
 ///   2. `drop_dead_clients` acquires the `McpState` lock,
 ///   3. `flush_window` emits,
 ///   4. `maybe_schedule_restart` `spawn_local`s `auto_restart_stdio`,
 ///   5. that task wakes from its backoff `select!`,
-///   6. it runs the in-loop guard checks (one of which `.await`s
-///      `is_stdio_server_configured`),
-///   7. it `.await`s `respawn_stdio` (which now `.await`s the
-///      `McpState` lock to re-insert), and
+///   6. it runs the in-loop guard checks (one of which `.await`s `is_stdio_server_configured`),
+///   7. it `.await`s `respawn_stdio` (which now `.await`s the `McpState` lock to re-insert), and
 ///   8. it pushes the status payload.
 ///
-/// That's ~7 hand-offs; 8 yields is a small, fixed upper bound that
-/// drains the whole chain deterministically under `start_paused` (no
-/// wall-clock cost — `yield_now` doesn't advance the paused clock).
+/// That's about 7 hops; 8 yields is a small, fixed upper bound that drains the whole chain deterministically under `start_paused`.
+/// There is no wall-clock cost: `yield_now` doesn't advance the paused clock.
 async fn settle() {
     for _ in 0..8 {
         tokio::task::yield_now().await;
     }
 }
 
-/// Pre-populate `owned_clients` with stub clients for `names`.
 async fn seed_clients(state: &Arc<TokioMutex<McpState>>, names: &[&str]) {
     let mut guard = state.lock().await;
     for n in names {
@@ -226,8 +198,7 @@ async fn has_client(state: &Arc<TokioMutex<McpState>>, name: &str) -> bool {
     state.lock().await.owned_clients.contains_key(name)
 }
 
-/// Send a `TransportClosed` stamped with the currently registered
-/// client's id, mirroring the production liveness watcher.
+/// Send a `TransportClosed` stamped with the currently registered client's id, mirroring the production liveness watcher.
 async fn send_transport_closed(
     tx: &tokio::sync::mpsc::UnboundedSender<McpClientEvent>,
     state: &Arc<TokioMutex<McpState>>,
@@ -247,12 +218,10 @@ async fn send_transport_closed(
     .unwrap();
 }
 
-/// Scenario 1 — server crashes and recovers.
+/// Scenario 1: server crashes and recovers.
 ///
-/// A `TransportClosed` for a configured stdio server must: drop the
-/// dead `Arc<McpClient>` from `owned_clients`, schedule a restart, and
-/// (respawn scripted `Ok`) emit exactly one `RestartSucceeded` push
-/// without marking the server as an intentional teardown.
+/// A `TransportClosed` for a configured stdio server must drop the dead `Arc<McpClient>` from `owned_clients` and schedule a restart.
+/// With the respawn scripted `Ok`, it must emit exactly one `RestartSucceeded` push without marking the server as an intentional teardown.
 #[tokio::test(start_paused = true, flavor = "current_thread")]
 async fn e2e_crash_recovers_drops_client_then_restart_succeeds() {
     let mcp_state = Arc::new(TokioMutex::new(McpState::new(vec![])));
@@ -285,11 +254,10 @@ async fn e2e_crash_recovers_drops_client_then_restart_succeeds() {
 
             send_transport_closed(&tx, &mcp_state, "svr").await;
             tokio::task::yield_now().await;
-            tokio::time::advance(PAST_WINDOW).await; // close window: drop + flush + schedule
+            tokio::time::advance(PAST_WINDOW).await; // close window: drop, flush, schedule
             settle().await;
 
-            // After the window closes (but before the backoff fires) the
-            // dead client must be gone from owned_clients.
+            // After the window closes (but before the backoff fires) the dead client must be gone from owned_clients
             assert!(
                 !has_client(&mcp_state, "svr").await,
                 "TransportClosed must drop the dead client from owned_clients",
@@ -298,8 +266,6 @@ async fn e2e_crash_recovers_drops_client_then_restart_succeeds() {
             tokio::time::advance(Duration::from_secs(1)).await; // BACKOFF[0]
             settle().await;
 
-            // The scripted-Ok respawn mirrors production by re-inserting
-            // the recovered client, so it is back in owned_clients now.
             assert!(
                 has_client(&mcp_state, "svr").await,
                 "successful restart must re-insert the recovered client",
@@ -327,11 +293,10 @@ async fn e2e_crash_recovers_drops_client_then_restart_succeeds() {
         .await;
 }
 
-/// Scenario 2 — server is permanently dead.
+/// Scenario 2: server is permanently dead.
 ///
-/// Three scripted `Err` respawns exhaust the `[1,4,16]s` backoff:
-/// 3 per-attempt `RestartFailed` pushes + 1 final exhausted
-/// `RestartFailed`, and the client stays dropped.
+/// Three scripted `Err` respawns exhaust the `[1,4,16]s` backoff.
+/// That yields 3 per-attempt `RestartFailed` pushes and 1 final exhausted `RestartFailed`, and the client stays dropped.
 #[tokio::test(start_paused = true, flavor = "current_thread")]
 async fn e2e_crash_permanently_dead_exhausts_after_three_attempts() {
     let mcp_state = Arc::new(TokioMutex::new(McpState::new(vec![])));
@@ -368,10 +333,9 @@ async fn e2e_crash_permanently_dead_exhausts_after_three_attempts() {
             tokio::task::yield_now().await;
             tokio::time::advance(PAST_WINDOW).await;
             settle().await;
-            // Step each backoff interval so every re-armed sleep fires;
-            // a single 21s jump would only trip the first attempt's
-            // already-armed timer. Drive from the production `BACKOFF`
-            // constant so this test can't drift from the real schedule.
+            // Step each backoff interval so the sleep each new attempt starts can fire
+            // A single 21s jump would only trip the timer the first attempt had already started
+            // Drive from the production `BACKOFF` constant so this test can't drift from the real schedule
             for wait in crate::session::mcp_restart::BACKOFF {
                 tokio::time::advance(wait).await;
                 settle().await;
@@ -385,8 +349,7 @@ async fn e2e_crash_permanently_dead_exhausts_after_three_attempts() {
                 assert_eq!(p.reason, McpServerStatusReason::RestartFailed);
                 assert_eq!(p.status, McpServerStatus::Unavailable);
             }
-            // Per-attempt details encode their 1-based attempt index and
-            // carry the scripted error string.
+            // Per-attempt details encode their 1-based attempt index and carry the scripted error string
             for (i, expected_err) in ["reset 1", "reset 2", "reset 3"].iter().enumerate() {
                 let want = format!("attempt {} of 3: {expected_err}", i + 1);
                 assert_eq!(
@@ -405,12 +368,10 @@ async fn e2e_crash_permanently_dead_exhausts_after_three_attempts() {
         .await;
 }
 
-/// Scenario 3 — handshake failure triggers a restart.
+/// Scenario 3: handshake failure triggers a restart.
 ///
-/// `HandshakeFailed` is a restart trigger but is NOT in the dead-client
-/// drop set (only `TransportClosed`/`ConfigRemoved` drop). So a
-/// configured stdio server's seeded client must SURVIVE while the
-/// restart is still scheduled and succeeds.
+/// `HandshakeFailed` is a restart trigger but is NOT in the dead-client drop set (only `TransportClosed`/`ConfigRemoved` drop).
+/// So a configured stdio server's seeded client must SURVIVE while the restart is still scheduled and succeeds.
 #[tokio::test(start_paused = true, flavor = "current_thread")]
 async fn e2e_handshake_failed_schedules_restart_without_dropping_client() {
     let mcp_state = Arc::new(TokioMutex::new(McpState::new(vec![])));
@@ -466,15 +427,12 @@ async fn e2e_handshake_failed_schedules_restart_without_dropping_client() {
         .await;
 }
 
-/// Scenario 4 — user removes the server (config diff).
+/// Scenario 4: user removes the server (config diff).
 ///
-/// `ConfigDiff{removed}` must mark the server `shutting_down` and
-/// schedule NO restart — and must NOT evict whatever client is
-/// registered under that name. `ConfigRemoved` is excluded from
-/// eviction entirely (see `collect_close_candidates`); the
-/// remove+re-add race where the registered entry is a fresh
-/// replacement is modeled end-to-end by
-/// `e2e_remove_readd_race_keeps_replacement_client`.
+/// `ConfigDiff{removed}` must mark the server `shutting_down` and schedule NO restart.
+/// It must NOT evict whatever client is registered under that name.
+/// `ConfigRemoved` is excluded from eviction entirely (see `collect_close_candidates`).
+/// `e2e_remove_readd_race_keeps_replacement_client` models the remove-then-re-add race where the registered entry is a fresh replacement.
 #[tokio::test(start_paused = true, flavor = "current_thread")]
 async fn e2e_config_removed_keeps_replacement_client_marks_shutdown_no_restart() {
     let mcp_state = Arc::new(TokioMutex::new(McpState::new(vec![])));
@@ -486,9 +444,7 @@ async fn e2e_config_removed_keeps_replacement_client_marks_shutdown_no_restart()
         Arc::clone(&mcp_state),
         Arc::clone(&shutdown),
     ));
-    // Configured-as-stdio on purpose: proves the no-restart outcome is
-    // driven by the event KIND (ConfigRemoved), not by the stdio guard
-    // rail.
+    // Configured-as-stdio on purpose: proves the no-restart outcome is driven by the event KIND (ConfigRemoved), not by the stdio guard rail
     actions.configure("svr");
     let assert_actions = Rc::clone(&actions);
     let restart_actions: Rc<dyn RestartActions> = actions;
@@ -536,11 +492,10 @@ async fn e2e_config_removed_keeps_replacement_client_marks_shutdown_no_restart()
         .await;
 }
 
-/// Scenario 5 — intentional shutdown suppresses a follow-up crash.
+/// Scenario 5: intentional shutdown suppresses a follow-up crash.
 ///
-/// The kill_on_drop guard rail end-to-end: window 1 removes the server
-/// (marks `shutting_down`); window 2's `TransportClosed` (the SIGKILL'd
-/// child's death rattle) must be skipped — no respawn.
+/// The kill_on_drop guard rail end-to-end: window 1 removes the server (marks `shutting_down`).
+/// Window 2's `TransportClosed`, emitted as the SIGKILL'd child dies, must be skipped: no respawn.
 #[tokio::test(start_paused = true, flavor = "current_thread")]
 async fn e2e_intentional_shutdown_suppresses_restart_on_transport_closed() {
     let mcp_state = Arc::new(TokioMutex::new(McpState::new(vec![])));
@@ -581,7 +536,7 @@ async fn e2e_intentional_shutdown_suppresses_restart_on_transport_closed() {
             settle().await;
             assert!(shutdown.lock().unwrap().is_shutting_down("svr"));
 
-            // Window 2: the kill_on_drop death rattle arrives.
+            // Window 2: the TransportClosed from the kill_on_drop kill arrives
             send_transport_closed(&tx, &mcp_state, "svr").await;
             tokio::task::yield_now().await;
             tokio::time::advance(PAST_WINDOW).await;
@@ -593,9 +548,7 @@ async fn e2e_intentional_shutdown_suppresses_restart_on_transport_closed() {
                 assert_actions.respawn_calls().is_empty(),
                 "a TransportClosed for a shutting_down server must NOT restart",
             );
-            // No restart task ran, so the restart-actions push sink must
-            // be empty — in particular zero `RestartFailed` pushes (the
-            // ConfigRemoved status goes to the gateway, not push_status).
+            // The ConfigRemoved status goes to the gateway, not push_status
             assert_eq!(
                 assert_actions.pushes_with_reason(McpServerStatusReason::RestartFailed),
                 0,
@@ -612,12 +565,10 @@ async fn e2e_intentional_shutdown_suppresses_restart_on_transport_closed() {
         .await;
 }
 
-/// Scenario 6 — HTTP / unconfigured server crashes.
+/// Scenario 6: HTTP / unconfigured server crashes.
 ///
-/// `TransportClosed` for a server that is NOT a configured stdio entry
-/// (production's gate returns `false` for HTTP/HttpAuth) must still drop
-/// the dead client, but schedule NO restart — HTTP recovers via
-/// `reset_transport` on the next tool call.
+/// `TransportClosed` for a server that is NOT a configured stdio entry must still drop the dead client, but schedule NO restart.
+/// Production's gate returns `false` for HTTP/HttpAuth; HTTP recovers via `reset_transport` on the next tool call.
 #[tokio::test(start_paused = true, flavor = "current_thread")]
 async fn e2e_unconfigured_http_server_drops_client_but_no_restart() {
     let mcp_state = Arc::new(TokioMutex::new(McpState::new(vec![])));
@@ -674,12 +625,11 @@ async fn e2e_unconfigured_http_server_drops_client_but_no_restart() {
         .await;
 }
 
-/// Scenario 7 — server disabled mid-backoff.
+/// Scenario 7: server disabled mid-backoff.
 ///
-/// A configured stdio server crashes and a restart is scheduled, but the
-/// user toggles it off (config flips to unconfigured) during the first
-/// backoff sleep. The loop's in-iteration re-check must skip the respawn
-/// and emit a single `Disabled` push instead of `RestartFailed`.
+/// A configured stdio server crashes and a restart is scheduled.
+/// The user then toggles it off (config flips to unconfigured) during the first backoff sleep.
+/// The loop's in-iteration re-check must skip the respawn and emit a single `Disabled` push instead of `RestartFailed`.
 #[tokio::test(start_paused = true, flavor = "current_thread")]
 async fn e2e_server_disabled_mid_backoff_emits_disabled_no_respawn() {
     let mcp_state = Arc::new(TokioMutex::new(McpState::new(vec![])));
@@ -737,12 +687,10 @@ async fn e2e_server_disabled_mid_backoff_emits_disabled_no_respawn() {
         .await;
 }
 
-/// Scenario 8 — burst of crash events coalesces to a single restart.
+/// Scenario 8: burst of crash events coalesces to a single restart.
 ///
-/// A flapping server that emits 50 `TransportClosed` notifications
-/// inside one 50 ms window must collapse to ONE coalesced key and
-/// therefore exactly ONE scheduled restart — not 50 racing respawn
-/// tasks.
+/// A flapping server that emits 50 `TransportClosed` notifications inside one 50 ms window must collapse to ONE coalesced key.
+/// That means exactly ONE scheduled restart, not 50 racing respawn tasks.
 #[tokio::test(start_paused = true, flavor = "current_thread")]
 async fn e2e_burst_transport_closed_coalesces_to_single_restart() {
     let mcp_state = Arc::new(TokioMutex::new(McpState::new(vec![])));
@@ -787,8 +735,6 @@ async fn e2e_burst_transport_closed_coalesces_to_single_restart() {
                 vec!["svr".to_string()],
                 "50 coalesced TransportClosed must schedule exactly one restart",
             );
-            // One coalesced restart → exactly one success push, no
-            // duplicate from any racing-but-coalesced sibling event.
             let pushes = assert_actions.pushes();
             assert_eq!(
                 pushes.len(),
@@ -802,20 +748,14 @@ async fn e2e_burst_transport_closed_coalesces_to_single_restart() {
         .await;
 }
 
-/// Scenario 9 — flapping server: never reliably available.
+/// Scenario 9: flapping server, never reliably available.
 ///
-/// A server that repeatedly crashes across SEPARATE coalesce windows
-/// (crash → restart succeeds → crash again → restart succeeds → …) must
-/// produce one independent restart cycle per crash. This is the
-/// canonical "MCP server is flapping / not always available" case: each
-/// crash is treated as a fresh transport death (the previous `Ready`
-/// cleared any shutdown mark), so every cycle drops the client and
-/// re-restarts.
+/// A server that repeatedly crashes across SEPARATE coalesce windows must produce one independent restart cycle per crash.
+/// Each crash is treated as a fresh transport death (the previous `Ready` cleared any shutdown mark).
+/// Every cycle therefore drops the client and restarts again.
 ///
-/// Models three crash→recover cycles. The mock's `respawn_stdio` now
-/// re-inserts the recovered `Arc<McpClient>` into `owned_clients` on a
-/// scripted `Ok` (mirroring production), so each cycle starts from an
-/// "available" state with no manual re-seeding between cycles.
+/// The mock's `respawn_stdio` re-inserts the recovered `Arc<McpClient>` into `owned_clients` on a scripted `Ok` (mirroring production).
+/// Each cycle therefore starts from an "available" state with no manual re-seeding between cycles.
 #[tokio::test(start_paused = true, flavor = "current_thread")]
 async fn e2e_flapping_server_restarts_on_each_crash_cycle() {
     let mcp_state = Arc::new(TokioMutex::new(McpState::new(vec![])));
@@ -828,7 +768,6 @@ async fn e2e_flapping_server_restarts_on_each_crash_cycle() {
         Arc::clone(&shutdown),
     ));
     actions.configure("flappy");
-    // Every restart attempt across all cycles succeeds.
     for _ in 0..3 {
         actions.script("flappy", Ok(()));
     }
@@ -853,7 +792,7 @@ async fn e2e_flapping_server_restarts_on_each_crash_cycle() {
                 // Each cycle: client is up, then the transport dies.
                 send_transport_closed(&tx, &mcp_state, "flappy").await;
                 tokio::task::yield_now().await;
-                tokio::time::advance(PAST_WINDOW).await; // drop + flush + schedule
+                tokio::time::advance(PAST_WINDOW).await; // drop, flush, schedule
                 settle().await;
 
                 assert!(
@@ -865,7 +804,7 @@ async fn e2e_flapping_server_restarts_on_each_crash_cycle() {
                     "cycle {cycle}: a crash is never an intentional teardown",
                 );
 
-                tokio::time::advance(Duration::from_secs(1)).await; // BACKOFF[0] → respawn
+                tokio::time::advance(Duration::from_secs(1)).await; // BACKOFF[0] fires the respawn
                 settle().await;
 
                 assert_eq!(
@@ -874,9 +813,6 @@ async fn e2e_flapping_server_restarts_on_each_crash_cycle() {
                     "cycle {cycle}: exactly one new respawn per crash cycle",
                 );
 
-                // The mock's `respawn_stdio` re-inserted the recovered
-                // client on its scripted `Ok`, so the next cycle already
-                // starts from an "available" state — no manual re-seed.
                 assert!(
                     has_client(&mcp_state, "flappy").await,
                     "cycle {cycle}: successful respawn must re-insert the client",
@@ -899,14 +835,11 @@ async fn e2e_flapping_server_restarts_on_each_crash_cycle() {
         .await;
 }
 
-/// Scenario 10 — intermittently healthy: transient failure then recovery
-/// within a single restart window.
+/// Scenario 10: intermittently healthy, a transient failure then recovery within a single restart window.
 ///
-/// A flapping server whose first respawn fails (still unhealthy) but
-/// whose second respawn succeeds must NOT exhaust: the backoff loop
-/// retries and recovers. Expect 2 respawn calls and pushes
-/// `[RestartFailed(attempt 1), RestartSucceeded]` — and crucially no
-/// `exhausted` push, since recovery happened before the third attempt.
+/// A flapping server whose first respawn fails (still unhealthy) but whose second respawn succeeds must NOT exhaust.
+/// Expect 2 respawn calls and pushes `[RestartFailed(attempt 1), RestartSucceeded]`.
+/// No `exhausted` push: recovery happened before the third attempt.
 #[tokio::test(start_paused = true, flavor = "current_thread")]
 async fn e2e_intermittently_healthy_recovers_after_transient_failure() {
     let mcp_state = Arc::new(TokioMutex::new(McpState::new(vec![])));
@@ -949,7 +882,7 @@ async fn e2e_intermittently_healthy_recovers_after_transient_failure() {
             settle().await;
             assert_eq!(assert_actions.respawn_calls().len(), 1);
 
-            // Attempt 2 at t=+4s succeeds — recovery before exhaustion.
+            // Attempt 2 at t=+4s succeeds: recovery before exhaustion
             tokio::time::advance(Duration::from_secs(4)).await;
             settle().await;
 
@@ -979,14 +912,12 @@ async fn e2e_intermittently_healthy_recovers_after_transient_failure() {
         .await;
 }
 
-/// Scenario 11 — auto-restart disabled (`restart_actions: None`).
+/// Scenario 11: auto-restart disabled (`restart_actions: None`).
 ///
-/// The kill-switch path: with `mcp.auto_restart=false` the dispatcher
-/// receives `None` and must still drop the dead `Arc<McpClient>` on
-/// `TransportClosed` (the H1 teardown is independent of auto-restart),
-/// while skipping the restart branch entirely — no task is scheduled
-/// and the `None` is never unwrapped. Guards the otherwise-untested
-/// `restart_actions.is_none()` arm of `run_dispatcher`.
+/// The kill-switch path: with `mcp.auto_restart=false` the dispatcher receives `None`.
+/// It must still drop the dead `Arc<McpClient>` on `TransportClosed` (the teardown is independent of auto-restart).
+/// It must skip the restart branch entirely: no task is scheduled and the `None` is never unwrapped.
+/// Guards the otherwise-untested `restart_actions.is_none()` arm of `run_dispatcher`.
 #[tokio::test(start_paused = true, flavor = "current_thread")]
 async fn e2e_auto_restart_disabled_drops_client_but_schedules_nothing() {
     let mcp_state = Arc::new(TokioMutex::new(McpState::new(vec![])));
@@ -994,7 +925,6 @@ async fn e2e_auto_restart_disabled_drops_client_but_schedules_nothing() {
     let shutdown = new_shutdown_state();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<McpClientEvent>();
 
-    // No restart actions — auto-restart is off for this session.
     let restart_actions: Option<Rc<dyn RestartActions>> = None;
 
     let state_for_dispatcher = Arc::clone(&mcp_state);
@@ -1013,10 +943,9 @@ async fn e2e_auto_restart_disabled_drops_client_but_schedules_nothing() {
 
             send_transport_closed(&tx, &mcp_state, "svr").await;
             tokio::task::yield_now().await;
-            tokio::time::advance(PAST_WINDOW).await; // drop + flush, no schedule
+            tokio::time::advance(PAST_WINDOW).await; // drop and flush, no schedule
             settle().await;
-            // Advance well past the first backoff to prove nothing was
-            // scheduled to fire later.
+            // Advance well past the first backoff to prove nothing was scheduled to fire later
             tokio::time::advance(Duration::from_secs(1)).await;
             settle().await;
 
@@ -1034,12 +963,12 @@ async fn e2e_auto_restart_disabled_drops_client_but_schedules_nothing() {
         .await;
 }
 
-/// Scenario 12 — config remove+re-add race (non-managed HTTP server):
-/// the old client is removed and a replacement handshakes
-/// inside ONE coalesce window; the old client's `ConfigRemoved` and
-/// stale `TransportClosed` then flush. The replacement must survive —
-/// pre-fix, name-keyed eviction destroyed it, leaving tools
-/// registered but no client ("MCP server 'demo-mcp' not found").
+/// Scenario 12: config remove-then-re-add race (non-managed HTTP server).
+///
+/// The old client is removed and a replacement handshakes inside ONE coalesce window.
+/// The old client's `ConfigRemoved` and stale `TransportClosed` then flush.
+/// The replacement must survive: eviction keyed by server name used to destroy it.
+/// That left tools registered but no client ("MCP server 'demo-mcp' not found").
 #[tokio::test(start_paused = true, flavor = "current_thread")]
 async fn e2e_remove_readd_race_keeps_replacement_client() {
     let mcp_state = Arc::new(TokioMutex::new(McpState::new(vec![])));
@@ -1057,9 +986,8 @@ async fn e2e_remove_readd_race_keeps_replacement_client() {
         Arc::clone(&mcp_state),
         Arc::clone(&shutdown),
     ));
-    // Configure `demo-mcp` as a restart-eligible stdio server so the
-    // no-respawn assertion has teeth: if the stale close were NOT stripped
-    // it would schedule a respawn. The strip is what keeps it inert.
+    // Configure `demo-mcp` as a restart-eligible stdio server so the no-respawn assertion can actually fail
+    // If the stale close were NOT stripped it would schedule a respawn
     actions.configure("demo-mcp");
     let assert_actions = Rc::clone(&actions);
     let restart_actions: Rc<dyn RestartActions> = actions;
@@ -1078,8 +1006,7 @@ async fn e2e_remove_readd_race_keeps_replacement_client() {
                 std::path::PathBuf::from("."),
             ));
 
-            // 1. The session actor's config diff: old client removed
-            //    synchronously, then the ConfigDiff event is emitted.
+            // 1. The session actor's config diff: old client removed synchronously, then the ConfigDiff event is emitted.
             mcp_state.lock().await.owned_clients.remove("demo-mcp");
             tx.send(McpClientEvent::ConfigDiff {
                 added: vec!["demo-mcp".to_string()],
@@ -1087,16 +1014,14 @@ async fn e2e_remove_readd_race_keeps_replacement_client() {
             })
             .unwrap();
 
-            // 2. The old client's lingering liveness watcher fires its
-            //    death rattle, stamped with the OLD client's id.
+            // 2. The old client's lingering liveness watcher fires its TransportClosed, stamped with the OLD client's id.
             tx.send(McpClientEvent::TransportClosed {
                 server: "demo-mcp".to_string(),
                 client_id: old_id,
             })
             .unwrap();
 
-            // 3. The replacement handshake completes before the 50 ms
-            //    window flushes (16 ms in the incident).
+            // 3. The replacement handshake completes before the 50 ms window flushes (16 ms in the incident).
             let replacement = Arc::new(McpClient::stub("demo-mcp"));
             assert_ne!(replacement.client_id(), old_id);
             mcp_state
@@ -1133,17 +1058,15 @@ async fn e2e_remove_readd_race_keeps_replacement_client() {
         .await;
 }
 
-/// Scenario — non-managed HTTP server (e.g. `http-mcp-server`) drops mid-session.
+/// Scenario: non-managed HTTP server (e.g. `http-mcp-server`) drops mid-session.
 ///
-/// Pins the core symptom end-to-end through the real `run_dispatcher`:
-/// a `TransportClosed` for an HTTP server in `McpState::configs` must
-/// NOT evict the client (that was the `MCP server '<name>' not found`
-/// bug) and must instead schedule an in-place `reset_http_client`. No
-/// stdio respawn fires.
+/// Pins the core symptom end-to-end through the real `run_dispatcher`.
+/// A `TransportClosed` for an HTTP server in `McpState::configs` must NOT evict the client (that was the `MCP server '<name>' not found` bug).
+/// It must instead schedule an in-place `reset_http_client`.
+/// No stdio respawn fires.
 #[tokio::test(start_paused = true, flavor = "current_thread")]
 async fn e2e_http_transport_closed_recovers_in_place_not_evicted() {
-    // `http-mcp-server` is present in configs as HTTP so the dispatcher's
-    // `recoverable_http_servers` classifies it as recoverable.
+    // `http-mcp-server` is present in configs as HTTP so the dispatcher's `recoverable_http_servers` classifies it as recoverable
     let http_mcp_cfg = agent_client_protocol::McpServer::Http(
         agent_client_protocol::McpServerHttp::new(
             "http-mcp-server".to_string(),

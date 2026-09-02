@@ -1,6 +1,5 @@
-//! Memory subsystem telemetry. Routes through `log_event` (product tier,
-//! `Enabled` mode only). No PII or user content -- only counts, scores,
-//! durations, and config values.
+//! Memory subsystem telemetry routes through `log_event` (product tier, `Enabled` mode only).
+//! Events carry no PII or user content, only counts, scores, durations, and config values.
 
 use serde::Serialize;
 

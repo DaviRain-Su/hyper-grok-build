@@ -1,32 +1,81 @@
-//! Process-wide activity counters attached to every analytics event.
+//! Process-wide activity gauges. Each gauge registers itself the first time it
+//! is entered, so [`ActivitySnapshot`] and [`work_is_idle`] enumerate the
+//! registry rather than naming any gauge — a gauge defined in any crate is
+//! picked up without this module referencing it.
 
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Mutex, Once, PoisonError};
 
-pub struct ActivityGauge(AtomicU32);
+/// Wire keys for the activity gauges; each domain crate builds its gauge from the
+/// matching const, so a rename here propagates to the gauge, the snapshot, the
+/// reserved-keys list, and every reader.
+pub const SESSIONS_ACTIVE_KEY: &str = "sessions_active";
+pub const SUBAGENTS_ACTIVE_KEY: &str = "subagents_active";
+pub const COMPACTIONS_ACTIVE_KEY: &str = "compaction_active";
+pub const MCP_SERVERS_CONNECTED_KEY: &str = "mcp_servers_connected";
+pub const TURNS_ACTIVE_KEY: &str = "turns_active";
+pub const WORKFLOW_RUNS_ACTIVE_KEY: &str = "workflow_runs_active";
+
+static GAUGES: Mutex<Vec<&'static ActivityGauge>> = Mutex::new(Vec::new());
+
+/// Whether a gauge's activity counts toward [`work_is_idle`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GaugeKind {
+    /// Turns, compactions, subagents, workflows.
+    Work,
+    /// Sessions, MCP — residency, so a quiet resident process still reads idle.
+    Residency,
+}
+
+pub struct ActivityGauge {
+    name: &'static str,
+    value: AtomicU32,
+    kind: GaugeKind,
+    registered: Once,
+}
 
 impl ActivityGauge {
-    const fn new() -> Self {
-        Self(AtomicU32::new(0))
+    pub const fn work(name: &'static str) -> Self {
+        Self::new(name, GaugeKind::Work)
+    }
+
+    pub const fn residency(name: &'static str) -> Self {
+        Self::new(name, GaugeKind::Residency)
+    }
+
+    const fn new(name: &'static str, kind: GaugeKind) -> Self {
+        Self {
+            name,
+            value: AtomicU32::new(0),
+            kind,
+            registered: Once::new(),
+        }
     }
 
     pub fn get(&self) -> u32 {
-        self.0.load(Ordering::Relaxed)
+        self.value.load(Ordering::Relaxed)
     }
 
-    fn inc(&self) {
-        self.0.fetch_add(1, Ordering::Relaxed);
+    fn register(&'static self) {
+        self.registered.call_once(|| {
+            GAUGES
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(self);
+        });
     }
 
     fn dec(&self) {
         let _ = self
-            .0
+            .value
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                 Some(v.saturating_sub(1))
             });
     }
 
     pub fn enter(&'static self) -> ActivityGaugeGuard {
-        self.inc();
+        self.register();
+        self.value.fetch_add(1, Ordering::Relaxed);
         ActivityGaugeGuard { gauge: self }
     }
 }
@@ -42,39 +91,39 @@ impl Drop for ActivityGaugeGuard {
     }
 }
 
-pub static SUBAGENTS_ACTIVE: ActivityGauge = ActivityGauge::new();
-pub static COMPACTIONS_ACTIVE: ActivityGauge = ActivityGauge::new();
-pub static MCP_SERVERS_CONNECTED: ActivityGauge = ActivityGauge::new();
-pub static TURNS_ACTIVE: ActivityGauge = ActivityGauge::new();
-pub static WORKFLOW_RUNS_ACTIVE: ActivityGauge = ActivityGauge::new();
-pub static SESSIONS_ACTIVE: ActivityGauge = ActivityGauge::new();
+pub(crate) static COMPACTIONS_ACTIVE: ActivityGauge = ActivityGauge::work(COMPACTIONS_ACTIVE_KEY);
 
-/// Every gauge in one read; the serde field names are the wire keys.
-/// Every boundary event enters its gauge before it logs, so its own stamp
-/// is self-inclusive.
-#[derive(Clone, Copy, serde::Serialize)]
-pub(crate) struct ActivitySnapshot {
-    pub(crate) sessions_active: u32,
-    pub(crate) subagents_active: u32,
-    pub(crate) compaction_active: bool,
-    pub(crate) mcp_servers_connected: u32,
-    pub(crate) turns_active: u32,
-    pub(crate) workflow_runs_active: u32,
+pub fn gauge_value(name: &str) -> u32 {
+    GAUGES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .find(|gauge| gauge.name == name)
+        .map_or(0, |gauge| gauge.get())
 }
+
+pub fn work_is_idle() -> bool {
+    GAUGES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .filter(|gauge| gauge.kind == GaugeKind::Work)
+        .all(|gauge| gauge.get() == 0)
+}
+
+#[derive(serde::Serialize)]
+#[serde(transparent)]
+pub(crate) struct ActivitySnapshot(std::collections::BTreeMap<&'static str, u32>);
 
 impl ActivitySnapshot {
     pub(crate) fn read() -> Self {
-        Self {
-            sessions_active: SESSIONS_ACTIVE.get(),
-            subagents_active: SUBAGENTS_ACTIVE.get(),
-            compaction_active: COMPACTIONS_ACTIVE.get() > 0,
-            mcp_servers_connected: MCP_SERVERS_CONNECTED.get(),
-            turns_active: TURNS_ACTIVE.get(),
-            workflow_runs_active: WORKFLOW_RUNS_ACTIVE.get(),
-        }
+        Self(
+            GAUGES
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .map(|gauge| (gauge.name, gauge.get()))
+                .collect(),
+        )
     }
 }
-
-#[cfg(test)]
-#[path = "activity_tests.rs"]
-mod tests;

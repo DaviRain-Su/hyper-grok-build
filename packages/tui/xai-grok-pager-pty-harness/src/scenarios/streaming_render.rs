@@ -1,8 +1,6 @@
-//! `streaming_render` — stream a response and measure frame timing during
-//! active streaming.
+//! Stream a response and measure frame timing during active streaming.
 //!
-//! What it stresses: streaming-chunk cache invalidation, `ensure_wrapped()`
-//! cache misses every generation, wave animation during running turn.
+//! What it stresses: streaming-chunk cache invalidation, `ensure_wrapped()` cache misses every generation, wave animation during running turn.
 
 use std::time::{Duration, Instant};
 
@@ -20,13 +18,11 @@ pub async fn run(harness: &mut PtyHarness, content: &ContentController) -> Resul
 
     // Kick off the streamed response.
     harness.inject_keys(b"stream\r")?;
-    // Wait for first delta to hit the screen so we're measuring the
-    // steady-state streaming path, not startup latency.
+    // Wait for first delta to hit the screen so we're measuring the steady-state streaming path, not startup latency
     harness.wait_for_text("stream-bench", Duration::from_secs(20))?;
     harness.reset_timing();
 
-    // Collect frames during the streaming window — the mock server paces
-    // itself naturally via HTTP/SSE; we just let the pipe drain.
+    // Collect frames during the streaming window: the mock server paces itself naturally via HTTP/SSE; we let the pipe drain
     let start = Instant::now();
     while start.elapsed() < STREAM_WINDOW {
         harness.update(Duration::from_millis(100));
@@ -41,8 +37,7 @@ pub async fn run(harness: &mut PtyHarness, content: &ContentController) -> Resul
 
 fn build_response(words: usize) -> String {
     let mut s = String::with_capacity(words * 10);
-    // Sentinel token that wait_for_text keys on — guaranteed to appear
-    // near the very start of the stream.
+    // wait_for_text keys on this sentinel token, which is guaranteed to appear near the very start of the stream
     s.push_str("stream-bench ");
     for i in 0..words {
         s.push_str("word");

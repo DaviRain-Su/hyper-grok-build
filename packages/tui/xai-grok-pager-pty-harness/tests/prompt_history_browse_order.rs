@@ -1,9 +1,7 @@
-//! E2E: the Up browse is one reverse-chronological list holding every kind of thing typed at the
-//! composer, interleaved in send order.
+//! E2E: the Up browse is one reverse-chronological list holding every kind of thing typed at the composer, interleaved in send order.
 //!
 //! The panel paints oldest at the top, so a newest-first list lands on strictly descending rows.
-//! `#` notes need `[features] remember_mode = true`, which the run seeds into the sandbox
-//! `$GROK_HOME/config.toml`.
+//! `#` notes need `[features] remember_mode = true`, which the run seeds into the sandbox `$GROK_HOME/config.toml`.
 
 use std::time::Duration;
 
@@ -23,8 +21,8 @@ const NOTE_TEXT: &str = "deploys need the staging flag";
 const SECOND_PROMPT: &str = "second prompt";
 const SECOND_COMMAND: &str = "! echo two";
 
-/// What the browse must hold, newest first. The `! ` prefix is part of the entry: recall reads it
-/// back into shell mode.
+/// What the browse must hold, newest first.
+/// The `! ` prefix is part of the entry: recall reads it back into shell mode.
 const EXPECTED_NEWEST_FIRST: [&str; 6] = [
     SECOND_COMMAND,
     SECOND_PROMPT,
@@ -197,8 +195,8 @@ async fn run() -> Result<()> {
 
 /// Type `command` (a `! `-prefixed shell command) and submit it.
 ///
-/// The bash-mode label is the synchronization point at both ends: it proves the leading `!` armed
-/// shell mode, and its disappearance proves the send consumed the composer.
+/// The bash-mode label is the synchronization point at both ends: it proves the leading `!` put the composer in shell mode.
+/// Its disappearance proves the send consumed the composer.
 fn send_shell_command(pager: &mut PtyHarness, command: &str) -> Result<()> {
     pager
         .inject_keys(command.as_bytes())

@@ -1,25 +1,21 @@
-//! Goal-orchestration concern for `SessionActor`.
+//! Goal handling for `SessionActor`.
 
 use super::*;
 
-/// Per-role toolset capability requirement for the parent-side gate.
-///
-/// Each role needs a different minimum toolset to do its job; a configured
-/// harness `agent_type` whose role toolset lacks the capability fails open to
-/// the current model + session harness rather than spawning an unusable
-/// verifier.
+/// Minimum toolset a role needs, checked by the parent-side gate.
+/// A configured harness `agent_type` whose role toolset lacks the capability fails open to the current model and session harness.
+/// Failing open beats spawning an unusable verifier.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum RoleCapability {
-    /// Skeptic: reads + greps code to corroborate diff hunks.
+    /// Reads and greps code to corroborate diff hunks.
     Skeptic,
-    /// Strategist: reads + greps + runs commands while investigating traces.
+    /// Reads, greps, and runs commands while investigating traces.
     Strategist,
 }
 
 impl RoleCapability {
-    /// `true` when `summary`'s toolset satisfies this role's minimum
-    /// capability, keyed on the `can_*` flags (`can_search` for grep,
-    /// `can_execute` for terminal/bash).
+    /// `true` when `summary`'s toolset satisfies this role's minimum capability.
+    /// Keyed on the `can_*` flags (`can_search` for grep, `can_execute` for terminal/bash).
     fn is_satisfied(
         self,
         summary: &xai_grok_tools::implementations::grok_build::task::types::SubagentTypeSummary,
@@ -31,27 +27,21 @@ impl RoleCapability {
     }
 }
 
-/// Panel-scoped memoization for `resolve_goal_role_override`:
-/// at most one `describe_subagent_type` coordinator round-trip per distinct
-/// `agent_type`, so a multi-index skeptic panel sharing one agent_type costs
-/// one round-trip instead of N. A single planner/strategist resolve uses a
-/// fresh (empty) cache — no cross-call sharing needed.
+/// Panel-scoped memoization for `resolve_goal_role_override`: at most one `describe_subagent_type` coordinator round-trip per distinct `agent_type`.
+/// So a multi-index skeptic panel sharing one agent_type costs one round-trip instead of N.
+/// A single planner/strategist resolve uses a fresh (empty) cache; no cross-call sharing is needed.
 #[derive(Default)]
 pub(crate) struct PanelResolveCache {
-    /// harness `agent_type` → describe outcome (the coordinator round-trip
-    /// result for the role's `general-purpose` toolset on that harness).
+    /// Maps a harness `agent_type` to its describe outcome (the coordinator's answer for the role's `general-purpose` toolset on that harness).
     describe: std::collections::HashMap<
         String,
         xai_grok_tools::implementations::grok_build::task::types::SubagentDescribeOutcome,
     >,
 }
 
-/// Build a role's prompt tool names from its resolved spawn override (
-/// option (a)). A committed explicit pair draws its names from the SAME
-/// `describe_subagent_type` summary cached during the gate (no second
-/// round-trip); every other case (inherit, fail-open, or a missing summary)
-/// falls back to the parent-toolset `inherit` names so the prompt always
-/// renders fully.
+/// Build a role's prompt tool names from its resolved spawn override.
+/// A committed explicit pair draws its names from the same `describe_subagent_type` summary cached during the gate, with no second round-trip.
+/// Every other case (inherit, fail-open, or a missing summary) falls back to the parent-toolset `inherit` names so the prompt always renders fully.
 fn role_tool_names_from(
     override_: &crate::session::goal_planner::RoleSpawnOverride,
     cache: &PanelResolveCache,
@@ -70,11 +60,9 @@ fn role_tool_names_from(
     }
 }
 
-/// How [`SessionActor::record_verdict_on_orchestration`] updates the
-/// orchestration's `last_classifier_gaps`. A real `NotAchieved` panel result
-/// stamps fresh curated gaps (`Set`), a verdict that resolves them clears
-/// (`Clear`), and a synthetic verdict that ran no panel leaves any stored
-/// real gaps replaying into the continuation directive (`Preserve`).
+/// How [`SessionActor::record_verdict_on_orchestration`] updates the orchestration's `last_classifier_gaps`.
+/// A real `NotAchieved` panel result stamps fresh curated gaps (`Set`), and a verdict that resolves them clears (`Clear`).
+/// A synthetic verdict that ran no panel leaves any stored real gaps replaying into the continuation directive (`Preserve`).
 pub(crate) enum GapsUpdate<'a> {
     Set(&'a str),
     Clear,
@@ -1050,6 +1038,69 @@ impl SessionActor {
         }
     }
 
+    /// Live GoalTracker snapshot for the post-compaction reminder.
+    /// `None` when no goal exists or it already completed.
+    pub(crate) async fn compaction_goal_section(&self) -> Option<String> {
+        use crate::session::goal_tracker::GoalStatus;
+
+        let names = self.resolve_goal_tool_names().await;
+        let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
+        let (tokens_used, _) = self.goal_tokens(current_tokens);
+        let planner_enabled = self.goal_planner_enabled;
+        let on_workflow = self.goal_runs_on_workflow_engine();
+        let mut tracker = self.goal_tracker.lock();
+        tracker.account_elapsed();
+        let o = tracker.snapshot()?;
+        if o.status == GoalStatus::Complete {
+            return None;
+        }
+        let elapsed = crate::session::goal_orchestrator::format_elapsed(o.elapsed_ms);
+        let status = match o.status {
+            GoalStatus::Active => "Active",
+            GoalStatus::UserPaused => "Paused",
+            GoalStatus::BackOffPaused => "Paused (back off)",
+            GoalStatus::NoProgressPaused => "Paused (no progress)",
+            GoalStatus::InfraPaused => "Paused (infrastructure error)",
+            GoalStatus::Blocked => "Blocked",
+            GoalStatus::BudgetLimited => "Budget limited",
+            GoalStatus::Complete => unreachable!("complete goals are omitted above"),
+        };
+        let mut goal_state =
+            format!("<goal-state>\nStatus: {status}\nTokens: {tokens_used} | Elapsed: {elapsed}\n");
+        if let Some(budget) = o.token_budget {
+            goal_state.push_str(&format!("Token budget: {budget}\n"));
+        }
+        if let Some(sub) = o.current_subagent_id.as_deref() {
+            goal_state.push_str(&format!("Current subagent: {sub}\n"));
+        }
+        goal_state.push_str("</goal-state>\n\n");
+        let plan_path = goal_reminder_plan_path(planner_enabled, o);
+        let scratch_dir = crate::session::goal_tracker::implementer_scratch_dir(&o.verifier_id);
+        let scratch = scratch_dir.to_string_lossy();
+        let body = if on_workflow {
+            render_goal_rules(
+                &o.objective,
+                &names,
+                "",
+                &goal_state,
+                plan_path,
+                &scratch,
+                o.scratch_dir_ready,
+            )
+        } else {
+            render_goal_rules_legacy(
+                &o.objective,
+                &names,
+                "",
+                &goal_state,
+                plan_path,
+                &scratch,
+                o.scratch_dir_ready,
+            )
+        };
+        Some(format_compaction_goal_section(&body))
+    }
+
     pub(super) async fn prune_prior_goal_continuation_directives(&self) {
         use xai_grok_sampling_types::conversation::SyntheticReason;
 
@@ -1460,9 +1511,8 @@ impl SessionActor {
             .await
     }
 
-    /// Pause only if the active goal still has `goal_id` — the goal-identity
-    /// variant used by stale planner work, so a replacement goal created while
-    /// the planner ran cannot be paused by the previous goal's failure.
+    /// Pause only if the active goal still has `goal_id`.
+    /// Stale planner work uses this variant, so a replacement goal created while the planner ran cannot be paused by the previous goal's failure.
     pub(crate) async fn auto_pause_goal_if_matches_with_message(
         &self,
         goal_id: &str,
@@ -1473,9 +1523,8 @@ impl SessionActor {
             .await
     }
 
-    /// Shared auto-pause body. Pauses the goal (with `message`, else the bare
-    /// reason) and emits, but only when the goal is `Active` AND — when
-    /// `expected_goal_id` is `Some` — still carries that id.
+    /// Shared auto-pause body: pauses the goal (with `message`, else the bare reason) and emits, but only when the goal is `Active`.
+    /// When `expected_goal_id` is `Some`, the goal must also still carry that id.
     async fn auto_pause_goal_if_active_inner(
         &self,
         reason: crate::session::goal_tracker::GoalPauseReason,
@@ -1949,17 +1998,15 @@ impl SessionActor {
         self.pending_classifier_completions.lock().clear();
     }
 
-    /// In-turn goal loop step: run verification for the round just completed
-    /// and decide whether to continue the loop in-turn (with the continuation
-    /// directive) or end the turn. The premature-stop signal, if any, is
-    /// emitted here — once per continued round.
+    /// In-turn goal loop step: run verification for the round just completed.
+    /// Decides whether to continue the loop in-turn (with the continuation directive) or end the turn.
+    /// The premature-stop signal, if any, is emitted here, once per continued round.
     pub(super) async fn run_goal_round_end_legacy(&self) -> GoalRoundDecision {
         let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
         let Some(plan) = self.prepare_goal_continuation(current_tokens).await else {
             return GoalRoundDecision::EndTurn;
         };
-        // A Continue directive is unconditionally injected — returning it
-        // commits the embedded strategist note for delivery.
+        // A Continue directive is unconditionally injected; returning it commits the embedded strategist note for delivery
         if let Some(rec) = plan.strategy_rec.as_deref() {
             self.consume_strategist_note(rec);
         }
@@ -2214,8 +2261,7 @@ mod role_tool_names_tests {
     };
     use xai_grok_tools::types::tool::ToolKind;
 
-    /// A named summary (distinct from the inherit/default names) so the
-    /// from_summary-vs-inherit dispatch is unambiguous.
+    /// A named summary (distinct from the inherit/default names) so tests can tell `from_summary` output from the inherit fallback.
     fn cursor_summary() -> SubagentTypeSummary {
         let mut s = SubagentTypeSummary {
             can_read: true,
@@ -2227,7 +2273,7 @@ mod role_tool_names_tests {
         s
     }
 
-    /// A distinguishable parent-inherit names value (not the literal defaults).
+    /// Parent inherit names distinct from the literal defaults, so assertions can tell which path won.
     fn inherit_names() -> RoleToolNames {
         RoleToolNames::from_parent(
             Some("parent_read".into()),
@@ -2282,8 +2328,7 @@ mod role_tool_names_tests {
         let tn = role_tool_names_from(&ov, &PanelResolveCache::default(), &inherit_names());
         assert_eq!(tn.read, "parent_read", "absent summary ⇒ inherit");
 
-        // (b) agent_type set but the describe round-trip failed open
-        // (`Unavailable`) ⇒ inherit, never a partial/broken summary.
+        // (b) agent_type set but the describe round-trip failed open (`Unavailable`): inherit wins, never a partial/broken summary
         let mut cache = PanelResolveCache::default();
         cache
             .describe

@@ -1,5 +1,4 @@
-//! Config-value resolution leaf types and per-model laziness config,
-//! extracted from xai-grok-shell for dependency inversion.
+//! Config-value resolution leaf types and per-model laziness config, extracted from xai-grok-shell so crates the shell depends on can use them.
 
 use xai_grok_config::env_bool;
 
@@ -38,7 +37,7 @@ impl<T: std::fmt::Display> std::fmt::Display for Resolved<T> {
         write!(f, "{} ({})", self.value, self.source)
     }
 }
-/// Resolve a boolean feature flag: requirement > cli > env > config > managed > feature flag > default.
+/// Resolve a boolean feature flag; the highest set tier wins: requirement, cli, env, config, managed, feature flag, default.
 pub struct BoolFlag {
     requirement: Option<bool>,
     cli: Option<bool>,
@@ -54,8 +53,7 @@ impl BoolFlag {
         Self::env_value(env_bool(env_var))
     }
 
-    /// The environment tier already read, for a resolver handed every tier
-    /// rather than reading the process itself.
+    /// Takes the env tier already read, so a caller handed every tier as data never reads the process environment here.
     pub fn env_value(env: Option<bool>) -> Self {
         Self {
             requirement: None,
@@ -137,36 +135,28 @@ fn resolve_bool_flag(
 }
 /// Per-model configuration for the Layer-3 LazinessDetector.
 ///
-/// All fields default to the disabled state. Activation is a deliberate
-/// two-step opt-in: setting `enabled = true` lets the classifier fire
-/// (and emit `LazinessClassifierFired` telemetry), but a nudge is only
-/// injected when `max_nudges_per_session > 0` as well. This makes
-/// observation-only rollout (classify-but-don't-act) the natural
-/// intermediate state.
+/// Every field defaults to disabled.
+/// `enabled = true` alone only classifies and emits `LazinessClassifierFired`; a nudge also needs `max_nudges_per_session > 0`.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LazinessDetectorPerModelConfig {
-    /// Master switch. When `false` (the default), the classifier never
-    /// fires for this model and no per-classification cost is incurred.
+    /// Master switch. When `false` (the default), the classifier never fires for this model.
     #[serde(default)]
     pub enabled: bool,
-    /// Hard cap on `<system-reminder>` nudges injected per session for
-    /// this model. Default `0` makes `enabled = true` alone an
-    /// observation-only mode (classifier fires, no nudges).
+    /// Hard cap on `<system-reminder>` nudges injected per session for this model.
+    /// The default `0` makes `enabled = true` observation-only: the classifier fires but injects nothing.
     #[serde(default)]
     pub max_nudges_per_session: u32,
     /// How long the session must be idle before the classifier runs.
     /// `None` defers to the harness default (10 seconds).
     #[serde(default)]
     pub idle_threshold_ms: Option<u64>,
-    /// Minimum classifier confidence required to inject a nudge. `None`
-    /// defers to the harness default (0.7).
+    /// Minimum classifier confidence required to inject a nudge.
+    /// `None` defers to the harness default (0.7).
     #[serde(default)]
     pub min_confidence: Option<f32>,
-    /// When `Some(true)` (or `None` — the default), the classifier sees
-    /// the assistant's plain-text reasoning as `[assistant reasoning]`
-    /// lines. `Some(false)` drops them (the pre-2026-05 behavior).
-    /// `None` defers to the harness default (`LAZINESS_INCLUDE_REASONING`,
-    /// currently `true`).
+    /// When `Some(true)` (or `None`, the default), the classifier sees the assistant's plain-text reasoning as `[assistant reasoning]` lines.
+    /// `Some(false)` drops those lines, the behavior before 2026-05.
+    /// `None` defers to the harness default (`LAZINESS_INCLUDE_REASONING`, currently `true`).
     #[serde(default)]
     pub include_reasoning: Option<bool>,
 }

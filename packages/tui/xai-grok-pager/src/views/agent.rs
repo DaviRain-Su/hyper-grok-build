@@ -34,6 +34,8 @@ pub enum ActivePane {
     Prompt,
     Tasks,
     Catalog,
+    /// Consolidated panel dock above the prompt (remote `dock_enabled`).
+    Dock,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum InputMode {
@@ -50,6 +52,9 @@ pub struct PaneAreas {
     pub prompt: Rect,
     pub tasks: Rect,
     pub catalog: Rect,
+    /// Consolidated panel dock (remote `dock_enabled`); the embedded
+    /// queue body inside it hit-tests as `Queue` (checked first).
+    pub dock: Rect,
 }
 impl PaneAreas {
     /// Determine which pane a screen position falls in, if any.
@@ -66,6 +71,9 @@ impl PaneAreas {
         }
         if self.queue.area() > 0 && self.queue.contains(pos) {
             return Some(ActivePane::Queue);
+        }
+        if self.dock.area() > 0 && self.dock.contains(pos) {
+            return Some(ActivePane::Dock);
         }
         if self.scrollback.contains(pos) {
             return Some(ActivePane::Scrollback);
@@ -119,6 +127,9 @@ pub struct AgentViewLayoutParams {
     pub cta_height: u16,
     /// Force-suppressed on short terminals on the same rule as `cta_height`.
     pub follow_ups_height: u16,
+    /// Consolidated panel dock (Subagents/Tasks/Watchers/Queued) directly
+    /// above the prompt. 0 = hidden (the default; remote `dock_enabled`).
+    pub dock_height: u16,
     /// 0 or 1: the gap row between turn status (or scrollback) and the prompt.
     pub prompt_gap: u16,
     pub voice_recording_height: u16,
@@ -148,6 +159,9 @@ pub struct AgentViewLayout {
     pub plugin_cta: Rect,
     /// Follow-up suggestion chips row (below the plugin CTA, above the prompt).
     pub follow_ups: Rect,
+    /// Consolidated panel dock (Subagents/Tasks/Watchers/Queued) directly
+    /// above the prompt; zero-area when hidden.
+    pub dock: Rect,
     /// Single-row record indicator ("◉ Recording") directly above the prompt, shown only while voice capture is active.
     pub voice_recording: Rect,
     pub prompt: Rect,
@@ -185,6 +199,7 @@ impl AgentViewLayout {
             banner_height,
             cta_height,
             follow_ups_height,
+            dock_height,
             prompt_gap,
             voice_recording_height,
             shortcuts_height,
@@ -257,6 +272,10 @@ impl AgentViewLayout {
         if follow_ups_height > 0 {
             constraints.push(Constraint::Length(1));
             constraints.push(Constraint::Length(follow_ups_height));
+        }
+        if dock_height > 0 {
+            constraints.push(Constraint::Length(1));
+            constraints.push(Constraint::Length(dock_height));
         }
         if prompt_gap > 0 {
             constraints.push(Constraint::Length(prompt_gap));
@@ -361,6 +380,14 @@ impl AgentViewLayout {
         } else {
             Rect::default()
         };
+        let dock = if dock_height > 0 {
+            i += 1;
+            let r = chunks[i];
+            i += 1;
+            r
+        } else {
+            Rect::default()
+        };
         if prompt_gap > 0 {
             i += 1;
         }
@@ -417,6 +444,7 @@ impl AgentViewLayout {
             banner,
             plugin_cta,
             follow_ups,
+            dock,
             voice_recording,
             prompt,
             shortcuts,
@@ -461,6 +489,7 @@ impl AgentViewLayout {
             prompt: self.prompt,
             tasks: self.tasks,
             catalog: self.catalog,
+            dock: self.dock,
         }
     }
 }
@@ -863,7 +892,6 @@ pub fn build_hints(
     has_queued_follow_up: bool,
     selected_is_user_prompt: bool,
     selected_is_agent_message: bool,
-    selected_is_credit_limit: bool,
     shift_enter_unavailable: bool,
     scrollback_search: Option<&ScrollbackSearchState>,
 ) -> Vec<HintItem> {
@@ -879,6 +907,13 @@ pub fn build_hints(
                 },
             ));
             hints
+        }
+        ActivePane::Dock => {
+            vec![
+                HintItem::paired(crate::key!('j'), crate::key!('k'), "navigate"),
+                HintItem::new(crate::key!(Enter), "open"),
+                HintItem::new(crate::key!('x'), "kill"),
+            ]
         }
         ActivePane::Queue => {
             let mut hints = vec![
@@ -1064,17 +1099,10 @@ pub fn build_hints(
             };
             let nothing_special = !selected_is_agent_message
                 && !selected_is_user_prompt
-                && !selected_is_credit_limit
                 && fold_label.is_none()
                 && group_header_label.is_none()
                 && !selected_supports_fullscreen;
             if nothing_special {
-                offer_focus_hint(&mut hints);
-            }
-            if selected_is_credit_limit {
-                if let Some(key) = registry.key_for(ActionId::OpenBlockViewer) {
-                    hints.push(HintItem::new(key, rust_i18n::t!("hints.open")));
-                }
                 offer_focus_hint(&mut hints);
             }
             if selected_is_agent_message {
@@ -1279,7 +1307,6 @@ mod tests {
             selected_is_user_prompt,
             selected_is_agent_message,
             false,
-            false,
             None,
         )
     }
@@ -1420,7 +1447,6 @@ mod tests {
             false,
             false,
             false,
-            false,
             None,
         );
         let hint = hints
@@ -1449,7 +1475,6 @@ mod tests {
             false,
             false,
             true,
-            false,
             false,
             false,
             false,
@@ -1622,7 +1647,6 @@ mod tests {
             false,
             false,
             false,
-            false,
             Some(&search),
         )
     }
@@ -1727,7 +1751,6 @@ mod tests {
             false,
             false,
             false,
-            false,
             None,
         );
         assert!(
@@ -1768,7 +1791,6 @@ mod tests {
             true,
             false,
             is_turn_running,
-            false,
             false,
             false,
             false,
@@ -1834,7 +1856,6 @@ mod tests {
                 false,
                 false,
                 false,
-                false,
                 None,
             );
             let labels: Vec<&str> = hints.iter().map(|h| h.label.as_ref()).collect();
@@ -1879,7 +1900,6 @@ mod tests {
                 false,
                 false,
                 false,
-                false,
                 None,
             );
             let cancel = hints
@@ -1919,7 +1939,6 @@ mod tests {
             false,
             false,
             true,
-            false,
             false,
             false,
             false,
@@ -1970,7 +1989,6 @@ mod tests {
             false,
             false,
             true,
-            false,
             false,
             false,
             false,

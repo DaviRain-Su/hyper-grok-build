@@ -413,14 +413,14 @@ fn soak_request(id: String, background: bool) -> SubagentRequest {
 
 async fn run_cycle(backend: &ChannelBackend, i: u64) {
     let fg = backend
-        .spawn(soak_request(format!("fg-{i}"), false))
+        .spawn(soak_request(format!("fg-{i}"), false), None)
         .await
         .expect("foreground spawn round-trips through the coordinator");
     assert!(fg.success, "cycle {i}: foreground child must complete");
 
     let bg_id = format!("bg-{i}");
     let bg = backend
-        .spawn(soak_request(bg_id.clone(), true))
+        .spawn(soak_request(bg_id.clone(), true), None)
         .await
         .expect("background spawn round-trips through the coordinator");
     assert!(bg.success, "cycle {i}: background child must complete");
@@ -451,7 +451,9 @@ async fn concurrent_phase(backend: &ChannelBackend, gate: &tokio::sync::Semaphor
         .map(|k| {
             let backend = backend.clone();
             tokio::task::spawn_local(async move {
-                backend.spawn(soak_request(format!("conc-{k}"), true)).await
+                backend
+                    .spawn(soak_request(format!("conc-{k}"), true), None)
+                    .await
             })
         })
         .collect();

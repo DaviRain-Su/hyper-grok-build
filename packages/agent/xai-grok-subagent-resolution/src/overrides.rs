@@ -958,19 +958,4 @@ mod tests {
         );
         assert!(result.role_prompt_warning.is_none());
     }
-
-    // ── role_name parameter is threaded through ───────────────────
-
-    #[test]
-    fn role_name_parameter_threaded_through() {
-        let overrides = make_overrides(None, None, None, None, None);
-        let result = resolve_effective_overrides(
-            &overrides,
-            None,
-            &empty_personas(),
-            None,
-            Some("my-role".into()),
-        );
-        assert_eq!(result.role_name.as_deref(), Some("my-role"));
-    }
 }

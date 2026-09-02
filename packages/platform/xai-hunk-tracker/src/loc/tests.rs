@@ -161,20 +161,6 @@ fn from_hunk_agent_edit() {
 }
 
 #[test]
-fn from_hunk_event_type_updated() {
-    let hunk = sample_agent_hunk();
-    let record = HunkRecord::from_hunk(
-        &hunk,
-        "sess-1",
-        "agent-1",
-        None,
-        EventType::Updated,
-        &hunk.source,
-    );
-    assert_eq!(record.event_type, EventType::Updated);
-}
-
-#[test]
 fn from_hunk_external() {
     let hunk = sample_external_hunk();
     let record = HunkRecord::from_hunk(

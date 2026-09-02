@@ -1,15 +1,13 @@
 //! Terminal version capture from environment variables.
 //!
-//! **A version variable is trusted only when the environment corroborates the
-//! brand it belongs to.** These variables cross process, SSH and multiplexer
-//! boundaries, so an uncorroborated version is as likely to describe another
-//! program as the terminal drawing our output. For a variable that is itself
-//! the brand marker (`WEZTERM_VERSION`, `VTE_VERSION`), corroboration means no
-//! stronger marker outranked it in `detect_terminal_brand_from_env`.
+//! **A version variable is trusted only when the environment corroborates the brand it belongs to.**
+//! These variables cross process, SSH and multiplexer boundaries.
+//! An uncorroborated version is as likely to describe another program as the terminal drawing our output.
+//! `WEZTERM_VERSION` and `VTE_VERSION` are themselves brand markers.
+//! For them, corroboration means no stronger marker outranked them in `detect_terminal_brand_from_env`.
 //!
-//! Never read: `ZELLIJ_VERSION`, which would make an Alacritty pane inside
-//! Zellij report Zellij's number as its own, and `KONSOLE_VERSION`, which has
-//! no `TerminalName::Konsole` to attach to.
+//! `ZELLIJ_VERSION` is never read: it would make an Alacritty pane inside Zellij report Zellij's number as its own.
+//! `KONSOLE_VERSION` is never read either: it has no `TerminalName::Konsole` to attach to.
 
 use std::collections::HashMap;
 
@@ -17,15 +15,14 @@ use super::{TerminalName, terminal_name_from_term_program};
 
 /// Which source produced a [`TermVersion`].
 ///
-/// The rendered labels are stable telemetry values — do not rename them.
+/// The rendered labels are stable telemetry values; do not rename them.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, strum::Display)]
 #[strum(serialize_all = "snake_case")]
 pub enum TermVersionSource {
     None,
-    /// The runtime [`crate::terminal::da2`] probe — the only non-env source.
+    /// The runtime [`crate::terminal::da2`] probe, the only non-env source.
     Da2,
-    /// `TERM_PROGRAM_VERSION`, or its SSH-surviving `LC_TERMINAL_VERSION`
-    /// mirror (iTerm2 only).
+    /// `TERM_PROGRAM_VERSION`, or its SSH-surviving `LC_TERMINAL_VERSION` mirror (iTerm2 only).
     TermProgram,
     #[strum(serialize = "wezterm")]
     WezTerm,
@@ -35,8 +32,8 @@ pub enum TermVersionSource {
 /// A terminal version together with the source that reported it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TermVersion {
-    /// Raw, exactly as the source reported it (trimmed). Shapes vary by
-    /// terminal: `"3.5.6"`, `"20240203-110809-5046fc22"`, `"7402"`.
+    /// Raw, exactly as the source reported it (trimmed).
+    /// Formats vary by terminal: `"3.5.6"`, `"20240203-110809-5046fc22"`, `"7402"`.
     pub version: String,
     pub source: TermVersionSource,
 }
@@ -52,11 +49,9 @@ impl TermVersion {
 
 /// Whether the brand `TERM_PROGRAM` names vouches for `env_brand`'s version.
 ///
-/// Identity, widened for VS Code forks: they export `TERM_PROGRAM=vscode` from
-/// the same host process that writes their brand marker and draws our output,
-/// so the version is that host's and `brand` records whose numbering it is.
-/// One-directional, so a leaked marker cannot borrow another brand's version;
-/// Zed is excluded as it is not an xterm.js host.
+/// Identity, widened for VS Code forks: they export `TERM_PROGRAM=vscode` from the host process that writes their brand marker and draws our output.
+/// The version is therefore that host's, and `brand` records whose numbering it is.
+/// The widening is one-directional, so a leaked marker cannot borrow another brand's version; Zed is excluded as it is not an xterm.js host.
 fn corroborates(named: TerminalName, env_brand: TerminalName) -> bool {
     named == env_brand
         || (named == TerminalName::VsCode
@@ -66,10 +61,9 @@ fn corroborates(named: TerminalName, env_brand: TerminalName) -> bool {
             ))
 }
 
-/// Pick the best available version: a runtime probe outranks the environment,
-/// since a live self-report cannot be inherited across a process, SSH or
-/// multiplexer boundary, nor go stale. XTVERSION has no arm — its payload is a
-/// name-and-version string, and it rides `TerminalTelemetry::xtversion`.
+/// Pick the best available version: a runtime probe outranks the environment.
+/// A live self-report cannot be inherited across a process, SSH or multiplexer boundary, nor go stale.
+/// XTVERSION has no arm: its payload is a name-and-version string, carried in `TerminalTelemetry::xtversion` instead.
 pub(super) fn best_term_version(
     da2: Option<&str>,
     env_version: Option<&TermVersion>,
@@ -85,20 +79,16 @@ fn env_trimmed<'a>(env: &'a HashMap<String, String>, key: &str) -> Option<&'a st
     (!value.is_empty()).then_some(value)
 }
 
-/// Resolve the terminal version from the environment, taking the first
-/// variable corroborated by `env_brand`.
+/// Resolve the terminal version from the environment, taking the first variable corroborated by `env_brand`.
 ///
-/// `env_brand` is the *pre-refinement* brand, before
-/// `refine_unknown_brand_for_host` may rewrite `TerminalContext::brand`:
-/// the native-Windows `Unknown -> WindowsTerminal` guess must not license a
-/// version attribution.
+/// `env_brand` is the *pre-refinement* brand, before `refine_unknown_brand_for_host` may rewrite `TerminalContext::brand`.
+/// The native-Windows `Unknown -> WindowsTerminal` guess must not be used to attribute a version.
 pub(super) fn detect_env_term_version(
     env: &HashMap<String, String>,
     env_brand: TerminalName,
 ) -> Option<TermVersion> {
-    // tmux >= 3.2 exports TERM_PROGRAM=tmux and its own TERM_PROGRAM_VERSION,
-    // which ungated would land on whichever brand marker survived inside the
-    // tmux server environment.
+    // tmux >= 3.2 exports TERM_PROGRAM=tmux and its own TERM_PROGRAM_VERSION
+    // Ungated, that version would land on whichever brand marker survived inside the tmux server environment
     let named_brand = env_trimmed(env, "TERM_PROGRAM").and_then(terminal_name_from_term_program);
     if let Some(version) = env_trimmed(env, "TERM_PROGRAM_VERSION")
         && named_brand.is_some_and(|named| corroborates(named, env_brand))
@@ -106,8 +96,7 @@ pub(super) fn detect_env_term_version(
         return Some(TermVersion::new(version, TermVersionSource::TermProgram));
     }
 
-    // LC_TERMINAL_VERSION survives SSH where TERM_PROGRAM_VERSION does not,
-    // but only iTerm2 sets the pair.
+    // LC_TERMINAL_VERSION survives SSH where TERM_PROGRAM_VERSION does not, but only iTerm2 sets the pair
     if let Some(version) = env_trimmed(env, "LC_TERMINAL_VERSION")
         && env_trimmed(env, "LC_TERMINAL").is_some_and(|v| v.eq_ignore_ascii_case("iterm2"))
         && env_brand == TerminalName::Iterm2
@@ -121,9 +110,8 @@ pub(super) fn detect_env_term_version(
         return Some(TermVersion::new(version, TermVersionSource::WezTerm));
     }
 
-    // Brand-only: `TerminalContext::is_vte_based()` also accepts a present
-    // `vte_version`, which is the candidate here — routing the gate through it
-    // would make it vacuous.
+    // Brand-only: `TerminalContext::is_vte_based()` also accepts a present `vte_version`, which is the candidate here
+    // Routing the gate through it would make it vacuous
     if let Some(version) = env_trimmed(env, "VTE_VERSION")
         && env_brand.is_vte_based()
     {
@@ -142,8 +130,7 @@ mod tests {
         build_terminal_context_from_env(&env_from(pairs)).term_version()
     }
 
-    /// Unlike the others, this reads ambient host state and warms process-wide
-    /// caches; the asserted fields still come only from the injected map.
+    /// Unlike the others, this reads ambient host state and warms process-wide caches; the asserted fields still come only from the injected map.
     fn snapshot(pairs: &[(&str, &str)]) -> xai_grok_telemetry::events::TerminalTelemetry {
         build_terminal_context_from_env(&env_from(pairs)).telemetry_snapshot()
     }
@@ -157,9 +144,8 @@ mod tests {
         assert_eq!(TermVersionSource::Vte.to_string(), "vte");
     }
 
-    /// Driven through `best_term_version` rather than the probe's process-global
-    /// `OnceLock`: this crate's tests share one process, so recording a reply
-    /// would race every env-precedence assertion below.
+    /// This test drives `best_term_version` directly rather than the probe's process-global `OnceLock`.
+    /// This crate's tests share one process, so recording a reply would race every env-precedence assertion below.
     #[test]
     fn a_probed_version_outranks_env() {
         let env = TermVersion::new("7402", TermVersionSource::Vte);
@@ -177,8 +163,7 @@ mod tests {
         );
     }
 
-    /// The version has to reach the feedback card; its source has no field on
-    /// the wire type to reach it through.
+    /// The version has to reach the feedback card; its source has no field on the wire type to reach it through.
     #[test]
     fn feedback_info_carries_the_version() {
         let present =
@@ -236,8 +221,7 @@ mod tests {
 
     #[test]
     fn the_vscode_widening_is_one_directional() {
-        // TERM_PROGRAM names Zed while the brand chain resolves Cursor —
-        // neither vouches for the other.
+        // TERM_PROGRAM names Zed while the brand chain resolves Cursor; neither vouches for the other
         let (version, source) = resolved(&[
             ("CURSOR_TRACE_ID", "abc123"),
             ("TERM_PROGRAM", "zed"),
@@ -302,9 +286,8 @@ mod tests {
 
     #[test]
     fn tmux_term_program_version_is_not_the_terminal_version() {
-        // tmux >= 3.2 exports TERM_PROGRAM=tmux plus its own version, and
-        // iTerm2's releases are also 3.5.x — an ungated value would be
-        // indistinguishable from a real one.
+        // tmux >= 3.2 exports TERM_PROGRAM=tmux plus its own version, and iTerm2's releases are also 3.5.x
+        // An ungated value would be indistinguishable from a real one
         let (version, source) = resolved(&[
             ("TMUX", "/tmp/tmux-501/default,12345,0"),
             ("TERM_PROGRAM", "tmux"),

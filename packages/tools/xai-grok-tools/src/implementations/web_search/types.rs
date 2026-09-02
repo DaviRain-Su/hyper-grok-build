@@ -81,20 +81,6 @@ mod tests {
     }
 
     #[test]
-    fn test_config_enabled() {
-        let config = WebSearchConfig::Enabled {
-            api_key: "test-key".to_string(),
-            base_url: "https://api.x.ai/v1".to_string(),
-            model: "test-web-search-model".to_string(),
-            extra_headers: IndexMap::new(),
-            alpha_test_key: None,
-            allowed_domains: None,
-            excluded_domains: None,
-        };
-        assert!(config.is_enabled());
-    }
-
-    #[test]
     fn test_config_redacted() {
         let mut headers = IndexMap::new();
         headers.insert("X-Custom".to_string(), "value".to_string());

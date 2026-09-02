@@ -1,4 +1,4 @@
-//! Canonical bounded recovery-outcome records.
+//! Recovery-outcome records; each has one canonical encoding and a byte bound checked on encode and decode.
 
 use serde_json::Value;
 
@@ -288,8 +288,8 @@ pub(super) fn account_recovery(segments: u64) -> Result<RecoveryAccounting> {
             .ok_or(CodecError::Invalid("accounting overflow"))?;
         multiply(RECOVERY_RUNS_PER_SLOT, bytes_per_run)
     };
-    // Known generations permit runs 0..=7. Unknown permits only terminal run 7,
-    // but all three record kinds remain constructible on that sole legal key.
+    // Known generations permit runs 0..=7
+    // Unknown permits only terminal run 7, but all three record kinds remain constructible on that sole legal key
     let rows_per_known_slot = multiply(RECOVERY_RUNS_PER_SLOT, RECORDS_PER_RECOVERY_RUN)?;
     let unknown_terminal_rows = RECORDS_PER_RECOVERY_RUN;
     let unknown_terminal_bytes = max_bytes_per_run;

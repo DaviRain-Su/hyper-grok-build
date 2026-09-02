@@ -22,7 +22,6 @@ fn summary_round_trips_head_fields_through_json() {
 
 #[test]
 fn summary_deserializes_without_head_fields_backward_compat() {
-    // Simulate an old summary.json that lacks head_commit/head_branch.
     let json = r#"{
             "info": { "id": "old-session", "cwd": "/tmp" },
             "session_summary": "",
@@ -125,10 +124,8 @@ fn summary_skips_none_head_fields_in_serialized_json() {
     )
     .unwrap();
     // In a non-git directory the fields will be None.
-    // Verify they are omitted from the JSON output.
     let json = serde_json::to_string(&summary).unwrap();
-    // head_commit should not appear if the cwd has a repo (it might),
-    // but verify the skip_serializing_if attribute works for None.
+    // The test cwd may be inside a git repo, so assert skip_serializing_if omission only when the field is None
     if summary.head_commit.is_none() {
         assert!(!json.contains("head_commit"));
     }

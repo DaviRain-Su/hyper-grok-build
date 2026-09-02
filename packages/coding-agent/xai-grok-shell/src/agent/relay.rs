@@ -1,8 +1,7 @@
 //! WebSocket relay connection management.
 //!
-//! This module provides a shared `RelayConnection` that handles the WebSocket
-//! connection to the grok.com relay server with automatic reconnection.
-//! It is used by both `run_headless` and `run_leader` modes to avoid code duplication.
+//! This module provides a shared `RelayConnection` that handles the WebSocket connection to the grok.com relay server with automatic reconnection.
+//! It is used by both `run_headless` and `run_leader` modes.
 use super::proxy;
 use crate::auth::{GrokAuth, GrokComConfig};
 use crate::{teprintln, tprintln};
@@ -17,28 +16,22 @@ use tokio_tungstenite::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 const KEEPALIVE_INTERVAL_SECS: u64 = 15;
-/// Read-side liveness deadline. The write half pings every
-/// `KEEPALIVE_INTERVAL_SECS`, and a healthy peer answers each ping with a
-/// pong, so a live connection delivers an inbound frame at least that often.
-/// If *nothing* arrives for this long the connection is treated as dead and
-/// the session is torn down so the reconnect loop can take over.
+/// Read-side liveness deadline.
+/// The write half pings every `KEEPALIVE_INTERVAL_SECS`, and a healthy peer answers each ping with a pong.
+/// A live connection thus delivers an inbound frame at least that often.
+/// If *nothing* arrives for this long the connection is treated as dead and the session is torn down so the reconnect loop can take over.
 ///
-/// Without this, a half-open TCP connection (e.g. the proxy/NAT leg still
-/// ACKing our tiny pings while the upstream relay leg is gone) blocks
-/// `ws_inbound.next()` forever and the agent never reconnects — sessions
-/// stay bricked until the process is killed (server sees a 1006 close, the
-/// client never notices).
+/// Without it, a half-open TCP connection blocks `ws_inbound.next()` forever and the agent never reconnects.
+/// (E.g. the proxy/NAT leg still ACKs our tiny pings while the upstream relay leg is gone.)
+/// Sessions stay bricked until the process is killed; the server sees a 1006 close, the client never notices.
 const READ_LIVENESS_TIMEOUT_SECS: u64 = 4 * KEEPALIVE_INTERVAL_SECS;
-/// Upper bound on a single auth-recovery attempt — a backstop against an
-/// indefinitely wedged relay loop, NOT a bound on a healthy refresh. It must
-/// stay comfortably above the refresh path's own internal worst case so it
-/// only fires when something is truly stuck: `refresh_chain` waits up to 25s
-/// for `auth.json.lock` (`REFRESH_LOCK_TIMEOUT`) before IdP IO — plus another
-/// 25s if the suspend-only revalidate re-acquires — and the IdP IO has its
-/// own timeouts (7s external refresher; 15s per OIDC request with short
-/// retries). When this fires the recovery future is dropped (the file lock
-/// releases on drop) and the loop falls through to reconnect backoff, which
-/// retries recovery on the next 401.
+/// Upper bound on a single auth-recovery attempt: a backstop against an indefinitely wedged relay loop, NOT a bound on a healthy refresh.
+/// It must stay comfortably above the refresh path's own internal worst case so it only fires when something is truly stuck.
+/// `refresh_chain` waits up to 25s for `auth.json.lock` (`REFRESH_LOCK_TIMEOUT`) before IdP IO.
+/// Another 25s applies if the suspend-only revalidate re-acquires the lock.
+/// The IdP IO has its own timeouts (7s external refresher; 15s per OIDC request with short retries).
+/// When this fires the recovery future is dropped (the file lock releases on drop) and the loop falls through to reconnect backoff.
+/// Backoff retries recovery on the next 401.
 const AUTH_RECOVERY_TIMEOUT_SECS: u64 = 180;
 const BASE_DELAY_SECS: u64 = 1;
 const MAX_DELAY_SECS: u64 = 60;
@@ -46,9 +39,8 @@ const CONNECT_TIMEOUT_SECS: u64 = 30;
 /// JSON-RPC auth error code
 const AUTH_ERROR_CODE: i64 = -32000;
 use crate::auth::AuthManager;
-/// Config for the grok.com WebSocket relay. Fields are private so the only
-/// constructor is [`RelayConfig::for_session`] — "no relay without a session
-/// bearer" is a compile-time guarantee.
+/// Config for the grok.com WebSocket relay.
+/// Fields are private so the only constructor is [`RelayConfig::for_session`]: "no relay without a session bearer" is a compile-time guarantee.
 #[derive(Clone)]
 pub struct RelayConfig {
     ws_url: String,
@@ -58,11 +50,9 @@ pub struct RelayConfig {
     auth_manager: Option<Arc<AuthManager>>,
 }
 impl RelayConfig {
-    /// Session gate: builds only for a grok.com first-party session
-    /// (`is_xai_auth`: x.ai-issuer OIDC or external credential) with a
-    /// non-empty bearer. BYOK/ApiKey, non-x.ai issuers (enterprise OIDC,
-    /// third-party external providers), and deprecated WebLogin get `None`
-    /// (relay-off; the leader still serves clients over IPC).
+    /// Session gate: builds only for a grok.com first-party session (`is_xai_auth`: x.ai-issuer OIDC or external credential) with a non-empty bearer.
+    /// BYOK/ApiKey, non-x.ai issuers (enterprise OIDC, third-party external providers), and deprecated WebLogin get `None`.
+    /// With relay off, the leader still serves clients over IPC.
     pub(crate) fn for_session(
         session: &GrokAuth,
         ctx: &GrokComConfig,
@@ -110,8 +100,7 @@ impl Drop for RelayHandle {
 /// Spawn a relay connection task that maintains a WebSocket connection.
 ///
 /// The task runs in the background, automatically reconnecting on disconnection.
-/// Messages from the relay are sent to `to_agent_tx`, and messages to send to
-/// the relay should be sent via the returned sender.
+/// Messages from the relay are sent to `to_agent_tx`, and messages to send to the relay should be sent via the returned sender.
 ///
 /// # Arguments
 /// * `config` - Relay connection configuration
@@ -129,8 +118,7 @@ pub fn spawn_relay_connection(
 }
 /// Spawn a relay connection with an optional first-connection callback.
 ///
-/// Same as `spawn_relay_connection` but allows providing a callback that will be
-/// called once when the first successful connection is established.
+/// Same as `spawn_relay_connection` but allows providing a callback that will be called once when the first successful connection is established.
 pub(crate) fn spawn_relay_connection_with_callback(
     config: RelayConfig,
     to_agent_tx: mpsc::UnboundedSender<String>,
@@ -162,8 +150,8 @@ fn is_handshake_unauthorized(err: &anyhow::Error) -> bool {
         })
         .unwrap_or(false)
 }
-/// Attempt auth recovery after a 401. Returns `true` to reconnect
-/// immediately, `false` to exit or fall through to backoff.
+/// Attempt auth recovery after a 401.
+/// Returns `true` to reconnect immediately, `false` to exit or fall through to backoff.
 async fn attempt_auth_recovery(
     config: &mut RelayConfig,
     cancel: &CancellationToken,
@@ -399,8 +387,8 @@ fn build_relay_request(config: &RelayConfig) -> anyhow::Result<axum::http::Reque
 }
 /// Attempt to connect to the relay WebSocket server.
 ///
-/// If `proxy_url` is `Some`, the connection is established through an HTTP
-/// CONNECT tunnel.  Otherwise, a direct connection is used.
+/// If `proxy_url` is `Some`, the connection is established through an HTTP CONNECT tunnel.
+/// Otherwise, a direct connection is used.
 async fn connect_to_relay(
     config: &RelayConfig,
     proxy_url: Option<&str>,
@@ -471,8 +459,7 @@ where
     )
     .await
 }
-/// [`run_websocket_session`] with an explicit read-liveness window
-/// (separate entry point so tests can use a short deadline).
+/// [`run_websocket_session`] with an explicit read-liveness window (separate entry point so tests can use a short deadline).
 pub(crate) async fn run_websocket_session_with_liveness<S>(
     ws: tokio_tungstenite::WebSocketStream<S>,
     to_agent_tx: &mpsc::UnboundedSender<String>,
@@ -492,10 +479,8 @@ where
                 _ = cancel_read.cancelled() => break,
                 msg_res = tokio::time::timeout(liveness, ws_inbound.next()) => {
                     let Ok(msg_opt) = msg_res else {
-                        // No frame (not even a pong for our keepalive pings)
-                        // within the liveness window: the connection is dead
-                        // or half-open. Break so the session ends and the
-                        // reconnect loop takes over.
+                        // No frame (not even a pong for our keepalive pings) within the liveness window: the connection is dead or half-open
+                        // Break so the session ends and the reconnect loop takes over
                         tprintln!("ws_inbound::liveness_timeout");
                         warn!(
                             timeout_secs = liveness.as_secs(),
@@ -605,12 +590,9 @@ where
                 msg_opt = from_agent_rx.recv() => {
                     match msg_opt {
                         Some(msg) => {
-                            // Per-message logging is debug-only: at info level a
-                            // streaming session mirrors every `session/update`
-                            // delta here, and the full JSON parse + params
-                            // re-format produced >100 MB of leader.log churn on
-                            // dashboard-heavy machines. Skip the parse entirely
-                            // unless debug logging is enabled.
+                            // Per-message logging is debug-only: at info level a streaming session mirrors every `session/update` delta here
+                            // The full JSON parse and params re-format produced over 100 MB of leader.log churn on dashboard-heavy machines
+                            // Skip the parse entirely unless debug logging is enabled
                             if tracing::enabled!(tracing::Level::DEBUG) {
                                 if let Ok(json_val) =
                                     serde_json::from_str::<serde_json::Value>(&msg)
@@ -969,13 +951,10 @@ mod tests {
         let json = serde_json::to_string_pretty(&map).unwrap();
         std::fs::write(&path, json).unwrap();
     }
-    /// Regression: `auth.json` vanishes (deleted/corrupt/externally
-    /// removed) while the process still holds an expired access token +
-    /// valid refresh token in `AuthManager` memory. Relay 401 recovery
-    /// must drive the full refresh chain — mint a fresh token via the
-    /// refresher and REWRITE `auth.json` — instead of dead-ending. A
-    /// relay holding a private, refresher-less `AuthManager` fails this:
-    /// it can only adopt sibling disk tokens, and there are none.
+    /// Regression: `auth.json` vanishes (deleted, corrupt, or externally removed).
+    /// The process still holds an expired access token and a valid refresh token in `AuthManager` memory.
+    /// Relay 401 recovery must drive the full refresh chain (mint a fresh token via the refresher and REWRITE `auth.json`) instead of dead-ending.
+    /// A relay holding a private, refresher-less `AuthManager` fails this: it can only adopt sibling disk tokens, and there are none.
     #[tokio::test]
     async fn auth_recovery_refreshes_and_heals_missing_auth_json() {
         use crate::auth::XAI_OAUTH2_ISSUER;
@@ -1038,9 +1017,8 @@ mod tests {
         assert_eq!(healed.key, "fresh-from-authority");
         assert_eq!(healed.refresh_token.as_deref(), Some("rt-rotated"));
     }
-    /// Recovery returning the *unchanged* token (fresh-mint guard) must report
-    /// no recovery — the caller then backs off before reconnecting instead of
-    /// tight-looping — without cancelling the relay or touching the IdP.
+    /// Recovery returning the *unchanged* token (fresh-mint guard) must report no recovery, without cancelling the relay or touching the IdP.
+    /// The caller then backs off before reconnecting instead of tight-looping.
     #[tokio::test]
     async fn attempt_auth_recovery_same_key_backs_off_without_cancel() {
         use crate::auth::XAI_OAUTH2_ISSUER;

@@ -12,7 +12,6 @@ use xai_grok_telemetry::session_ctx::log_event;
 /// Copy the selected block's content to the system clipboard.
 ///
 /// Respects the block's raw/pretty mode for markdown content.
-/// Shows a toast notification on theExtensionsTab
 pub(super) fn dispatch_copy_block_content(app: &mut AppView) {
     with_active_agent(app, |agent| {
         let Some(idx) = agent.scrollback.selected() else {
@@ -56,7 +55,10 @@ pub(super) fn dispatch_copy_assistant_message(
     n: usize,
     file_path: Option<std::path::PathBuf>,
 ) {
+    // Session-wide so a later fullscreen child (or the parent after a child) stays quiet.
+    app.export_copy_slash_used = true;
     with_active_agent(app, |agent| {
+        agent.note_export_copy_slash_used();
         // Collect agent messages in reverse order (most recent first).
         let mut agent_messages: Vec<String> = Vec::new();
         for i in (0..agent.scrollback.len()).rev() {
@@ -149,7 +151,9 @@ pub(super) fn dispatch_export_conversation(
     app: &mut AppView,
     file_path: Option<std::path::PathBuf>,
 ) {
+    app.export_copy_slash_used = true;
     with_active_agent(app, |agent| {
+        agent.note_export_copy_slash_used();
         let blocks: Vec<_> = (0..agent.scrollback.len())
             .filter_map(|i| agent.scrollback.entry(i).map(|e| &e.block))
             .collect();

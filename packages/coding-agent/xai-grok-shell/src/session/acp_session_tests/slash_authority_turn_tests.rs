@@ -506,7 +506,7 @@ async fn parent_compact_and_available_skill_execute_but_other_slashes_stay_inert
                 actor.active_skill.lock().as_deref(),
                 Some("dynamic-authority-skill")
             );
-            // After the turn the assistant reply is last; find the skill injection by content.
+            // After the turn the assistant reply is last, so this looks for the injected skill body by content
             assert!(
                 actor
                     .chat_state_handle

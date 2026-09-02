@@ -5,7 +5,8 @@ use super::attempt_runner::{
 };
 use super::prompt_turn_receipt::{
     ACTIVE_MESSAGE_RECEIPT_CAPACITY, AdmissionSettlement, FinalPromptTurnReceipt,
-    PromptTurnReceiptDisposition, PromptTurnReceiptDrain, PromptTurnReceiptOutcome,
+    PromptTurnReceiptDrain, PromptTurnReceiptOutcome, PromptTurnSettlementInput,
+    reduce_prompt_turn_settlement,
 };
 use super::*;
 use crate::upload::trace::PromptMetadataParams;
@@ -14,6 +15,239 @@ use xai_grok_telemetry::region::Parent;
 use xai_grok_telemetry::subagent_spawn::{SubagentSpawnPhase, phase_region};
 use xai_grok_telemetry::{instrument_task, region};
 use xai_grok_tools::implementations::{grok_build, opencode};
+static SUBAGENTS_ACTIVE: xai_grok_telemetry::activity::ActivityGauge =
+    xai_grok_telemetry::activity::ActivityGauge::work(
+        xai_grok_telemetry::activity::SUBAGENTS_ACTIVE_KEY,
+    );
+/// Bounds each parent-side await in the child completion path. The parent's
+/// biased select polls its event channels ahead of `cmd_rx`, so a busy turn
+/// can starve `cmd_rx` and park a completed child (leaking its session
+/// thread, fs watchers, and fds) forever.
+pub(super) const PARENT_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// `PARENT_ACK_TIMEOUT`-bounded acks in the completion path: usage fold,
+/// not-applied mark, list_tasks snapshot, notification reparent.
+const PARENT_ACK_SITES: u128 = 4;
+const _: () = assert!(
+    PARENT_ACK_SITES * PARENT_ACK_TIMEOUT.as_millis()
+        <= crate::session::acp_session::SUBAGENT_USAGE_DRAIN.as_millis(),
+    "sequential parent acks must fit the turn-freeze usage drain; a new \
+     PARENT_ACK_TIMEOUT-bounded await must bump PARENT_ACK_SITES"
+);
+/// Bounds each read of the child session's own actors (chat state, signals)
+/// in the completion path. They are spawned on the child session's
+/// current-thread runtime, so a tool synchronously blocking that thread
+/// freezes them together with the session actor; teardown must still reach
+/// Shutdown on the cheap fallbacks.
+pub(super) const CHILD_ACTOR_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// One bounded query against a child-session actor, degrading to `fallback`
+/// when the actor never answers.
+pub(super) async fn child_actor_query<T>(
+    what: &'static str,
+    query: impl std::future::Future<Output = T>,
+    fallback: T,
+) -> T {
+    match tokio::time::timeout(CHILD_ACTOR_ACK_TIMEOUT, query).await {
+        Ok(value) => value,
+        Err(_) => {
+            tracing::warn!(
+                query = what,
+                "child actor did not answer in time; using fallback"
+            );
+            fallback
+        }
+    }
+}
+/// Fallback when the usage fold missed: ask the parent session to mark the
+/// bill incomplete (sticky + pin-aware ledger marks); if the parent doesn't
+/// ack, mark the shared coordinator's report-level sticky directly.
+/// A merely-slow parent can later apply both the queued fold and this mark;
+/// both are idempotent, so the worst case is a conservative incomplete flag,
+/// never a double-count.
+/// (Distinct from `SessionActor::mark_subagent_usage_not_applied`, which is
+/// the parent-side coordinator-only mark.)
+pub(super) async fn mark_child_usage_not_applied_with_fallback(
+    parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
+    subagent_event_tx: &mpsc::UnboundedSender<SubagentEvent>,
+    parent_session_id: &str,
+    parent_prompt_id: Option<String>,
+) {
+    let marked_by_parent = if let Some(cmd_tx) = parent_cmd_tx {
+        let (respond_to, ack) = oneshot::channel();
+        if cmd_tx
+            .send(SessionCommand::MarkSubagentUsageNotApplied {
+                parent_prompt_id: parent_prompt_id.clone(),
+                respond_to,
+            })
+            .is_ok()
+        {
+            matches!(
+                tokio::time::timeout(PARENT_ACK_TIMEOUT, ack).await,
+                Ok(Ok(()))
+            )
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if !marked_by_parent && let Some(pid) = parent_prompt_id {
+        let (respond_to, ack) = oneshot::channel();
+        if subagent_event_tx
+            .send(SubagentEvent::MarkUsageNotApplied(
+                SubagentMarkUsageNotAppliedRequest {
+                    parent_session_id: parent_session_id.to_string(),
+                    prompt_id: pid,
+                    respond_to,
+                },
+            ))
+            .is_ok()
+        {
+            let _ = ack.await;
+        }
+    }
+}
+/// Bounded turn-message take from the child's chat state. A take the actor
+/// never answers — wedged (timeout) or gone (dropped channel) — is a recorded
+/// miss; `complete_prompt_trace` must not mistake it for a genuinely empty
+/// turn.
+pub(super) async fn take_child_turn_messages(
+    cmd_tx: &mpsc::UnboundedSender<SessionCommand>,
+    upload_deadline: tokio::time::Instant,
+) -> crate::upload::turn::TurnMessages {
+    use crate::upload::turn::{MissingTurnMessages, TurnMessages};
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if cmd_tx
+        .send(SessionCommand::TakeTurnMessages { respond_to: tx })
+        .is_err()
+    {
+        return TurnMessages::Missing(MissingTurnMessages::ChannelDropped);
+    }
+    match tokio::time::timeout(
+        crate::upload::trace::blocking_attempt_budget(upload_deadline),
+        rx,
+    )
+    .await
+    {
+        Ok(Ok(taken)) => taken.into(),
+        Ok(Err(_)) => {
+            tracing::warn!("TakeTurnMessages responder dropped; recording the miss");
+            TurnMessages::Missing(MissingTurnMessages::ChannelDropped)
+        }
+        Err(_) => {
+            tracing::warn!("TakeTurnMessages not answered in time; recording the miss");
+            TurnMessages::Missing(MissingTurnMessages::TakeTimedOut)
+        }
+    }
+}
+/// Bounded out-of-band streaming-capture take: a wedged child actor skips the
+/// capture instead of parking teardown.
+pub(super) async fn take_child_streaming_partial(
+    cmd_tx: &mpsc::UnboundedSender<SessionCommand>,
+    upload_deadline: tokio::time::Instant,
+    prompt_id: String,
+    committed: bool,
+    model_id: Option<String>,
+) -> Option<crate::session::acp_session::StreamingTurnCapture> {
+    tokio::time::timeout(
+        crate::upload::trace::blocking_attempt_budget(upload_deadline),
+        crate::upload::turn::take_streaming_partial(cmd_tx, prompt_id, committed, model_id),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        tracing::warn!("TakeStreamingCapture not answered in time; skipping capture");
+        None
+    })
+}
+/// Bounded conversation-global resolved-model read for `turn_result.json`,
+/// falling back to `configured` when the child actor is wedged or has served
+/// no assistant turn.
+pub(super) async fn resolve_child_model(
+    cmd_tx: &mpsc::UnboundedSender<SessionCommand>,
+    upload_deadline: tokio::time::Instant,
+    configured: Option<String>,
+) -> Option<String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let resolved = if cmd_tx
+        .send(SessionCommand::GetModelMetadata { responds_to: tx })
+        .is_ok()
+    {
+        match tokio::time::timeout(
+            crate::upload::trace::blocking_attempt_budget(upload_deadline),
+            rx,
+        )
+        .await
+        {
+            Ok(meta) => meta.unwrap_or_default().resolved_model_id,
+            Err(_) => {
+                tracing::warn!("GetModelMetadata not answered in time; using configured model");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    resolved.or(configured)
+}
+/// Snapshot goal-internal task ids, tag them goal-turn origin, then reparent
+/// surviving background tasks (monitors, bg commands) from the child to the
+/// parent's notification bridge. Both awaits ride the parent terminal actor's
+/// channel and are bounded so the child Shutdown stays reachable behind a
+/// starved actor.
+pub(super) async fn reparent_surviving_child_tasks(
+    parent_tb: &std::sync::Arc<dyn xai_grok_tools::computer::types::TerminalBackend>,
+    parent_notif_handle: &xai_grok_tools::notification::types::ToolNotificationHandle,
+    parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
+    child_session_id: &str,
+    parent_session_id: &str,
+    surface_completion: bool,
+) {
+    if !surface_completion {
+        match tokio::time::timeout(PARENT_ACK_TIMEOUT, parent_tb.list_tasks()).await {
+            Ok(tasks) => {
+                let reparented_task_ids: Vec<String> = tasks
+                    .into_iter()
+                    .filter(|t| {
+                        !t.completed && t.owner_session_id.as_deref() == Some(child_session_id)
+                    })
+                    .map(|t| t.task_id)
+                    .collect();
+                if !reparented_task_ids.is_empty()
+                    && let Some(cmd_tx) = parent_cmd_tx
+                {
+                    let _ = cmd_tx.send(SessionCommand::RecordGoalTurnTaskIds {
+                        task_ids: reparented_task_ids,
+                    });
+                }
+            }
+            Err(_) => {
+                tracing::warn!(
+                    child_session_id = %child_session_id,
+                    parent_session_id = %parent_session_id,
+                    "list_tasks not answered in time; skipping goal-turn task-id recording"
+                );
+            }
+        }
+    }
+    let parent_backend_weak = std::sync::Arc::downgrade(parent_tb);
+    if tokio::time::timeout(
+        PARENT_ACK_TIMEOUT,
+        parent_tb.reparent_notifications(
+            child_session_id,
+            parent_session_id,
+            parent_notif_handle.clone(),
+            parent_backend_weak,
+        ),
+    )
+    .await
+    .is_err()
+    {
+        tracing::warn!(
+            child_session_id = %child_session_id,
+            parent_session_id = %parent_session_id,
+            "reparent_notifications not acked in time; proceeding to child shutdown"
+        );
+    }
+}
 const INITIAL_PROMPT_ADMISSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const CHILD_COMPLETION_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 pub(super) fn task_model_override_error(
@@ -85,11 +319,6 @@ pub(crate) async fn run_shell_child(
             );
             return child_run_output(failure_result(&request, &msg), completion_data, None);
         }
-        SubagentValidateTypeOutcome::Unknown { .. }
-        | SubagentValidateTypeOutcome::ValidationUnavailable => {
-            let msg = format!("Cannot validate subagent '{}'", request.subagent_type);
-            return child_run_output(failure_result(&request, &msg), completion_data, None);
-        }
         SubagentValidateTypeOutcome::Ok => {}
         _ => {
             let msg = format!("Cannot validate subagent '{}'", request.subagent_type);
@@ -155,11 +384,11 @@ pub(crate) async fn run_shell_child(
             .await
         {
             SubagentResumeLookup::Active => {
-                let msg = format!(
+                let error = format!(
                     "Cannot resume from subagent '{resume_id}': it is still running. \
                      Wait for it to complete before resuming."
                 );
-                return child_run_output(failure_result(&request, &msg), completion_data, None);
+                return child_run_output(failure_result(&request, &error), completion_data, None);
             }
             SubagentResumeLookup::Completed(info) => Some(ResumeSourceData {
                 subagent_id: info.subagent_id,
@@ -176,12 +405,12 @@ pub(crate) async fn run_shell_child(
                 {
                     Some(info) => Some(info),
                     None => {
-                        let msg = format!(
+                        let error = format!(
                             "Cannot resume from subagent '{resume_id}': not found. \
                              The subagent may have been evicted or the ID is invalid."
                         );
                         return child_run_output(
-                            failure_result(&request, &msg),
+                            failure_result(&request, &error),
                             completion_data,
                             None,
                         );
@@ -588,7 +817,7 @@ pub(crate) async fn run_shell_child(
             && !ctx
                 .available_models
                 .values()
-                .any(|e| e.info().model == *model_str);
+                .any(|e| e.info().has_model_id(model_str));
         if model_unknown {
             let (parent_config, parent_mid) = read_parent_sampling_config(&ctx).await;
             tracing::warn!(
@@ -629,10 +858,13 @@ pub(crate) async fn run_shell_child(
             .models_manager
             .model_supports_reasoning_effort(effective_model_id.0.as_ref())
     {
-        // Fork's typed effort enum; strings align 1:1 with the sampler's
-        // canonical tokens (none..ultra), so parse is total.
         match effort.as_str().parse::<ReasoningEffort>() {
-            Ok(eff) => effective_sampling_config.reasoning_effort = Some(eff),
+            Ok(eff) => ctx.models_manager.apply_supported_effort(
+                &mut effective_sampling_config,
+                Some(eff),
+                &acp::SessionId::new(request.id.clone()),
+                crate::agent::mvp_agent::reasoning_effort::EffortTarget::NewSession,
+            ),
             Err(err) => {
                 tracing::warn!(
                     value = %effort,
@@ -642,6 +874,9 @@ pub(crate) async fn run_shell_child(
             }
         }
     }
+    let subagent_model_id = effective_sampling_config.model.clone();
+    let auto_compact_threshold_percent =
+        ctx.resolve_auto_compact_threshold_percent(&subagent_model_id);
     let subagent_id = request.id.clone();
     let child_session_id = acp::SessionId::new(subagent_id.clone());
     let override_cwd = select_override_cwd(resume_source.as_ref(), request.cwd.as_deref());
@@ -666,6 +901,7 @@ pub(crate) async fn run_shell_child(
         copy_error: fork_copy_error,
         prefix_len: inherited_prefix_len,
         conversation: forked_conversation,
+        force_compact: force_compact_on_first_turn,
         verbatim_fork: context_verbatim_fork,
     } = match bootstrap_initial_context(
         &request,
@@ -674,7 +910,10 @@ pub(crate) async fn run_shell_child(
         &child_session_info,
         &child_session_dir,
         effective_model_id.0.as_ref(),
-        effective_sampling_config.context_window,
+        super::resume_window::ResumeWindowPolicy {
+            context_window: effective_sampling_config.context_window,
+            auto_compact_threshold_percent,
+        },
     )
     .await
     {
@@ -1163,9 +1402,9 @@ pub(crate) async fn run_shell_child(
         );
     }
     let mcp_owned_count = agent_mcp_servers.len() as u32;
-    let _active = xai_grok_telemetry::activity::SUBAGENTS_ACTIVE.enter();
+    let _active = SUBAGENTS_ACTIVE.enter();
     debug_assert!(
-        xai_grok_telemetry::activity::SUBAGENTS_ACTIVE.get() >= 1,
+        SUBAGENTS_ACTIVE.get() >= 1,
         "SubagentLaunched must stamp a self-inclusive count"
     );
     xai_grok_telemetry::session_ctx::log_event(xai_grok_telemetry::events::SubagentLaunched {
@@ -1185,7 +1424,6 @@ pub(crate) async fn run_shell_child(
         skills_inherited_count,
     });
     let subagent_session_default_agent_profile = Some(definition.name.clone());
-    let subagent_model_id = effective_sampling_config.model.clone();
     let _ = persistence
         .tx
         .send(crate::session::persistence::PersistenceMsg::CurrentModel {
@@ -1232,7 +1470,7 @@ pub(crate) async fn run_shell_child(
             ..Default::default()
         },
         xai_grok_workspace::permission::ClientType::Generic,
-        ctx.resolve_auto_compact_threshold_percent(&subagent_model_id),
+        auto_compact_threshold_percent,
         xai_grok_agent::DEFAULT_SYSTEM_PROMPT_LABEL.to_string(),
         pins.mode,
         ctx.resolve_compaction_verbatim_input(),
@@ -1390,6 +1628,10 @@ pub(crate) async fn run_shell_child(
         cancel_token.clone(),
     );
     let (prompt_admitted, prompt_admitted_rx) = oneshot::channel();
+    super::resume_window::arm_force_compact(
+        &child_handle.force_compact,
+        force_compact_on_first_turn,
+    );
     let mut attempt = Box::pin(run_one_turn_attempt(OneTurnAttemptInput {
         child_handle: &child_handle,
         request: &request,
@@ -1515,7 +1757,6 @@ pub(crate) async fn run_shell_child(
     let mut final_turn_tokens = turn_token_totals;
     let mut final_receipt = None;
     let mut final_receipt_telemetry = None;
-    let mut is_final_receipt_closed = false;
     if let Some(FinalPromptTurnReceipt {
         prompt_id,
         outcome,
@@ -1524,18 +1765,8 @@ pub(crate) async fn run_shell_child(
     {
         final_prompt_id = prompt_id;
         final_receipt_telemetry = Some(telemetry);
-        match outcome {
-            PromptTurnReceiptOutcome::Settled(receipt) => {
-                is_final_receipt_closed = receipt.is_err();
-                final_receipt = Some(*receipt);
-            }
-            PromptTurnReceiptOutcome::TimedOut => {
-                result.success = false;
-                result.cancelled = true;
-                result.error = Some("Subagent receipt settlement timed out".to_string());
-                result.output_usage_incomplete = true;
-                cancellation_may_hide_usage = true;
-            }
+        if let PromptTurnReceiptOutcome::Settled(receipt) = outcome {
+            final_receipt = Some(*receipt);
         }
     }
     if let Some(Ok(Ok(crate::session::commands::PromptTurnOk {
@@ -1549,96 +1780,53 @@ pub(crate) async fn run_shell_child(
             snapshot.turn_output_tokens,
         ));
     }
+    let child_stop_reason: Option<acp::StopReason> = final_receipt
+        .as_ref()
+        .and_then(|r| r.as_ref().ok())
+        .and_then(|r| r.as_ref().ok())
+        .map(|ok| ok.stop_reason);
     let final_text = if final_receipt.is_some() {
-        child_handle
-            .chat_state_handle
-            .get_last_assistant_text_in_turn()
-            .await
-            .unwrap_or_default()
+        child_actor_query(
+            "trailing_assistant_report",
+            child_handle
+                .chat_state_handle
+                .get_trailing_assistant_report(),
+            None,
+        )
+        .await
+        .unwrap_or_default()
     } else {
         String::new()
     };
-    match receipt_disposition {
-        PromptTurnReceiptDisposition::Completed => {
-            if let Some(receipt) = final_receipt {
-                let empty_summary = String::new;
-                let max_turns_summary = |_| String::new();
-                let folded = super::prompt_turn_result::reduce_prompt_turn_result(
-                    super::prompt_turn_result::PromptTurnResultInput {
-                        result,
-                        turn_result: receipt,
-                        mode: super::prompt_turn_result::PromptTurnResultMode::ParentFollowup,
-                        final_text,
-                        was_cancelled: cancel_token.is_cancelled(),
-                        summaries: super::prompt_turn_result::PromptTurnResultSummaries {
-                            success: &empty_summary,
-                            max_turns: &max_turns_summary,
-                            cancelled: &empty_summary,
-                        },
-                        result_tokens: 0,
-                    },
-                );
-                result = folded.result;
-                cancellation_may_hide_usage |= folded.cancellation_may_hide_usage;
-            }
-        }
-        PromptTurnReceiptDisposition::Cancelled => {
-            result.success = false;
-            result.cancelled = true;
-            result.error = Some("Subagent was cancelled".to_string());
-            result.output = Arc::from(final_text);
-            result.output_usage_incomplete = true;
-            cancellation_may_hide_usage = true;
-        }
-        PromptTurnReceiptDisposition::AdmissionUncertain => {
-            result.success = false;
-            result.cancelled = true;
-            result.error = Some("Active-message admission could not be proven settled".to_string());
-            result.output = Arc::from(final_text);
-            result.output_usage_incomplete = true;
-            cancellation_may_hide_usage = true;
-        }
-        PromptTurnReceiptDisposition::TimedOut => {
-            result.success = false;
-            result.cancelled = true;
-            result.error = Some("Subagent receipt settlement timed out".to_string());
-            result.output = Arc::from(final_text);
-            result.output_usage_incomplete = true;
-            cancellation_may_hide_usage = true;
-        }
-    }
-    let settlement_status = match receipt_disposition {
-        PromptTurnReceiptDisposition::Completed => {
-            crate::session::telemetry::classify_completed_settlement(
-                crate::session::telemetry::ActiveAgentMessageCompletedSettlement {
-                    is_result_success: result.success,
-                    is_result_cancelled: result.cancelled,
-                    is_final_receipt_closed,
-                },
-            )
-        }
-        PromptTurnReceiptDisposition::Cancelled => {
-            crate::session::telemetry::ActiveAgentMessageSettlementStatus::Cancelled
-        }
-        PromptTurnReceiptDisposition::AdmissionUncertain => {
-            crate::session::telemetry::ActiveAgentMessageSettlementStatus::AdmissionUncertain
-        }
-        PromptTurnReceiptDisposition::TimedOut => {
-            crate::session::telemetry::ActiveAgentMessageSettlementStatus::TimedOut
-        }
-    };
-    crate::session::telemetry::record_settlement(final_receipt_telemetry, settlement_status).await;
-    let trace_token_totals = child_handle
-        .chat_state_handle
-        .try_get_session_usage()
-        .await
-        .ok()
-        .map(|usage| usage.totals);
+    let folded_settlement = reduce_prompt_turn_settlement(PromptTurnSettlementInput {
+        result,
+        disposition: receipt_disposition,
+        final_receipt,
+        final_text,
+        was_cancelled: cancel_token.is_cancelled(),
+    });
+    result = folded_settlement.result;
+    cancellation_may_hide_usage |= folded_settlement.cancellation_may_hide_usage;
+    crate::session::telemetry::record_settlement(
+        final_receipt_telemetry,
+        folded_settlement.settlement_status,
+    )
+    .await;
+    let trace_token_totals = child_actor_query(
+        "session_usage",
+        child_handle.chat_state_handle.try_get_session_usage(),
+        Err(()),
+    )
+    .await
+    .ok()
+    .map(|usage| usage.totals);
     result.tokens_used = trace_token_totals
         .as_ref()
         .map(xai_chat_state::UsageTotals::total_tokens)
         .unwrap_or(0);
-    let (tool_calls, turns) = signals_snapshot_counts(&child_handle).await;
+    let (tool_calls, turns) = signals_snapshot_counts(&child_handle)
+        .await
+        .unwrap_or((0, 0));
     result.tool_calls = tool_calls;
     result.turns = turns;
     result.duration_ms = start.elapsed().as_millis() as u64;
@@ -1666,26 +1854,24 @@ pub(crate) async fn run_shell_child(
             upload_method: method.clone(),
         }
     }) {
+        let upload_deadline =
+            tokio::time::Instant::now() + crate::util::config::load_blocking_upload_config_sync().1;
+        let upload_wait = crate::upload::turn::UploadWait::Defer {
+            deadline: upload_deadline,
+        };
         let (copy_tx, session_copy_rx) = tokio::sync::oneshot::channel();
         let _ = child_handle.cmd_tx.send(SessionCommand::CopyFile {
             respond_to: copy_tx,
         });
-        let turn_messages: Option<xai_chat_state::TurnCapture> = {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            if child_handle
-                .cmd_tx
-                .send(SessionCommand::TakeTurnMessages { respond_to: tx })
-                .is_ok()
-            {
-                rx.await.ok().flatten()
-            } else {
-                None
-            }
-        };
-        let streaming_partial = crate::upload::turn::take_streaming_partial(
+        let turn_messages = take_child_turn_messages(&child_handle.cmd_tx, upload_deadline).await;
+        let child_committed = child_stop_reason
+            .map(crate::upload::turn::stop_reason_commits_turn)
+            .unwrap_or(result.success);
+        let streaming_partial = take_child_streaming_partial(
             &child_handle.cmd_tx,
+            upload_deadline,
             final_prompt_id.clone(),
-            result.success,
+            child_committed,
             gcs_upload_ctx.model_id.clone(),
         )
         .await
@@ -1714,33 +1900,29 @@ pub(crate) async fn run_shell_child(
         let session_dir = crate::session::persistence::session_dir(&child_handle.info);
         if let Ok(prompt_bytes) = std::fs::read(session_dir.join("system_prompt.txt")) {
             let gcs_path = format!("{}/system_prompt.txt", child_session_id.0);
-            crate::upload::trace::upload_trace_artifact(
+            crate::upload::trace::upload_small_artifact(
                 &trace_ctx,
                 &prompt_bytes,
                 &gcs_path,
                 "text/plain",
                 "system_prompt",
+                upload_wait,
             )
             .await;
         }
         if let Ok(ctx_bytes) = std::fs::read(session_dir.join("prompt_context.json")) {
             let gcs_path = format!("{}/prompt_context.json", child_session_id.0);
-            crate::upload::trace::upload_trace_artifact(
+            crate::upload::trace::upload_small_artifact(
                 &trace_ctx,
                 &ctx_bytes,
                 &gcs_path,
                 "application/json",
                 "prompt_context",
+                upload_wait,
             )
             .await;
         }
-        upload_session_state(
-            &trace_ctx,
-            "before",
-            before_copy_rx,
-            crate::upload::turn::UploadWait::Confirm,
-        )
-        .await;
+        upload_session_state(&trace_ctx, "before", before_copy_rx, upload_wait).await;
         let subagent_auth = ctx.auth_manager.current();
         let metadata = PromptMetadata::new(PromptMetadataParams {
             schema_version: GCS_SCHEMA_VERSION.to_string(),
@@ -1768,17 +1950,18 @@ pub(crate) async fn run_shell_child(
             sandbox: local_sandbox_telemetry(),
             ..Default::default()
         });
-        upload_metadata(&trace_ctx, metadata).await;
-        let resolved_model = child_handle
-            .get_model_metadata()
-            .await
-            .resolved_model_id
-            .or_else(|| gcs_upload_ctx.model_id.clone());
+        upload_metadata(&trace_ctx, metadata, upload_wait).await;
+        let resolved_model = resolve_child_model(
+            &child_handle.cmd_tx,
+            upload_deadline,
+            gcs_upload_ctx.model_id.clone(),
+        )
+        .await;
         let turn_result_meta = TurnResultMetadata {
             schema_version: "1",
             request_id: final_prompt_id,
-            completed: result.success,
-            stop_reason: None,
+            completed: child_committed,
+            stop_reason: child_stop_reason.map(|sr| format!("{sr:?}")),
             total_tokens: trace_token_totals
                 .as_ref()
                 .map(xai_chat_state::UsageTotals::total_tokens),
@@ -1794,19 +1977,14 @@ pub(crate) async fn run_shell_child(
             resolved_model,
             subagents_spawned: vec![],
         };
-        upload_turn_result(
-            &trace_ctx,
-            &turn_result_meta,
-            crate::upload::turn::UploadWait::Confirm,
-        )
-        .await;
+        upload_turn_result(&trace_ctx, &turn_result_meta, upload_wait).await;
         match complete_prompt_trace(
             trace_ctx,
             permission_events,
             session_copy_rx,
             turn_messages,
             streaming_partial,
-            crate::upload::turn::UploadWait::Confirm,
+            upload_wait,
         )
         .await
         {
@@ -1831,7 +2009,12 @@ pub(crate) async fn run_shell_child(
     let final_status = result.status().to_string();
     let snapshot_dispose_enabled = ctx.resolve_subagent_worktree_snapshot_enabled();
     let telemetry_tokens = if result.tool_calls > 0 || result.success {
-        child_handle.chat_state_handle.get_total_tokens().await
+        child_actor_query(
+            "total_tokens",
+            child_handle.chat_state_handle.get_total_tokens(),
+            0,
+        )
+        .await
     } else {
         0
     };
@@ -1851,43 +2034,15 @@ pub(crate) async fn run_shell_child(
         tracing::warn!(
             subagent_id = %request.id,
             parent_prompt_id = ?request.parent_prompt_id,
-            "subagent usage not applied; parent bill marked incomplete"
+            "subagent usage fold unacked; marking parent bill incomplete via fallback"
         );
-        let sticky_prompt = request.parent_prompt_id.clone();
-        let marked_by_parent = if let Some(cmd_tx) = ctx.parent_cmd_tx.as_ref() {
-            let (respond_to, ack) = tokio::sync::oneshot::channel();
-            if cmd_tx
-                .send(
-                    crate::session::commands::SessionCommand::MarkSubagentUsageNotApplied {
-                        parent_prompt_id: sticky_prompt.clone(),
-                        respond_to,
-                    },
-                )
-                .is_ok()
-            {
-                ack.await.is_ok()
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-        if !marked_by_parent && let Some(pid) = sticky_prompt {
-            let (respond_to, ack) = tokio::sync::oneshot::channel();
-            if ctx
-                .subagent_event_tx
-                .send(SubagentEvent::MarkUsageNotApplied(
-                    SubagentMarkUsageNotAppliedRequest {
-                        parent_session_id: ctx.parent_session_id.clone(),
-                        prompt_id: pid,
-                        respond_to,
-                    },
-                ))
-                .is_ok()
-            {
-                let _ = ack.await;
-            }
-        }
+        mark_child_usage_not_applied_with_fallback(
+            ctx.parent_cmd_tx.as_ref(),
+            &ctx.subagent_event_tx,
+            &ctx.parent_session_id,
+            request.parent_prompt_id.clone(),
+        )
+        .await;
     }
     let outcome = if result.success {
         xai_grok_telemetry::events::Outcome::Completed
@@ -1923,33 +2078,15 @@ pub(crate) async fn run_shell_child(
         &ctx.parent_notification_handle,
     ) {
         (Some(parent_tb), Some(parent_notif_handle)) => {
-            if !request.surface_completion {
-                let reparented_task_ids: Vec<String> = parent_tb
-                    .list_tasks()
-                    .await
-                    .into_iter()
-                    .filter(|t| {
-                        !t.completed && t.owner_session_id.as_deref() == Some(&*child_session_id.0)
-                    })
-                    .map(|t| t.task_id)
-                    .collect();
-                if !reparented_task_ids.is_empty()
-                    && let Some(cmd_tx) = ctx.parent_cmd_tx.as_ref()
-                {
-                    let _ = cmd_tx.send(SessionCommand::RecordGoalTurnTaskIds {
-                        task_ids: reparented_task_ids,
-                    });
-                }
-            }
-            let parent_backend_weak = std::sync::Arc::downgrade(parent_tb);
-            parent_tb
-                .reparent_notifications(
-                    &child_session_id.0,
-                    &ctx.parent_session_id,
-                    parent_notif_handle.clone(),
-                    parent_backend_weak,
-                )
-                .await;
+            reparent_surviving_child_tasks(
+                parent_tb,
+                parent_notif_handle,
+                ctx.parent_cmd_tx.as_ref(),
+                &child_session_id.0,
+                &ctx.parent_session_id,
+                request.surface_completion,
+            )
+            .await;
         }
         (Some(_), None) | (None, Some(_)) => {
             tracing::warn!(

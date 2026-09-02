@@ -1,19 +1,15 @@
-//! Probe that verifies a running workspace-server actually serves tools
-//! over the server connection (not just that it reached READY).
+//! Probe that verifies a running workspace-server actually serves tools over the server connection (not just that it reached READY).
 //!
-//! Connects to the server as a client harness, binds the workspace-server's
-//! session (its `server_id` equals the sandbox `session_id`), then
-//! invokes real tools and asserts the results:
+//! Connects to the server as a client harness and binds the workspace-server's session (its `server_id` equals the sandbox `session_id`).
+//! Then invokes real tools and asserts the results:
 //!   - `run_terminal_command` echoes a nonce that must come back,
 //!   - `read_file` reads a file the first command wrote.
 //!
-//! Exits 0 and prints `PROBE_OK` on success; non-zero with a diagnostic
-//! on failure. Intended for sandbox end-to-end tests.
+//! Exits 0 and prints `PROBE_OK` on success; non-zero with a diagnostic on failure.
+//! Intended for sandbox end-to-end tests.
 //!
-//! The client connects to the *local* server (the same one the
-//! workspace-server reaches back to, e.g. `ws://localhost:10030/v1/tools`)
-//! using a bearer token. `servers.list` is scoped per-user on the server, so
-//! the bearer must resolve to the same user that owns the session — the
+//! The client connects to the *local* server the workspace-server reaches back to (e.g. `ws://localhost:10030/v1/tools`), using a bearer token.
+//! `servers.list` is scoped per-user on the server, so the bearer must resolve to the same user that owns the session; the
 //! access token from `~/.grok/auth.json` does (same identity).
 
 use base64::Engine;
@@ -38,8 +34,7 @@ struct Args {
     #[arg(long)]
     session_id: String,
 
-    /// Hub user to authenticate as. Must match the user the
-    /// workspace-server registered under (`local-dev` in local-auth-dev).
+    /// Hub user to authenticate as. Must match the user the workspace-server registered under (`local-dev` in local-auth-dev).
     #[arg(long, default_value = "local-dev")]
     user_id: String,
 
@@ -52,10 +47,8 @@ struct Args {
     cwd: String,
 }
 
-/// Mint an unsigned JWT carrying `{"sub": user_id}`. The local-auth-dev
-/// hub derives the principal's user from the bearer's JWT `sub` and does
-/// NOT verify the signature, so this is sufficient to authenticate as a
-/// specific local-dev user. Not usable against a real (verifying) hub.
+/// Mint an unsigned JWT carrying `{"sub": user_id}`.
+/// The local-auth-dev hub reads the principal from `sub` without verifying the signature; a real (verifying) hub rejects this.
 fn dev_bearer(user_id: &str) -> String {
     let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
     let header = b64.encode(br#"{"alg":"none","typ":"JWT"}"#);
@@ -108,9 +101,8 @@ async fn main() -> anyhow::Result<()> {
 
     let credential = AuthCredential::bearer(bearer(&args));
 
-    // The server connection can drop once right after connect (the SDK
-    // reconnects with backoff). build()'s eager session_open doesn't
-    // survive that first blip, so retry the connect + bind a few times.
+    // The server connection can drop once right after connect (the SDK reconnects with backoff)
+    // build()'s eager session_open doesn't survive that first blip, so retry the connect and bind a few times
     let mut last_err = None;
     for attempt in 1..=8u32 {
         match connect_and_bind(&args, &credential).await {
@@ -155,8 +147,7 @@ async fn connect_and_bind(
     eprintln!("[probe] servers visible to this user: {server_ids:?}");
 
     let server_id = args.session_id.as_str();
-    // Strict servers (`--require-explicit-toolset`) fail metadata-less binds
-    // closed: bind with exactly the tools the checks below invoke.
+    // Strict servers (`--require-explicit-toolset`) fail metadata-less binds closed: bind with exactly the tools the checks below invoke
     let metadata = json!({
         "tools": [
             {"id": "GrokBuild:run_terminal_cmd", "name_override": "run_terminal_command"},

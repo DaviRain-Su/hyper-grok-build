@@ -35,8 +35,8 @@ const BATCH_INTERVAL_MS: u64 = 50;
 const DEFAULT_MAX_FILES: usize = 100;
 const DEFAULT_MAX_MATCHES: usize = 1000;
 
-fn build_ripgrep_command(root: &Path, params: &ContentSearchParams) -> Command {
-    let rg_path = crate::util::ripgrep::rg_path();
+fn build_ripgrep_command(root: &Path, params: &ContentSearchParams) -> anyhow::Result<Command> {
+    let rg_path = crate::util::ripgrep::rg_path()?;
 
     let mut cmd = Command::new(&rg_path);
     cmd.current_dir(root);
@@ -73,7 +73,7 @@ fn build_ripgrep_command(root: &Path, params: &ContentSearchParams) -> Command {
     cmd.arg("-e").arg(&params.pattern);
     cmd.arg(".");
 
-    cmd
+    Ok(cmd)
 }
 
 fn extract_match_positions(data: &serde_json::Value) -> (Option<usize>, Option<usize>) {
@@ -126,8 +126,8 @@ fn parse_file_path_from_json(root: &Path, json: &serde_json::Value) -> Option<St
     Some(root.join(normalized).to_string_lossy().to_string())
 }
 
-/// Streaming content search with batched status notifications. Cancellation
-/// is dropping the future: the spawn config kills rg on drop.
+/// Streaming content search with batched status notifications.
+/// Cancellation is dropping the future: the spawn config kills rg on drop.
 pub async fn content_search_streaming<F>(
     root: &Path,
     params: &ContentSearchParams,
@@ -139,7 +139,7 @@ where
     let max_files = params.max_files.unwrap_or(DEFAULT_MAX_FILES);
     let max_matches = params.max_matches.unwrap_or(DEFAULT_MAX_MATCHES);
 
-    let mut cmd = build_ripgrep_command(root, params);
+    let mut cmd = build_ripgrep_command(root, params)?;
     #[allow(clippy::disallowed_methods)] // waited on below; killed on drop (cancellation)
     let mut child = cmd
         .spawn()
@@ -261,14 +261,12 @@ where
 mod tests {
     use super::*;
 
-    /// Cancellation is dropping the future; commands from
-    /// `build_ripgrep_command` must kill rg on drop.
+    /// Cancellation is dropping the future; commands from `build_ripgrep_command` must kill rg on drop.
     #[cfg(unix)]
     #[tokio::test]
     async fn dropping_spawned_search_child_kills_rg() {
         let tmp = tempfile::TempDir::new().unwrap();
-        // Overflow the stdout pipe (rg caps 50 matches/file, so use many files)
-        // so rg blocks on write and stays alive until killed.
+        // Overflow the stdout pipe (rg caps 50 matches/file, so use many files) so rg blocks on write and stays alive until killed
         let line = format!("needle {}\n", "x".repeat(120));
         for i in 0..200 {
             std::fs::write(tmp.path().join(format!("f{i}.txt")), line.repeat(50)).unwrap();
@@ -278,7 +276,7 @@ mod tests {
             pattern: "needle".to_string(),
             ..Default::default()
         };
-        let mut cmd = build_ripgrep_command(tmp.path(), &params);
+        let mut cmd = build_ripgrep_command(tmp.path(), &params).expect("build rg command");
         // rg is hermetic under Bazel and on PATH locally; spawn failure is a real bug.
         #[allow(clippy::disallowed_methods)] // test child, killed on drop below
         let mut child = cmd.spawn().expect("spawn rg");

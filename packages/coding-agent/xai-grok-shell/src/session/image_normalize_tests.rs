@@ -59,7 +59,7 @@ fn make_gif_content(width: u32, height: u32) -> ImageContent {
         "image/gif",
     )
 }
-/// GIF must be PNG'd before send — engines do not sample GIF on the wire.
+/// GIF must be PNG'd before send; engines do not sample GIF on the wire.
 #[tokio::test]
 async fn gif_attachment_transcoded_to_png() {
     let cache = fresh_cache();
@@ -102,9 +102,8 @@ async fn large_dimensions_resized_when_over_side_limit() {
         other => panic!("expected Compressed, got {other:?}"),
     }
 }
-/// A flat 1700x1700 attachment is under the 2000px side clamp but its
-/// 2.89 Mpx area exceeds the v9 pixel budget, so it must be downscaled —
-/// under a side-only cap this passed through unchanged at full resolution.
+/// A flat 1700x1700 attachment is under the 2000px side clamp but its 2.89 Mpx area exceeds the v9 pixel budget, so it must be downscaled.
+/// Under a side-only cap this passed through unchanged at full resolution.
 #[tokio::test]
 async fn attachment_over_area_cap_is_downscaled() {
     let img = make_image_content(1700, 1700);
@@ -123,8 +122,7 @@ async fn attachment_over_area_cap_is_downscaled() {
         other => panic!("expected a 2.89 Mpx image to be downscaled, got {other:?}"),
     }
 }
-/// 3438x1830 flat screenshot: aspect > ~1.67, so the 2000px side clamp
-/// binds before the area cap and the long side lands exactly on 2000.
+/// 3438x1830 flat screenshot: aspect ratio above ~1.67, so the 2000px side clamp binds before the area cap and the long side lands exactly on 2000.
 #[tokio::test]
 async fn wide_screenshot_clamped_to_side_limit_and_area_budget() {
     let img = make_image_content(3438, 1830);
@@ -144,8 +142,7 @@ async fn wide_screenshot_clamped_to_side_limit_and_area_budget() {
         other => panic!("expected Compressed, got {other:?}"),
     }
 }
-/// Near-square 1800x1700 = 3.06 Mpx: sides are within the 2000px clamp,
-/// so only the v9 area cap triggers; the result stays under 2000 per side.
+/// Near-square 1800x1700 = 3.06 Mpx: sides are within the 2000px clamp, so only the v9 area cap triggers; the result stays under 2000 per side.
 #[tokio::test]
 async fn near_square_over_area_budget_downscaled_below_side_clamp() {
     let img = make_image_content(1800, 1700);
@@ -167,9 +164,8 @@ async fn near_square_over_area_budget_downscaled_below_side_clamp() {
         other => panic!("expected Compressed, got {other:?}"),
     }
 }
-/// External-harness pin: the 1024px side-only resize with area cap
-/// disabled, so behavior matches the pre-v9-area-cap path —
-/// a 1300x900 paste still lands on a 1024px long side.
+/// Pins the external-harness behavior: the 1024px side-only resize runs with the area cap disabled, matching the path before the v9 area cap.
+/// A 1300x900 paste still lands on a 1024px long side.
 #[tokio::test]
 async fn strict_path_still_downscales_to_1024_side_only() {
     let img = make_image_content(1300, 900);
@@ -190,8 +186,7 @@ async fn strict_path_still_downscales_to_1024_side_only() {
         other => panic!("expected Compressed on the strict path, got {other:?}"),
     }
 }
-/// External-harness pin: within the 1024px side cap nothing triggers — the
-/// attachment passes through untouched.
+/// Pins the external-harness behavior: within the 1024px side cap nothing triggers, and the attachment passes through untouched.
 #[tokio::test]
 async fn strict_path_passes_through_within_1024_side() {
     let img = make_image_content(1000, 800);
@@ -246,11 +241,9 @@ async fn oversize_bytes_becomes_jpeg_under_limit() {
         other => panic!("expected Compressed, got {other:?}"),
     }
 }
-/// Regression: a byte-efficient image over the 2000px side clamp (e.g. a
-/// 2048px export) whose downscale is not smaller in bytes. The old
-/// keep-original branch returned the still-oversized original, which the
-/// API rejects on many-image requests (400). Normalize must clamp the side
-/// regardless of byte size.
+/// Regression: a byte-efficient image over the 2000px side clamp (e.g. a 2048px export) whose downscale is not smaller in bytes.
+/// The old keep-original branch returned the still-oversized original, which the API rejects on many-image requests (400).
+/// Normalize must clamp the side regardless of byte size.
 #[tokio::test]
 async fn oversize_dimension_but_byte_efficient_is_still_downscaled() {
     use image::{ImageBuffer, Rgb};
@@ -540,8 +533,7 @@ async fn truncated_png_fails_integrity_check_in_normalize_one() {
         other => panic!("expected Failed, got {other:?}"),
     }
 }
-/// Truncated JPEG is rejected somewhere in the normalize pipeline
-/// (dimension-probe or integrity-check, depending on the codec).
+/// Truncated JPEG is rejected somewhere in the normalize pipeline (dimension-probe or integrity-check, depending on the codec).
 #[tokio::test]
 async fn corrupt_jpeg_rejected_by_normalize_one() {
     use image::{ImageBuffer, Rgb};
@@ -579,7 +571,7 @@ async fn corrupt_jpeg_rejected_by_normalize_one() {
         other => panic!("expected Failed, got {other:?}"),
     }
 }
-/// Entropy-cut JPEG (a data URI sliced mid-payload by tool output):
+/// A JPEG cut inside its entropy-coded data (a data URI sliced mid-payload by tool output).
 /// zune-jpeg decodes it leniently, so only the structural walk rejects it.
 #[tokio::test]
 async fn truncated_jpeg_under_size_limits_is_dropped() {
@@ -613,8 +605,7 @@ async fn truncated_jpeg_under_size_limits_is_dropped() {
         other => panic!("expected Failed, got {other:?}"),
     }
 }
-/// A 16×16 icon clears the 8px-side floor but violates the API's
-/// 512-total-pixel floor.
+/// A 16×16 icon clears the 8px-side floor but violates the API's 512-total-pixel floor.
 #[tokio::test]
 async fn below_total_pixel_floor_is_dropped() {
     let img = make_image_content(16, 16);
@@ -678,10 +669,9 @@ fn persisted_image_reject_reason_verdicts() {
     assert!(reason(&garbage_ico).is_some_and(|r| r.contains("Ico")));
     assert!(reason(b"not an image").is_some());
 }
-/// Regression: a camera-class photo above the old 16 Mpx decode cap
-/// (production shape: a 5184×3888 ≈ 20 Mpx attachment refused with
-/// "exceeds … px decode limit") must normalize via downscale, not be
-/// rejected — the API accepts up to ~178.9 Mpx.
+/// Regression: a camera-class photo above the old 16 Mpx decode cap must normalize via downscale, not be rejected.
+/// The production shape: a 5184×3888 ≈ 20 Mpx attachment refused with "exceeds … px decode limit".
+/// The API accepts up to ~178.9 Mpx.
 #[tokio::test]
 async fn camera_sized_photo_is_compressed_not_rejected() {
     use image::codecs::jpeg::JpegEncoder;
@@ -703,9 +693,8 @@ async fn camera_sized_photo_is_compressed_not_rejected() {
         other => panic!("expected Compressed, got {other:?}"),
     }
 }
-/// Above the API ceiling the decode is still refused (the API would
-/// 400 it regardless). SOF dims are patched — a real fixture that
-/// large is infeasible to encode.
+/// Above the API ceiling the decode is still refused (the API would 400 it regardless).
+/// SOF dims are patched because a real fixture that large is infeasible to encode.
 #[tokio::test]
 async fn above_api_ceiling_is_rejected_by_normalize() {
     use image::codecs::jpeg::JpegEncoder;
@@ -731,10 +720,9 @@ async fn above_api_ceiling_is_rejected_by_normalize() {
         other => panic!("expected Failed, got {other:?}"),
     }
 }
-/// The API also 400s images whose header dims exceed its
-/// `MAX_IMAGE_PIXELS` ceiling; a kept one would brick the session the
-/// same way as a below-floor image. (SOF dims are patched because
-/// encoding a real >178 Mpx fixture is infeasible.)
+/// The API also 400s images whose header dims exceed its `MAX_IMAGE_PIXELS` ceiling.
+/// A kept one would brick the session the same way as a below-floor image.
+/// (SOF dims are patched because encoding a real fixture above 178 Mpx is infeasible.)
 #[test]
 fn persisted_image_reject_reason_pixel_ceiling() {
     use image::codecs::jpeg::JpegEncoder;
@@ -754,8 +742,7 @@ fn persisted_image_reject_reason_pixel_ceiling() {
         persisted_image_reject_reason(&jpeg).is_some_and(|r| r.contains("above pixel ceiling")),
     );
 }
-/// The `read_file` inline-attach gate (the below-floor icon enforcement
-/// point): floors enforced, and unvalidatable payloads fail closed.
+/// The `read_file` inline-attach gate (the below-floor icon enforcement point): floors are enforced, and unvalidatable payloads fail closed.
 #[test]
 fn inline_attach_verdict_gates_floors_and_fails_closed() {
     use base64::Engine as _;
@@ -785,8 +772,7 @@ fn inline_attach_verdict_gates_floors_and_fails_closed() {
         InlineAttachVerdict::Unreadable
     );
 }
-/// Oversized truncated JPEG must be dropped too — not silently healed
-/// into a mostly-grey re-encode.
+/// Oversized truncated JPEG must be dropped too, not silently healed into a mostly-grey re-encode.
 #[tokio::test]
 async fn truncated_oversized_jpeg_is_dropped() {
     let mut raw = jpeg_larger_than_limit();
@@ -816,7 +802,6 @@ async fn small_well_formed_png_unchanged_after_integrity_check() {
         other => panic!("expected Unchanged, got {other:?}"),
     }
 }
-/// Dropped notes propagate to the top-level `NormalizeResult`.
 #[tokio::test]
 async fn normalize_images_collects_dropped_notes() {
     let mut bytes = make_test_png(32, 32);
@@ -859,8 +844,7 @@ fn image_dropped_notice_picks_tag_per_harness() {
     assert!(grok.contains("Image 5"));
     assert_eq!(render_image_dropped_notice(&[], false), "");
 }
-/// Large flat-color images compress better as PNG than JPEG; the
-/// normalizer must pick PNG when it wins.
+/// Large flat-color images compress better as PNG than JPEG; the normalizer must pick PNG when it wins.
 #[tokio::test]
 async fn flat_color_oversized_picks_png() {
     use image::{ImageBuffer, Rgb};
@@ -893,8 +877,7 @@ async fn flat_color_oversized_picks_png() {
         other => panic!("expected Compressed, got {other:?}"),
     }
 }
-/// `Bytes::as_ptr` identity + re-stamped per-call `index` together
-/// prove the second call is a cache hit through `entry_to_outcome`.
+/// `Bytes::as_ptr` identity and the re-stamped per-call `index` together prove the second call is a cache hit through `entry_to_outcome`.
 #[tokio::test]
 async fn normalize_one_in_uses_cache_for_repeat_input() {
     let cache = fresh_cache();
@@ -933,8 +916,7 @@ async fn normalize_one_in_uses_cache_for_repeat_input() {
     };
     assert_eq!(p1, p2, "`Bytes::as_ptr` identity proves cache hit");
 }
-/// Forces `re_encode_under_limit` to exhaust every step (drives
-/// the `ReEncodingOversized` path).
+/// Forces `re_encode_under_limit` to exhaust every step (drives the `ReEncodingOversized` path).
 static UNSATISFIABLE_PARAMS: ReEncodeParams = ReEncodeParams {
     max_bytes: 0,
     max_side_px: MAX_ENCODE_SIDE_PX,
@@ -1061,8 +1043,7 @@ async fn sub_8x8_image_is_rejected() {
         result.dropped[0]
     );
 }
-/// Boundary: 8×8 clears the per-side floor but not the API's
-/// 512-total-pixel floor (64 px would 400 server-side).
+/// Boundary: 8×8 clears the per-side floor but not the API's 512-total-pixel floor (64 px would 400 server-side).
 #[tokio::test]
 async fn exactly_8x8_is_rejected_by_total_pixel_floor() {
     let img = make_image_content(8, 8);
@@ -1076,7 +1057,7 @@ async fn exactly_8x8_is_rejected_by_total_pixel_floor() {
         result.dropped[0]
     );
 }
-/// One dimension below threshold.
+/// One dimension below the 8px side floor is enough to reject.
 #[tokio::test]
 async fn seven_by_eight_is_rejected() {
     let img = make_image_content(7, 8);

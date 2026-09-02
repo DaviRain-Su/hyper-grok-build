@@ -945,4 +945,85 @@ mod tests {
 
         assert_eq!(ua.render(), "grok-shell/0.1.171 (macos; aarch64)");
     }
+
+    #[tokio::test]
+    async fn send_with_retry_escaping_pool_combinator_behavior() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        // (a) all-retryable: op runs max_attempts times, backoff awaited max_attempts-1 times, last Err returned.
+        let op_calls = AtomicU32::new(0);
+        let backoffs = AtomicU32::new(0);
+        let exhausted: Result<(), u32> = send_with_retry_escaping_pool(
+            |_client| {
+                let n = op_calls.fetch_add(1, Ordering::SeqCst);
+                async move { Err(n) }
+            },
+            3,
+            |_e: &u32| true,
+            |_attempt| {
+                backoffs.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(())
+            },
+        )
+        .await;
+        assert_eq!(exhausted, Err(2), "returns the last attempt's error");
+        assert_eq!(
+            op_calls.load(Ordering::SeqCst),
+            3,
+            "op runs max_attempts times"
+        );
+        assert_eq!(
+            backoffs.load(Ordering::SeqCst),
+            2,
+            "backoff awaited max_attempts-1 times"
+        );
+
+        // (b) non-retryable: fail fast after one op call, no backoff.
+        let op_calls = AtomicU32::new(0);
+        let backoffs = AtomicU32::new(0);
+        let fast: Result<(), u32> = send_with_retry_escaping_pool(
+            |_client| {
+                op_calls.fetch_add(1, Ordering::SeqCst);
+                async { Err(7) }
+            },
+            5,
+            |_e: &u32| false,
+            |_attempt| {
+                backoffs.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(())
+            },
+        )
+        .await;
+        assert_eq!(fast, Err(7));
+        assert_eq!(
+            op_calls.load(Ordering::SeqCst),
+            1,
+            "a non-retryable error fails fast"
+        );
+        assert_eq!(
+            backoffs.load(Ordering::SeqCst),
+            0,
+            "no backoff on a fast failure"
+        );
+
+        // (c) success short-circuits: fail once (retryable), then succeed on the 2nd attempt.
+        let op_calls = AtomicU32::new(0);
+        let ok: Result<u32, u32> = send_with_retry_escaping_pool(
+            |_client| {
+                let n = op_calls.fetch_add(1, Ordering::SeqCst);
+                let outcome: Result<u32, u32> = if n == 0 { Err(1) } else { Ok(42) };
+                async move { outcome }
+            },
+            5,
+            |_e: &u32| true,
+            |_attempt| std::future::ready(()),
+        )
+        .await;
+        assert_eq!(ok, Ok(42));
+        assert_eq!(
+            op_calls.load(Ordering::SeqCst),
+            2,
+            "stops at the first success"
+        );
+    }
 }

@@ -71,7 +71,7 @@ async fn tool_bridge_routes_writes_through_injected_fs() {
         .await
         .expect("finalize_builder should succeed");
 
-    // Create a new file via search_replace (old_string="" = new file).
+    // Create a new file via search_replace (an empty old_string means a new file)
     let result = bridge
         .call(
             "search_replace",

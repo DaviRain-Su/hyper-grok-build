@@ -1,10 +1,8 @@
 //! Empty-composer Enter sends the top mid-turn queued follow-up now.
 //!
-//! Regression for send-now discoverability: plain Enter with text still
-//! *queues*; a second bare Enter on the empty prompt is cancel-and-send — the
-//! running turn is cancelled (silently: no "Turn cancelled by user" marker)
-//! and the queued row runs as the next turn, arriving on the wire as a
-//! standard `<user_query>` prompt with the interjection preamble.
+//! Plain Enter with text still *queues*; a second bare Enter on the empty prompt is cancel-and-send.
+//! The running turn is cancelled silently (no "Turn cancelled by user" marker) and the queued row runs as the next turn.
+//! On the wire it arrives as a standard `<user_query>` prompt with the interjection preamble.
 
 use std::time::Duration;
 
@@ -44,14 +42,13 @@ fn all_user_message_blobs(content: &ContentController) -> Vec<String> {
         .collect()
 }
 
-/// Mid-turn queue via Enter, then empty Enter cancels the running turn and
-/// runs that row as the next turn (cancel-and-send).
+/// Mid-turn queue via Enter, then empty Enter cancels the running turn and runs that row as the next turn (cancel-and-send).
 pub async fn assert_empty_enter_force_sends_top_queued() -> Result<()> {
     let content = ContentController::start()
         .await
         .context("start ContentController")?;
-    // Gate turn 1's terminal event so the queue + empty-Enter provably land
-    // mid-turn — a paced-chunk window races turn end on slow (remote) workers.
+    // Gate turn 1's terminal event so the queue and the empty Enter provably land mid-turn
+    // A paced-chunk window races turn end on slow (remote) workers
     let mut turn_one = content
         .expect_agent_turn_blocked("running turn before send-now", slow_turn_text("TURNONE"));
     let mut turn_two = content.expect_agent_turn(
@@ -82,12 +79,10 @@ pub async fn assert_empty_enter_force_sends_top_queued() -> Result<()> {
         .context("queued text visible")?;
 
     harness.inject_keys(b"\r").context("empty Enter send-now")?;
-    // Cancel-and-send: the shell cancels turn 1 (its held completion is
-    // irrelevant — the abort wins) and promotes the row to run as turn 2.
+    // Cancel-and-send: the shell cancels turn 1 (its held completion is irrelevant; the abort wins) and promotes the row to run as turn 2
     turn_one.release();
-    // The promoted row renders as a standard user prompt block ("❯ " prefix
-    // distinguishes the committed block from the prefix-less queue row) with
-    // the new turn's reply below it.
+    // The promoted row renders as a standard user prompt block with the new turn's reply below it
+    // The "❯ " prefix distinguishes the committed block from the prefix-less queue row
     harness
         .wait_for_text(
             "\u{276F} please also check the logs",
@@ -101,8 +96,7 @@ pub async fn assert_empty_enter_force_sends_top_queued() -> Result<()> {
         .await
         .context("promoted turn expectation timeout")?;
 
-    // A send-now cancel is silent: no "Turn cancelled by user" marker may
-    // appear between the partial turn-1 output and the promoted prompt.
+    // A send-now cancel is silent: no "Turn cancelled by user" marker may appear between the partial turn-1 output and the promoted prompt
     if harness.contains_text("Turn cancelled by user") {
         bail!(
             "send-now cancel must not render a cancelled marker\n{}",

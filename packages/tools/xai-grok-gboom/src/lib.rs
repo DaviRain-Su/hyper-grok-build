@@ -1,21 +1,15 @@
-//! `/gboom` easter egg: a tiny single-level raycaster shooter rendered in
-//! the terminal via the kitty graphics protocol.
+//! `/gboom` easter egg: a tiny single-level raycaster shooter rendered in the terminal via the kitty graphics protocol.
 //!
-//! Not production code — this is for fun and is not maintained to the
-//! standards in `crates/codegen/AGENTS.md`.
+//! Not production code: this is for fun and is not maintained to the standards in `crates/codegen/AGENTS.md`.
 //!
-//! Typing `/gboom` (and nothing else) opens a modal overlay — the same
-//! surface the imagine-video player uses — and streams PNG frames via
-//! per-frame kitty `a=T` retransmission at the ~30 fps animation tick. The
-//! simulation steps with wall-clock `dt`, so gameplay speed is independent
-//! of the achieved frame rate.
+//! Typing `/gboom` (and nothing else) opens a modal overlay, the same overlay the imagine-video player uses.
+//! It streams PNG frames, one full kitty `a=T` retransmission per frame, at the ~30 fps animation tick.
+//! The simulation steps with wall-clock `dt`, so gameplay speed is independent of the achieved frame rate.
 //!
-//! Controls: `W`/`↑` forward, `S`/`↓` back, `A`/`D` strafe, `←`/`→` turn,
-//! mouse move/drag aim (in-modal, Playing only), click or `Space`/`Enter`
-//! fire, `Esc`/`q` quit. Movement uses the continuous held-key model in
-//! [`game`] — terminals deliver no key-release events, so it eases toward a
-//! steady target while a key is held, staying smooth regardless of the OS
-//! key-repeat cadence.
+//! Controls: `W`/`↑` forward, `S`/`↓` back, `A`/`D` strafe, `←`/`→` turn, click or `Space`/`Enter` fire, `Esc`/`q` quit.
+//! Moving or dragging the mouse aims, inside the modal and only while Playing.
+//! Movement uses the continuous held-key model in [`game`], because terminals deliver no key-release events.
+//! It eases toward a steady target while a key is held, staying smooth regardless of the OS key-repeat cadence.
 
 mod assets;
 mod engine;
@@ -30,14 +24,12 @@ use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKin
 use engine::{FireSim, FrameBuffer, Renderer};
 use game::{Control, Game};
 
-/// Maximum rendered frame width in pixels. Each frame is PNG-encoded and
-/// pushed through the PTY every tick (~100 KB / ~3 MB/s at 30 fps at this
-/// cap), comfortably within what the video player already streams.
+/// Maximum rendered frame width in pixels.
+/// Each frame is PNG-encoded and pushed through the PTY every tick (~100 KB, ~3 MB/s at 30 fps at this cap), within what the video player streams.
 const MAX_FRAME_W: usize = 480;
 /// Maximum rendered frame height in pixels.
 const MAX_FRAME_H: usize = 320;
-/// Assumed cell size in pixels for aspect mapping (cell aspect 0.5,
-/// consistent with `terminal::image::fit_image_to_cells`).
+/// Assumed cell size in pixels for aspect mapping (cell aspect 0.5, consistent with `terminal::image::fit_image_to_cells`).
 const CELL_PX_W: usize = 8;
 const CELL_PX_H: usize = 16;
 /// Largest simulation step; longer gaps (lag, suspend) are clamped.
@@ -51,8 +43,8 @@ const MAX_MOUSE_AIM_DX: i32 = 12;
 /// Near-black outline that keeps screen text legible over the fire.
 const TEXT_OUTLINE: [u8; 3] = [16, 6, 6];
 
-/// Where the player is in the easter egg flow. Time spent in the current
-/// phase is tracked by `GboomState::phase_time` (reset on every transition).
+/// Where the player is in the easter egg flow.
+/// Time spent in the current phase is tracked by `GboomState::phase_time` (reset on every transition).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
     Title,
@@ -78,9 +70,8 @@ pub struct GboomHud {
     pub playing: bool,
 }
 
-/// Modal state for the `/gboom` easter egg. Owned by the agent view like
-/// the video viewer; ticked from the animation tick; rendered in the draw
-/// path via post-flush kitty escapes.
+/// Modal state for the `/gboom` easter egg.
+/// The agent view owns it like the video viewer, ticks it from the animation tick, and renders it in the draw path via post-flush kitty escapes.
 pub struct GboomState {
     game: Game,
     renderer: Renderer,
@@ -118,9 +109,8 @@ impl GboomState {
         }
     }
 
-    /// On terminals that report key releases (Kitty keyboard protocol),
-    /// latch keys on press/release so the player can move and turn at
-    /// once; otherwise fall back to the repeat-bridging timer model.
+    /// On terminals that report key releases (Kitty keyboard protocol), latch keys on press/release so the player can move and turn at once.
+    /// Otherwise fall back to the timer model that bridges OS key repeats.
     /// Defaults to off; the host sets it right after construction.
     pub fn set_release_aware(&mut self, release_aware: bool) {
         self.game.set_release_aware(release_aware);
@@ -142,7 +132,6 @@ impl GboomState {
         col >= x && row >= y && col < x.saturating_add(w) && row < y.saturating_add(h)
     }
 
-    /// Map a key to its movement control, if any.
     fn control_for(code: KeyCode) -> Option<Control> {
         match code {
             KeyCode::Char('w' | 'W') | KeyCode::Up => Some(Control::Forward),
@@ -155,9 +144,8 @@ impl GboomState {
         }
     }
 
-    /// Advance the game by wall-clock time. Every tick produces a new
-    /// frame (the world, fire, and bob animations are continuous), so the
-    /// caller should always redraw after ticking.
+    /// Advance the game by wall-clock time.
+    /// Every tick produces a new frame (the world, fire, and bob animations are continuous), so the caller should always redraw after ticking.
     pub fn tick(&mut self) {
         let dt = self.last_tick.elapsed().as_secs_f32().min(MAX_DT);
         self.last_tick = Instant::now();
@@ -170,8 +158,7 @@ impl GboomState {
                 if self.game.dead() {
                     self.set_phase(Phase::Dead);
                 } else if self.game.won() && self.all_corpses_settled() {
-                    // The corpse check makes the win screen wait for the
-                    // final death animation to play out.
+                    // The corpse check makes the win screen wait for the final death animation to play out
                     self.set_phase(Phase::Won);
                 }
             }
@@ -210,9 +197,7 @@ impl GboomState {
                 self.sim_gen += 1;
             }
             Phase::Playing => {
-                // No `sim_gen` bump: held keys and queued shots only take
-                // effect on the next tick (which bumps it), so the current
-                // frame's cache stays valid.
+                // Held keys and queued shots only take effect on the next tick, which bumps `sim_gen`, so the current frame's cache stays valid
                 if let Some(control) = Self::control_for(key.code) {
                     self.game.press(control);
                 } else if matches!(key.code, KeyCode::Char(' ') | KeyCode::Enter) {
@@ -228,8 +213,7 @@ impl GboomState {
         GboomKeyOutcome::Changed
     }
 
-    /// Handle a key-release event (release-aware terminals only): un-latch
-    /// the corresponding movement control so the player stops that motion.
+    /// Handle a key-release event (release-aware terminals only): un-latch the corresponding movement control so the player stops that motion.
     pub fn handle_release(&mut self, key: &KeyEvent) {
         if matches!(self.phase, Phase::Playing)
             && let Some(control) = Self::control_for(key.code)
@@ -238,7 +222,7 @@ impl GboomState {
         }
     }
 
-    /// In-region move/drag aims; left-click fires (Playing only).
+    /// Moving or dragging the mouse inside the region aims; a left click there fires (Playing only).
     pub fn handle_mouse(&mut self, mouse: &MouseEvent) {
         if !matches!(self.phase, Phase::Playing) {
             return;
@@ -271,21 +255,18 @@ impl GboomState {
         }
     }
 
-    /// Un-latch all movement (on focus loss), so a release dropped while
-    /// unfocused can't leave the player walking forever.
+    /// Un-latch all movement (on focus loss), so a release dropped while unfocused can't leave the player walking forever.
     pub fn release_all(&mut self) {
         self.game.release_all();
         self.last_mouse_col = None;
     }
 
-    /// Whether the game currently holds a latched movement control. Lets the
-    /// app layer assert that backgrounded games drop their holds.
+    /// Lets the app layer assert that backgrounded games drop their holds.
     #[cfg(any(test, feature = "test-support"))]
     pub fn any_movement_held(&self) -> bool {
         self.game.any_held()
     }
 
-    /// HUD values for the chrome line.
     pub fn hud(&self) -> GboomHud {
         GboomHud {
             hp: self.game.player.hp,
@@ -295,8 +276,7 @@ impl GboomState {
         }
     }
 
-    /// Map a cell box to the internal render resolution: match the box's
-    /// pixel aspect (8x16 px cells), capped to bound PNG payload and CPU.
+    /// Map a cell box to the internal render resolution: match the box's pixel aspect (8x16 px cells), capped to bound PNG payload and CPU.
     pub fn frame_size_for_cells(cols: u16, rows: u16) -> (usize, usize) {
         let mut w = (cols as usize * CELL_PX_W).max(64);
         let mut h = (rows as usize * CELL_PX_H).max(64);
@@ -545,7 +525,7 @@ mod tests {
         mouse_at(MouseEventKind::Down(MouseButton::Left), column, row)
     }
 
-    /// In-region yaw: Δangle = Δcol × sensitivity (first event seeds only).
+    /// Mouse motion inside the region yaws by the column delta times `MOUSE_AIM_SENSITIVITY`; the first event only seeds the baseline.
     #[test]
     fn mouse_aim_delta_matches_column_delta() {
         let mut state = playing_with_region();
@@ -558,7 +538,6 @@ mod tests {
         assert!((state.game.player.angle - 2.0 * MOUSE_AIM_SENSITIVITY).abs() < 1e-5);
     }
 
-    /// Non-Playing phases ignore mouse aim.
     #[test]
     fn mouse_aim_only_while_playing() {
         for phase in [Phase::Title, Phase::Won, Phase::Dead] {
@@ -572,7 +551,7 @@ mod tests {
         }
     }
 
-    /// Continuity breaks (release_all / teleport dx) re-seed without applying the gap as yaw.
+    /// A continuity break (`release_all`, or a column jump past `MAX_MOUSE_AIM_DX`) re-seeds the baseline without applying the gap as yaw.
     #[test]
     fn mouse_aim_baseline_reseeds_on_discontinuity() {
         let mut state = playing_with_region();
@@ -600,7 +579,7 @@ mod tests {
         assert_eq!(state.game.player.angle, 3.0 * MOUSE_AIM_SENSITIVITY);
     }
 
-    /// Out-of-region motion does not yaw; re-entry does not apply the OOB span.
+    /// Re-entering the region does not apply the motion that happened outside it.
     #[test]
     fn out_of_region_motion_does_not_aim() {
         let mut state = playing_with_region();
@@ -619,7 +598,7 @@ mod tests {
         assert_eq!(state.game.player.angle, angle + 2.0 * MOUSE_AIM_SENSITIVITY);
     }
 
-    /// Left-click fires only when Playing and in-region (same queue as Space).
+    /// Clicking fires through the same queue as `Space`.
     #[test]
     fn click_fires_only_playing_in_region() {
         let mut state = playing_with_region();
@@ -648,7 +627,6 @@ mod tests {
         }
     }
 
-    /// No region ⇒ no aim or click-fire.
     #[test]
     fn clear_mouse_region_disables_aim_and_fire() {
         let mut state = playing_with_region();
@@ -663,65 +641,5 @@ mod tests {
         state.handle_mouse(&mouse_click(40, 10));
         state.tick();
         assert_eq!(state.game.player.muzzle, 0.0);
-    }
-
-    /// Dumps representative frames to a temp dir for eyeballing.
-    /// Run manually: `cargo test -p xai-grok-gboom tests::dump -- --ignored`
-    #[test]
-    #[ignore]
-    fn dump_frames_for_visual_inspection() {
-        let dir = std::env::temp_dir().join("grok-gboom-frames");
-        std::fs::create_dir_all(&dir).unwrap();
-        let dump = |name: &str, state: &mut GboomState| {
-            state.sim_gen += 1;
-            std::fs::write(dir.join(name), state.frame_png(480, 300).unwrap()).unwrap();
-        };
-
-        // Title screen with developed fire.
-        let mut state = GboomState::new();
-        for _ in 0..70 {
-            state.tick();
-        }
-        dump("title.png", &mut state);
-
-        // Corridor vantage: spawn looking south down the long west corridor.
-        let mut state = GboomState::new();
-        state.handle_key(&key(KeyCode::Char('w'))); // leave title
-        state.phase = Phase::Playing;
-        state.game.player.angle = std::f32::consts::FRAC_PI_2; // +y, south
-        state.game.step(0.016);
-        dump("game.png", &mut state);
-
-        // Imp 3 tiles ahead in that corridor, walking at us.
-        state.game.imps[0].x = state.game.player.x;
-        state.game.imps[0].y = state.game.player.y + 3.0;
-        state.game.imps[0].state = game::ImpState::Chasing;
-        // A second one further away to check fog/scale falloff.
-        state.game.imps[1].x = state.game.player.x;
-        state.game.imps[1].y = state.game.player.y + 6.0;
-        state.game.imps[1].state = game::ImpState::Attacking { t: 0.2 };
-        dump("imp.png", &mut state);
-
-        // Muzzle flash over that scene.
-        state.game.queue_fire();
-        state.game.step(0.016);
-        dump("fire.png", &mut state);
-
-        // Damage flash + pain.
-        state.game.player.damage_flash = 0.8;
-        dump("hurt.png", &mut state);
-
-        // End screens (past the grace period so the hint line shows, with
-        // the fire developed as it would be after a few seconds of play).
-        for _ in 0..80 {
-            state.fire.step();
-        }
-        state.phase = Phase::Dead;
-        state.phase_time = 2.0;
-        dump("dead.png", &mut state);
-        state.phase = Phase::Won;
-        dump("won.png", &mut state);
-
-        eprintln!("frames dumped to {}", dir.display());
     }
 }

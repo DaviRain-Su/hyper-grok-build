@@ -1,7 +1,6 @@
-//! Bootstrap-cost regression tier, in its OWN binary: the waterfall sink
-//! latches on first use, so it cannot share a process with the stderr-mode
-//! sweep tests. Knobs: `GROK_BOOTSTRAP_REGRESSION_SOFT=1` reports without
-//! asserting; `GROK_SWEEP_LOG` adjusts tracing.
+//! The bootstrap-cost regression tier lives in its OWN binary.
+//! The waterfall sink latches on first use, so it cannot share a process with the stderr-mode sweep tests.
+//! Knobs: `GROK_BOOTSTRAP_REGRESSION_SOFT=1` reports without asserting; `GROK_SWEEP_LOG` adjusts tracing.
 
 #[allow(dead_code)]
 #[path = "acp_harness/mod.rs"]
@@ -20,8 +19,7 @@ fn regression_bootstrap_cost() {
     let _sweep = sweep_lock();
     const REPS: usize = 3;
     // Floors keep a near-zero N=1 baseline from turning noise into a ratio.
-    // Post-fix measurements under an 8-core cgroup quota (debug): sessboot
-    // ratio 2.3-2.7, bridge 1.1-3.6, comfortably inside 3x / 5x.
+    // Measured under an 8-core cgroup quota (debug): sessboot ratio 2.3-2.7 and bridge 1.1-3.6, comfortably inside the 3x and 5x limits
     const SESSBOOT_MAX_RATIO: f64 = 3.0;
     const SESSBOOT_N1_FLOOR_MS: f64 = 20.0;
     const BRIDGE_MAX_RATIO: f64 = 5.0;

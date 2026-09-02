@@ -16,7 +16,19 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         let SubagentSpawnRequest {
             mut request,
             result_tx,
+            mut registered_tx,
         } = command;
+        // `loop_task_id` is lineage and reparent copies it onto nested Tasks.
+        // Only the scheduler actor's own fire (already tagged before reparent)
+        // stays Hold: terminal result on `result_tx`, no registration signal.
+        let start_ack = if request.run_in_background && !request.from_scheduler_loop() {
+            BackgroundStartAck::OnRegister
+        } else {
+            BackgroundStartAck::Hold
+        };
+        if start_ack == BackgroundStartAck::Hold {
+            registered_tx = None;
+        }
         if let Err(rejection) = self.reparent_nested_spawn(&mut request) {
             let _ = result_tx.send(rejection);
             return;
@@ -49,9 +61,12 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         }
         let running = self.session_running_count(&request.parent_session_id);
         match self.admission.admit(&request, running) {
-            AdmissionDecision::Start => {
-                self.start_child(*request, Some(result_tx), StartOrigin::Direct)
-            }
+            AdmissionDecision::Start => self.start_child(
+                *request,
+                Some(result_tx),
+                registered_tx,
+                StartOrigin::Direct,
+            ),
             AdmissionDecision::Enqueue => {
                 debug_assert!(
                     !request.owner.is_workflow(),
@@ -69,6 +84,8 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                         limit: self.admission.max_concurrent(),
                     },
                 );
+                // Keep `result_tx` so cancel/completion of a queued background
+                // child still resolves `spawn()`. Registration is a side channel.
                 let deadline = request
                     .awaits_in_foreground()
                     .then(|| tokio::time::Instant::now() + self.config.foreground_budget);
@@ -80,6 +97,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                         deadline,
                     },
                 });
+                // `Hold` already cleared `registered_tx`; fire iff the policy
+                // left a signal.
+                if let Some(tx) = registered_tx {
+                    let _ = tx.send(());
+                }
             }
             AdmissionDecision::Reject(error) => {
                 self.notify_limit(
@@ -194,6 +216,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 foreground_deadline: None,
                 handle_only: request.run_in_background,
                 explicitly_killed: false,
+                launched: false,
                 request,
             },
         );
@@ -206,6 +229,18 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             },
         );
     }
+}
+
+/// Who should see a registration signal versus the terminal `result_tx` value.
+///
+/// Decided before reparent: `loop_task_id` copied onto nested Tasks is lineage,
+/// not "this waiter is the scheduler actor".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BackgroundStartAck {
+    /// Fire `registered_tx` once the child is pending or queued.
+    OnRegister,
+    /// Leave `result_tx` for completion or a foreground-budget handoff.
+    Hold,
 }
 
 /// A spawn refused before it ever became a child record.

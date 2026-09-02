@@ -53,6 +53,10 @@ pub enum CompactionSampleError {
     Start(String),
     /// The model produced no response-channel content. Transient.
     EmptyResponse,
+    /// Structurally-detected size overflow (context window or transport
+    /// payload limit). Deterministic; hosts with an input ladder step down
+    /// instead of retrying.
+    ContextOverflow(String),
     /// Anything else — classified by string matching for backward
     /// compatibility with samplers that pre-date the structured variants.
     Other(anyhow::Error),
@@ -82,6 +86,8 @@ impl std::fmt::Display for CompactionSampleError {
             Self::EmptyResponse => {
                 write!(f, "Compaction sampler returned no response channel content")
             }
+            // Verbatim: callers surface this to users and telemetry.
+            Self::ContextOverflow(msg) => write!(f, "{msg}"),
             Self::Other(e) => write!(f, "{}", e),
         }
     }
@@ -99,13 +105,18 @@ impl CompactionSampleError {
     pub fn is_deterministic(&self) -> bool {
         match self {
             Self::Timeout { .. } | Self::EmptyResponse => false,
-            Self::Build(_) | Self::Start(_) => true,
+            Self::Build(_) | Self::Start(_) | Self::ContextOverflow(_) => true,
             Self::Other(err) => {
                 let msg = err.to_string();
                 msg.contains("Failed to build AgenticScheduler")
                     || msg.contains("Failed to start compaction sample")
             }
         }
+    }
+
+    /// Structurally-detected size overflow — the input-ladder step-down signal.
+    pub fn is_context_overflow(&self) -> bool {
+        matches!(self, Self::ContextOverflow(_))
     }
 }
 
@@ -161,6 +172,14 @@ mod tests {
         assert!(!CompactionSampleError::EmptyResponse.is_deterministic());
         assert!(CompactionSampleError::Build("bad config".into()).is_deterministic());
         assert!(CompactionSampleError::Start("no stream".into()).is_deterministic());
+        assert!(
+            CompactionSampleError::ContextOverflow("request too large".into()).is_deterministic()
+        );
+        assert!(
+            CompactionSampleError::ContextOverflow("request too large".into())
+                .is_context_overflow()
+        );
+        assert!(!CompactionSampleError::Build("bad config".into()).is_context_overflow());
         // Legacy string-matching fallback.
         assert!(
             CompactionSampleError::Other(anyhow::anyhow!(
@@ -186,5 +205,16 @@ mod tests {
     fn empty_response_display_keeps_match_literal() {
         let msg = CompactionSampleError::EmptyResponse.to_string();
         assert!(msg.contains("no response channel content"), "got: {msg}");
+    }
+
+    /// Pins the verbatim Display pass-through.
+    #[test]
+    fn context_overflow_display_passes_message_through() {
+        let msg = "compact failed: API error (status 413 Payload Too Large): Request failed \
+                   (HTTP 413).";
+        assert_eq!(
+            CompactionSampleError::ContextOverflow(msg.into()).to_string(),
+            msg
+        );
     }
 }

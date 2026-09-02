@@ -1,6 +1,7 @@
 use super::*;
 
 fn render(text: &str, area: Rect, padding: u16) -> (Buffer, Vec<LinkSpan>) {
+    let _theme = crate::test_util::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, area.right(), area.bottom()));
     let display = StatusLineDisplay::Text(SanitizedText::new(text));
     let links = render_status_line(&mut buf, area, &display, padding, &Theme::tokyonight());

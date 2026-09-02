@@ -1,8 +1,7 @@
-//! PTY scroll correctness via the harness (screen state from **ptyctl** /
-//! alacritty_terminal).
+//! PTY scroll correctness via the harness (screen state from **ptyctl** / alacritty_terminal).
 //!
-//! After a large mock response settles (follow-mode pins the viewport to the
-//! bottom), scroll **up** then **down** and assert the visible markers move.
+//! After a large mock response settles, follow mode pins the viewport to the bottom.
+//! Scroll **up** then **down** and assert the visible markers move.
 //! That path exercises the optimized AllTurns paint window in production.
 
 use std::time::{Duration, Instant};
@@ -14,7 +13,7 @@ const ROWS: u16 = 40;
 const COLS: u16 = 100;
 const LINES: usize = 400;
 
-/// SGR mouse-wheel at (row, col) — 1-indexed terminal coords for CSI.
+/// SGR mouse-wheel at (row, col): 1-indexed terminal coords for CSI.
 fn sgr_scroll(button: u16, row: u16, col: u16, count: u16) -> Vec<u8> {
     let mut out = Vec::new();
     for _ in 0..count {
@@ -56,15 +55,13 @@ async fn scroll_up_from_follow_bottom_then_back_down() -> Result<()> {
         .context("welcome")?;
 
     harness.inject_keys(b"scroll test\r")?;
-    // Follow mode pins the viewport to the bottom, so the top marker only
-    // flashes on-screen before scrolling above the viewport — polling for it
-    // races a fast stream. Wait for the bottom marker, which stays visible in
-    // follow mode once the response reaches it.
+    // Follow mode pins the viewport to the bottom, so the top marker only flashes on-screen before scrolling above the viewport
+    // Polling for it races a fast stream; wait for the bottom marker, which stays visible in follow mode once the response reaches it
     harness
         .wait_for_text("MARKER_BOTTOM_OF_RESPONSE", Duration::from_secs(30))
         .context("response reached bottom while following")?;
 
-    // Wait for stream end. Follow mode pins the viewport to the bottom.
+    // Wait for stream end
     let settle_deadline = Instant::now() + Duration::from_secs(45);
     loop {
         harness.update(Duration::from_millis(100));
@@ -102,7 +99,7 @@ async fn scroll_up_from_follow_bottom_then_back_down() -> Result<()> {
         }
     }
     // Wheel over mid-screen scrollback (1-indexed SGR coords).
-    harness.inject_keys(&sgr_scroll(64, 15, 40, 50))?; // 64 = wheel up
+    harness.inject_keys(&sgr_scroll(64, 15, 40, 50))?; // Button 64 is wheel up
     harness.update(Duration::from_millis(200));
     harness.update(Duration::from_millis(300));
     let mid = harness.screen_contents();
@@ -130,7 +127,7 @@ async fn scroll_up_from_follow_bottom_then_back_down() -> Result<()> {
             bail!("pager exited while PageDown scrolling");
         }
     }
-    harness.inject_keys(&sgr_scroll(65, 15, 40, 50))?; // 65 = wheel down
+    harness.inject_keys(&sgr_scroll(65, 15, 40, 50))?; // Button 65 is wheel down
     harness.update(Duration::from_millis(200));
     harness.update(Duration::from_millis(400));
     let back_bottom = harness.screen_contents();

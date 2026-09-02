@@ -1,9 +1,8 @@
-//! Single source of truth for the `sessionUpdate` discriminant strings the
-//! session-resume replay matchers compare against persisted `updates.jsonl` lines.
+//! Single source of truth for the `sessionUpdate` discriminant strings.
+//! The session-resume replay matchers compare them against persisted `updates.jsonl` lines.
 //!
-//! Each value is derived from its enum's serde impl (not a hand-written literal),
-//! so renaming a variant updates the matcher automatically. The guard test pins
-//! the wire format, turning an accidental serde change into a failing test.
+//! Each value is derived from its enum's serde impl (not a hand-written literal), so renaming a variant updates the matcher automatically.
+//! The guard test pins the wire format, turning an accidental serde change into a failing test.
 
 use std::sync::LazyLock;
 
@@ -12,8 +11,7 @@ use xai_grok_tools::types::TaskSnapshot;
 
 use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
 
-/// Serialize an internally-tagged session-update value and return the
-/// `sessionUpdate` discriminant serde itself emits for that variant.
+/// Serialize an internally-tagged session-update value and return the `sessionUpdate` discriminant serde itself emits for that variant.
 fn tagged_discriminant<T: serde::Serialize>(value: &T) -> String {
     serde_json::to_value(value)
         .ok()
@@ -25,21 +23,18 @@ fn tagged_discriminant<T: serde::Serialize>(value: &T) -> String {
         .expect("internally-tagged session-update value must serialize with a sessionUpdate tag")
 }
 
-/// `acp::SessionUpdate::UserMessageChunk` discriminant.
 pub(crate) static USER_MESSAGE_CHUNK: LazyLock<String> = LazyLock::new(|| {
     tagged_discriminant(&acp::SessionUpdate::UserMessageChunk(
         acp::ContentChunk::new(acp::ContentBlock::from("")),
     ))
 });
 
-/// `acp::SessionUpdate::AvailableCommandsUpdate` discriminant.
 pub(crate) static AVAILABLE_COMMANDS_UPDATE: LazyLock<String> = LazyLock::new(|| {
     tagged_discriminant(&acp::SessionUpdate::AvailableCommandsUpdate(
         acp::AvailableCommandsUpdate::new(Vec::new()),
     ))
 });
 
-/// `acp::SessionUpdate::ToolCallUpdate` discriminant.
 pub(crate) static TOOL_CALL_UPDATE: LazyLock<String> = LazyLock::new(|| {
     tagged_discriminant(&acp::SessionUpdate::ToolCallUpdate(
         acp::ToolCallUpdate::new(acp::ToolCallId::new("t"), acp::ToolCallUpdateFields::new()),
@@ -54,8 +49,7 @@ pub(crate) static TOOL_CALL_STATUS_IN_PROGRESS: LazyLock<String> = LazyLock::new
         .expect("ToolCallStatus::InProgress must serialize as a string")
 });
 
-/// xAI `SessionUpdate::RewindMarker` discriminant. Appears verbatim in compact
-/// JSON, so it doubles as a cheap substring pre-filter.
+/// Appears verbatim in compact JSON, so it doubles as a cheap substring pre-filter.
 pub(crate) static REWIND_MARKER: LazyLock<String> = LazyLock::new(|| {
     tagged_discriminant(&XaiSessionUpdate::RewindMarker {
         target_prompt_index: 0,
@@ -63,7 +57,6 @@ pub(crate) static REWIND_MARKER: LazyLock<String> = LazyLock::new(|| {
     })
 });
 
-/// xAI `SessionUpdate::TaskBackgrounded` discriminant.
 pub(crate) static TASK_BACKGROUNDED: LazyLock<String> = LazyLock::new(|| {
     tagged_discriminant(&XaiSessionUpdate::TaskBackgrounded {
         tool_call_id: String::new(),
@@ -76,7 +69,6 @@ pub(crate) static TASK_BACKGROUNDED: LazyLock<String> = LazyLock::new(|| {
     })
 });
 
-/// xAI `SessionUpdate::TaskCompleted` discriminant.
 pub(crate) static TASK_COMPLETED: LazyLock<String> = LazyLock::new(|| {
     tagged_discriminant(&XaiSessionUpdate::TaskCompleted {
         task_snapshot: TaskSnapshot {
@@ -105,10 +97,7 @@ pub(crate) static TASK_COMPLETED: LazyLock<String> = LazyLock::new(|| {
     })
 });
 
-/// The `"sessionUpdate":"user_message_chunk"` key/value pair as serialized (no
-/// leading `{`). Built from [`USER_MESSAGE_CHUNK`] so the literal isn't hand-
-/// maintained; the quoted key means it can't false-match the bare discriminant
-/// escaped inside user content.
+/// The quoted key means it cannot match the bare discriminant escaped inside user content.
 pub(crate) static USER_MESSAGE_CHUNK_PREFIX: LazyLock<String> =
     LazyLock::new(|| format!(r#""sessionUpdate":"{}""#, *USER_MESSAGE_CHUNK));
 
@@ -116,8 +105,7 @@ pub(crate) static USER_MESSAGE_CHUNK_PREFIX: LazyLock<String> =
 mod tests {
     use super::*;
 
-    /// Pins the wire format: each derived discriminant must equal the exact
-    /// string persisted in `updates.jsonl`, so a serde/wire change fails here.
+    /// Pins the wire format: each derived discriminant must equal the exact string persisted in `updates.jsonl`, so a serde/wire change fails here.
     #[test]
     fn derived_discriminants_match_wire_format() {
         assert_eq!(USER_MESSAGE_CHUNK.as_str(), "user_message_chunk");

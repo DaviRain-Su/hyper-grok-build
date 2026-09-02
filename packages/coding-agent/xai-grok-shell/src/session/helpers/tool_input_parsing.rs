@@ -1,7 +1,6 @@
 pub fn try_extract_concatenated_json_objects(arguments: &str) -> Option<Vec<serde_json::Value>> {
     let trimmed = arguments.trim();
 
-    // Quick check: must start with '{'.
     if !trimmed.starts_with('{') {
         return None;
     }
@@ -11,8 +10,7 @@ pub fn try_extract_concatenated_json_objects(arguments: &str) -> Option<Vec<serd
         return None;
     }
 
-    // Use serde_json::StreamDeserializer to parse concatenated JSON objects.
-    // This handles nested braces correctly (unlike naive string splitting on "}{").
+    // The stream deserializer handles nested braces correctly (unlike naive string splitting on "}{")
     let stream = serde_json::Deserializer::from_str(trimmed).into_iter::<serde_json::Value>();
 
     let mut objects = Vec::new();
@@ -23,7 +21,7 @@ pub fn try_extract_concatenated_json_objects(arguments: &str) -> Option<Vec<serd
         }
     }
 
-    // Need at least 2 objects for this to be concatenated JSON.
+    // At least 2 objects are needed for this to be concatenated JSON
     if objects.len() >= 2 {
         Some(objects)
     } else {
@@ -31,11 +29,7 @@ pub fn try_extract_concatenated_json_objects(arguments: &str) -> Option<Vec<serd
     }
 }
 
-/// Normalize empty tool call arguments to `"{}"`.
-///
-/// Zero-arg MCP tools (e.g. `get_me`) sometimes receive `""` from the model
-/// instead of `"{}"`, which fails JSON parsing. This normalizes empty/whitespace
-/// strings to `"{}"` so downstream parsing succeeds.
+/// Zero-arg MCP tools (e.g. `get_me`) sometimes receive `""` from the model instead of `"{}"`, which fails JSON parsing.
 pub fn normalize_empty_arguments(arguments: &str) -> &str {
     if arguments.trim().is_empty() {
         "{}"
@@ -115,7 +109,7 @@ mod tests {
         assert!(try_extract_concatenated_json_objects(r#"{"a": 1} garbage"#).is_none());
     }
 
-    /// Parse after normalizing — mirrors the production pattern in handle_tool_call.
+    /// Parse after normalizing; mirrors the production pattern in handle_tool_call.
     fn normalize_and_parse(arguments: &str) -> serde_json::Value {
         let normalized = normalize_empty_arguments(arguments);
         serde_json::from_str(normalized).unwrap_or_else(|_| serde_json::json!({"raw": arguments}))

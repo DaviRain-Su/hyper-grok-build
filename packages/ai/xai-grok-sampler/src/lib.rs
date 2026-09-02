@@ -1,20 +1,13 @@
-//! xai-grok-sampler - Actor-based sampling layer for xAI grok.
+//! Actor-based sampling layer for xAI grok.
 //!
-//! This crate extracts the HTTP streaming + retry logic out of
-//! `xai-grok-shell`'s session actor into a standalone, reusable
-//! component built on the same actor pattern as `xai-hunk-tracker`.
+//! This crate holds the HTTP streaming and retry logic extracted from `xai-grok-shell`'s session actor.
+//! It is built on the same actor pattern as `xai-hunk-tracker`.
 //!
 //! ## Layered API
 //!
 //! - **Layer 1**: [`client::SamplingClient`] returns raw chunk streams.
 //! - **Layer 2**: [`stream`] transforms raw streams into [`SamplingEvent`]s.
-//! - **Layer 3**: [`SamplerHandle`] manages concurrent requests with retry,
-//!   cancellation, and event-based coordination via the actor.
-//!
-//! The type skeleton, the pure retry / metrics / client logic, the
-//! Layer-2 stream transforms ([`stream_chat_completions`],
-//! [`stream_responses`], [`stream_messages`], [`collect_response`]),
-//! and the actor with its per-request task tie these layers together.
+//! - **Layer 3**: [`SamplerHandle`] manages concurrent requests with retry, cancellation, and event-based coordination via the actor.
 
 pub mod actor;
 pub mod adapter;
@@ -30,13 +23,16 @@ pub mod google;
 pub mod handle;
 pub mod metrics;
 pub mod pi_messages;
+mod prewarm;
 pub mod retry;
 pub mod sampling_log;
 mod shared_http;
+mod span_timing;
 pub mod stream;
+mod stream_classify;
 pub mod types;
 
-// Public re-exports — the API surface consumers see.
+// Public re-exports: the API consumers see
 pub use actor::SamplerActor;
 pub use adapter::BackendAdapter;
 pub use actor::request_task::CompletionResult;
@@ -54,6 +50,7 @@ pub use events::{
 };
 pub use handle::{CollectedSamplingResult, DoomLoopRecoveryAttempt, SamplerHandle};
 pub use metrics::{InferenceLatencyStats, compute_percentiles};
+pub use prewarm::{PrewarmOutcome, PrewarmReport, prewarm_transport};
 pub use retry::{
     DEFAULT_MAX_RETRIES, MAX_RETRY_BACKOFF, RATE_LIMIT_RETRY_DISABLED, RATE_LIMIT_RETRY_THRESHOLD,
     RetryDecision, classify_error, format_sampling_error, jitter_backoff, resolve_max_retries,

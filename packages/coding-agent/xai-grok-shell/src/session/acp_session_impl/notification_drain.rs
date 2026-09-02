@@ -1,14 +1,12 @@
-//! Idle-gated pending-notification buffering and drain for `SessionActor`,
-//! plus auto-start of queued prompts (`maybe_start_running_task`).
+//! Idle-gated pending-notification buffering and drain for `SessionActor`, plus auto-start of queued prompts (`maybe_start_running_task`).
 
 use super::*;
 
 /// Maximum number of pending notifications before oldest are dropped.
 pub(super) const MAX_PENDING_NOTIFICATIONS: usize = 50;
 
-/// Mid-turn live-orphan scan interval. InjectNotification can fire often;
-/// one disk pass per window is enough because persist-first makes a repeat
-/// finalize a no-op.
+/// Mid-turn live-orphan scan interval.
+/// InjectNotification can fire often; one disk pass per window is enough since records persist first, so finalizing the same orphan again is a no-op.
 pub(crate) const LIVE_ORPHAN_RECONCILE_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(30);
 
@@ -126,7 +124,7 @@ impl SessionActor {
         let may_combine;
         {
             let state = self.state.lock().await;
-            if state.running_task.is_some() {
+            if state.running_task.is_some() || state.finalization_gate.is_active() {
                 let queue_depth = state.pending_inputs.len();
                 if queue_depth > 0 {
                     xai_grok_telemetry::unified_log::debug(
@@ -156,13 +154,11 @@ impl SessionActor {
             if state.pending_inputs.is_empty() {
                 return;
             }
-            // A merge needs 2+ queued prompts; sample here so the common
-            // single-prompt promote skips the config disk read below.
+            // A merge needs at least two queued prompts; sample here so the common single-prompt promote skips the config disk read below
             may_combine = state.pending_inputs.len() >= 2;
         }
 
-        // Config I/O outside the state lock, and only when a merge is even
-        // possible — keeps the single-prompt promote (the common case) off disk.
+        // Config I/O outside the state lock, and only when a merge is even possible; keeps the single-prompt promote (the common case) off disk
         let combine_queued = may_combine
             && crate::util::config::load_config()
                 .await
@@ -172,7 +168,10 @@ impl SessionActor {
 
         let mut state = self.state.lock().await;
         // Re-check after the await gap.
-        if state.running_task.is_some() || state.pending_inputs.is_empty() {
+        if state.running_task.is_some()
+            || state.finalization_gate.is_active()
+            || state.pending_inputs.is_empty()
+        {
             return;
         }
 
@@ -196,12 +195,11 @@ impl SessionActor {
             return;
         }
 
-        // Note: Auto-compact is now handled inline during process_conversation_turn,
-        // so we no longer need to check for queued auto-compact here.
+        // Auto-compact is handled inline by process_conversation_turn, so there is no queued auto-compact to check here
 
-        // Drop stale synthetic fronts before promoting: already-reported workflow completions, and
-        // goal continuations whose goal is no longer Active. An Active goal re-arms a fresh
-        // continuation at turn end, so a leftover one here would jump ahead of the user's queue.
+        // Drop stale synthetic fronts before promoting
+        // Stale means already-reported workflow completions, and goal continuations whose goal is no longer Active
+        // An Active goal queues a fresh continuation at turn end, so a leftover one here would jump ahead of the user's queue
         loop {
             let stale = match state
                 .pending_inputs
@@ -237,8 +235,7 @@ impl SessionActor {
             }
         }
 
-        // Drop holds for rows no longer queued, then expire leaked holds so a
-        // client crash or dropped release cannot park the queue forever.
+        // Drop holds for rows no longer queued, then expire leaked holds so a client crash or dropped release cannot park the queue forever
         if !state.edit_holds.is_empty() {
             let live: std::collections::HashSet<String> = state
                 .pending_inputs
@@ -249,8 +246,7 @@ impl SessionActor {
             super::expire_older_than(&mut state.edit_holds, super::EDIT_HOLD_TTL);
         }
 
-        // Held front must not start until edit/release; check before combine so
-        // we never absorb followers into a front that will not run yet.
+        // A held front must not start until edit/release; check before combine so we never absorb followers into a front that will not run yet
         if let Some(front) = state.pending_inputs.front()
             && state.edit_holds.contains_key(&front.prompt_id)
         {
@@ -283,9 +279,9 @@ impl SessionActor {
             SessionActor::combine_front_pending_inputs(&mut state.pending_inputs, &skip);
         }
 
-        // Start the next pending user prompt. Pull all needed fields from the
-        // queue head in one `front_mut` scope so we can mutate `state` again
-        // (e.g. `rewindable`) without overlapping borrows.
+        // Start the next pending user prompt
+        // Pull all needed fields from the queue head in one `front_mut` scope
+        // `state` can then be mutated again (e.g. `rewindable`) without overlapping borrows.
         let (
             persist_ack,
             parsed_prompt_tx,
@@ -374,13 +370,12 @@ impl SessionActor {
             session = self.session_info.id.0.as_ref(),
             "promoting front of pending_inputs to the running turn",
         );
-        // Promote broadcast before spawn so clients paint (and arm echo-skip)
-        // before the user-message chunk can race in.
+        // Promote broadcast before spawn so clients paint (and enable echo-skip) before the user-message chunk can race in
         self.broadcast_queue_changed_promoting(&state, running_display);
 
         // Bump the epoch here rather than in `handle_prompt`: a cancel reads the slot as soon as
         // `running_task` is set on the next line.
-        self.turn_report.start_next_turn();
+        let epoch = self.turn_report.start_next_turn();
         state.running_task = Some(AgentTask::new_prompt(
             self.clone(),
             TurnInputRequest {
@@ -399,6 +394,7 @@ impl SessionActor {
                 parsed_prompt_tx,
                 traceparent,
             },
+            epoch,
             completion_tx,
         ));
         if let Some(initial_child_prompt_ready) = initial_child_prompt_ready {
@@ -406,8 +402,7 @@ impl SessionActor {
         }
     }
 
-    /// Flip on-disk `running` metas that the coordinator no longer holds so
-    /// the pager stops showing Responding without a quit+resume.
+    /// Flip on-disk `running` metas that the coordinator no longer holds so the pager stops showing Responding without a quit and resume.
     pub(super) async fn reconcile_live_orphaned_subagents(&self) {
         self.last_live_orphan_reconcile
             .set(Some(std::time::Instant::now()));
@@ -437,8 +432,7 @@ impl SessionActor {
         }
     }
 
-    /// Tray / reconnect can miss the idle hook; heal before listing so the
-    /// pager does not keep a dead child as Responding.
+    /// Tray / reconnect can miss the idle hook; heal before listing so the pager does not keep a dead child as Responding.
     #[cfg(test)]
     pub(super) async fn list_running_subagents(
         &self,
@@ -459,16 +453,14 @@ impl SessionActor {
     /// - No user prompts are pending (user prompts always take priority)
     /// - Notifications are NOT suppressed (cleared on next user prompt)
     ///
-    /// All notifications are taken and merged into a single `InputItem` with
-    /// `---` separators between content blocks. The take+push happens in a
-    /// single lock acquisition to avoid interleaving.
+    /// All notifications are taken and merged into a single `InputItem` with `---` separators between content blocks.
+    /// The take and push happen in a single lock acquisition to avoid interleaving.
     pub(super) async fn maybe_drain_notifications(
         self: Arc<Self>,
         completion_tx: mpsc::UnboundedSender<super::turn_task::TurnCompletionMsg>,
     ) {
-        // Mid-turn tick: parent may still be Responding so the idle
-        // hook never runs. Throttled so InjectNotification does not scan disk
-        // on every event.
+        // Mid-turn tick: the parent may still be Responding so the idle hook never runs
+        // Throttled so InjectNotification does not scan disk on every event
         if self
             .last_live_orphan_reconcile
             .get()
@@ -477,15 +469,11 @@ impl SessionActor {
             self.reconcile_live_orphaned_subagents().await;
         }
 
-        // Auto-wake notification turns are DROPPED both while the goal loop is
-        // active (a bg-task / monitor "completed" turn would pull a weak model
-        // off the goal continuation, e.g. relaunching a killed server) AND
-        // after the goal completes (the autonomous run is over — late dev-
-        // server completions should leave the session idle, not spawn fresh
-        // post-goal turns). Independently, completions whose source task
-        // originated during the goal turn are dropped regardless of status (see
-        // `split_goal_suppressed`). Dropped notifications are still marked
-        // reported below so nothing resurfaces later.
+        // Auto-wake notification turns are DROPPED both while the goal loop is active AND after the goal completes
+        // While active, a task or monitor completion turn would pull a weak model off the goal continuation (e.g. relaunch a killed server).
+        // After the goal completes the autonomous run is over; late dev-server completions should leave the session idle, not spawn post-goal turns
+        // Separately, completions whose source task originated during the goal turn are dropped regardless of status (see `split_goal_suppressed`)
+        // Dropped notifications are still marked reported below so nothing resurfaces later
         let suppress_all = self.goal_harness_enabled()
             && matches!(
                 self.goal_tracker.lock().status(),
@@ -500,19 +488,16 @@ impl SessionActor {
         let drained = {
             let mut state = self.state.lock().await;
 
-            // Shared idle predicate — same conditions Layer 3 uses via
-            // `is_session_idle_for_injection`. Inlined here so the
-            // `mut state` borrow can survive into the take/push below.
+            // Shared idle predicate: the same conditions Layer 3 uses via `is_session_idle_for_injection`
+            // Inlined here so the `mut state` borrow can survive into the take/push below
             if !is_session_idle_for_injection(&state) {
                 return;
             }
 
-            // Backstop sweep for events that hit the buffer after the
-            // turn-end drain (the is_turn_active flag can lag the actual
-            // turn teardown). Normally a no-op.
+            // Backstop sweep for events that hit the buffer after the turn-end drain (the is_turn_active flag can lag the actual turn teardown)
+            // Normally a no-op
             self.sweep_monitor_buffer_into_pending(&mut state, "monitor-idle-drain");
 
-            // Nothing to drain
             if state.pending_notifications.is_empty() {
                 return;
             }
@@ -547,8 +532,7 @@ impl SessionActor {
                 )
             }
         };
-        // Mark reported whether dropped or surfaced, so the per-tool-call
-        // `TaskCompletionReminder` won't resurface the same completions.
+        // Mark reported whether dropped or surfaced, so the per-tool-call `TaskCompletionReminder` won't resurface the same completions
         let ids: Vec<&str> = drained_task_ids.iter().map(String::as_str).collect();
         self.mark_completions_reported(&ids).await;
 
@@ -560,8 +544,8 @@ impl SessionActor {
     /// Notifies extensions when the session settles idle (nothing running, nothing queued).
     /// The idle check stays host-side; extensions only get the event.
     ///
-    /// Ignores `notifications_suppressed`, unlike [`is_session_idle_for_injection`]: after an
-    /// interrupt the session really is idle, and that is the ping a host waits for.
+    /// Ignores `notifications_suppressed`, unlike [`is_session_idle_for_injection`].
+    /// After an interrupt the session really is idle, and that is the ping a host waits for.
     pub(super) async fn emit_session_idle_if_idle(&self) {
         let suppressed = {
             let state = self.state.lock().await;
@@ -570,8 +554,8 @@ impl SessionActor {
             }
             state.notifications_suppressed
         };
-        // Reconciliation writes subagent records, so it stays behind the suppression check, and
-        // it runs in a child session, which the notification below does not.
+        // Reconciliation writes subagent records, so it stays behind the suppression check
+        // It also runs in a child session, which the notification below does not
         if !suppressed {
             self.reconcile_live_orphaned_subagents().await;
         }
@@ -587,11 +571,9 @@ impl SessionActor {
         }
     }
 
-    /// Sweep this session's buffered monitor events (`drain_owned`) into
-    /// `pending_notifications`. Used where the turn loop can no longer
-    /// drain the buffer: turn end (`drain_monitor_buffer_to_pending`),
-    /// turn cancel, and the idle drain (all three race the
-    /// `is_turn_active`-gated buffer push in `InjectNotification`).
+    /// Sweep this session's buffered monitor events (`drain_owned`) into `pending_notifications`.
+    /// Used where the turn loop can no longer drain the buffer: turn end (`drain_monitor_buffer_to_pending`), turn cancel, and the idle drain.
+    /// All three race the `is_turn_active`-gated buffer push in `InjectNotification`.
     pub(super) fn sweep_monitor_buffer_into_pending(
         &self,
         state: &mut State,
@@ -622,9 +604,8 @@ impl SessionActor {
 
     /// Partition drained notifications into `(to_surface, dropped_count)`.
     ///
-    /// `suppress_all` mirrors the goal Active/Complete blanket gate (drop
-    /// everything); independently, notifications whose source task is in
-    /// `goal_turn_task_ids` are always dropped (see that field).
+    /// `suppress_all` mirrors the goal Active/Complete blanket gate (drop everything).
+    /// Independently, notifications whose source task is in `goal_turn_task_ids` are always dropped (see that field).
     pub(super) fn split_goal_suppressed(
         suppress_all: bool,
         goal_turn_task_ids: &std::collections::HashSet<String>,
@@ -726,9 +707,8 @@ impl SessionActor {
 
         let merged_prompt_id = format!("notifications-{}", uuid::Uuid::now_v7());
 
-        // Receiver intentionally dropped — notification turns have no caller
-        // awaiting the result. The send() in handle_completion returns Err,
-        // which is harmless.
+        // Receiver intentionally dropped: notification turns have no caller awaiting the result
+        // The send() in handle_completion returns Err, which is harmless
         let (respond_to, _) = tokio::sync::oneshot::channel();
 
         state.pending_inputs.push_back(InputItem {
@@ -769,11 +749,9 @@ impl SessionActor {
         true
     }
 
-    /// Turn-end straggler sweep: monitor events buffered during the turn's
-    /// final sampling step (after the loop's last `inject_pending_monitor_events`
-    /// pass) move to `pending_notifications`. Runs in the completion handler
-    /// before `maybe_drain_notifications`, so it — not the idle sweep — is
-    /// what normally catches them.
+    /// Turn-end straggler sweep: monitor events buffered during the turn's final sampling step move to `pending_notifications`.
+    /// That step follows the loop's last `inject_pending_monitor_events` pass.
+    /// Runs in the completion handler before `maybe_drain_notifications`, so this sweep (not the idle one) is what normally catches them.
     pub(super) async fn drain_monitor_buffer_to_pending(&self) {
         let mut state = self.state.lock().await;
         self.sweep_monitor_buffer_into_pending(&mut state, "monitor-turn-end-drain");

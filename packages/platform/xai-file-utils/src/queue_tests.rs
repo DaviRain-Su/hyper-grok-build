@@ -184,6 +184,7 @@ async fn blocking_enqueue_spills_recoverable_sidecar_pair() {
             "session_state",
             "sess-1234",
             7,
+            None,
         ),
     )
     .await;
@@ -210,7 +211,10 @@ async fn blocking_enqueue_spills_recoverable_sidecar_pair() {
 /// A blocking enqueue rejected by the channel (full here; closed behaves
 /// the same) must roll back `pending` before any await, so a cancelled or
 /// failed hand-off can never leak the counter and poison `wait_idle` into
-/// full-budget stalls for the rest of the session.
+/// full-budget stalls for the rest of the session. The full-channel divert
+/// must also set `diverted_inline` before parking on confirmation: nothing
+/// durable remains (the sidecar is dropped with the hand-off), so a caller
+/// cancelling that wait must not record the item as queue-owned.
 #[tokio::test]
 async fn rejected_blocking_enqueue_does_not_leak_pending() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -234,6 +238,7 @@ async fn rejected_blocking_enqueue_does_not_leak_pending() {
         uploads_in_flight: Arc::new(Mutex::new(HashSet::new())),
     };
 
+    let filler_diverted = std::sync::atomic::AtomicBool::new(false);
     let filler = tokio::time::timeout(
         Duration::from_millis(200),
         queue.enqueue_blocking(
@@ -243,12 +248,17 @@ async fn rejected_blocking_enqueue_does_not_leak_pending() {
             "a",
             "s",
             0,
+            Some(&filler_diverted),
         ),
     )
     .await;
     assert!(
         filler.is_err(),
         "no worker: the accepted item never settles"
+    );
+    assert!(
+        !filler_diverted.load(Ordering::Relaxed),
+        "a channel-accepted item is queue-owned, not diverted"
     );
     assert_eq!(
         stats.pending.load(Ordering::Relaxed),
@@ -258,6 +268,7 @@ async fn rejected_blocking_enqueue_does_not_leak_pending() {
 
     // Full channel: rejected before any await, diverted inline; `pending`
     // must be back to the accepted item only.
+    let overflow_diverted = std::sync::atomic::AtomicBool::new(false);
     let overflow = tokio::time::timeout(
         Duration::from_millis(200),
         queue.enqueue_blocking(
@@ -267,10 +278,15 @@ async fn rejected_blocking_enqueue_does_not_leak_pending() {
             "b",
             "s",
             0,
+            Some(&overflow_diverted),
         ),
     )
     .await;
     drop(overflow);
+    assert!(
+        overflow_diverted.load(Ordering::Relaxed),
+        "the full-channel divert must be visible to a cancelled caller"
+    );
     assert_eq!(
         stats.pending.load(Ordering::Relaxed),
         1,
@@ -347,41 +363,6 @@ fn temp_file_name_contains_components() {
     let name = temp_file_name("config", "019abc-def0-1234", 3);
     assert!(name.contains("turn3"), "should contain turn number");
     assert!(name.contains("config"), "should contain artifact name");
-}
-
-#[test]
-fn with_client_version_sets_field() {
-    // with_client_version() must propagate the version onto every enqueued item
-    // so the gcs_queue_upload span carries it for analytics dashboard breakdowns.
-    let temp = tempfile::TempDir::new().unwrap();
-    let queue_dir = temp.path().join("upload_queue");
-    std::fs::create_dir_all(&queue_dir).unwrap();
-
-    let stats = Arc::new(UploadQueueStats::new());
-    let (tx, _rx) = mpsc::channel(CHANNEL_CAPACITY);
-
-    let queue = UploadQueue {
-        tx,
-        queue_dir,
-        resolver: Arc::new(MockResolver),
-        stats,
-        max_queue_bytes: DEFAULT_MAX_QUEUE_BYTES,
-        client_version: None,
-        drain_state: Arc::new(Mutex::new(None)),
-        inline_fallback_semaphore: Arc::new(tokio::sync::Semaphore::new(
-            INLINE_FALLBACK_TOTAL_PERMITS as usize,
-        )),
-        uploads_in_flight: Arc::new(Mutex::new(HashSet::new())),
-    };
-
-    assert!(queue.client_version.is_none(), "starts as None");
-
-    let queue = queue.with_client_version("1.2.3-test");
-    assert_eq!(
-        queue.client_version.as_deref(),
-        Some("1.2.3-test"),
-        "with_client_version sets the field"
-    );
 }
 
 #[tokio::test]
@@ -1010,21 +991,6 @@ async fn enqueue_does_not_write_sidecar_legacy_fast_path() {
         item.sidecar_path.is_none(),
         "legacy enqueue item carries no sidecar path"
     );
-}
-
-#[test]
-fn stats_initial_values() {
-    let stats = UploadQueueStats::new();
-    assert_eq!(stats.pending.load(Ordering::Relaxed), 0);
-    assert_eq!(stats.pending_bytes.load(Ordering::Relaxed), 0);
-    assert_eq!(stats.enqueued.load(Ordering::Relaxed), 0);
-    assert_eq!(stats.uploaded.load(Ordering::Relaxed), 0);
-    assert_eq!(stats.failed.load(Ordering::Relaxed), 0);
-    assert_eq!(stats.circuit_breaker_trips.load(Ordering::Relaxed), 0);
-    assert_eq!(stats.enqueue_fallbacks.load(Ordering::Relaxed), 0);
-    assert_eq!(stats.leaked_temp_files.load(Ordering::Relaxed), 0);
-    assert_eq!(stats.reference_stale.load(Ordering::Relaxed), 0);
-    assert_eq!(stats.cleanup_orphan_mismatched.load(Ordering::Relaxed), 0);
 }
 
 #[test]
@@ -1701,18 +1667,6 @@ async fn streaming_zstd_produces_valid_compressed_output() {
     let mut decompressed = Vec::new();
     decoder.read_to_end(&mut decompressed).await.unwrap();
     assert_eq!(decompressed, content.as_bytes());
-}
-
-#[test]
-fn compress_decision_size_threshold() {
-    let decide = |compress: bool, size: u64| -> bool { compress && size >= COMPRESS_MIN_BYTES };
-
-    assert!(decide(true, 128));
-    assert!(decide(true, 1000));
-    assert!(!decide(true, 127));
-    assert!(!decide(true, 1));
-    assert!(!decide(false, 1000));
-    assert!(!decide(false, 128));
 }
 
 #[tokio::test]

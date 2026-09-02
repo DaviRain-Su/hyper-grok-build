@@ -1,5 +1,5 @@
 //! Renders slash command/arg suggestions as a scrollable list, following the same layout as the question/answer panel:
-//! - Aligned label column (truncated with `...` when too long)
+//! - Aligned label column (truncated with `…` when too long)
 //! - Description text after a fixed gap, truncated to remaining width
 //! - Selection highlight (bg_visual and bold on the selected row)
 //! - Mouse hover highlight (25% blended bg)
@@ -55,11 +55,9 @@ fn tag_suffix_width(row: &SuggestionRow) -> usize {
 ///
 /// The label column gets up to 60% of the available width (capped at `LABEL_CAP`), prioritising the full command name over the description.
 /// The tag suffix is folded in so a `/cmd [tag]` row and a plain `/cmd` row share the same description column.
-/// An untagged row longer than `LABEL_CAP` is ignored.
-/// A tagged row always contributes a `LABEL_CAP`-clamped width, so a long tag can never zero out the column.
 fn compute_label_column_w(items: &[SuggestionRow], content_w: usize) -> usize {
     let budget = (content_w * 3 / 5).min(LABEL_CAP);
-    let max_display_w = items
+    let preferred = items
         .iter()
         .filter_map(|r| {
             let base = r.display.width();
@@ -71,7 +69,17 @@ fn compute_label_column_w(items: &[SuggestionRow], content_w: usize) -> usize {
         })
         .max()
         .unwrap_or(0);
-    max_display_w.min(budget)
+    // Without a fallback a lone overlong name zeros the column.
+    let candidate = if preferred > 0 {
+        preferred
+    } else {
+        items
+            .iter()
+            .map(|r| (r.display.width() + tag_suffix_width(r)).min(LABEL_CAP))
+            .max()
+            .unwrap_or(0)
+    };
+    candidate.min(budget)
 }
 
 /// Build a flat list of styled lines for all visible items.
@@ -862,5 +870,106 @@ mod tests {
             let na = Rect::new(0, 0, w, 1);
             let _ = render_dropdown(&mut nb, na, &narrow, None, &theme);
         }
+    }
+
+    #[test]
+    fn overlong_untagged_command_renders_ellipsized_label() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let theme = Theme::current();
+        let display = "/principles-redesign-from-first-principles";
+        let snap = SlashSnapshot {
+            open: true,
+            matches: vec![row(display, "short desc")],
+            selected: 0,
+            ..Default::default()
+        };
+        let area = Rect::new(0, 0, 80, 1);
+        let mut buf = Buffer::empty(area);
+        render_dropdown(&mut buf, area, &snap, None, &theme);
+
+        let line0: String = (0..80).map(|x| buf[(x, 0)].symbol().to_string()).collect();
+        let ellipsized = "/principles-redesign-from-first-princip\u{2026}";
+        assert!(
+            line0.contains(ellipsized),
+            "missing ellipsized label: {line0:?}"
+        );
+        assert!(
+            !line0.contains(display),
+            "full 42-col name must not render: {line0:?}"
+        );
+    }
+
+    #[test]
+    fn overlong_untagged_does_not_widen_column_beside_short_name() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let theme = Theme::default();
+        let long_display = "/principles-redesign-from-first-principles";
+        let width: u16 = 80;
+        let snap = SlashSnapshot {
+            open: true,
+            matches: vec![row("/cache", "cache help"), row(long_display, "long name")],
+            selected: 0,
+            ..Default::default()
+        };
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, 2));
+        let area = Rect::new(0, 0, width, 2);
+        render_dropdown(&mut buf, area, &snap, None, &theme);
+
+        let row_text = |y: u16| -> String {
+            (0..width)
+                .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                .collect()
+        };
+        let desc_col = |y: u16, needle: &str| -> u16 {
+            let needle_chars: Vec<char> = needle.chars().collect();
+            (0..width)
+                .find(|&start| {
+                    needle_chars.iter().enumerate().all(|(i, ch)| {
+                        let x = start + i as u16;
+                        x < width
+                            && buf
+                                .cell((x, y))
+                                .is_some_and(|c| c.symbol() == ch.to_string())
+                    })
+                })
+                .unwrap_or_else(|| panic!("row {y} missing {needle:?}: {}", row_text(y)))
+        };
+
+        let short_desc_x = desc_col(0, "cache help");
+        let long_desc_x = desc_col(1, "long name");
+        assert_eq!(
+            short_desc_x,
+            long_desc_x,
+            "shared column (row0={}, row1={})",
+            row_text(0),
+            row_text(1)
+        );
+        assert_eq!(
+            short_desc_x,
+            9,
+            "short name must set the column, not a 40-col pad: {}",
+            row_text(0)
+        );
+
+        let truncated_to_short = "/prin\u{2026}";
+        assert!(
+            row_text(1).contains(truncated_to_short),
+            "long name must truncate to the short column: {}",
+            row_text(1)
+        );
+        assert!(
+            !row_text(1).contains(long_display),
+            "full 42-col name must not render: {}",
+            row_text(1)
+        );
+        assert!(
+            !row_text(1).contains("/principles-redesign-from-first-princip\u{2026}"),
+            "long name must not get a 40-col label: {}",
+            row_text(1)
+        );
     }
 }

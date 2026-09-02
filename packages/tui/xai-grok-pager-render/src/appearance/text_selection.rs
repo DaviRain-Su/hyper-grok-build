@@ -1,19 +1,13 @@
 //! The `keep_text_selection` user setting (`flash` | `hold` | `word_select`).
 //!
 //! This is the single, unified control for scrollback text-selection behavior.
-//! It governs both how long an in-app selection highlight stays on screen and
-//! what a double/triple-click does, so the two can never drift out of sync:
+//! It governs both how long an in-app selection highlight stays on screen and what a double/triple-click does, so the two never drift out of sync.
 //!
-//! - `flash` — brief highlight on mouse-up, then clear; double-click toggles fold.
-//! - `hold` — selection stays until dismissed; double-click toggles fold.
-//! - `word_select` — selection stays until dismissed; double-click selects &
-//!   copies a word, triple-click a paragraph (terminal-like). Implies `hold`.
-//!
-//! The compile-time default is `flash`. A remote `keep_text_selection_default` soft-default
-//! (`flash` | `hold` | `word_select`) can override it at pager startup; see
-//! `apply_remote_keep_text_selection_default`.
+//! The compile-time default is `flash`.
+//! A remote `keep_text_selection_default` soft-default (`flash` | `hold` | `word_select`) can override it at pager startup.
+//! See `apply_remote_keep_text_selection_default`.
 
-/// Scrollback text-selection behavior: highlight lifetime + double-click action.
+/// Scrollback text-selection behavior: highlight lifetime and double-click action.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum TextSelection {
     /// Brief highlight on mouse-up, then clear; double-click toggles fold. Default.
@@ -21,8 +15,8 @@ pub enum TextSelection {
     Flash,
     /// Stay visible until Esc/click/scroll; double-click toggles fold.
     Hold,
-    /// Stay visible until dismissed; double-click selects & copies a word, triple-click a
-    /// paragraph (terminal-like). Implies [`TextSelection::holds`].
+    /// Stay visible until dismissed; double-click selects and copies a word, triple-click a paragraph (terminal-like).
+    /// Implies [`TextSelection::holds`].
     WordSelect,
 }
 
@@ -46,13 +40,12 @@ impl TextSelection {
         }
     }
 
-    /// Never timer-dismiss the highlight (`hold` or `word_select`).
+    /// Whether the highlight stays until dismissed instead of clearing on a timer (`hold` or `word_select`).
     pub const fn holds(self) -> bool {
         matches!(self, Self::Hold | Self::WordSelect)
     }
 
-    /// Whether double-click selects & copies a word (and triple-click a paragraph),
-    /// terminal-style, instead of toggling a fold (`word_select` only).
+    /// Whether double-click selects and copies a word (and triple-click a paragraph) instead of toggling a fold (`word_select` only).
     pub const fn selects_word(self) -> bool {
         matches!(self, Self::WordSelect)
     }
@@ -82,8 +75,8 @@ mod tests {
         assert_eq!(TextSelection::default().as_canonical(), "flash");
     }
 
-    /// The unified invariant: `word_select` always implies `holds()` (persistent
-    /// highlight) and is the only mode that turns on double-click word select.
+    /// `word_select` always implies `holds()` (persistent highlight).
+    /// It is the only mode that turns on double-click word select.
     #[test]
     fn word_select_implies_hold_and_word_select() {
         assert!(TextSelection::WordSelect.holds());

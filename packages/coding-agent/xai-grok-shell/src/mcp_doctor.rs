@@ -1,4 +1,4 @@
-//! `grok mcp doctor` -- runtime health check for MCP servers.
+//! `grok mcp doctor`: runtime health check for MCP servers.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -99,10 +99,9 @@ fn discover_servers(cwd: &Path) -> (Vec<ConfigSourceStatus>, Vec<DiscoveredServe
             .unwrap_or_default();
     plugins_cfg.merge_claude_enabled_plugins(Some(cwd));
     let mut plugin_config = plugins_cfg.to_discovery_config();
-    // Route through the live folder-trust gate (matches actual hook/MCP/LSP
-    // gating) so the doctor report shows an untrusted folder's project plugin
-    // MCP as blocked; no session resolve has run for a one-shot doctor. Resolve
-    // and record the verdict, then gate plugins on it.
+    // Route through the live folder-trust gate, the same gate that covers hooks, MCP, and LSP
+    // The doctor report then shows an untrusted folder's project-plugin MCP servers as blocked
+    // No session resolve has run for a one-shot doctor, so resolve and record the verdict here, then gate plugins on it
     let project_trusted = crate::agent::folder_trust::resolve_and_record(cwd, None, false);
     let discovered_plugins = xai_grok_agent::plugins::discover_plugins(
         Some(cwd),
@@ -406,7 +405,7 @@ async fn check_server(
                     checks.push(check_tools_list(&service).await);
                 }
             }
-            // Client drops here, killing child process via kill_on_drop.
+            // Client drops here, killing the child process via kill_on_drop
         }
     }
 
@@ -457,17 +456,15 @@ pub async fn run_doctor(cwd: &Path, name_filter: Option<&str>) -> DoctorReport {
 
     let disabled_names = crate::util::config::disabled_mcp_server_names(cwd);
 
-    // Folder-trust gate: `grok mcp doctor` actually STARTS each server
-    // (`check_server_start`), so in an untrusted clone it would spawn the repo's
-    // project-scoped servers. Resolve the doctor cwd once (no prompt), then skip
-    // (do not start) any project-scoped server when untrusted. Reuses the same
-    // name primitive as the session/agent-pool gates.
+    // Folder-trust gate: `grok mcp doctor` actually STARTS each server (`check_server_start`)
+    // In an untrusted clone that would spawn the repo's project-scoped servers
+    // Resolve the doctor cwd once (no prompt), then skip (do not start) any project-scoped server when untrusted
+    // Uses the same name lookup (`project_scoped_mcp_names`) as the session/agent-pool gates
     //
-    // `remote = None` is intentional: standalone `grok mcp doctor` has no loaded
-    // `RemoteSettings`, so a remote-only org `folder_trust_enabled = false`
-    // opt-out isn't seen here — gating conservatively (treating the feature as
-    // enabled) is the deliberate fail-secure direction. Local env/user/managed
-    // config disable is still honored by `feature_enabled`.
+    // `remote = None` is intentional: standalone `grok mcp doctor` has no loaded `RemoteSettings`
+    // A remote-only org opt-out (`folder_trust_enabled = false`) isn't seen here
+    // Gating conservatively (treating the feature as enabled) is the deliberate fail-secure choice
+    // Local env/user/managed config disable is still honored by `feature_enabled`
     crate::agent::folder_trust::resolve_and_record(cwd, None, false);
     let untrusted_project: std::collections::HashSet<String> =
         if crate::agent::folder_trust::project_scope_allowed(cwd) {

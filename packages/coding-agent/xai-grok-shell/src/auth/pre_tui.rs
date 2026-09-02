@@ -1,15 +1,13 @@
 //! Interactive-pager external login that runs on the real TTY before raw mode.
 //!
-//! `auth_provider_command` already works via `grok login` because stderr is
-//! inherited. The TUI path instead pipes that stderr into the welcome copy-link
-//! overlay, which is unusable in Docker (no host browser, mouse capture, wrapped
-//! URLs). This module is the first-launch equivalent of `grok login`: print the
-//! provider URL on the real terminal, persist the token, then let the pager
-//! start already authenticated.
+//! `auth_provider_command` already works via `grok login` because stderr is inherited.
+//! The TUI path instead pipes that stderr into the welcome copy-link overlay.
+//! That overlay is unusable in Docker (no host browser, mouse capture, wrapped URLs).
+//! This module is the first-launch equivalent of `grok login`.
+//! It prints the provider URL on the real terminal, persists the token, then lets the pager start already authenticated.
 //!
-//! Deliberately does **not** call [`super::flow::run_auth_flow`]: that falls
-//! through to browser OIDC on provider failure (`Signing in with browser
-//! instead...`), which would re-enter the TUI splash this path exists to skip.
+//! Deliberately does **not** call [`super::flow::run_auth_flow`]: on provider failure that falls through to browser OIDC.
+//! The fallthrough (`Signing in with browser instead...`) would re-enter the TUI splash this path exists to skip.
 
 use std::sync::Arc;
 
@@ -19,9 +17,8 @@ use crate::util::grok_home;
 
 /// Whether the pager should attempt a pre-TUI provider login.
 ///
-/// Fresh-credential and `--force-login` checks are async and live in
-/// [`maybe_run_pre_tui_external_login`]; this is the sync half so tests can
-/// assert the TTY / provider gate without spawning a binary.
+/// Fresh-credential and `--force-login` checks are async and live in [`maybe_run_pre_tui_external_login`].
+/// This is the sync half so tests can assert the TTY and provider gate without spawning a binary.
 pub(crate) fn should_attempt_pre_tui_external_login(
     has_provider: bool,
     stdin_is_tty: bool,
@@ -32,17 +29,17 @@ pub(crate) fn should_attempt_pre_tui_external_login(
 /// Result of [`maybe_run_pre_tui_external_login`].
 #[derive(Debug)]
 pub enum PreTuiLoginOutcome {
-    /// Gate missed, or a usable cached credential already exists.
+    /// The gate did not pass, or a usable cached credential already exists.
     Skipped,
     /// Provider minted a session credential; `auth.json` is written.
     SignedIn(Box<GrokAuth>),
 }
 
-/// Run `auth_provider_command` on the real terminal when the interactive pager
-/// needs a sign-in. Call **before** `redirect_native_stderr` / raw mode.
+/// Run `auth_provider_command` on the real terminal when the interactive pager needs a sign-in.
+/// Call **before** `redirect_native_stderr` and raw mode.
 ///
-/// On provider failure this returns `Err` (no OIDC/device fallthrough). The
-/// pager should exit before taking over the TTY.
+/// On provider failure this returns `Err` (no OIDC/device fallthrough).
+/// The pager should exit before taking over the TTY.
 pub async fn maybe_run_pre_tui_external_login(
     grok_com_config: &GrokComConfig,
     force_login: bool,
@@ -66,8 +63,8 @@ pub async fn maybe_run_pre_tui_external_login(
     run_pre_tui_external_login_with(&auth_manager, cmd, force_login).await
 }
 
-/// Provider run + persist, with the `AuthManager` injected so tests can use a
-/// temp grok-home instead of the process-cached [`grok_home::grok_home`].
+/// Runs the provider and persists the result.
+/// The `AuthManager` is injected so tests can use a temp grok-home instead of the process-cached [`grok_home::grok_home`].
 pub(crate) async fn run_pre_tui_external_login_with(
     auth_manager: &Arc<AuthManager>,
     command: &str,

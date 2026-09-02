@@ -61,9 +61,7 @@ pub(crate) async fn handle(
         .map_err(|e| acp::Error::invalid_params().data(format!("invalid params: {e}")))?;
 
     let q = WsQuery {
-        // Clamp to a sane positive page size: a missing, zero, or negative
-        // `pageSize` falls back to the default rather than being forwarded
-        // verbatim to `/rest/workspaces`.
+        // A missing, zero, or negative `pageSize` falls back to the default instead of being forwarded verbatim to `/rest/workspaces`
         page_size: match req.page_size {
             Some(n) if n > 0 => n,
             _ => DEFAULT_PAGE_SIZE,
@@ -77,8 +75,7 @@ pub(crate) async fn handle(
         Ok(page) => success_response(page),
         Err(WsError::NoOauth) => degraded_response("no_oauth"),
         Err(e) => {
-            // Degrade to a partial result, but don't silently swallow the
-            // cause — log it so field failures are diagnosable.
+            // Degrade to a partial result, but log the cause so failures in the field stay diagnosable
             tracing::warn!("workspaces/list fetch failed: {e}");
             degraded_response("error")
         }

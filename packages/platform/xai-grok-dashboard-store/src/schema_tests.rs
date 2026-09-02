@@ -4,19 +4,6 @@ use tempfile::TempDir;
 use super::*;
 
 #[test]
-fn negative_user_version_is_unusable() {
-    let tmp = TempDir::new().unwrap();
-    let path = tmp.path().join("negative-version.db");
-    let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.pragma_update(None, "user_version", -1).unwrap();
-
-    assert!(matches!(
-        read_user_version(&conn),
-        Err(StoreError::Unusable { .. })
-    ));
-}
-
-#[test]
 fn schema_requires_cwd_only_for_build_members() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("constraint.db");

@@ -1,7 +1,6 @@
-//! Shared harness for the subagent latency sweep and the bootstrap-cost
-//! regression tier. Included by BOTH test binaries via `#[path]`: the
-//! regression tier lives in its own binary because the waterfall sink and
-//! env latch once per process.
+//! Shared harness for the subagent latency sweep and the bootstrap-cost regression tier.
+//! Both test binaries include this file via `#[path]`.
+//! The regression tier lives in its own binary because the waterfall sink and env latch once per process.
 #![allow(dead_code)]
 
 use std::time::{Duration, Instant};
@@ -36,8 +35,7 @@ pub fn probe_id(n: usize, i: usize) -> String {
     format!("swp-{n}-{i:03}")
 }
 
-/// One assistant response with N parallel task calls, one delta chunk per
-/// call; the script speaks wire names (`spawn_subagent`, `background`).
+/// One assistant response with N parallel task calls, one delta chunk per call; the script speaks wire names (`spawn_subagent`, `background`).
 pub fn burst_tool_calls_sse(n: usize, isolation: &str) -> ScriptedResponse {
     let mut events = Vec::with_capacity(n + 2);
     for i in 0..n {
@@ -149,9 +147,8 @@ pub async fn warm_mock(origin: &str, k: usize) {
     eprintln!("WARMUP k={k} ok={ok} ms={}", t.elapsed().as_millis());
 }
 
-/// Emit one `MOCK_REQ` mark per probe: for each probe id, stamp the first mock
-/// chat request whose last message is that probe's user prompt, which skips
-/// tool-result follow-ups and the auto-wake echo.
+/// Emit one `MOCK_REQ` mark per probe: for each probe id, stamp the first mock chat request whose last message is that probe's user prompt.
+/// That match skips tool-result follow-ups and the auto-wake echo.
 pub fn emit_mock_request_marks(server: &MockInferenceServer, n: usize) {
     let mut seen: std::collections::HashSet<String> = Default::default();
     for e in server.requests() {
@@ -201,8 +198,7 @@ pub struct BurstOutcome {
     pub peak_fds: usize,
 }
 
-/// One N-subagent burst against `server`; the agent runs on its own thread,
-/// the client (this thread) stamps notification arrivals.
+/// One N-subagent burst against `server`; the agent runs on its own thread, the client (this thread) stamps notification arrivals.
 pub fn run_burst(
     server: &MockInferenceServer,
     n: usize,
@@ -213,8 +209,7 @@ pub fn run_burst(
     let repo = build_repo(repo_files);
     let repo_path = repo.path().to_path_buf();
 
-    // The first foreground chat request is the parent's opening turn; every
-    // later request falls through to echo mode.
+    // The first foreground chat request is the parent's opening turn; every later request falls through to echo mode
     let expectation = server.expect_response(
         format!("burst-{n}-{isolation}"),
         InferenceRequestMatcher::foreground(InferenceEndpoint::ChatCompletions),
@@ -321,7 +316,6 @@ pub fn run_burst(
         let mut failures = 0usize;
         for i in 0..n {
             let id = probe_id(n, i);
-            // Exact task_id match first, then positional fallback.
             let spawn_ms = rec
                 .dispatch
                 .iter()
@@ -376,9 +370,8 @@ pub fn run_burst(
     outcome
 }
 
-/// Process-wide scaffold shared by the sweep and regression binaries: the
-/// mock's own runtime (agent startup prefetch would starve a shared one),
-/// an isolated GROK_HOME, and the base test env.
+/// Process-wide scaffold shared by the sweep and regression binaries.
+/// The mock gets its own runtime because agent startup prefetch would starve a shared one.
 pub struct SweepEnv {
     pub mock_rt: tokio::runtime::Runtime,
     pub deadline: Duration,
@@ -431,8 +424,7 @@ pub fn burst_on_fresh_mock(env: &SweepEnv, n: usize, isolation: &str) -> BurstOu
     outcome
 }
 
-/// One burst per N; the per-N wrapper tests select N by test-name filter so
-/// no env plumbing is needed through remote runners.
+/// One burst per N; the per-N wrapper tests select N by test-name filter so no env var has to reach the remote runners.
 pub fn run_sweep(ns: &[usize], isolation: &str) {
     let env = sweep_env_init();
     for &n in ns {

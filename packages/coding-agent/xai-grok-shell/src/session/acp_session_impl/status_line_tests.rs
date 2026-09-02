@@ -25,8 +25,7 @@ fn session_usage_splits_fresh_input_from_the_cache_buckets() {
     };
     let window = build_context_window(100_000, Some(42_000), Some(&totals), 80);
 
-    // The wire's 30k `input_tokens` already contains both cache buckets, so 17k
-    // is what was fresh and the three fields must not overlap.
+    // The wire's 30k `input_tokens` already contains both cache buckets, so 17k is what was fresh and the three fields must not overlap
     let usage = window.session_usage.unwrap();
     assert_eq!(usage.input_tokens, 17_000);
     assert_eq!(usage.cache_creation_input_tokens, 5_000);
@@ -177,8 +176,7 @@ async fn client_that_cannot_draw_the_row_never_builds_one() {
             let seeded = tokio::time::timeout(Duration::from_secs(10), painted.recv()).await;
             assert!(matches!(seeded, Ok(Some(_))), "a later attach must build");
 
-            // Ends the loop, so a build started by the earlier wake has landed
-            // before the receiver below is drained.
+            // Ends the loop, so a build started by the earlier wake has landed before the receiver below is drained
             drop(session);
             tokio::time::timeout(Duration::from_secs(10), emitter)
                 .await
@@ -215,8 +213,7 @@ async fn a_dropped_session_ends_its_parked_emitter() {
             let (session, _painted) = emitter_fixture(Client::WithoutTheRow).await;
             let emitter =
                 tokio::task::spawn_local(super::run_status_emitter(Arc::downgrade(&session)));
-            // Parks the emitter on the wake: without the yield it has not
-            // reached one, and the test would pass on the loop's first pass.
+            // Parks the emitter on the wake: without the yield it has not reached one, and the test would pass on the loop's first pass
             tokio::task::yield_now().await;
             assert!(
                 !emitter.is_finished(),

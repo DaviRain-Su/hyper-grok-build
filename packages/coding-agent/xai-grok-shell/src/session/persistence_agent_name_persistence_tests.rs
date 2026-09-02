@@ -20,8 +20,7 @@ fn summary_round_trips_agent_name_through_json() {
 
 #[test]
 fn summary_deserializes_without_agent_name_backward_compat() {
-    // Simulate an old summary.json that lacks agent_name — must still
-    // deserialize successfully (serde default → None).
+    // An old summary.json that lacks agent_name must still deserialize; serde defaults the field to None
     let json = r#"{
             "info": { "id": "old-session", "cwd": "/tmp" },
             "session_summary": "",
@@ -102,7 +101,6 @@ fn summary_round_trips_various_agent_names() {
 
 #[test]
 fn summary_with_agent_name_in_full_json() {
-    // Verify agent_name deserializes correctly alongside all other fields.
     let json = r#"{
             "info": { "id": "full-session", "cwd": "/tmp" },
             "session_summary": "test session",

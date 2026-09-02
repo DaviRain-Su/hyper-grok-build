@@ -1,6 +1,5 @@
-//! Shared in-process OTLP collector + decode helpers for the external-stream
-//! wire tests. Each integration-test binary that needs a collector does
-//! `mod otlp_collector;` and uses these.
+//! Shared in-process OTLP collector and decode helpers for the external-stream wire tests.
+//! Each integration-test binary that needs a collector does `mod otlp_collector;` and uses these.
 //!
 //! The collector runs on its own thread with its own current-thread runtime.
 #![allow(dead_code)]
@@ -9,9 +8,8 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, Once};
 
-/// Install a process-wide test tracing subscriber so construction/export
-/// failures surface under `--test_output=errors` without production
-/// `eprintln!` side effects.
+/// Install a process-wide test tracing subscriber.
+/// Construction and export failures then show up under `--test_output=errors` without production `eprintln!` side effects.
 pub fn init_test_tracing() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
@@ -59,8 +57,7 @@ impl Collected {
     pub fn raw_metrics(&self) -> Vec<u8> {
         self.metrics.lock().unwrap().concat()
     }
-    /// Combined raw bytes of both signals, lossy-decoded to a string — for
-    /// canary/leak scans at the HTTP layer.
+    /// Combined raw bytes of both signals, lossy-decoded to a string for canary/leak scans at the HTTP layer.
     pub fn raw_text(&self) -> String {
         let mut bytes = self.raw_logs();
         bytes.extend(self.raw_metrics());
@@ -111,14 +108,12 @@ impl MetricsService for GrpcCollector {
     }
 }
 
-/// Start an HTTP/protobuf collector; returns its base URL
-/// (`http://127.0.0.1:PORT`).
+/// Start an HTTP/protobuf collector; returns its base URL (`http://127.0.0.1:PORT`).
 pub fn start_collector(collected: Collected) -> String {
     start_collector_with_protocol(collected, CollectorProtocol::HttpProtobuf)
 }
 
-/// Start the collector for the requested OTLP transport; returns its base URL
-/// (`http://127.0.0.1:PORT`).
+/// Start the collector for the requested OTLP transport; returns its base URL (`http://127.0.0.1:PORT`).
 pub fn start_collector_with_protocol(collected: Collected, protocol: CollectorProtocol) -> String {
     let (addr_tx, addr_rx) = std::sync::mpsc::channel::<SocketAddr>();
     std::thread::spawn(move || {
@@ -261,10 +256,8 @@ fn start_grpc_tls_collector_inner(
     use opentelemetry_proto::tonic::collector::logs::v1::logs_service_server::LogsServiceServer;
     use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_server::MetricsServiceServer;
 
-    // The test binary links both ring and aws-lc-rs, so rustls cannot pick a
-    // process default on its own; the server-side acceptor needs one pinned.
-    // (The production client is unaffected: tonic passes a provider
-    // explicitly.)
+    // The test binary links both ring and aws-lc-rs, so rustls cannot pick a process default on its own; the server-side acceptor needs one pinned
+    // (The production client is unaffected: tonic passes a provider explicitly.)
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let (addr_tx, addr_rx) = std::sync::mpsc::channel::<SocketAddr>();
@@ -316,9 +309,8 @@ pub fn start_http_mtls_collector(
     use rustls::server::WebPkiClientVerifier;
     use std::sync::Arc;
 
-    // Same process-level CryptoProvider pin as gRPC mTLS tests: the binary
-    // links both ring and aws-lc-rs, so rustls will not auto-pick. Prefer
-    // aws-lc to match the workspace `rustls` feature set and tonic path.
+    // Same process-level CryptoProvider pin as gRPC mTLS tests: the binary links both ring and aws-lc-rs, so rustls will not auto-pick
+    // Prefer aws-lc to match the workspace `rustls` feature set and tonic path
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let (addr_tx, addr_rx) = std::sync::mpsc::channel::<SocketAddr>();
@@ -387,8 +379,7 @@ pub fn start_http_mtls_collector(
     let addr = addr_rx
         .recv_timeout(std::time::Duration::from_secs(10))
         .expect("collector must start");
-    // Prefer localhost so the server cert SAN (localhost + 127.0.0.1) matches
-    // whatever the client/rustls hostname check uses.
+    // Prefer localhost so the server cert SAN (localhost and 127.0.0.1) matches whatever the client/rustls hostname check uses
     format!("https://localhost:{}", addr.port())
 }
 
@@ -528,8 +519,7 @@ pub fn log_records(c: &Collected) -> Vec<RecordView> {
     out
 }
 
-/// One decoded metric data point (sums only — the external schema is all
-/// monotonic counters).
+/// One decoded metric data point (sums only; the external schema is all monotonic counters).
 #[derive(Debug, Clone)]
 pub struct MetricPoint {
     pub name: String,

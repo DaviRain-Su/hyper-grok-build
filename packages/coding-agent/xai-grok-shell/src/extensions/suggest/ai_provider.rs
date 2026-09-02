@@ -9,9 +9,8 @@ const AI_PRIORITY: i32 = -10;
 
 /// Request AI-powered shell command suggestions via the session actor.
 ///
-/// Sends `SessionCommand::AISuggest` and awaits the response with a 2-second
-/// timeout. Returns at most one `RankedSuggestion` with `source: AI` and
-/// `priority: -10` (below history/path results).
+/// Sends `SessionCommand::AISuggest` and awaits the response with a 2-second timeout.
+/// Returns at most one `RankedSuggestion` with `source: AI` and `priority: -10` (below history and path results).
 pub(crate) async fn suggest(
     cmd_tx: &mpsc::UnboundedSender<SessionCommand>,
     prefix: &str,
@@ -49,8 +48,7 @@ fn build_suggestion(prefix: &str, raw: &str) -> Vec<RankedSuggestion> {
     }
 
     // If the model returned the full command (including prefix), use it as-is.
-    // Otherwise concatenate directly — the model output may start with a space
-    // or continuation that should be appended verbatim after the prefix.
+    // Otherwise concatenate directly: the model output may start with a space or continuation that should be appended verbatim after the prefix
     let insert_text = if trimmed.starts_with(prefix) {
         trimmed.to_owned()
     } else if raw.starts_with(prefix) {
@@ -65,7 +63,7 @@ fn build_suggestion(prefix: &str, raw: &str) -> Vec<RankedSuggestion> {
         insert_text,
         source: SuggestionSource::AI,
         priority: AI_PRIORITY,
-        // Whole-line; `handle_suggest` stamps the range (no full text here).
+        // The suggestion replaces the whole line; `handle_suggest` fills in the range, since the full text is not available here
         replace_range: None,
         token_text: None,
         truncated: false,
@@ -111,8 +109,8 @@ mod tests {
 
     #[test]
     fn build_suggestion_no_separator_concatenates_directly() {
-        // Model returned a continuation without leading space — result has no separator.
-        // This is expected: the model should include the space if one is needed.
+        // The model returned "commit" without a leading space, so nothing inserts a separator
+        // The model must include the space itself when one is needed
         let result = build_suggestion("git", "commit");
         assert_eq!(result[0].insert_text, "gitcommit");
     }

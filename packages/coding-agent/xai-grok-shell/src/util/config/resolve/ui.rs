@@ -1,14 +1,12 @@
 use crate::util::config::RemoteSettings;
 use toml::Value as TomlValue;
 
-/// Env override for showing agent thinking blocks in the TUI.
 pub const ENV_SHOW_THINKING_BLOCKS: &str = "GROK_SHOW_THINKING_BLOCKS";
 
 #[cfg(test)]
 static SHOW_THINKING_BLOCKS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Shared precedence core for `[ui]` bool flags: requirement > env >
-/// `[ui].<ui_key>` config > managed > remote (already extracted) > `default`.
+/// Shared precedence core for `[ui]` bool flags: requirement > env > `[ui].<ui_key>` config > managed > remote (already extracted) > `default`.
 fn resolve_ui_bool(
     env_var: &str,
     ui_key: &str,
@@ -30,10 +28,6 @@ fn resolve_ui_bool(
         .resolve()
 }
 
-/// Resolve whether the TUI should show agent thinking/reasoning blocks.
-///
-/// Precedence: requirements > env (`GROK_SHOW_THINKING_BLOCKS`) >
-/// `[ui] show_thinking_blocks` > managed > remote settings > default `true`.
 pub fn resolve_show_thinking_blocks(
     requirements: Option<&TomlValue>,
     user: Option<&TomlValue>,
@@ -51,18 +45,13 @@ pub fn resolve_show_thinking_blocks(
     )
 }
 
-/// Env override for grouping consecutive non-destructive tool calls in the TUI.
 pub const ENV_GROUP_TOOL_VERBS: &str = "GROK_GROUP_TOOL_VERBS";
 
 #[cfg(test)]
 static GROUP_TOOL_VERBS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Resolve whether the TUI folds runs of consecutive non-destructive tool
-/// calls (reads/searches/lists) into one transcript row.
-///
-/// Precedence: requirements > env (`GROK_GROUP_TOOL_VERBS`) >
-/// `[ui] group_tool_verbs` > managed > remote settings > default `true`
-/// (remote `Some(false)` is the kill switch).
+/// Resolve whether the TUI folds runs of consecutive non-destructive tool calls (reads/searches/lists) into one transcript row.
+/// Remote `Some(false)` is the kill switch.
 pub fn resolve_group_tool_verbs(
     requirements: Option<&TomlValue>,
     user: Option<&TomlValue>,
@@ -80,18 +69,13 @@ pub fn resolve_group_tool_verbs(
     )
 }
 
-/// Env override for the collapsed-Edit-blocks default in the TUI.
 pub const ENV_COLLAPSED_EDIT_BLOCKS: &str = "GROK_COLLAPSED_EDIT_BLOCKS";
 
 #[cfg(test)]
 static COLLAPSED_EDIT_BLOCKS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Resolve whether the TUI shows Edit tool calls as a collapsed one-line
-/// `+N/-M` diffstat summary by default (expand for the diff).
-///
-/// Precedence: requirements > env (`GROK_COLLAPSED_EDIT_BLOCKS`) >
-/// `[ui] collapsed_edit_blocks` > managed > remote (GrowthBook) > default
-/// `false` (rollout flag: off keeps the legacy expanded-diff view).
+/// Resolve whether the TUI shows Edit tool calls as a collapsed one-line `+N/-M` diffstat summary by default (expand for the diff).
+/// This is a rollout flag: off keeps the legacy expanded-diff view.
 pub fn resolve_collapsed_edit_blocks(
     requirements: Option<&TomlValue>,
     user: Option<&TomlValue>,
@@ -109,19 +93,13 @@ pub fn resolve_collapsed_edit_blocks(
     )
 }
 
-/// Resolve the opt-in mouse-reporting toggle shortcut flag.
+/// When enabled, the pager registers `Ctrl+R` (scrollback-focused only) so the user can flip terminal mouse capture.
+/// Turning capture off hands selection back to the terminal for native click-drag copy/paste.
 ///
-/// When enabled, the pager registers `Ctrl+R` (scrollback-focused only) so the
-/// user can flip terminal mouse capture and hand selection back to the terminal
-/// for native click-drag copy/paste.
-///
-/// Precedence: `GROK_MOUSE_REPORTING_TOGGLE` env > `[ui] mouse_reporting_toggle`
-/// in effective config > the parsed [`UiConfig`] field (defends against a
-/// partial deserialize) > default (`false`). Returns [`Resolved`] so callers can
-/// log the winning source.
+/// Precedence: `GROK_MOUSE_REPORTING_TOGGLE` env > `[ui] mouse_reporting_toggle` > the parsed [`UiConfig`] field > default (`false`).
+/// The [`UiConfig`] fallback defends against a partial deserialize.
 ///
 /// [`UiConfig`]: crate::agent::config::UiConfig
-/// [`Resolved`]: crate::agent::config::Resolved
 pub fn resolve_mouse_reporting_toggle(
     effective_config: Option<&TomlValue>,
     ui: &crate::agent::config::UiConfig,
@@ -165,7 +143,7 @@ mod tests {
             mouse_reporting_toggle: Some(true),
             ..UiConfig::default()
         };
-        // No effective config → the parsed struct field is the fallback layer.
+        // With no effective config, the parsed struct field is the fallback layer
         let resolved = resolve_mouse_reporting_toggle(None, &ui);
         assert!(resolved.value);
     }

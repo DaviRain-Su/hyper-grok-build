@@ -1,11 +1,8 @@
-//! `scroll-matrix` — scroll validation matrix sweep for xai-grok-pager.
-//!
-//! Runs matrix cells (`scroll_matrix::CELLS`) against a real pager binary in
-//! a PTY, prints the per-cell verdict table, writes `report.json` into the
-//! artifacts dir (next to each cell's recorder capture), and exits nonzero
-//! iff any cell failed or an xfail cell passed. The curated tier also runs
-//! in CI as `tests/scroll_matrix_curated.rs`; this binary is the local
-//! entry point for the full sweep and for one-off cell reruns (`--filter`).
+//! Runs matrix cells (`scroll_matrix::CELLS`) against a real pager binary in a PTY and prints the per-cell verdict table.
+//! Writes `report.json` into the artifacts dir, next to each cell's recorder capture.
+//! Exits nonzero iff any cell failed or an xfail cell passed.
+//! The curated tier also runs in CI as `tests/scroll_matrix_curated.rs`.
+//! This binary is the local entry point for the full sweep and for one-off cell reruns (`--filter`).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -22,7 +19,7 @@ use xai_grok_pager_pty_harness::scroll_matrix::{
 enum TierArg {
     /// The CI subset.
     Curated,
-    /// Every cell (curated + full-tier rows).
+    /// Every cell (curated and full-tier rows).
     Full,
 }
 
@@ -41,11 +38,11 @@ struct Cli {
     #[arg(long, value_name = "SUBSTR")]
     filter: Option<String>,
 
-    /// Concurrent cells. Default 1 because gestures are host-paced: parallel
-    /// cells contend for CPU and stretch the inter-report sleeps, which can
-    /// flip Auto-mode classifications. The invariant suite is stall-safe (it
-    /// judges timing from the recorder's clock), so raising this stays sound
-    /// — it just makes captures less representative of real gesture timing.
+    /// Concurrent cells.
+    /// Default 1 because the host paces gestures: parallel cells contend for CPU and stretch the inter-report sleeps.
+    /// That can flip Auto-mode classifications.
+    /// The invariant suite judges timing from the recorder's clock, so raising this stays sound.
+    /// It just makes captures less representative of real gesture timing.
     #[arg(long, value_name = "N", default_value_t = 1)]
     jobs: usize,
 
@@ -59,8 +56,7 @@ struct Cli {
     binary: Option<PathBuf>,
 }
 
-// Multi-thread runtime required: run_cell drives its blocking cell body via
-// Handle::block_on on a spawn_blocking thread (see scroll_matrix::runner).
+// Multi-thread runtime required: run_cell drives its blocking cell body via Handle::block_on on a spawn_blocking thread (see scroll_matrix::runner)
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> ExitCode {
     match run().await {
@@ -99,10 +95,9 @@ async fn run() -> Result<ExitCode> {
         );
     }
 
-    // The pager child resolves GROK_SCROLL_LOG against ITS cwd (the
-    // harness's temp workspace), so a relative artifacts dir — including
-    // the default — would scatter captures there and starve the finalize
-    // wait. Absolutize against the invoking cwd.
+    // The pager child resolves GROK_SCROLL_LOG against ITS cwd (the harness's temp workspace)
+    // A relative artifacts dir (including the default) would scatter captures there and starve the finalize wait
+    // Absolutize against the invoking cwd
     let artifacts = std::path::absolute(&cli.artifacts)
         .with_context(|| format!("absolutize artifacts dir {}", cli.artifacts.display()))?;
 
@@ -113,8 +108,8 @@ async fn run() -> Result<ExitCode> {
     Ok(ExitCode::from(exit_code(&reports)))
 }
 
-/// Run every cell, preserving table order. `jobs == 1` runs inline (the
-/// representative-timing default); higher values fan out over a semaphore.
+/// Run every cell, preserving table order.
+/// `jobs == 1` runs inline (the default, which keeps gesture timing representative); higher values fan out over a semaphore.
 async fn run_cells(
     cells: &[&'static MatrixCell],
     jobs: usize,

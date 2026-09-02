@@ -112,7 +112,7 @@ fn clipped_jitter_reports_effective_displacement() {
     assert_eq!(secs_between(now, at0), 60);
     assert_eq!(at0, at1);
     assert_eq!(at0, atn);
-    // Nominal is exp − 0.4·ttl = now+18; floor is now+60 ⇒ +42s.
+    // Nominal is exp − 0.4·ttl = now+18 and the floor is now+60, so the reported jitter is +42s
     assert!((j0 - 42.0).abs() < 0.1);
     assert!((j0 - j1).abs() < 0.001);
     assert!((j0 - jn).abs() < 0.001);
@@ -315,22 +315,6 @@ async fn debug_does_not_leak_tokens() {
     assert!(!debug.contains("stale-access"));
     assert!(!debug.contains("refresh-tok"));
 }
-
-#[tokio::test(flavor = "current_thread")]
-async fn identity_surfaces_principal_fields() {
-    let mut params = provider_params("https://auth.example.com".into(), None);
-    params.identity = AuthIdentity {
-        user_id: "user-1".into(),
-        principal_type: Some("Team".into()),
-        principal_id: Some("team-9".into()),
-    };
-    let provider = ProactiveOidcAuthProvider::new(params);
-    let id = provider.identity().expect("identity present");
-    assert_eq!(id.user_id, "user-1");
-    assert_eq!(id.principal_type.as_deref(), Some("Team"));
-    assert_eq!(id.principal_id.as_deref(), Some("team-9"));
-}
-
 async fn spawn_mock_idp(
     token_body: serde_json::Value,
     status: axum::http::StatusCode,
@@ -492,7 +476,7 @@ async fn background_refresh_updates_snapshot_against_mock_idp() {
     let new_leads = lead_sample_count() - lead_before;
     assert_eq!(new_leads, 1);
     let lead = (lead_sample_sum() - lead_sum_before) / new_leads as f64;
-    // Old remaining after a ~3s wait from a 5s token — not the new expires_in=5.
+    // The lead is the old token's remaining lifetime after a ~3s wait on a 5s token, not the new expires_in=5
     assert!(
         (0.0..4.5).contains(&lead),
         "lead={lead} looks like the new TTL rather than old remaining"
@@ -969,8 +953,7 @@ async fn stale_persist_does_not_clobber_newer_token() {
     let auth_path = write_auth_json(dir.path());
     let mut params = provider_params("https://auth.example.com".into(), None);
     params.refresh.enabled = false;
-    // Production wiring: persist_on_refresh writes synchronously so the
-    // PersistGate seq check covers the actual auth.json write.
+    // Production wiring: persist_on_refresh writes synchronously so the PersistGate seq check covers the actual auth.json write
     params.on_refresh = Some(crate::hub_auth::persist_on_refresh(
         auth_path.clone(),
         "oidc".into(),

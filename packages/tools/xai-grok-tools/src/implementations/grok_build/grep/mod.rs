@@ -833,7 +833,7 @@ async fn prepare_grep(
     let output_mode = input.output_mode.clone().unwrap_or(OutputMode::Content);
     let effective_head_limit = resolve_effective_head_limit(input, &output_mode);
 
-    let rg_exec = rg_path();
+    let rg_exec = rg_path()?;
 
     let mut cmd = Command::new(rg_exec);
     cmd.arg("--heading")

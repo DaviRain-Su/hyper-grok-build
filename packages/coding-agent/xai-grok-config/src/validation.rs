@@ -9,7 +9,7 @@ use crate::version_overrides::{VersionOverrideError, apply_version_overrides};
 
 use prod_mc_cli_chat_proxy_types::FAIL_CLOSED_KEY;
 
-/// `fail_closed` from a requirements table; non-bool → warn once and treat as false.
+/// `fail_closed` from a requirements table; a non-bool warns once and is treated as false.
 fn fail_closed_flag(requirements: &toml::Value) -> bool {
     use prod_mc_cli_chat_proxy_types::{FailClosedFlag, fail_closed_flag_status_from_value};
     let status = fail_closed_flag_status_from_value(requirements);
@@ -25,13 +25,12 @@ fn fail_closed_flag(requirements: &toml::Value) -> bool {
     status.is_enabled()
 }
 
-/// Env override for [`FAIL_CLOSED_KEY`]. Named for prefix-alignment
-/// with `GROK_MANAGED_CONFIG_URL`; only applies to `requirements.toml`.
+/// Env override for [`FAIL_CLOSED_KEY`]; only applies to `requirements.toml`.
+/// The name shares the `GROK_MANAGED_CONFIG_URL` prefix.
 pub(crate) const FAIL_CLOSED_ENV: &str = "GROK_MANAGED_CONFIG_FAIL_CLOSED";
 
-/// Where a requirements layer came from: a file on disk, or the macOS MDM
-/// managed-preferences layer (admin-forced, no file). The typed split keeps a
-/// caller from `exists()`/reading a layer that has no path.
+/// Where a requirements layer came from: a file on disk, or the macOS MDM managed-preferences layer (admin-forced, no file).
+/// The typed split keeps a caller from calling `exists()` on or reading a layer that has no path.
 #[derive(Debug, Clone)]
 pub enum RequirementsSource {
     File(PathBuf),
@@ -39,9 +38,8 @@ pub enum RequirementsSource {
 }
 
 impl RequirementsSource {
-    /// Display/provenance label — a file path string, or the synthetic MDM source
-    /// id (`ai.x.grok:…`). For diagnostics and matching only; the MDM layer has no
-    /// file, so this is a label (`Cow<str>`), never a `Path` to open.
+    /// The display and provenance label: a file path string, or the synthetic MDM source id (`ai.x.grok:…`).
+    /// For diagnostics and matching only; the MDM layer has no file, so this is a label (`Cow<str>`), never a `Path` to open.
     pub fn label(&self) -> std::borrow::Cow<'_, str> {
         match self {
             Self::File(p) => p.to_string_lossy(),
@@ -55,14 +53,13 @@ impl RequirementsSource {
 pub struct RequirementsLayer {
     pub value: toml::Value,
     pub source: RequirementsSource,
-    /// `true` = root-owned system layer. Security decisions must trust this flag,
-    /// not re-derive from the source (`GROK_HOME`-influenced, could carry `..`).
+    /// `true` means the root-owned system layer.
+    /// Security decisions must trust this flag, not re-derive it from the source, which is `GROK_HOME`-influenced and could carry `..`.
     pub is_system: bool,
 }
 
 /// All loaded requirements layers in apply order (user first, system last).
-/// Use when you need per-layer source attribution; otherwise use
-/// [`load_merged_requirements`].
+/// Use when you need per-layer source attribution; otherwise use [`load_merged_requirements`].
 pub fn requirements_layers() -> Vec<RequirementsLayer> {
     let mut out = Vec::new();
     if let Some(user_path) = user_grok_home().map(|g| g.join("requirements.toml"))
@@ -84,9 +81,9 @@ pub fn requirements_layers() -> Vec<RequirementsLayer> {
             });
         }
     }
-    // macOS MDM: OS-protected admin layer (forced values only). Pushed last so it
-    // wins the deep-merge over the system file and cloud cache; `is_system` so
-    // security decisions trust it like the root-owned layer.
+    // macOS MDM: OS-protected admin layer (forced values only)
+    // It is pushed last so it wins the deep-merge over the system file and cloud cache
+    // It is marked `is_system` so security decisions trust it like the root-owned layer
     if let Some(value) = mdm_requirements_value() {
         out.push(RequirementsLayer {
             value,
@@ -97,7 +94,7 @@ pub fn requirements_layers() -> Vec<RequirementsLayer> {
     out
 }
 
-/// User + system requirements deep-merged, system wins on conflict.
+/// User and system requirements deep-merged; system wins on conflict.
 /// Use for read-only consumers so user pins can't bypass system policy.
 pub fn load_merged_requirements() -> Option<toml::Value> {
     let mut iter = requirements_layers().into_iter();
@@ -112,8 +109,7 @@ pub(crate) fn load_requirements() -> Option<toml::Value> {
     load_user_requirements(user_grok_home().as_deref())
 }
 
-/// User requirements layer from `<home>/requirements.toml`, or `None` with no
-/// resolvable user home (rather than reading a cwd-relative `.grok`).
+/// User requirements layer from `<home>/requirements.toml`, or `None` with no resolvable user home (rather than reading a cwd-relative `.grok`).
 fn load_user_requirements(home: Option<&Path>) -> Option<toml::Value> {
     load_requirements_layer(&home?.join("requirements.toml"))
 }
@@ -123,8 +119,7 @@ pub(crate) fn load_system_requirements() -> Option<toml::Value> {
     load_requirements_layer(&dir.join("requirements.toml"))
 }
 
-/// Soft-fails on errors; fail-closed enforcement lives in
-/// [`validate_requirements`].
+/// Soft-fails on errors; fail-closed enforcement lives in [`validate_requirements`].
 pub(crate) fn load_requirements_layer(path: &Path) -> Option<toml::Value> {
     let v = match load_toml_file(path) {
         Ok(v) if v.as_table().is_some_and(|t| !t.is_empty()) => v,
@@ -133,9 +128,8 @@ pub(crate) fn load_requirements_layer(path: &Path) -> Option<toml::Value> {
     normalize_requirements_value(v, &path.display().to_string())
 }
 
-/// Strip `fail_closed` and apply `[[version_overrides]]` for a parsed
-/// requirements layer (file or MDM), so every source is normalized identically.
-/// `None` (skip the layer) when version_overrides are invalid for this build.
+/// Strip `fail_closed` and apply `[[version_overrides]]` for a parsed requirements layer (file or MDM), so every source is normalized identically.
+/// Returns `None` (skip the layer) when version_overrides are invalid for this build.
 pub(crate) fn normalize_requirements_value(
     mut v: toml::Value,
     source: &str,
@@ -154,8 +148,8 @@ pub(crate) fn normalize_requirements_value(
     Some(v)
 }
 
-/// The MDM requirements layer (read + normalized), or `None`. Shared so the
-/// enforced view and the effective-config view agree.
+/// The MDM requirements layer (read and normalized), or `None`.
+/// Shared so the enforced view and the effective-config view agree.
 pub(crate) fn mdm_requirements_value() -> Option<toml::Value> {
     normalize_requirements_value(
         crate::macos_managed::managed_preferences_requirements()?,
@@ -177,12 +171,8 @@ pub enum RequirementsError {
     },
 }
 
-/// `Ok(())` unless the layer opts into fail_closed AND has invalid
-/// `[[version_overrides]]` for the registered CLI version.
-///
-/// Re-reads the file independently from [`load_requirements_layer`]:
-/// at startup both run, costing one extra small read per layer. Sharing
-/// the parse would couple loader+validator APIs for negligible gain.
+/// `Ok(())` unless the layer opts into fail_closed AND has invalid `[[version_overrides]]` for the registered CLI version.
+/// Re-reads the file independently from [`load_requirements_layer`]; sharing the parse would couple the loader and validator APIs for little gain.
 pub(crate) fn validate_requirements_layer(path: &Path) -> Result<(), RequirementsError> {
     let Ok(v) = load_toml_file(path) else {
         return Ok(());
@@ -190,9 +180,9 @@ pub(crate) fn validate_requirements_layer(path: &Path) -> Result<(), Requirement
     validate_requirements_value(v, &RequirementsSource::File(path.to_path_buf()))
 }
 
-/// Fail-closed `[[version_overrides]]` validation for a parsed requirements layer
-/// (file or MDM). Reads `fail_closed` before applying overrides so a broken patch
-/// can't disable enforcement mid-load. `source` is the provenance label in the error.
+/// Fail-closed `[[version_overrides]]` validation for a parsed requirements layer (file or MDM).
+/// Reads `fail_closed` before applying overrides so a broken patch can't disable enforcement mid-load.
+/// `source` is the provenance label in the error.
 fn validate_requirements_value(
     mut v: toml::Value,
     source: &RequirementsSource,
@@ -215,8 +205,8 @@ fn validate_requirements_value(
     Ok(())
 }
 
-/// Validates all requirements layers (user + system files, and macOS MDM). Call
-/// once at startup from the binary's `main()`; exit on `Err`.
+/// Validates all requirements layers (user and system files, and macOS MDM).
+/// Call once at startup from the binary's `main()`; exit on `Err`.
 pub fn validate_requirements() -> Result<(), RequirementsError> {
     validate_user_requirements(user_grok_home().as_deref())?;
     if let Some(dir) = system_config_dir() {
@@ -229,8 +219,7 @@ pub fn validate_requirements() -> Result<(), RequirementsError> {
     Ok(())
 }
 
-/// Validate the user requirements layer if a user home resolves; otherwise a
-/// no-op (no cwd-relative `.grok/requirements.toml` is read or enforced).
+/// Validate the user requirements layer if a user home resolves; otherwise a no-op (no cwd-relative `.grok/requirements.toml` is read or enforced).
 fn validate_user_requirements(home: Option<&Path>) -> Result<(), RequirementsError> {
     match home {
         Some(g) => validate_requirements_layer(&g.join("requirements.toml")),
@@ -238,7 +227,8 @@ fn validate_user_requirements(home: Option<&Path>) -> Result<(), RequirementsErr
     }
 }
 
-/// `fail_closed` for [`validate_requirements`]'s version check: the admin file flag is authoritative; the env can only TIGHTEN it (force-on), never loosen.
+/// `fail_closed` for [`validate_requirements`]'s version check.
+/// The admin file flag is authoritative; the env can only TIGHTEN it (force-on), never loosen.
 fn resolve_fail_closed_mode(requirements: &toml::Value) -> bool {
     fail_closed_flag(requirements) || env_bool(FAIL_CLOSED_ENV) == Some(true)
 }
@@ -247,8 +237,7 @@ fn resolve_fail_closed_mode(requirements: &toml::Value) -> bool {
 mod tests {
     use super::*;
 
-    /// Even with `fail_closed = true` in the file -- enforcement is
-    /// `validate_requirements`, not the loader.
+    /// Even with `fail_closed = true` in the file: enforcement is `validate_requirements`, not the loader.
     #[test]
     fn load_requirements_layer_soft_fails_on_invalid_version_overrides() {
         use std::io::Write;
@@ -340,7 +329,7 @@ minimum_version = "not-a-version"
         );
         assert!(!resolve_fail_closed_mode(&off));
 
-        // Unset → the admin file flag governs.
+        // Unset: the admin file flag governs
         unsafe { std::env::remove_var(FAIL_CLOSED_ENV) };
         assert!(resolve_fail_closed_mode(&on));
         assert!(!resolve_fail_closed_mode(&off));
@@ -385,7 +374,7 @@ minimum_version = "not-a-version"
 
     #[test]
     fn load_user_requirements_is_none_without_user_home() {
-        // No resolvable user home => no user requirements (no cwd-relative read).
+        // No resolvable user home means no user requirements (no cwd-relative read)
         assert!(load_user_requirements(None).is_none());
     }
 
@@ -405,7 +394,7 @@ minimum_version = "not-a-version"
 
     #[test]
     fn validate_user_requirements_ok_without_user_home() {
-        // No user home => nothing to validate, no error.
+        // No user home means nothing to validate, no error
         assert!(validate_user_requirements(None).is_ok());
     }
 
@@ -434,11 +423,9 @@ minimum_version = "not-a-version"
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The macOS MDM layer enters at the value level (no file on disk):
-    /// `mdm_requirements_value` / `validate_requirements` hand the CFPreferences
-    /// value straight to these, so normalize (strip `fail_closed`, keep the
-    /// clamp) and enforcement (Err under `fail_closed` + a bad override) must
-    /// hold with no file in the loop.
+    /// The macOS MDM layer has no file on disk; `mdm_requirements_value` and `validate_requirements` hand the CFPreferences value straight to these.
+    /// Normalizing must still strip `fail_closed` and keep the clamp.
+    /// Enforcement must still Err on a bad override under `fail_closed`.
     #[test]
     fn mdm_value_normalizes_and_enforces_like_a_file() {
         let source = crate::macos_managed::MDM_REQUIREMENTS_SOURCE;
@@ -450,8 +437,7 @@ minimum_version = "not-a-version"
         assert!(normalized.get(FAIL_CLOSED_KEY).is_none());
         assert_eq!(normalized["features"]["web_fetch"].as_bool(), Some(false));
 
-        // Enforcement keeps fail_closed: a bad override under fail_closed => Err,
-        // the same override without fail_closed soft-fails (Ok).
+        // Enforcement keeps fail_closed: a bad override under fail_closed errs; the same override without fail_closed soft-fails (Ok)
         let bad: toml::Value = toml::from_str(
             "fail_closed = true\n[[version_overrides]]\nminimum_version = \"not-a-version\"\n",
         )

@@ -1,17 +1,14 @@
 //! Wire-shape parsers for ext-notification params handled by `MvpAgent`.
 //!
-//! Pure parsing only (params JSON → `SessionCommand`); session lookup and
-//! command dispatch stay in `mvp_agent::ext_notification`.
+//! Pure parsing only (params JSON into `SessionCommand`); session lookup and command dispatch stay in `mvp_agent::ext_notification`.
 
 use crate::session::SessionCommand;
 
-/// Parse a `x.ai/queue/{remove,reorder,clear,edit,interject,hold_edit,release_edit}`
-/// ext-notification's params into the corresponding [`SessionCommand`].
-/// `owner` is the resolved attribution (params `owner`/`clientIdentifier`) used
-/// to scope remove/clear to the requesting client's own items, and recorded as
-/// `last_editor` for in-place text edits. Returns `None` for unrecognized
-/// methods, for `edit` when `newText` is missing, or when a required `id` is
-/// missing.
+/// Parse the params of a `x.ai/queue/{remove,reorder,clear,edit,interject,hold_edit,release_edit}` ext-notification.
+/// Yields the corresponding [`SessionCommand`].
+/// `owner` is the resolved attribution (params `owner`/`clientIdentifier`).
+/// It scopes remove/clear to the requesting client's own items, and is recorded as `last_editor` for in-place text edits.
+/// Returns `None` for unrecognized methods, for `edit` when `newText` is missing, or when a required `id` is missing.
 pub(super) fn parse_queue_edit_command(
     method: &str,
     params: &serde_json::Value,
@@ -20,8 +17,8 @@ pub(super) fn parse_queue_edit_command(
     match method {
         "x.ai/queue/remove" => {
             let id = params.get("id").and_then(|v| v.as_str())?.to_string();
-            // The client supplies the version it last saw; the handler removes
-            // only on an exact match (stale = benign no-op + rebroadcast).
+            // The client supplies the version it last saw; the handler removes only on an exact match
+            // A stale version is a benign no-op plus a rebroadcast
             // Default 0 covers never-edited prompts (the common case).
             let expected_version = params
                 .get("expectedVersion")
@@ -48,15 +45,14 @@ pub(super) fn parse_queue_edit_command(
         "x.ai/queue/clear" => Some(SessionCommand::ClearQueue { owner }),
         "x.ai/queue/interject" => {
             let id = params.get("id").and_then(|v| v.as_str())?.to_string();
-            // The client supplies the version it last saw; the handler acts
-            // only on an exact match (stale = benign no-op + rebroadcast).
+            // The client supplies the version it last saw; the handler acts only on an exact match
+            // A stale version is a benign no-op plus a rebroadcast
             let expected_version = params
                 .get("expectedVersion")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            // Optional client-edited replacement text (atomic edit+interject).
-            // Blank overrides are dropped (degrade to the stored queue text) —
-            // never interject an empty prompt on a malformed client param.
+            // Optional client-edited replacement text (atomic edit and interject)
+            // Blank overrides are dropped (degrade to the stored queue text); never interject an empty prompt on a malformed client param
             let new_text = params
                 .get("newText")
                 .and_then(|v| v.as_str())
@@ -72,9 +68,8 @@ pub(super) fn parse_queue_edit_command(
         "x.ai/queue/edit" => {
             let id = params.get("id").and_then(|v| v.as_str())?.to_string();
             let new_text = params.get("newText").and_then(|v| v.as_str())?.to_string();
-            // `owner` is the resolved attribution; for edit it represents the
-            // most recent editor (recorded as `last_editor`), not the original
-            // enqueuer.
+            // `owner` is the resolved attribution
+            // For edit it represents the most recent editor (recorded as `last_editor`), not the original enqueuer
             Some(SessionCommand::EditQueuedPrompt {
                 id,
                 new_text,
@@ -97,8 +92,7 @@ pub(super) fn parse_queue_edit_command(
 mod tests {
     use super::*;
 
-    /// Each `x.ai/queue/*` ext-notification maps to the
-    /// correct versioned/idempotent `SessionCommand`.
+    /// Each `x.ai/queue/*` ext-notification maps to the correct versioned/idempotent `SessionCommand`.
     #[test]
     fn parse_queue_edit_command_maps_each_method() {
         // remove: id + expectedVersion + owner.
@@ -165,7 +159,7 @@ mod tests {
             _ => panic!("expected EditQueuedPrompt"),
         }
 
-        // edit without editor (no owner/clientIdentifier) → editor: None.
+        // edit without editor (no owner/clientIdentifier) yields editor: None
         match parse_queue_edit_command(
             "x.ai/queue/edit",
             &serde_json::json!({ "sessionId": "s1", "id": "p9", "newText": "x" }),
@@ -177,7 +171,7 @@ mod tests {
             _ => panic!("expected EditQueuedPrompt"),
         }
 
-        // edit without newText → None (can't replace text we don't have).
+        // edit without newText yields None (can't replace text we don't have)
         assert!(
             parse_queue_edit_command(
                 "x.ai/queue/edit",
@@ -187,7 +181,7 @@ mod tests {
             .is_none()
         );
 
-        // edit without id → None (can't target an entry).
+        // edit without id yields None (can't target an entry)
         assert!(
             parse_queue_edit_command(
                 "x.ai/queue/edit",
@@ -227,7 +221,7 @@ mod tests {
             _ => panic!("expected InterjectQueuedPrompt"),
         }
 
-        // Blank newText is dropped → degrades to the stored queue text.
+        // Blank newText is dropped and degrades to the stored queue text
         let p = serde_json::json!({
             "sessionId": "s1", "id": "p10", "expectedVersion": 2, "newText": "   "
         });
@@ -250,7 +244,7 @@ mod tests {
             _ => panic!("expected InterjectQueuedPrompt"),
         }
 
-        // interject without id → None (can't target an entry).
+        // interject without id yields None (can't target an entry)
         assert!(
             parse_queue_edit_command("x.ai/queue/interject", &serde_json::json!({}), None)
                 .is_none()
@@ -267,7 +261,7 @@ mod tests {
             _ => panic!("expected ReleaseEdit"),
         }
 
-        // hold_edit / release_edit without id → None (can't target an entry).
+        // hold_edit / release_edit without id yields None (can't target an entry)
         assert!(
             parse_queue_edit_command("x.ai/queue/hold_edit", &serde_json::json!({}), None)
                 .is_none()
@@ -277,8 +271,8 @@ mod tests {
                 .is_none()
         );
 
-        // unknown method → None. Outbound `changed` is the other production
-        // `x.ai/queue/*` method and must not parse as an edit command.
+        // An unknown method yields None
+        // Outbound `changed` is the other production `x.ai/queue/*` method and must not parse as an edit command
         assert!(
             parse_queue_edit_command("x.ai/queue/bogus", &serde_json::json!({}), None).is_none()
         );
@@ -299,7 +293,7 @@ mod tests {
             )
             .is_none()
         );
-        // remove without id → None (can't target an entry).
+        // remove without id yields None (can't target an entry)
         assert!(
             parse_queue_edit_command("x.ai/queue/remove", &serde_json::json!({}), None).is_none()
         );

@@ -21,20 +21,42 @@ impl ActiveAgentMessageEventSink for CapturingSink {
     }
 }
 
-fn capture(output: ToolOutput) -> Vec<ActiveAgentMessageEvent> {
+fn capture(
+    output: ToolOutput,
+    requested_operation: ActiveAgentMessageOperation,
+) -> Vec<ActiveAgentMessageEvent> {
     let mut sink = CapturingSink::default();
-    record_completed_tool_output_with_sink(&output, 13, &mut sink);
+    record_completed_tool_output_with_sink(&output, requested_operation, 13, &mut sink);
     sink.events
+}
+
+fn admission(
+    admitted_at: Instant,
+    requested_operation: ActiveAgentMessageOperation,
+    effective_operation: ActiveAgentMessageOperation,
+    fallback_reason: Option<FallbackReason>,
+) -> ActiveAgentMessageAdmissionTelemetry {
+    ActiveAgentMessageAdmissionTelemetry::new(
+        admitted_at,
+        TelemetryCtx::new(
+            "parent".to_owned(),
+            std::sync::Arc::new(tokio::sync::Mutex::new(4)),
+        ),
+        requested_operation,
+        effective_operation,
+        fallback_reason,
+    )
 }
 
 #[test]
 fn completed_output_projection_emits_exactly_one_completion() {
     let private_identifier = "do-not-emit-this-id";
-    let events = capture(ToolOutput::SendSubagentMessage(
-        SendSubagentMessageOutput::Accepted {
+    let events = capture(
+        ToolOutput::SendSubagentMessage(SendSubagentMessageOutput::Accepted {
             message_id: private_identifier.to_owned(),
-        },
-    ));
+        }),
+        ActiveAgentMessageOperation::Steer,
+    );
 
     assert_eq!(events.len(), 1);
     assert_eq!(event_name(&events[0]), "active_agent_message_completed");
@@ -42,6 +64,7 @@ fn completed_output_projection_emits_exactly_one_completion() {
         &events[0],
         ActiveAgentMessageEvent::Completed(Completed {
             outcome: Outcome::Accepted,
+            requested_operation: Operation::Steer,
             duration_ms: 13,
         })
     ));
@@ -55,12 +78,13 @@ fn completed_output_projection_emits_exactly_one_completion() {
 
 #[test]
 fn completed_output_projection_emits_limit_only_for_real_oversize() {
-    let oversize = capture(ToolOutput::SendSubagentMessage(
-        SendSubagentMessageOutput::Limit {
+    let oversize = capture(
+        ToolOutput::SendSubagentMessage(SendSubagentMessageOutput::Limit {
             max_bytes: 8,
             observed_bytes: 9,
-        },
-    ));
+        }),
+        ActiveAgentMessageOperation::Steer,
+    );
     assert_eq!(
         oversize.iter().map(event_name).collect::<Vec<_>>(),
         [
@@ -73,6 +97,7 @@ fn completed_output_projection_emits_limit_only_for_real_oversize() {
         [
             ActiveAgentMessageEvent::Completed(Completed {
                 outcome: Outcome::Limit,
+                requested_operation: Operation::Steer,
                 duration_ms: 13,
             }),
             ActiveAgentMessageEvent::LimitHit(LimitHit {
@@ -82,17 +107,19 @@ fn completed_output_projection_emits_limit_only_for_real_oversize() {
         ]
     ));
 
-    let empty = capture(ToolOutput::SendSubagentMessage(
-        SendSubagentMessageOutput::Limit {
+    let empty = capture(
+        ToolOutput::SendSubagentMessage(SendSubagentMessageOutput::Limit {
             max_bytes: 8,
             observed_bytes: 0,
-        },
-    ));
+        }),
+        ActiveAgentMessageOperation::Queue,
+    );
     assert_eq!(empty.len(), 1);
     assert!(matches!(
         empty.as_slice(),
         [ActiveAgentMessageEvent::Completed(Completed {
             outcome: Outcome::Invalid,
+            requested_operation: Operation::Queue,
             duration_ms: 13,
         })]
     ));
@@ -134,11 +161,15 @@ fn immediate_projection_covers_every_current_tool_outcome() {
         ),
         (Send::ChannelClosed, Outcome::ChannelClosed),
     ] {
-        let events = capture(ToolOutput::SendSubagentMessage(output));
+        let events = capture(
+            ToolOutput::SendSubagentMessage(output),
+            ActiveAgentMessageOperation::Steer,
+        );
         assert!(matches!(
             events.first(),
             Some(ActiveAgentMessageEvent::Completed(Completed {
                 outcome,
+                requested_operation: Operation::Steer,
                 duration_ms: 13,
             })) if *outcome == expected
         ));
@@ -148,10 +179,13 @@ fn immediate_projection_covers_every_current_tool_outcome() {
 #[test]
 fn completed_output_projection_ignores_other_outputs() {
     assert!(
-        capture(ToolOutput::SearchTool(SearchToolOutput {
-            result_count: 0,
-            content: String::new(),
-        }))
+        capture(
+            ToolOutput::SearchTool(SearchToolOutput {
+                result_count: 0,
+                content: String::new(),
+            }),
+            ActiveAgentMessageOperation::Steer,
+        )
         .is_empty()
     );
 }
@@ -166,13 +200,12 @@ fn folded_cancellation_beats_closed_receipt_once_at_settlement_boundary() {
     let admitted_at = Instant::now();
     let mut sink = CapturingSink::default();
     let (_, event) = project_settlement(
-        Some(ActiveAgentMessageAdmissionTelemetry {
+        Some(admission(
             admitted_at,
-            parent_ctx: TelemetryCtx::new(
-                "parent".to_owned(),
-                std::sync::Arc::new(tokio::sync::Mutex::new(4)),
-            ),
-        }),
+            ActiveAgentMessageOperation::Steer,
+            ActiveAgentMessageOperation::Steer,
+            None,
+        )),
         status,
         admitted_at + std::time::Duration::from_millis(9),
     )
@@ -183,6 +216,11 @@ fn folded_cancellation_beats_closed_receipt_once_at_settlement_boundary() {
         sink.events.as_slice(),
         [ActiveAgentMessageEvent::Settled(Settled {
             disposition: SettlementDisposition::Cancelled,
+            requested_operation: Operation::Steer,
+            effective_operation: Operation::Steer,
+            fallback_disposition: FallbackDisposition::NotApplicable,
+            fallback_reason: None,
+            safe_point_latency_ms: None,
             duration_ms: 9,
         })]
     ));
@@ -217,14 +255,15 @@ async fn settlement_projection_is_closed_and_suppresses_no_admission() {
             SettlementDisposition::AdmissionUncertain,
         ),
     ] {
+        let telemetry = admission(
+            admitted_at,
+            ActiveAgentMessageOperation::Steer,
+            ActiveAgentMessageOperation::Steer,
+            None,
+        );
+        telemetry.record_safe_point_delivery(admitted_at + std::time::Duration::from_millis(3));
         let projected = project_settlement(
-            Some(ActiveAgentMessageAdmissionTelemetry {
-                admitted_at,
-                parent_ctx: TelemetryCtx::new(
-                    "parent".to_owned(),
-                    std::sync::Arc::new(tokio::sync::Mutex::new(4)),
-                ),
-            }),
+            Some(telemetry),
             status,
             admitted_at + std::time::Duration::from_millis(9),
         );
@@ -237,6 +276,11 @@ async fn settlement_projection_is_closed_and_suppresses_no_admission() {
             settled,
             Settled {
                 disposition,
+                requested_operation: Operation::Steer,
+                effective_operation: Operation::Steer,
+                fallback_disposition: FallbackDisposition::NotApplicable,
+                fallback_reason: None,
+                safe_point_latency_ms: Some(3),
                 duration_ms: 9,
             } if disposition == expected
         ));
@@ -249,4 +293,49 @@ async fn settlement_projection_is_closed_and_suppresses_no_admission() {
         )
         .is_none()
     );
+}
+
+#[test]
+fn fallback_projection_reports_idle_and_terminal_queue_reasons() {
+    let admitted_at = Instant::now();
+    for (effective, reason) in [
+        (ActiveAgentMessageOperation::Queue, FallbackReason::Idle),
+        (
+            ActiveAgentMessageOperation::Steer,
+            FallbackReason::Completion,
+        ),
+        (
+            ActiveAgentMessageOperation::Steer,
+            FallbackReason::SoftCancel,
+        ),
+        (ActiveAgentMessageOperation::Steer, FallbackReason::Rewind),
+    ] {
+        let telemetry = admission(
+            admitted_at,
+            ActiveAgentMessageOperation::Steer,
+            effective,
+            (reason == FallbackReason::Idle).then_some(reason),
+        );
+        if reason != FallbackReason::Idle {
+            telemetry.record_fallback(reason);
+        }
+        let (_, settled) = project_settlement(
+            Some(telemetry),
+            ActiveAgentMessageSettlementStatus::Completed,
+            admitted_at,
+        )
+        .expect("fallback settlement must project");
+        assert_eq!(
+            settled,
+            Settled {
+                disposition: SettlementDisposition::Completed,
+                requested_operation: Operation::Steer,
+                effective_operation: operation(effective),
+                fallback_disposition: FallbackDisposition::Queued,
+                fallback_reason: Some(reason),
+                safe_point_latency_ms: None,
+                duration_ms: 0,
+            }
+        );
+    }
 }

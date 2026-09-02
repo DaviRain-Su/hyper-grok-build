@@ -237,6 +237,8 @@ pub enum TurnActivity {
         max_retries: u32,
         /// Human-readable reason for the retry.
         reason: String,
+        /// Sampler error kind when the shell forwarded one.
+        error_type: Option<String>,
     },
     /// The model is streaming tool-call arguments; see [`WritingToolCall`].
     WritingToolCall(WritingToolCall),
@@ -346,9 +348,14 @@ pub struct AcpUpdateTracker {
     /// When true, the next UserMessageChunk is a skill body that follows a skill metadata chunk.
     /// It should be silently absorbed so the raw skill instructions don't appear in scrollback.
     skip_next_skill_body: bool,
-    /// Tool call IDs suppressed from scrollback (e.g. TodoWrite).
-    /// Their ToolCallUpdate counterparts are silently dropped too.
-    suppressed_tools: std::collections::HashSet<String>,
+    /// Tool calls suppressed from scrollback (e.g. TodoWrite), keyed by
+    /// tool-call ID. Updates merge into the stashed call and are otherwise
+    /// dropped — except a Failed terminal status, which renders the stashed
+    /// call: the surface that justified suppression (todo pane, subagent
+    /// block, tasks pane) never appears for a call that failed. Exception:
+    /// background-poll tools (`is_bg_plumbing_tool`) stay hidden even on
+    /// failure — polling a finished task fails routinely.
+    suppressed_tools: std::collections::HashMap<String, acp::ToolCall>,
     /// Suppressed-but-blocking tool calls, keyed by tool-call ID, holding the reason the turn is waiting.
     /// These tools (`get_command_or_subagent_output`, `wait_tasks`, `Sleep`, …) are kept out of `pending_tools` so they never hit scrollback.
     /// The turn *is* blocked on them, though; without this map the spinner falls back to a generic "Waiting…".
@@ -1112,7 +1119,7 @@ impl AcpUpdateTracker {
     /// Handle a tool call start.
     fn handle_tool_call(
         &mut self,
-        tc: acp::ToolCall,
+        mut tc: acp::ToolCall,
         scrollback: &mut ScrollbackState,
         is_replay: bool,
     ) -> bool {
@@ -1125,32 +1132,45 @@ impl AcpUpdateTracker {
             || is_scheduler_tool(&tc)
             || is_workflow_tool(&tc)
         {
-            if is_task_tool(&tc) {
-                let is_background = tc
-                    .meta
-                    .as_ref()
-                    .and_then(|m| m.get("subagentBackground"))
-                    .and_then(serde_json::Value::as_bool);
-                if is_background != Some(true) {
+            if let Some(orphan) = self.orphan_updates.remove(tc.tool_call_id.0.as_ref()) {
+                tc = merge_tool_call_update(tc, orphan);
+            }
+            if matches!(
+                tc.status,
+                acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed
+            ) {
+                if matches!(tc.status, acp::ToolCallStatus::Completed) || is_bg_plumbing_tool(&tc) {
+                    return false;
+                }
+            } else {
+                if is_task_tool(&tc) {
+                    let is_background = tc
+                        .meta
+                        .as_ref()
+                        .and_then(|m| m.get("subagentBackground"))
+                        .and_then(serde_json::Value::as_bool);
+                    if is_background != Some(true) {
+                        self.blocking_waits.insert(
+                            tc.tool_call_id.0.to_string(),
+                            BlockingWait {
+                                reason: WaitingReason::subagent(),
+                                stream_start_ms: self.last_stream_start_ms,
+                            },
+                        );
+                    }
+                } else if let Some(reason) = blocking_wait_reason(&tc) {
                     self.blocking_waits.insert(
                         tc.tool_call_id.0.to_string(),
                         BlockingWait {
-                            reason: WaitingReason::subagent(),
+                            reason,
                             stream_start_ms: self.last_stream_start_ms,
                         },
                     );
                 }
-            } else if let Some(reason) = blocking_wait_reason(&tc) {
-                self.blocking_waits.insert(
-                    tc.tool_call_id.0.to_string(),
-                    BlockingWait {
-                        reason,
-                        stream_start_ms: self.last_stream_start_ms,
-                    },
-                );
+                self.suppressed_tools
+                    .insert(tc.tool_call_id.0.to_string(), tc);
+                return false;
             }
-            self.suppressed_tools.insert(tc.tool_call_id.0.to_string());
-            return false;
         }
         let tc_id = tc.tool_call_id.0.to_string();
         if let Some(orphan) = self.orphan_updates.remove(&tc_id) {
@@ -1194,7 +1214,7 @@ impl AcpUpdateTracker {
         if self.bg_deferred_tools.contains_key(&tc_id_str) {
             return false;
         }
-        if self.suppressed_tools.contains(&tc_id_str) {
+        if self.suppressed_tools.contains_key(&tc_id_str) {
             if let Some(ref raw_input) = tcu.fields.raw_input {
                 let variant = raw_input.get("variant").and_then(|v| v.as_str());
                 if is_task_variant(variant) {
@@ -1230,12 +1250,27 @@ impl AcpUpdateTracker {
                 }
             }
             let status = tcu.fields.status.unwrap_or_default();
-            if matches!(
-                status,
-                acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed
-            ) {
-                self.suppressed_tools.remove(&tc_id_str);
-                self.blocking_waits.remove(&tc_id_str);
+            match status {
+                acp::ToolCallStatus::Failed => {
+                    self.blocking_waits.remove(&tc_id_str);
+                    if let Some(mut base) = self.suppressed_tools.remove(&tc_id_str)
+                        && !is_bg_plumbing_tool(&base)
+                    {
+                        base.update(tcu.fields);
+                        let block = tool_call_to_block(&base, self.session_cwd.as_deref());
+                        self.finish_completed_tool(block, scrollback, is_replay);
+                        return true;
+                    }
+                }
+                acp::ToolCallStatus::Completed => {
+                    self.suppressed_tools.remove(&tc_id_str);
+                    self.blocking_waits.remove(&tc_id_str);
+                }
+                _ => {
+                    if let Some(base) = self.suppressed_tools.get_mut(&tc_id_str) {
+                        base.update(tcu.fields);
+                    }
+                }
             }
             return false;
         }

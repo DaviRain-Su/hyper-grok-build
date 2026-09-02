@@ -1,6 +1,5 @@
-//! Tool dispatch helpers for `SessionActor`: `dispatch_tool` and its lock /
-//! display helpers, direct bash-mode execution, and tool argument
-//! parse-error formatting.
+//! Tool dispatch helpers for `SessionActor`.
+//! Covers `dispatch_tool` and its lock and display helpers, direct bash-mode execution, and tool argument parse-error formatting.
 
 use super::*;
 use std::path::PathBuf;
@@ -39,22 +38,18 @@ fn str_arg<'a>(args: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
     keys.iter().find_map(|k| args.get(*k)?.as_str())
 }
 
-/// Extract the workspace path that a tool call targets, for the purpose of
-/// serializing concurrent same-file edits inside `execute_tool_calls`.
+/// Extract the workspace path that a tool call targets, to serialize concurrent same-file edits inside `execute_tool_calls`.
 ///
 /// Different toolsets advertise the path under different JSON keys:
-/// - `file_path` — grok_build (`search_replace`), opencode (`EditTool`,
-///   `WriteTool`, `ReadTool`), codex (`read_file`), grok_build_hashline
-///   (`hashline_edit`)
-/// - `path` — alternate edit/read tools
-/// - `target_file` — grok_build (`read_file`, via `#[serde(rename)]`)
+/// - `file_path`: grok_build (`search_replace`), opencode (`EditTool`, `WriteTool`, `ReadTool`), codex (`read_file`),
+///   grok_build_hashline (`hashline_edit`)
+/// - `path`: alternate edit/read tools
+/// - `target_file`: grok_build (`read_file`, via `#[serde(rename)]`)
 ///
-/// Returning the same key for two calls in a batch causes them to share a
-/// `tokio::sync::Mutex` and therefore run sequentially in model-emitted order.
+/// Returning the same key for two calls in a batch causes them to share a `tokio::sync::Mutex` and so run sequentially in model-emitted order.
 /// Returning `None` lets the call run fully concurrently with everything else.
 ///
-/// `target_directory` is deliberately omitted — a directory listing isn't an
-/// edit and must not bucket into a file lock.
+/// `target_directory` is deliberately omitted: a directory listing isn't an edit and must not share a file lock.
 pub(super) fn lock_path_for_args(args: &serde_json::Value, cwd: &Path) -> Option<String> {
     let input = Path::new(str_arg(args, &["file_path", "path", "target_file"])?);
     let absolute = if input.is_absolute() {
@@ -91,8 +86,8 @@ fn canonicalize_existing_ancestor(path: &Path) -> Option<PathBuf> {
 }
 
 /// Pull the path a read/list tool targets and classify it against the store.
-/// Keys span harnesses: `read_file`=`target_file`, grep=`path`,
-/// `list_dir`=`target_directory`. Grammar lives in `xai_compaction_transcript`.
+/// Keys span harnesses: `read_file` uses `target_file`, grep uses `path`, `list_dir` uses `target_directory`.
+/// The path grammar lives in `xai_compaction_transcript`.
 pub(super) fn compaction_artifact_read(
     args: &serde_json::Value,
 ) -> Option<xai_compaction_transcript::CompactionArtifact> {
@@ -103,12 +98,10 @@ pub(super) fn compaction_artifact_read(
     xai_compaction_transcript::classify_compaction_path(path)
 }
 
-/// Map a backend-hosted tool name to a user-facing title, ACP ToolKind,
-/// and `raw_input` JSON for display in the pager's tool call UI.
+/// Map a backend-hosted tool name to a user-facing title, ACP ToolKind, and `raw_input` JSON for display in the pager's tool call UI.
 ///
-/// The `raw_input` carries metadata that the pager's `tool_call_to_block()`
-/// uses to select the correct renderer (e.g., `variant: "WebSearch"` picks
-/// the `WebSearchToolCallBlock` instead of the grep `SearchToolCallBlock`).
+/// The `raw_input` carries metadata that the pager's `tool_call_to_block()` uses to select the correct renderer.
+/// For example, `variant: "WebSearch"` picks the `WebSearchToolCallBlock` instead of the grep `SearchToolCallBlock`.
 pub(super) fn backend_tool_display(name: &str) -> (String, acp::ToolKind, serde_json::Value) {
     match name {
         "web_search" => (
@@ -129,15 +122,10 @@ pub(super) fn backend_tool_display(name: &str) -> (String, acp::ToolKind, serde_
     }
 }
 
-/// Map a completed backend (server-side) tool call's payload to the ACP terminal
-/// status the shell should emit. The backend reports each call's real
-/// success/failure in the serialized payload's top-level `status` field (e.g. a
-/// `web_search_call`'s `WebSearchToolCallStatus`, which includes `failed`); a
-/// `"failed"` status becomes [`acp::ToolCallStatus::Failed`] so downstream
-/// consumers — notably the headless `streaming-messages-json`
-/// `web_search_tool_result_error` branch — see the real failure instead of a
-/// blanket `Completed`. Any other or absent status stays `Completed`
-/// (behavior-preserving for the success path).
+/// Map a completed backend (server-side) tool call's payload to the ACP terminal status the shell should emit.
+/// The backend reports each call's real success or failure in the payload's `status` field (e.g. a `web_search_call`'s `WebSearchToolCallStatus`).
+/// A `"failed"` status becomes [`acp::ToolCallStatus::Failed`]; any other or absent status stays `Completed`.
+/// Consumers, notably the headless `streaming-messages-json` `web_search_tool_result_error` branch, see the real failure instead of `Completed`.
 pub(super) fn backend_tool_call_status(result: Option<&serde_json::Value>) -> acp::ToolCallStatus {
     let failed = result
         .and_then(|r| r.get("status"))
@@ -150,10 +138,9 @@ pub(super) fn backend_tool_call_status(result: Option<&serde_json::Value>) -> ac
     }
 }
 
-/// Expose the resolved model ID only when the backend actually routed elsewhere
-/// AND the catalog opted this model into checkpoint identity. Same
-/// `show_model_fingerprint` flag as the fingerprint itself, so one server-side
-/// setting governs both — the client keeps no per-slug default.
+/// Expose the resolved model ID only when the backend actually routed elsewhere AND the catalog opted this model into checkpoint identity.
+/// It checks the same `show_model_fingerprint` flag as the fingerprint itself, so one server-side setting governs both.
+/// The client keeps no per-slug default.
 pub(super) fn should_show_resolved_model(
     requested: &str,
     resolved: &str,
@@ -165,8 +152,7 @@ pub(super) fn should_show_resolved_model(
 /// Resolve the shell name for the system prompt `Shell:` field.
 ///
 /// Unix: basename of `$SHELL` (e.g. "zsh", "bash").
-/// Windows: name from the `detect_windows_shell` cascade
-/// (pwsh > powershell.exe > Git Bash > cmd.exe), since `$SHELL` is absent.
+/// Windows: name from the `detect_windows_shell` cascade (pwsh, then powershell.exe, then Git Bash, then cmd.exe), since `$SHELL` is absent.
 pub(super) fn resolve_session_shell() -> String {
     #[cfg(unix)]
     {
@@ -189,12 +175,11 @@ pub(super) fn resolve_session_shell() -> String {
 }
 
 /// Key in `ToolError::details` that carries the HTTP status code.
-/// Used by both error producers (image_gen, video_gen, test helpers) and
-/// the `is_auth_tool_error` classifier to avoid accidental key mismatch.
+/// Used by both error producers (image_gen, video_gen, test helpers) and the `is_auth_tool_error` classifier to avoid accidental key mismatch.
 pub(crate) const HTTP_STATUS_DETAILS_KEY: &str = "status";
 
 impl SessionActor {
-    /// Extract bash command from prompt blocks if present in meta.
+    /// Extract the bash command from the prompt blocks if present in meta.
     /// Returns Some(command) if the prompt is a direct bash command, None otherwise.
     pub(super) fn extract_bash_command(prompt_blocks: &[acp::ContentBlock]) -> Option<String> {
         use crate::extensions::prompt_meta::PromptBlockMeta;
@@ -219,7 +204,7 @@ impl SessionActor {
     ) -> PromptTurnResult {
         tracing::info!("Handling direct bash command");
 
-        // Send user message chunks to scrollback (so user sees their command)
+        // Send user message chunks to scrollback (so the user sees their command)
         let model_id = self.current_model_id().await;
         let user_chunk_meta = serde_json::json!({ "modelId": model_id })
             .as_object()
@@ -245,8 +230,7 @@ impl SessionActor {
             .send(PersistenceMsg::ContentChunk(PersistenceContentChunk::new(
                 prompt_blocks.to_vec(),
             )));
-        // Bash turns bypass `handle_prompt`'s commit point; the command is now
-        // in the ordered persistence stream, so a send-now may cancel this turn.
+        // Bash turns bypass `handle_prompt`'s commit point; the command is now in the ordered persistence stream, so a send-now may cancel this turn
         self.mark_front_message_committed().await;
 
         // Run the bash command with streaming enabled
@@ -255,8 +239,7 @@ impl SessionActor {
         // Send initial ToolCall to register with TUI
 
         use xai_grok_tools::types::ToolInput;
-        // Use the stripped command as description so pager chrome shows the
-        // real command (not a generic label) while still satisfying the required field.
+        // Use the stripped command as the description so the pager shows the real command (not a generic label) while satisfying the required field
         let title_command = xai_grok_tools::util::strip_redundant_session_cd(
             &command,
             self.tool_context.cwd.as_path(),
@@ -267,8 +250,7 @@ impl SessionActor {
             description: title_command.clone().into_owned(),
             is_background: false,
         });
-        // Bash mode has no model-issued wire name; resolve the toolset's
-        // execute tool by kind so the x.ai/tool identity still stamps.
+        // Bash mode has no model-issued wire name; resolve the toolset's execute tool by kind so the x.ai/tool identity still stamps
         let bash_marker = serde_json::json!({"bash_mode": true}).as_object().cloned();
         let exec_wire = {
             let agent = self.agent.borrow();
@@ -346,7 +328,7 @@ impl SessionActor {
         }
 
         // Send final tool call update
-        // For backgrounded commands, don't mark as completed/failed - let the background task do that
+        // For backgrounded commands, don't mark as completed/failed; let the background task do that
         if !is_backgrounded {
             let final_status = if exit_code == 0 && signal.is_none() {
                 acp::ToolCallStatus::Completed
@@ -380,11 +362,8 @@ impl SessionActor {
             .await;
         }
 
-        // NOTE: The redundant AgentMessageChunk summary that was previously
-        // sent here has been removed. The execute block already contains the
-        // full command output — sending it again as an agent message created
-        // a noisy duplicate scrollback entry. Old sessions that have it will
-        // still replay fine; new sessions are cleaner.
+        // No AgentMessageChunk summary is sent here: the execute block already shows the full output, so an agent copy would duplicate scrollback
+        // Old sessions that persisted one still replay fine
 
         // Build a single user message for chat history that includes command, output, and exit code
         let user_message = format!(
@@ -408,39 +387,21 @@ impl SessionActor {
 
 // ── Tool argument error formatting ─────────────────────────────────────
 
-// Re-use the UTF-8-safe truncation helper from xai-grok-sampling-types rather
-// than duplicating it here (R3).
+// `truncate_bytes` is the UTF-8-safe truncation helper from xai-grok-sampling-types
 
-/// Maximum bytes of `raw_arguments` included in a parse-error tool_result.
+/// Maximum bytes of `raw_arguments` echoed in a parse-error tool_result.
 ///
-/// The model already holds the arguments in its recent context window, so
-/// echoing the full string (potentially 8 KB+) would grow every subsequent
-/// turn by that many tokens for no additional benefit.  The JSON error
-/// position (e.g. `line 1 column 81`) is usually sufficient to locate the
-/// typo; we include a prefix for orientation.
-///
-/// Note: when the JSON syntax error falls past this byte limit, the column
-/// hint will reference text that was truncated from the message.  The model
-/// should still have the full arguments in its context window from the
-/// turn it generated them.
+/// The model already holds the full arguments in context, so a prefix plus the JSON error position is enough; echoing more grows every later turn.
+/// A syntax error position past this limit points into truncated text, but the model still has the full arguments in context.
 pub(crate) const MAX_ARGS_IN_ERROR: usize = 2_000;
 
-/// Build the user-facing error message shown when tool arguments cannot be
-/// parsed.  The message is stored as a `tool_result` in the conversation
-/// history, so the model sees it on the very next turn.
+/// Build the user-facing error message shown when tool arguments cannot be parsed.
+/// The message is stored as a `tool_result` in the conversation history, so the model sees it on the very next turn.
 ///
-/// The message intentionally includes:
-///
-/// 1. The normal error description (so the model knows *what* failed).
-/// 2. The **original arguments string** the model produced (capped at
-///    [`MAX_ARGS_IN_ERROR`] bytes).  Without this, grok-shell would sanitize
-///    the arguments to `"{}"` before forwarding them to the provider (to
-///    avoid 400 errors), so the model would only see an empty object and have
-///    to regenerate all its work from scratch.
-/// 3. A JSON-level parse error (position + reason) when the arguments string
-///    is itself invalid JSON — e.g. a missing `"` before a key name.  This
-///    lets the model fix a one-character typo rather than regenerating a
-///    thousand-line file.
+/// It carries the error description, the original arguments (capped at [`MAX_ARGS_IN_ERROR`] bytes), and the JSON error position for invalid JSON.
+/// Grok-shell sanitizes unparseable arguments to `"{}"` before forwarding to the provider (avoiding 400 errors).
+/// Without the echoed original, the model would only see that empty object and have to regenerate all its work from scratch.
+/// The JSON position (e.g. a missing `"` before a key name) lets the model fix a one-character typo rather than regenerating a thousand-line file.
 pub(super) fn build_tool_parse_error_message(
     function_name: &str,
     err: &xai_tool_runtime::ToolError,
@@ -461,9 +422,8 @@ pub(super) fn build_tool_parse_error_message(
         msg.push_str("\n... (truncated)");
     }
 
-    // If the arguments string is not valid JSON, surface the exact position
-    // of the syntax error so the model can fix it directly.
-    // Use `IgnoredAny` — we only need the error, not a DOM.
+    // If the arguments string is not valid JSON, append the exact position of the syntax error so the model can fix it directly
+    // Use `IgnoredAny`: we only need the error, not a DOM
     if let Err(json_err) = serde_json::from_str::<serde::de::IgnoredAny>(raw_arguments) {
         msg.push_str(&format!(
             "\n\nNote: the arguments above contain invalid JSON — {json_err}\n\
@@ -480,8 +440,7 @@ mod tests {
     use xai_grok_sampling_types::rs;
 
     fn web_search_payload(status: rs::WebSearchToolCallStatus) -> serde_json::Value {
-        // The exact serialized `web_search_call` payload the sampler forwards on
-        // `BackendToolCallCompleted` (via `serde_json::to_value(ws)`).
+        // The exact serialized `web_search_call` payload the sampler forwards on `BackendToolCallCompleted` (via `serde_json::to_value(ws)`)
         serde_json::to_value(rs::WebSearchToolCall {
             action: rs::WebSearchToolCallAction::Search(rs::WebSearchActionSearch {
                 query: "rust async runtime".to_string(),
@@ -493,10 +452,9 @@ mod tests {
         .expect("serialize web_search_call payload")
     }
 
-    /// A backend-reported web-search failure must map to ACP `Failed` (so the
-    /// headless `web_search_tool_result_error` branch becomes reachable in
-    /// production), while a completed call — or an absent payload — stays
-    /// `Completed`. Exercises the real payload shape, not a hand-built status.
+    /// A backend web-search failure must map to ACP `Failed` so the headless `web_search_tool_result_error` branch is reachable in production.
+    /// A completed call or an absent payload stays `Completed`.
+    /// Exercises the real payload shape, not a hand-built status.
     #[test]
     fn backend_failed_web_search_maps_to_failed_status() {
         let failed = web_search_payload(rs::WebSearchToolCallStatus::Failed);
@@ -512,7 +470,6 @@ mod tests {
             acp::ToolCallStatus::Completed
         );
 
-        // No payload at all is treated as success (behavior-preserving).
         assert_eq!(
             backend_tool_call_status(None),
             acp::ToolCallStatus::Completed

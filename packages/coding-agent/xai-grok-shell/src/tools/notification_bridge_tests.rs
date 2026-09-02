@@ -2,8 +2,7 @@ use super::*;
 use xai_grok_tools::computer::types::TaskKind;
 use xai_grok_tools::types::TaskSnapshot;
 
-/// Drive the admission handshake inline so receiver assertions observe the
-/// bridge's command order without racing a detached proxy task.
+/// Drive the admission handshake inline so receiver assertions observe the bridge's command order without racing a detached proxy task.
 async fn handle_notification_with_admission(
     config: &NotificationBridgeConfig,
     notification: ToolNotification,
@@ -177,11 +176,10 @@ async fn bash_task_completed_injects_bash_task_completed_source() {
     }
 }
 
-/// Gap 1: while a goal loop is active, a completed background bash task
-/// must NOT fire the synthetic auto-wake prompt — an async "task completed"
-/// wake mid-goal derails a weak model. It must also NOT be marked
-/// reserved (so surface 2's `TaskCompletionReminder` is free to
-/// drain it). The pager's `x.ai/task_completed` notification still fires.
+/// While a goal loop is active, a completed background bash task must NOT fire the synthetic auto-wake prompt.
+/// An async "task completed" wake mid-goal derails a weak model.
+/// It must also NOT be marked reserved (so the `TaskCompletionReminder` is free to drain it).
+/// The pager's `x.ai/task_completed` notification still fires.
 #[tokio::test]
 async fn bash_task_completed_suppresses_auto_wake_during_goal_loop() {
     let (config, mut gateway_rx, _persistence_rx, mut cmd_rx) = make_test_config_full();
@@ -202,8 +200,7 @@ async fn bash_task_completed_suppresses_auto_wake_during_goal_loop() {
     )
     .await;
 
-    // No synthetic prompt / CopyFile / InjectNotification while the goal
-    // loop drives the turn — only the Notification hook dispatch.
+    // No synthetic prompt / CopyFile / InjectNotification while the goal loop drives the turn, only the Notification hook dispatch
     match cmd_rx
         .try_recv()
         .expect("expected DispatchNotificationHook for task_complete")
@@ -217,7 +214,7 @@ async fn bash_task_completed_suppresses_auto_wake_during_goal_loop() {
         cmd_rx.try_recv().is_err(),
         "goal-loop-active bash completion must not inject auto-wake commands"
     );
-    // Not marked reserved: surface 2 must be free to drain it.
+    // Not marked reserved: the `TaskCompletionReminder` must be free to drain it
     assert!(
         config.task_completion_reservations.snapshot().is_empty(),
         "goal-loop-active completion must not be marked reserved"
@@ -237,10 +234,8 @@ async fn bash_task_completed_suppresses_auto_wake_during_goal_loop() {
     );
 }
 
-/// Gap 1 (preserve non-goal behavior): with the goal loop inactive — the
-/// default for a normal session — a completed bash task DOES fire the
-/// synthetic auto-wake prompt AND is marked reserved so surface
-/// 2 suppresses the duplicate reminder.
+/// With the goal loop inactive (the default for a normal session), a completed bash task DOES fire the synthetic auto-wake prompt.
+/// It is also marked reserved so the `TaskCompletionReminder` suppresses the duplicate reminder.
 #[tokio::test]
 async fn bash_task_completed_auto_wakes_and_reserves_without_goal_loop() {
     let (config, mut cmd_rx) = make_test_config();
@@ -288,9 +283,8 @@ fn task_completed_will_wake(
     None
 }
 
-/// The completion notification carries the wake verdict — the pager keys
-/// its between-turns status line on it (skip when a wake response
-/// follows, emit when nothing else will mark the moment).
+/// The completion notification carries the wake verdict: the pager keys its between-turns status line on it.
+/// The pager skips the line when a wake response follows and emits it when nothing else will mark the moment.
 #[tokio::test]
 async fn task_completed_notification_stamps_will_wake() {
     let (config, mut gateway_rx, _persistence_rx, mut cmd_rx) = make_test_config_full();
@@ -510,11 +504,9 @@ async fn task_completed_stamps_will_wake_false_when_session_channel_closed() {
     assert!(!config.task_completion_reservations.contains("bg-dead"));
 }
 
-/// Gap 1 (adjacent branch): the goal-loop arm sits BEFORE the
-/// `auto_wake_enabled == false` `InjectNotification` fallback, so an
-/// auto-wake-DISABLED completion mid-goal must also be suppressed — it must
-/// NOT fall through to the idle-gated `InjectNotification`. Guards against a
-/// future reorder that would leak a mid-goal notification.
+/// The goal-loop arm sits BEFORE the `auto_wake_enabled == false` `InjectNotification` fallback.
+/// So an auto-wake-DISABLED completion mid-goal must also be suppressed: it must NOT fall through to the idle-gated `InjectNotification`.
+/// The test guards against a future reorder that would leak a mid-goal notification.
 #[tokio::test]
 async fn bash_task_completed_auto_wake_disabled_still_suppressed_during_goal_loop() {
     let (mut config, mut cmd_rx) = make_test_config();
@@ -549,10 +541,8 @@ async fn bash_task_completed_auto_wake_disabled_still_suppressed_during_goal_loo
     assert!(config.task_completion_reservations.snapshot().is_empty());
 }
 
-/// Natural monitor exit (including exit code 0) must immediate-auto-wake
-/// the same way bash does — not only via the idle-gated MonitorEvent path.
-/// Also drops queued MonitorEvents so a second NotificationDrain turn is
-/// not started for the same completion.
+/// Natural monitor exit (including exit code 0) must auto-wake immediately the same way bash does, not only via the idle-gated MonitorEvent path.
+/// It also drops queued MonitorEvents so a second NotificationDrain turn is not started for the same completion.
 #[tokio::test]
 async fn monitor_task_completed_auto_wakes_with_monitor_ended_message() {
     let (config, mut cmd_rx) = make_test_config();
@@ -668,8 +658,7 @@ async fn declined_quiet_monitor_wake_queues_canonical_deferred_completion() {
     );
 }
 
-/// After TaskCompleted auto-wake reserves the task, late pipeline
-/// MonitorEvents must not inject another model-facing notification.
+/// After TaskCompleted auto-wake reserves the task, late pipeline MonitorEvents must not inject another model-facing notification.
 #[tokio::test]
 async fn monitor_event_skipped_after_task_completed_auto_wake() {
     let (config, mut cmd_rx) = make_test_config();
@@ -691,15 +680,13 @@ async fn monitor_event_skipped_after_task_completed_auto_wake() {
     )
     .await;
 
-    // No InjectNotification — only the TaskCompleted wake should talk to the model.
     assert!(
         cmd_rx.try_recv().is_err(),
         "post-auto-wake MonitorEvent must not InjectNotification"
     );
 }
 
-/// Model-tool kill of a monitor still skips auto-wake — the model already
-/// got the kill_task tool result.
+/// Model-tool kill of a monitor still skips auto-wake: the model already got the kill_task tool result.
 #[tokio::test]
 async fn monitor_explicitly_killed_skips_auto_wake() {
     let (config, mut gateway_rx, _persistence_rx, mut cmd_rx) = make_test_config_full();
@@ -814,9 +801,8 @@ async fn monitor_task_completed_suppressed_during_goal_loop() {
 
 #[tokio::test]
 async fn scheduled_task_created_is_persisted() {
-    // A `/loop` create must be persisted (like TaskBackgrounded) so a
-    // second terminal that resumes the session restores the loop from
-    // replay — otherwise it stays invisible until the loop next fires.
+    // A `/loop` create must be persisted (like TaskBackgrounded) so a second terminal that resumes the session restores the loop from replay
+    // Otherwise it stays invisible until the loop next fires
     let (config, _gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
     let notification = ToolNotification::ScheduledTaskCreated(
         xai_grok_tools::notification::types::ScheduledTaskCreated {
@@ -858,9 +844,8 @@ async fn scheduled_task_created_is_persisted() {
     }
 }
 
-/// InProgress bash chunks stream live to the TUI but are not persisted —
-/// Completed/Failed tool results (emitted on the tool-result path, not this
-/// 100ms ticker) remain the replay source of truth.
+/// InProgress bash chunks stream live to the TUI but are not persisted.
+/// Completed/Failed tool results (emitted on the tool-result path, not this 100ms ticker) remain the replay source of truth.
 #[tokio::test]
 async fn bash_output_chunk_forwards_live_without_persisting() {
     let (config, mut gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
@@ -976,8 +961,7 @@ async fn bash_output_chunk_skips_persist_when_gateway_closed() {
 
 #[tokio::test]
 async fn scheduled_task_removed_is_persisted() {
-    // The deletion must also persist so replay nets out a removed loop
-    // instead of resurrecting it from a persisted `created` line.
+    // The deletion must also persist so replay nets out a removed loop instead of resurrecting it from a persisted `created` line
     let (config, _gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
     let removed = xai_grok_tools::notification::ScheduledTaskRemoved::new(
         "loop-1".into(),
@@ -1064,10 +1048,8 @@ fn xai_persisted_event_id(
         .map(str::to_string)
 }
 
-/// Per-site stamp pins for the bridge emitters not covered by the
-/// representative chokepoint tests: deleting any one `stamp_event_id`
-/// call must fail a test (an id-less persisted line silently disables
-/// incremental reconnect for the session).
+/// Per-site pins for the bridge emitters the representative chokepoint tests do not cover: deleting any one `stamp_event_id` call must fail a test.
+/// A persisted line without an id silently disables incremental reconnect for the session.
 #[tokio::test]
 async fn task_backgrounded_persisted_line_is_stamped() {
     let (config, _gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
@@ -1165,10 +1147,8 @@ fn durable_append_mapping_respects_commit_disposition() {
 
 #[tokio::test]
 async fn scheduled_task_fired_is_not_persisted() {
-    // `_fired` recurs on every interval; persisting it would grow the
-    // updates log without bound. Loops are restored from create/delete, so
-    // the fire stays gateway-only (the pager self-heals the entry on a live
-    // fire if needed).
+    // `_fired` recurs on every interval; persisting it would grow the updates log without bound
+    // Loops are restored from create/delete, so the fire stays gateway-only (the pager self-heals the entry on a live fire if needed)
     let (config, mut gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
     let notification = ToolNotification::ScheduledTaskFired(
         xai_grok_tools::notification::types::ScheduledTaskFired {
@@ -1212,12 +1192,9 @@ fn make_monitor_event_notification(task_id: &str, owner: Option<&str>) -> ToolNo
 
 #[tokio::test]
 async fn cross_session_monitor_event_is_dropped() {
-    // The bridge belongs to "test-session"; the event is owned by a
-    // different session. In leader mode (one agent process, many sessions)
-    // this is the cross-session leak: without the owner guard the foreign
-    // monitor would inject a `<monitor-event>` reminder into this session's
-    // conversation. Assert it is fully dropped — no conversation injection
-    // and no pager forward.
+    // The bridge belongs to "test-session"; the event is owned by a different session
+    // In leader mode (one agent process, many sessions) this is the cross-session leak
+    // Without the owner guard the foreign monitor would inject a `<monitor-event>` reminder into this session's conversation
     let (config, mut gateway_rx, _persistence_rx, mut cmd_rx) = make_test_config_full();
     let notification = make_monitor_event_notification("mon-foreign", Some("other-session"));
     let mut offsets = HashMap::new();
@@ -1241,7 +1218,7 @@ async fn cross_session_monitor_event_is_dropped() {
 
 #[tokio::test]
 async fn same_session_monitor_event_is_injected() {
-    // Owner matches the bridge's own session id ("test-session") -> deliver.
+    // Owner matches the bridge's own session id ("test-session"), so it is delivered
     let (config, mut cmd_rx) = make_test_config();
     let notification = make_monitor_event_notification("mon-own", Some("test-session"));
     let mut offsets = HashMap::new();
@@ -1262,8 +1239,7 @@ async fn same_session_monitor_event_is_injected() {
 
 #[tokio::test]
 async fn legacy_monitor_event_without_owner_is_injected() {
-    // Legacy / non-grok-build backends record no owner; such events must
-    // pass through unchanged for backwards compatibility.
+    // Legacy / non-grok-build backends record no owner; such events must pass through unchanged for backwards compatibility
     let (config, mut cmd_rx) = make_test_config();
     let notification = make_monitor_event_notification("mon-legacy", None);
     let mut offsets = HashMap::new();
@@ -1294,8 +1270,7 @@ async fn block_waited_task_skips_auto_wake_prompt() {
 
     handle_notification(&config, notification, &mut offsets).await;
 
-    // block_waited tasks must NOT inject a synthetic prompt — the
-    // blocking caller already received the result directly.
+    // block_waited tasks must NOT inject a synthetic prompt: the blocking caller already received the result directly
     match cmd_rx
         .try_recv()
         .expect("expected DispatchNotificationHook for task_complete")
@@ -1336,8 +1311,7 @@ async fn explicitly_killed_task_skips_auto_wake_prompt() {
 
     handle_notification(&config, notification, &mut offsets).await;
 
-    // Model-tool / delivered kill skips auto-wake; UI kill is
-    // `ui_killed_task_auto_wakes_and_tells_model_not_to_restart`.
+    // Model-tool / delivered kill skips auto-wake; UI kill is `ui_killed_task_auto_wakes_and_tells_model_not_to_restart`
     match cmd_rx
         .try_recv()
         .expect("expected DispatchNotificationHook for task_complete")
@@ -1484,7 +1458,7 @@ async fn bash_task_completed_falls_back_when_auto_wake_disabled() {
 
     handle_notification(&config, notification, &mut offsets).await;
 
-    // With auto-wake disabled, should use InjectNotification (not Prompt).
+    // With auto-wake disabled, the completion is delivered by InjectNotification, not Prompt
     let cmd = cmd_rx.try_recv().expect("expected InjectNotification");
     match cmd {
         SessionCommand::InjectNotification {
@@ -1555,15 +1529,13 @@ fn extract_current_mode_id(notification: &acp::SessionNotification) -> Option<&s
     }
 }
 
-/// Regression: `PlanModeExited` must emit `CurrentModeUpdate("default")`
-/// onto both the gateway and the persistence stream. Without this,
-/// agent-driven plan approvals leave the TUI stuck in plan mode.
+/// Regression: `PlanModeExited` must emit `CurrentModeUpdate("default")` onto both the gateway and the persistence stream.
+/// Without this, agent-driven plan approvals leave the TUI stuck in plan mode.
 #[tokio::test]
 async fn plan_mode_exited_emits_current_mode_update_default() {
     let (config, mut gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
 
-    // Pre-condition: agent path requires plan mode to be Active first
-    // so `deactivate_approved` actually flips state and triggers the emit.
+    // Pre-condition: agent path requires plan mode to be Active first so `deactivate_approved` actually flips state and triggers the emit
     {
         let mut tracker = config.plan_mode.lock();
         assert!(tracker.activate_from_tool());
@@ -1618,9 +1590,8 @@ async fn plan_mode_exited_emits_current_mode_update_default() {
     ));
 }
 
-/// Default (grok) polarity: the exit_plan_mode tool result is the model's
-/// only exit signal, so an approved `PlanModeExited` must NOT arm the
-/// deferred exit reminder — in memory or in the persisted snapshot.
+/// With the default (grok) configuration, the exit_plan_mode tool result is the model's only exit signal.
+/// So an approved `PlanModeExited` must NOT queue the deferred exit reminder, in memory or in the persisted snapshot.
 /// Sibling of `plan_mode_exited_arms_exit_reminder_when_gated`.
 #[tokio::test]
 async fn plan_mode_exited_does_not_arm_exit_reminder_by_default() {
@@ -1660,9 +1631,8 @@ async fn plan_mode_exited_does_not_arm_exit_reminder_by_default() {
     );
 }
 
-/// Gated counterpart: when `queue_exit_reminder_on_approved_exit` is
-/// set, an approved `PlanModeExited` must arm the next-turn exit
-/// reminder and persist it.
+/// Gated counterpart: when `queue_exit_reminder_on_approved_exit` is set, an approved `PlanModeExited` must queue the next-turn exit reminder.
+/// The reminder must be persisted too.
 #[tokio::test]
 async fn plan_mode_exited_arms_exit_reminder_when_gated() {
     let (config, _gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
@@ -1704,8 +1674,7 @@ async fn plan_mode_exited_arms_exit_reminder_when_gated() {
     );
 }
 
-/// Symmetric to the exit test: `PlanModeEntered` emits
-/// `CurrentModeUpdate("plan")`.
+/// Symmetric to the exit test: `PlanModeEntered` emits `CurrentModeUpdate("plan")`.
 #[tokio::test]
 async fn plan_mode_entered_emits_current_mode_update_plan() {
     let (config, mut gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
@@ -1739,9 +1708,8 @@ async fn plan_mode_entered_emits_current_mode_update_plan() {
     assert_eq!(persisted_modes, vec!["plan".to_string()]);
 }
 
-/// Build a completed-bash `TaskSnapshot` whose `output` is large enough
-/// to trip the inline-completion truncation cap, with a concrete
-/// `output_file` path so the disk-pointer footer is exercised end-to-end.
+/// Build a completed-bash `TaskSnapshot` whose `output` is large enough to trip the inline-completion truncation cap.
+/// The concrete `output_file` path exercises the disk-pointer footer end-to-end.
 fn make_large_bash_snapshot(task_id: &str, output_file: PathBuf) -> TaskSnapshot {
     TaskSnapshot {
         task_id: task_id.into(),
@@ -1779,8 +1747,7 @@ fn auto_wake_prompt_text(cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>) -
     }
 }
 
-/// Extract the InjectNotification prompt text emitted on the session
-/// command channel (auto-wake-disabled fallback path).
+/// Extract the InjectNotification prompt text emitted on the session command channel (auto-wake-disabled fallback path).
 fn inject_notification_prompt_text(cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>) -> String {
     let cmd = cmd_rx.try_recv().expect("expected InjectNotification");
     match cmd {
@@ -1792,12 +1759,8 @@ fn inject_notification_prompt_text(cmd_rx: &mut mpsc::UnboundedReceiver<SessionC
     }
 }
 
-/// Bash completion with a large output and no polling tool (compat-harness
-/// toolset) renders the truncation marker AND the disk-pointer footer
-/// pointing the model at `output_file` via the resolved Read tool name.
-/// Covers BOTH the auto-wake branch and the auto-wake-disabled fallback
-/// so the truncation + footer behaviour stays consistent across both
-/// completion-injection paths.
+/// Bash completion with a large output and no polling tool (compat-harness toolset) renders the truncation marker AND the disk-pointer footer.
+/// The footer points the model at `output_file` via the resolved Read tool name.
 #[tokio::test]
 async fn bash_completion_renders_disk_pointer_footer_in_both_branches() {
     let output_file = PathBuf::from("/tmp/bg-disk-pointer.log");
@@ -1868,9 +1831,8 @@ async fn bash_completion_renders_disk_pointer_footer_in_both_branches() {
     );
 }
 
-/// Completions must go through the size limit, and the copy persisted
-/// for replay must be the copy that was sent. The limit itself is
-/// tested in `task_completed_frame`.
+/// Completions must go through the size limit, and the copy persisted for replay must be the copy that was sent.
+/// The limit itself is tested in `task_completed_frame`.
 #[tokio::test]
 async fn task_completed_notification_is_frame_bounded() {
     let (mut config, mut gateway_rx, mut persistence_rx, mut cmd_rx) = make_test_config_full_raw();

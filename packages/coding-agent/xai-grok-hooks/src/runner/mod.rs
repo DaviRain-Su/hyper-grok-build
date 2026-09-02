@@ -7,7 +7,9 @@ use crate::config::HookSpec;
 use crate::event::{HookEventEnvelope, MAX_HOOK_FEEDBACK_CHARS, clip_reason, clip_text};
 use serde::Deserialize;
 
-use crate::result::{HttpInfo, StopHookOutcome};
+use crate::result::{
+    HttpInfo, OutputReplacement, PostToolUseHookOutcome, ReplacementKind, StopHookOutcome,
+};
 
 pub use crate::event::GateKind;
 
@@ -38,6 +40,10 @@ pub enum HookRunnerResult {
         hook_name: String,
     },
     Stop(StopHookOutcome),
+    PostToolUse {
+        outcome: PostToolUseHookOutcome,
+        failure: Option<String>,
+    },
     Success,
     Failed(String),
 }
@@ -429,6 +435,107 @@ pub(crate) fn stop_json_to_outcome(
             reason: json.stop_reason,
         }),
     })
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PostToolUseHookJson {
+    pub decision: Option<String>,
+    pub reason: Option<String>,
+    pub hook_specific_output: Option<PostToolUseHookSpecificOutputJson>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PostToolUseHookSpecificOutputJson {
+    pub additional_context: Option<String>,
+    pub updated_tool_output: Option<serde_json::Value>,
+    #[serde(rename = "updatedMCPToolOutput")]
+    pub updated_mcp_tool_output: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct PostToolUseParse {
+    pub outcome: PostToolUseHookOutcome,
+    pub failure: Option<String>,
+}
+
+pub(crate) fn post_tool_use_json_to_outcome(
+    json: PostToolUseHookJson,
+    hook_name: &str,
+    health: HookHealth,
+) -> PostToolUseParse {
+    let mut failure = None;
+    let block_reason = match json.decision.as_deref() {
+        Some("block") => Some(
+            json.reason
+                .filter(|reason| !reason.trim().is_empty())
+                .map(|reason| clip_text(&reason, MAX_HOOK_FEEDBACK_CHARS))
+                .unwrap_or_else(|| format!("Blocked by post_tool_use hook '{hook_name}'")),
+        ),
+        Some("approve") | None => None,
+        Some(other) => {
+            tracing::warn!(
+                hook_name,
+                decision = %other,
+                "post_tool_use hook set an unrecognized decision; only \"block\" is honored"
+            );
+            failure = Some(format!(
+                "post_tool_use hook '{hook_name}' set an unrecognized decision value '{}'; only \"block\" is honored",
+                clip_reason(other)
+            ));
+            None
+        }
+    };
+    let output = json.hook_specific_output.unwrap_or_default();
+    let additional_context = output
+        .additional_context
+        .filter(|context| !context.trim().is_empty())
+        .map(|context| clip_text(&context, MAX_HOOK_FEEDBACK_CHARS));
+    let builtin = output.updated_tool_output;
+    let mcp = output.updated_mcp_tool_output;
+    let (kind, value) = match (builtin, mcp) {
+        (Some(value), Some(_)) => {
+            tracing::warn!(
+                hook_name,
+                "hook set both updatedToolOutput and updatedMCPToolOutput; keeping updatedToolOutput"
+            );
+            (ReplacementKind::Builtin, Some(value))
+        }
+        (Some(value), None) => (ReplacementKind::Builtin, Some(value)),
+        (None, Some(value)) => (ReplacementKind::Mcp, Some(value)),
+        (None, None) => (ReplacementKind::Builtin, None),
+    };
+    let output_replacement = value.map(|value| OutputReplacement {
+        kind,
+        hook_name: hook_name.to_string(),
+        value,
+    });
+    let output_replacement = output_replacement.and_then(|replacement| {
+        if health == HookHealth::Broken {
+            tracing::warn!(
+                hook_name,
+                wire_field = replacement.wire_field(),
+                "dropping a field of a hook that failed"
+            );
+            None
+        } else {
+            Some(replacement)
+        }
+    });
+    PostToolUseParse {
+        outcome: PostToolUseHookOutcome {
+            block_reason,
+            additional_context: drop_if_broken(
+                additional_context,
+                hook_name,
+                "additionalContext",
+                health,
+            ),
+            output_replacement,
+        },
+        failure,
+    }
 }
 
 pub type HookRunOutput = (HookRunnerResult, Duration, Option<HttpInfo>, Option<String>);

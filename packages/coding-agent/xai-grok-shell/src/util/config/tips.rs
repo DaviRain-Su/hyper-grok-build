@@ -1,7 +1,6 @@
 use serde::Deserialize;
 use toml::Value as TomlValue;
 
-/// Read `[cli] show_tips` from config.toml. Returns `None` if not set.
 /// When `Some(false)`, the tip-of-the-day is suppressed on startup.
 pub(crate) fn show_tips_from_toml_opt(root: &TomlValue) -> Option<bool> {
     if let TomlValue::Table(table) = root
@@ -21,13 +20,10 @@ pub struct TipsOverride {
     pub exclude_default: bool,
 }
 
-/// Parse `[tips]` from a TOML value.
 pub(crate) fn tips_from_toml(root: &TomlValue) -> Option<TipsOverride> {
     root.get("tips")?.clone().try_into::<TipsOverride>().ok()
 }
 
-/// Merge tip sources in priority order.
-///
 /// If any local source sets `exclude_default = true`, remote tips are dropped entirely.
 /// Otherwise remote tips are inserted after requirements and before user/managed config.
 pub(crate) fn merge_tips(
@@ -57,8 +53,6 @@ pub(crate) fn merge_tips(
     out
 }
 
-/// Resolve the merged tip list from pre-loaded config layers.
-///
 /// Priority: requirements > remote > user config > managed config.
 /// `GROK_TIPS_OVERRIDE` env var overrides everything (debug builds only).
 /// `[cli] show_tips = false` in requirements or user config kills all tips.
@@ -84,14 +78,12 @@ pub fn resolve_tips(
     let usr = user.and_then(tips_from_toml);
     let mgd = managed.and_then(tips_from_toml);
 
-    // Priority: requirements > remote > user > managed.
     merge_tips(req, usr, mgd, remote_tips)
 }
 
 pub const SLASH_COMMAND_TAGS_CONFIG_PATH: &str = "slash_command_tags";
 
-/// Parse `[slash_command_tags]` from a TOML value into a name → tag map.
-/// Only string values are kept; non-string entries are ignored.
+/// Non-string entries are ignored.
 fn slash_command_tags_from_toml(root: &TomlValue) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
     if let Some(TomlValue::Table(table)) = root.get(SLASH_COMMAND_TAGS_CONFIG_PATH) {
@@ -104,12 +96,9 @@ fn slash_command_tags_from_toml(root: &TomlValue) -> std::collections::HashMap<S
     out
 }
 
-/// Parse a `GROK_SLASH_COMMAND_TAGS` payload (a JSON object of string→string)
-/// into a name → tag map. `None`/empty → empty; malformed → warn + empty. Split
-/// from env-reading so the parse is unit-testable without mutating process env.
+/// Parse a `GROK_SLASH_COMMAND_TAGS` payload (a JSON object of string values) into a name-to-tag map.
 fn parse_slash_command_tags_json(raw: Option<&str>) -> std::collections::HashMap<String, String> {
-    // Unset or empty/whitespace-only is the normal "no override" state, not an
-    // error — only real, non-empty input is parsed (and warned on failure).
+    // Unset or empty/whitespace-only is the normal "no override" state, not an error
     let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
         return std::collections::HashMap::new();
     };
@@ -125,16 +114,12 @@ fn parse_slash_command_tags_json(raw: Option<&str>) -> std::collections::HashMap
     }
 }
 
-/// Read per-command tags from the `GROK_SLASH_COMMAND_TAGS` env var. Unset →
-/// empty; malformed → warn + empty.
 fn slash_command_tags_from_env() -> std::collections::HashMap<String, String> {
     parse_slash_command_tags_json(std::env::var("GROK_SLASH_COMMAND_TAGS").ok().as_deref())
 }
 
-/// Pure per-key merge of the three tag sources. Precedence lowest → highest:
-/// remote (base) → local `[slash_command_tags]` → env. Every key from every
-/// layer survives; higher layers override per key. Pure so precedence is
-/// unit-testable without touching process env.
+/// Remote is the base, local `[slash_command_tags]` overrides it, and env wins.
+/// Every key from every layer survives.
 fn merge_command_tags(
     remote: Option<&std::collections::BTreeMap<String, String>>,
     local: std::collections::HashMap<String, String>,
@@ -143,14 +128,12 @@ fn merge_command_tags(
     let mut out: std::collections::HashMap<String, String> = remote
         .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
         .unwrap_or_default();
-    out.extend(local); // local overrides remote
-    out.extend(env); // env overrides local
+    out.extend(local);
+    out.extend(env);
     out
 }
 
-/// Env-injectable core of [`resolve_slash_command_tags`]: remote → local
-/// `[slash_command_tags]` → `env` (highest). Takes the env map explicitly so the
-/// TOML-extraction + merge composition is hermetically testable (no process env).
+/// Core of [`resolve_slash_command_tags`].
 fn resolve_slash_command_tags_with_env(
     effective_config: &TomlValue,
     remote: Option<&std::collections::BTreeMap<String, String>>,
@@ -159,9 +142,8 @@ fn resolve_slash_command_tags_with_env(
     merge_command_tags(remote, slash_command_tags_from_toml(effective_config), env)
 }
 
-/// Resolve per-command slash-dropdown tags. Precedence lowest → highest: remote
-/// settings (base) → local `[slash_command_tags]` → `GROK_SLASH_COMMAND_TAGS`
-/// env var (wins). Empty/missing everywhere → empty map.
+/// Resolve per-command slash-dropdown tags.
+/// Remote settings are the base, local `[slash_command_tags]` overrides them, and the `GROK_SLASH_COMMAND_TAGS` env var wins.
 pub fn resolve_slash_command_tags(
     effective_config: &TomlValue,
     remote: Option<&std::collections::BTreeMap<String, String>>,
@@ -169,7 +151,6 @@ pub fn resolve_slash_command_tags(
     resolve_slash_command_tags_with_env(effective_config, remote, slash_command_tags_from_env())
 }
 
-/// Read `[cli] channel` from config.toml.
 /// Returns `None` when absent (falls through to remote settings).
 pub fn channel_from_toml_opt(root: &TomlValue) -> Option<String> {
     if let TomlValue::Table(table) = root
@@ -236,8 +217,7 @@ mod tests {
         assert_eq!(s.tips, Some(vec!["a".to_string(), "b".to_string()]));
     }
 
-    // Hermetic: drive the resolver through `_with_env` with an EXPLICIT env map
-    // so ambient `GROK_SLASH_COMMAND_TAGS` can't affect these assertions.
+    // Hermetic: drive the resolver through `_with_env` with an EXPLICIT env map so ambient `GROK_SLASH_COMMAND_TAGS` can't affect these assertions
     #[test]
     fn resolve_slash_command_tags_local_overrides_remote_per_key() {
         let mut remote = std::collections::BTreeMap::new();
@@ -283,8 +263,7 @@ mod tests {
         assert_eq!(resolved.len(), 1);
     }
 
-    // Env wins through the public composition — proven hermetically via `_with_env`
-    // (no process-env mutation).
+    // Env wins through the public composition; proven hermetically via `_with_env` (no process-env mutation)
     #[test]
     fn resolve_slash_command_tags_env_overrides_local_and_remote() {
         let mut remote = std::collections::BTreeMap::new();
@@ -301,10 +280,10 @@ mod tests {
 
     #[test]
     fn remote_settings_slash_command_tags_absent_and_malformed() {
-        // Absent → None.
+        // Absent parses to None
         let s: RemoteSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(s.slash_command_tags, None);
-        // Malformed (array instead of map) → tolerated as None, whole parse ok.
+        // Malformed (array instead of map) is tolerated as None; the whole parse still succeeds
         let s: RemoteSettings =
             serde_json::from_str(r#"{"slash_command_tags": ["oops"]}"#).unwrap();
         assert_eq!(s.slash_command_tags, None);
@@ -344,7 +323,7 @@ mod tests {
         assert_eq!(merged.get("e").map(String::as_str), Some("env-only")); // env-only survives
         assert_eq!(merged.len(), 5);
 
-        // All sources empty → empty map.
+        // All sources empty yields an empty map
         assert!(
             merge_command_tags(
                 None,
@@ -357,21 +336,21 @@ mod tests {
 
     #[test]
     fn parse_slash_command_tags_json_handles_none_valid_and_malformed() {
-        // Unset → empty (no warn).
+        // Unset yields empty (no warn)
         assert!(parse_slash_command_tags_json(None).is_empty());
-        // Empty / whitespace-only is the normal "no override" state → empty (no warn).
+        // Empty or whitespace-only is the normal "no override" state and yields empty (no warn)
         assert!(parse_slash_command_tags_json(Some("")).is_empty());
         assert!(parse_slash_command_tags_json(Some("   ")).is_empty());
-        // Valid JSON object of string→string → parsed.
+        // A valid JSON object of string values is parsed
         let parsed = parse_slash_command_tags_json(Some(r#"{"commit":"new","plan":"beta"}"#));
         assert_eq!(parsed.get("commit").map(String::as_str), Some("new"));
         assert_eq!(parsed.get("plan").map(String::as_str), Some("beta"));
         assert_eq!(parsed.len(), 2);
-        // Array instead of object → empty (tolerated).
+        // An array instead of an object yields empty (tolerated)
         assert!(parse_slash_command_tags_json(Some(r#"["oops"]"#)).is_empty());
-        // Non-string value → whole parse fails → empty (only string values kept).
+        // A non-string value fails the whole parse and yields empty
         assert!(parse_slash_command_tags_json(Some(r#"{"commit": 3}"#)).is_empty());
-        // Not JSON → empty.
+        // Not JSON yields empty
         assert!(parse_slash_command_tags_json(Some("garbage")).is_empty());
     }
 }

@@ -1,10 +1,9 @@
 //! Scope-owned measurement regions.
 //!
-//! A [`Region`] is a held (never entered) span whose parentage is a required
-//! constructor choice and whose close point belongs to scope, replacing raw
-//! `tracing::Span` locals with hand-placed drops. Background tasks go through
-//! [`instrument_task!`], which accepts a named child or root, never a bare
-//! current span, so a caller's span lifetime cannot be extended silently.
+//! A [`Region`] is a held (never entered) span whose parentage is a required constructor choice and whose close point belongs to scope.
+//! It replaces raw `tracing::Span` locals with hand-placed drops.
+//! Background tasks go through [`instrument_task!`], which accepts a named child or root, never a bare current span.
+//! A caller's span lifetime therefore cannot be extended silently.
 
 /// Where a region attaches in the trace tree. The choice is mandatory.
 pub enum Parent<'a> {
@@ -16,9 +15,8 @@ pub enum Parent<'a> {
     Root,
 }
 
-/// A measured region: opens at construction, closes when it goes out of scope
-/// or at an explicit [`Region::close`]. Held, not entered, so it is safe to
-/// keep across `.await`.
+/// A measured region: opens at construction, closes when it goes out of scope or at an explicit [`Region::close`].
+/// Held, not entered, so it is safe to keep across `.await`.
 #[must_use = "dropping a Region immediately closes its span as a zero-length frame"]
 pub struct Region(tracing::Span);
 
@@ -58,8 +56,7 @@ macro_rules! region {
 }
 
 /// Instrument a future for a spawned task under a named child or root span.
-/// There is no variant taking the bare current span: cloning it into a task
-/// holds the caller's span open until the task finishes.
+/// There is no variant taking the bare current span: cloning it into a task holds the caller's span open until the task finishes.
 #[macro_export]
 macro_rules! instrument_task {
     ($name:literal, $parent:expr, $fut:expr) => {
@@ -83,8 +80,7 @@ mod tests {
     use super::*;
     use crate::span_profile::test_support::folded_with_layer;
 
-    /// Every guard pattern folds where its parent choice says, verified
-    /// through the real profile layer.
+    /// Every guard pattern folds where its parent choice says, verified through the real profile layer.
     #[test]
     fn regions_fold_under_their_declared_parents() {
         let folded = folded_with_layer(|| {

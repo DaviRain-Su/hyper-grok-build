@@ -585,7 +585,7 @@ fn render_selection_overlay_impl(
     let Some(range) = model.range(entry_idx, range_id) else {
         return;
     };
-    // Table kinds need their geometry; without it (`/btw` overlay, stale side-car) paint nothing rather than a misleading linear sweep
+    // Table kinds need their geometry; without it (stale side-car) paint nothing rather than a misleading linear sweep
     let table = match kind {
         SelectionKind::Linear => None,
         SelectionKind::TableCell | SelectionKind::TableGrid { .. } => match table {

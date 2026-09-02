@@ -1,11 +1,9 @@
 //! Normalization of `read_only` / `read_write` sandbox config entries.
 //!
-//! Security-sensitive parser kept separate from the profile resolver so the
-//! policy it implements stays small and easy to audit: allow paths are
-//! literal directory grants, and the only rewriting ever performed is
-//! stripping one trailing recursive glob down to the directory the user
-//! plainly meant. Everything else either passes through byte-for-byte or is
-//! rejected — never widened.
+//! This security-sensitive parser is kept separate from the profile resolver so the policy it implements stays small and easy to audit.
+//! Allow paths are literal directory grants.
+//! The only rewriting ever performed is stripping one trailing recursive glob down to the directory the user plainly meant.
+//! Everything else either passes through byte-for-byte or is rejected, never widened.
 
 use std::path::PathBuf;
 
@@ -13,21 +11,16 @@ use crate::deny::is_glob;
 
 /// Normalize a `read_only` / `read_write` config entry.
 ///
-/// Allow paths are literal directory grants: missing ones are created with
-/// `create_dir_all`, then bound. A trailing recursive glob is a common config
-/// mistake that used to create a directory literally named `**` and grant
-/// access only to it, leaving the intended tree inaccessible — so one trailing
-/// `/**`, `/**/`, `/**/*`, or `/*` is stripped to the parent directory (the
-/// root forms `/**`, `/**/`, `/**/*`, and `/*` grant `/`, their parent).
+/// Allow paths are literal directory grants: missing ones are created with `create_dir_all`, then bound.
+/// A trailing recursive glob is a common config mistake that used to create a directory literally named `**` and grant access only to it.
+/// That left the intended tree inaccessible, so one trailing `/**`, `/**/`, `/**/*`, or `/*` is stripped to the parent directory.
+/// The root forms `/**`, `/**/`, `/**/*`, and `/*` grant `/`, their parent.
 ///
-/// Everything else is taken byte-for-byte from the config, so entries with
-/// surrounding whitespace are rejected rather than silently rewritten:
-/// trimming would turn `/tmp/* ` (skipped as a glob) into a grant of `/tmp`,
-/// and `/srv/cache ` into a grant of a different directory than the one
-/// named. Entries still glob-shaped after the single strip ([`is_glob`])
-/// cannot be expressed as a directory grant and are skipped with a warning
-/// rather than widened. `deny` entries are not affected; globs there are real
-/// kernel-enforced patterns.
+/// Everything else is taken byte-for-byte from the config, so entries with surrounding whitespace are rejected rather than silently rewritten.
+/// Trimming would turn `/tmp/* ` (skipped as a glob) into a grant of `/tmp`, and `/srv/cache ` into a different directory than the one named.
+/// Entries still glob-shaped after the single strip ([`is_glob`]) cannot be expressed as a directory grant.
+/// They are skipped with a warning rather than widened.
+/// `deny` entries are not affected; globs there are real kernel-enforced patterns.
 pub(crate) fn normalize_allow_path(raw: &str) -> Option<PathBuf> {
     if raw.is_empty() {
         return None;
@@ -50,8 +43,7 @@ pub(crate) fn normalize_allow_path(raw: &str) -> Option<PathBuf> {
     {
         s = parent.trim_end_matches('/');
         if s.is_empty() {
-            // The whole path was a root glob (`/**`, `/**/`, `/**/*`, `/*`):
-            // the parent directory is the filesystem root.
+            // The whole path was a root glob (`/**`, `/**/`, `/**/*`, `/*`): the parent directory is the filesystem root
             s = "/";
         }
     }
@@ -96,15 +88,13 @@ mod tests {
             ("/tmp/scratch", Some("/tmp/scratch")),
             ("/tmp/scratch/", Some("/tmp/scratch")),
             ("/", Some("/")),
-            // Still glob-shaped after one strip: skip, never widen further
-            // (stacked wildcards must not collapse to a higher parent).
+            // Still glob-shaped after one strip: skip, never widen further (stacked wildcards must not collapse to a higher parent)
             ("/a/**/**", None),
             ("/a/*/*", None),
             ("/home/**/cache", None),
             ("/tmp/foo*", None),
-            // Surrounding whitespace is rejected, never trimmed: trimming
-            // would widen `/tmp/* ` into a grant of /tmp and rewrite
-            // `/srv/cache ` into a different directory than configured.
+            // Surrounding whitespace is rejected, never trimmed
+            // Trimming would widen `/tmp/* ` into a grant of /tmp and rewrite `/srv/cache ` into a different directory than configured
             ("/tmp/* ", None),
             ("/srv/cache ", None),
             (" /srv/cache", None),

@@ -1,9 +1,4 @@
-//! Actor-internal state.
-//!
-//! All fields are touched only from the actor task, so no mutex /
-//! atomic synchronization is needed -- the actor's command-loop
-//! serialization gives us a "single-threaded with shared state"
-//! discipline matching the hunk-tracker pattern.
+//! All fields are touched only from the actor task, which processes one command at a time, so no mutex or atomic synchronization is needed.
 
 use std::collections::HashMap;
 
@@ -12,16 +7,12 @@ use tokio_util::sync::CancellationToken;
 use crate::config::{RetryPolicy, SamplerConfig};
 use crate::types::RequestId;
 
-/// In-flight request bookkeeping.
-///
-/// `cancel_token` is owned by the actor (cloned into the spawned
-/// per-request task). The completion oneshot is moved into the
-/// per-request task at spawn time and is therefore not stored here.
+/// `cancel_token` is owned by the actor (cloned into the spawned per-request task).
+/// The completion oneshot is moved into the per-request task at spawn time and is therefore not stored here.
 pub(crate) struct ActiveRequest {
     pub(crate) cancel_token: CancellationToken,
 }
 
-/// Actor-owned state.
 pub(crate) struct ActorState {
     pub(crate) active_requests: HashMap<RequestId, ActiveRequest>,
     pub(crate) config: SamplerConfig,
@@ -37,9 +28,7 @@ impl ActorState {
         }
     }
 
-    /// Register a newly-spawned request. Returns the previous entry if
-    /// the same `request_id` was already in flight (callers should
-    /// cancel the previous token before overwriting).
+    /// Returns the previous entry if the same `request_id` was already in flight (callers should cancel the previous token before overwriting).
     pub(crate) fn register(
         &mut self,
         request_id: RequestId,
@@ -48,9 +37,8 @@ impl ActorState {
         self.active_requests.insert(request_id, active)
     }
 
-    /// Remove a request from the active set without cancelling its
-    /// token. Used by the cleanup signal sent from per-request tasks
-    /// when they exit normally.
+    /// Remove a request from the active set without cancelling its token.
+    /// The actor calls this when a per-request task exits normally.
     pub(crate) fn remove(&mut self, request_id: &RequestId) -> Option<ActiveRequest> {
         self.active_requests.remove(request_id)
     }
@@ -65,8 +53,8 @@ impl ActorState {
         }
     }
 
-    /// Replace the default config. The next request submitted without
-    /// an override will use this.
+    /// Replace the default config.
+    /// The next request submitted without an override will use this.
     pub(crate) fn update_config(&mut self, config: SamplerConfig) {
         self.config = config;
     }
@@ -78,7 +66,6 @@ mod tests {
     use crate::client::ApiBackend;
     use indexmap::IndexMap;
 
-    /// Minimal config builder for tests in this module.
     fn cfg() -> SamplerConfig {
         SamplerConfig {
             api_key: None,

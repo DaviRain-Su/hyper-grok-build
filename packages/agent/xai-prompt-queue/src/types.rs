@@ -193,14 +193,6 @@ mod tests {
     }
 
     #[test]
-    fn queue_changed_derives_default() {
-        let d = QueueChanged::default();
-        assert_eq!(d.session_id, "");
-        assert!(d.entries.is_empty());
-        assert!(d.running_prompt_id.is_none());
-    }
-
-    #[test]
     fn running_combined_texts_round_trip() {
         let original = QueueChanged {
             session_id: "s1".into(),

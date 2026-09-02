@@ -22,7 +22,6 @@ use crate::theme::Theme;
 
 /// Synthetic entry index for btw overlay selection (never collides with real scrollback).
 pub const BTW_OVERLAY_ENTRY_IDX: usize = usize::MAX;
-const BTW_OVERLAY_RANGE_ID: u16 = 0;
 
 #[derive(Debug, Clone)]
 pub enum BtwOverlayState {
@@ -105,29 +104,49 @@ impl BtwOverlayState {
         if content_width == 0 {
             return model;
         }
-        content.with_wrapped_lines(content_width, |wrapped| {
-            for (idx, (line, joiner)) in
-                wrapped.lines.iter().zip(wrapped.joiners.iter()).enumerate()
-            {
-                let text = line_plain_text(line);
-                // The markdown wrapper emits `None` for the first piece of each source line and `Some(" ")` for soft-wrapped continuations
-                // Reconstruct treats a `None` joiner as a newline
-                let joiner_to_previous = if idx == 0 { None } else { joiner.clone() };
-                model.push_line(ResolvedSelectableLine {
-                    entry_idx: BTW_OVERLAY_ENTRY_IDX,
-                    range_id: BTW_OVERLAY_RANGE_ID,
-                    block_line_idx: idx,
-                    screen_y: 0,
-                    screen_x: 0,
-                    selectable_cols: 0..crate::scrollback::types::str_display_cells(&text) as u16,
-                    text,
-                    painted_region: None,
-                    joiner_to_previous,
-                });
-            }
-        });
+        // Same wrap + quote-bar strip as linear copy (`MarkdownContent::output`).
+        // Hit columns must index the selectable region, not the painted `│ ` prefix.
+        let output = content.output(content_width);
+        for (idx, line) in output.lines.iter().enumerate() {
+            let joiner_to_previous = if idx == 0 { None } else { line.joiner.clone() };
+            push_btw_selectable_line(&mut model, line, idx, 0, 0, joiner_to_previous);
+        }
         model
     }
+}
+
+/// Push one `/btw` row in the same column space scrollback uses for copy.
+///
+/// `col_within_range` is an offset into the selectable region (`QuoteBarStrip` drops blockquote bars).
+/// Indexing the full painted line would shift quoted copy by the prefix width.
+fn push_btw_selectable_line(
+    model: &mut ResolvedSelectionModel,
+    line: &crate::scrollback::types::BlockLine,
+    block_line_idx: usize,
+    screen_y: u16,
+    screen_x: u16,
+    joiner_to_previous: Option<String>,
+) {
+    use crate::scrollback::types::{
+        derive_selection_text, painted_selectable_region, selectable_cols, visual_selectable_cols,
+    };
+    let Some(range_id) = line.selection_range else {
+        return;
+    };
+    let Some(cols) = selectable_cols(&line.content, &line.selectable) else {
+        return;
+    };
+    model.push_line(ResolvedSelectableLine {
+        entry_idx: BTW_OVERLAY_ENTRY_IDX,
+        range_id,
+        block_line_idx,
+        screen_y,
+        screen_x,
+        selectable_cols: visual_selectable_cols(line).unwrap_or(cols),
+        text: derive_selection_text(line),
+        painted_region: Some(painted_selectable_region(line)),
+        joiner_to_previous,
+    });
 }
 
 /// Show each spinner frame for this many animation ticks.
@@ -135,12 +154,6 @@ const SPINNER_DIVISOR: u64 = 4;
 
 /// Maximum body lines shown for a Done response.
 pub const DONE_MAX_BODY_LINES: u16 = 12;
-
-/// Concatenate a line's span contents into plain text (styles stripped).
-/// Used to build the selection model from rendered markdown lines.
-fn line_plain_text(line: &Line<'_>) -> String {
-    line.spans.iter().map(|s| s.content.as_ref()).collect()
-}
 
 /// Wrap an error message to `content_width` columns, capped at `max_lines` with an ellipsis on the last line when cut.
 /// The caller passes the rows it can actually paint.
@@ -382,19 +395,15 @@ pub fn render_btw_panel(
                     &bl.content,
                     content_width as u16,
                 );
-                let text = line_plain_text(&bl.content);
                 let joiner_to_previous = if idx == 0 { None } else { bl.joiner.clone() };
-                selection_model.push_line(ResolvedSelectableLine {
-                    entry_idx: BTW_OVERLAY_ENTRY_IDX,
-                    range_id: BTW_OVERLAY_RANGE_ID,
-                    block_line_idx: idx,
-                    screen_y: body_y + row as u16,
-                    screen_x: content_x,
-                    selectable_cols: 0..crate::scrollback::types::str_display_cells(&text) as u16,
-                    text,
-                    painted_region: None,
+                push_btw_selectable_line(
+                    selection_model,
+                    bl,
+                    idx,
+                    body_y + row as u16,
+                    content_x,
                     joiner_to_previous,
-                });
+                );
             }
             if visible_count > 0 {
                 let body_area = Rect {
@@ -470,6 +479,9 @@ pub fn render_btw_panel(
 mod tests {
     use super::*;
     use crate::render::osc8::resolve_link_target;
+
+    /// Markdown body range id (`MARKDOWN_BODY_RANGE`); `/btw` hits and copy share it.
+    const BTW_OVERLAY_RANGE_ID: u16 = 0;
 
     fn render_with_model(
         state: &BtwOverlayState,
@@ -759,6 +771,51 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(text, expected);
+    }
+
+    /// Quoted `/btw` hits index the selectable region, so linear copy does not drop the first content cells.
+    #[test]
+    fn quoted_btw_hit_columns_match_linear_copy() {
+        use crate::scrollback::text_selection::{
+            ActiveTextDrag, RangeHit, reconstruct_full_selection_text,
+        };
+        let state = BtwOverlayState::done("q".to_string(), "> QUOTE alpha".to_string());
+        let model = render_with_model(&state, 40, 8);
+        let line = model
+            .ranges
+            .iter()
+            .flat_map(|r| r.lines.iter())
+            .find(|l| l.text.contains("QUOTE"))
+            .expect("quote row in selection model");
+        assert!(
+            line.selectable_cols.start > 0,
+            "quote bar must sit outside the hitbox, got {:?}",
+            line.selectable_cols
+        );
+        assert_eq!(line.text, "QUOTE alpha");
+        let hit = model
+            .hit_test_selectable_range(line.screen_x + line.selectable_cols.start, line.screen_y)
+            .expect("click on first content cell");
+        assert_eq!(hit.col_within_range, 0);
+        let BtwOverlayState::Done { content, .. } = &state else {
+            panic!("done");
+        };
+        let output = content.output(36);
+        let drag = ActiveTextDrag {
+            anchor: hit,
+            head: RangeHit {
+                col_within_range: line
+                    .selectable_cols
+                    .end
+                    .saturating_sub(line.selectable_cols.start)
+                    .saturating_sub(1),
+                ..hit
+            },
+            kind: Default::default(),
+            anchor_content_width: Some(36),
+        };
+        let copied = reconstruct_full_selection_text(&output.lines, &drag).expect("copy");
+        assert_eq!(copied, "QUOTE alpha");
     }
 
     /// The Done overlay must render markdown (bold, headings, tables) instead of echoing the raw source.

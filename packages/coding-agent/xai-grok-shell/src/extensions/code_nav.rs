@@ -1,7 +1,6 @@
 //! Code Navigation Extension Methods
 //!
-//! Provides go-to-definition, go-to-references, and symbol lookup functionality
-//! using the xai-codebase-graph index.
+//! Provides go-to-definition, go-to-references, and symbol lookup using the xai-codebase-graph index.
 //!
 //! ## Extension Methods
 //!
@@ -19,14 +18,10 @@ use crate::agent::mvp_agent::{CodeNavEligibility, MvpAgent};
 use agent_client_protocol as acp;
 use serde::{Deserialize, Serialize};
 
-/// Record a structured telemetry event at the end of a code-nav handler call.
+/// Record a structured telemetry event at the end of a code-nav handler call, once per request.
 ///
-/// This is called once per request with the method name, triggering session,
-/// cwd, whether the index was newly spawned or reused, and total elapsed time.
-/// These fields make it possible to:
-///  - identify first-use latency (newly spawned + high elapsed_ms)
-///  - identify reuse latency (reused + low elapsed_ms)
-///  - attribute slowness to index startup vs query processing
+/// The fields separate first-use latency (newly spawned, high elapsed_ms) from reuse latency.
+/// They also attribute slowness to index startup vs query processing.
 fn log_code_nav_telemetry(
     method: &str,
     session_id: Option<&acp::SessionId>,
@@ -51,14 +46,13 @@ type ExtResult = Result<acp::ExtResponse, acp::Error>;
 /// Position-based query request (for goto-definition, goto-references).
 /// Position parameters are 1-indexed (matching editor display).
 ///
-/// **`sessionId` is required** for all code-nav requests.  Per-client
-/// capability gating requires a valid session so eligibility is resolved
-/// correctly in both simple and leader modes.  Requests without `sessionId`
-/// receive `reason: sessionRequired` in the error response.
+/// **`sessionId` is required** for all code-nav requests.
+/// Per-client capability gating requires a valid session so eligibility is resolved correctly in both simple and leader modes.
+/// Requests without `sessionId` receive `reason: sessionRequired` in the error response.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GotoRequest {
-    /// Session ID — required for code navigation.
+    /// Session ID; required for code navigation.
     pub session_id: Option<acp::SessionId>,
     /// Working directory (optional when session_id is provided).
     pub cwd: Option<String>,
@@ -72,11 +66,11 @@ pub(crate) struct GotoRequest {
 
 /// Symbol name query request (for find-definitions, find-references).
 ///
-/// **`sessionId` is required** — same contract as [`GotoRequest`].
+/// **`sessionId` is required**; same contract as [`GotoRequest`].
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FindSymbolRequest {
-    /// Session ID — required for code navigation.
+    /// Session ID; required for code navigation.
     pub session_id: Option<acp::SessionId>,
     /// Working directory (optional when session_id is provided).
     pub cwd: Option<String>,
@@ -86,13 +80,13 @@ pub(crate) struct FindSymbolRequest {
     pub context_path: Option<String>,
 }
 
-/// Status request — check indexing status.
+/// Status request: check indexing status.
 ///
-/// **`sessionId` is required** — same contract as [`GotoRequest`].
+/// **`sessionId` is required**; same contract as [`GotoRequest`].
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StatusRequest {
-    /// Session ID — required for code navigation.
+    /// Session ID; required for code navigation.
     pub session_id: Option<acp::SessionId>,
     /// Working directory (optional when session_id is provided).
     pub cwd: Option<String>,
@@ -137,8 +131,7 @@ pub struct SymbolLocation {
 pub(crate) enum IndexStatusReason {
     /// Index is running and ready.
     Active,
-    /// Index is eligible but has not been started yet (first code-nav request
-    /// will trigger lazy startup).
+    /// Index is eligible but has not been started yet (the first code-nav request triggers lazy startup).
     NotStarted,
     /// Client type is not web (web-only for initial rollout).
     ClientNotWeb,
@@ -171,8 +164,8 @@ pub(crate) struct StatusResponse {
 
 /// Handle code navigation extension methods.
 ///
-/// Routes through [`WorkspaceOps`]. Eligibility checks still run in shell since
-/// they depend on agent-level config (client type, feature flags).
+/// Routes through [`WorkspaceOps`].
+/// Eligibility checks still run in shell since they depend on agent-level config (client type, feature flags).
 #[tracing::instrument(name = "ext.code_nav", skip_all, fields(method = %args.method))]
 pub async fn handle(
     agent: &MvpAgent,
@@ -352,8 +345,7 @@ pub async fn handle(
     }
 }
 
-/// Convert workspace CodeNavResponse to the shell's CodeNavResponse format
-/// and wrap in the `ExtMethodResult` envelope that clients expect.
+/// Convert workspace CodeNavResponse to the shell's CodeNavResponse format and wrap in the `ExtMethodResult` envelope that clients expect.
 fn to_code_nav_ext_response(resp: xai_grok_workspace::workspace_ops::CodeNavResponse) -> ExtResult {
     let symbol = resp
         .locations
@@ -378,8 +370,7 @@ fn to_code_nav_ext_response(resp: xai_grok_workspace::workspace_ops::CodeNavResp
     super::to_ext_response(Ok(shell_resp))
 }
 
-/// Check eligibility, ensure the codebase index is started, and return
-/// whether the index was newly created (for telemetry).
+/// Check eligibility, ensure the codebase index is started, and return whether the index was newly created (for telemetry).
 fn ensure_eligible_and_started(
     agent: &MvpAgent,
     session_id: Option<&acp::SessionId>,

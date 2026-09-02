@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-/// Parsed server → client STT WebSocket events.
+/// Parsed server-to-client STT WebSocket events.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SttServerEvent {

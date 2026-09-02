@@ -1,13 +1,10 @@
 //! Truncation helpers for the external OTEL stream.
 //!
-//! Constants follow common customer-pipeline parity values: strings
-//! longer than 512 chars collapse to their first 128 chars plus a marker,
-//! tool-input JSON is capped at 4 KB / depth 2 / 20 items per collection, and
-//! gated prompt/content text is capped at 60 KB.
+//! The caps match values common in customer telemetry pipelines.
 
-/// Values longer than this are truncated…
+/// Strings longer than this are truncated.
 pub const MAX_STRING_LEN: usize = 512;
-/// …to their first 128 chars + [`TRUNCATION_MARKER`].
+/// Truncated strings keep this many leading chars before [`TRUNCATION_MARKER`].
 pub const TRUNCATED_PREFIX_LEN: usize = 128;
 /// Marker appended to truncated strings.
 pub const TRUNCATION_MARKER: &str = "…[truncated]";
@@ -22,7 +19,6 @@ pub const MAX_CONTENT_BYTES: usize = 60 * 1024;
 /// File-extension attribute cap (`"rs"`, `"tsx"`, …).
 pub const MAX_FILE_EXTENSION_LEN: usize = 10;
 
-/// Truncate on a `char` boundary at or before `max_bytes`.
 fn floor_char_boundary(s: &str, max_bytes: usize) -> usize {
     if max_bytes >= s.len() {
         return s.len();
@@ -34,13 +30,19 @@ fn floor_char_boundary(s: &str, max_bytes: usize) -> usize {
     idx
 }
 
-/// Standard attribute-value truncation: strings whose `char` count exceeds
-/// [`MAX_STRING_LEN`] collapse to their first [`TRUNCATED_PREFIX_LEN`] chars
-/// plus [`TRUNCATION_MARKER`]. Returns `None` when unchanged.
+fn truncate_to(s: &str, max_bytes: usize) -> Option<String> {
+    if s.len() <= max_bytes {
+        return None;
+    }
+    let idx = floor_char_boundary(s, max_bytes);
+    Some(format!("{}{TRUNCATION_MARKER}", &s[..idx]))
+}
+
+/// Standard truncation for attribute values.
+/// Strings whose `char` count exceeds [`MAX_STRING_LEN`] collapse to their first [`TRUNCATED_PREFIX_LEN`] chars plus [`TRUNCATION_MARKER`].
+/// Returns `None` when unchanged.
 pub fn truncate_value(s: &str) -> Option<String> {
-    // Counting chars (not bytes) keeps the limit stable for non-ASCII text;
-    // chars_count > MAX_STRING_LEN implies the string is "long" regardless of
-    // encoding width.
+    // Counting chars (not bytes) keeps the limit stable for non-ASCII text
     if s.chars().count() <= MAX_STRING_LEN {
         return None;
     }
@@ -55,16 +57,22 @@ pub fn truncate_value_owned(s: String) -> String {
 
 /// Cap gated prompt/content text at [`MAX_CONTENT_BYTES`] (UTF-8-safe).
 pub fn truncate_content(s: &str) -> Option<String> {
-    if s.len() <= MAX_CONTENT_BYTES {
-        return None;
-    }
-    let idx = floor_char_boundary(s, MAX_CONTENT_BYTES);
-    Some(format!("{}{TRUNCATION_MARKER}", &s[..idx]))
+    truncate_to(s, MAX_CONTENT_BYTES)
 }
 
-/// Reduce a JSON value for the gated `tool_parameters` attribute: depth
-/// capped at [`MAX_JSON_DEPTH`], collections capped at
-/// [`MAX_COLLECTION_ITEMS`] entries, strings truncated per [`truncate_value`].
+/// Cap DETAILS `tool_parameters` preview and CONTENT `error_message` at
+/// [`MAX_TOOL_INPUT_JSON_BYTES`].
+pub fn truncate_preview(s: &str) -> Option<String> {
+    truncate_to(s, MAX_TOOL_INPUT_JSON_BYTES)
+}
+
+/// Capture-time cap so the shell does not retain multi-MB tool bodies.
+pub fn cap_bytes(s: &str, max_bytes: usize) -> String {
+    truncate_to(s, max_bytes).unwrap_or_else(|| s.to_owned())
+}
+
+/// Reduce a JSON value for the gated `tool_parameters` attribute.
+/// Depth is capped at [`MAX_JSON_DEPTH`], collections at [`MAX_COLLECTION_ITEMS`] entries, and strings are truncated per [`truncate_value`].
 /// The serialized result is finally clamped to [`MAX_TOOL_INPUT_JSON_BYTES`].
 pub fn reduce_tool_input(value: &serde_json::Value) -> String {
     let reduced = reduce_json(value, 0);
@@ -152,7 +160,7 @@ mod tests {
         let v = serde_json::json!({"a": {"b": {"c": {"d": 1}}}});
         let out = reduce_tool_input(&v);
         let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
-        // Depth 0 = root object, depth 1 = a's object; b's value is at depth 2 → collapsed.
+        // Depth 0 is the root object and depth 1 is a's object, so b's value sits at depth 2 and collapses
         assert_eq!(parsed["a"]["b"], serde_json::json!("{object:1}"));
     }
 

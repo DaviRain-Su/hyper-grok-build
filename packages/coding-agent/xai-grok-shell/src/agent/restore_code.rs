@@ -1,15 +1,10 @@
-//! Thin wire-format adapter that wraps the shared
-//! [`xai_grok_workspace::session::git::build_restore_decision`] helper
-//! into the JSON shape emitted by `LoadSession` on `_meta.codeRestore`.
+//! Wraps [`xai_grok_workspace::session::git::build_restore_decision`] into the JSON shape `LoadSession` emits on `_meta.codeRestore`.
 use serde_json::Value;
 use xai_grok_workspace::session::git::{
     CheckoutSessionOutcome, RestoreKind, build_restore_decision,
 };
-/// Build the `codeRestore` JSON meta, or `None` when no restore should
-/// be reported (no checkout AND no archive applied). The shared
-/// [`build_restore_decision`] is the source of truth; this function
-/// only adapts the result into the wire JSON shape used by the
-/// non-worktree path.
+/// Builds the `codeRestore` JSON meta, or `None` when there was neither a checkout nor an applied archive.
+/// The shared [`build_restore_decision`] makes the decision; this function only reshapes it into the wire JSON used by the non-worktree path.
 pub(crate) fn build_code_restore_meta(
     target_sha: &str,
     outcome: &CheckoutSessionOutcome,

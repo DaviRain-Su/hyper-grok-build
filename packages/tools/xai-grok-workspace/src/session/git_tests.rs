@@ -106,8 +106,7 @@ async fn commit_turn_if_dirty_ignores_ambient_gpgsign() {
     git_cli(tmp.path(), &["config", "user.name", "t"])
         .await
         .unwrap();
-    // Ambient signing on with no usable key would make an unattended commit
-    // fail; the helper must force `commit.gpgsign=false` and still commit.
+    // Ambient signing on with no usable key would make an unattended commit fail; the helper must force `commit.gpgsign=false` and still commit
     git_cli(tmp.path(), &["config", "commit.gpgsign", "true"])
         .await
         .unwrap();
@@ -145,8 +144,7 @@ async fn commit_turn_if_dirty_skips_when_operation_in_progress() {
         .unwrap();
     let base = get_current_commit(tmp.path()).await.unwrap();
 
-    // Simulate an in-progress merge and a dirty tree: the turn commit must
-    // refuse rather than finalize the merge.
+    // Simulate an in-progress merge and a dirty tree: the turn commit must refuse rather than finalize the merge
     std::fs::write(tmp.path().join(".git").join("MERGE_HEAD"), &base).unwrap();
     std::fs::write(tmp.path().join("a.txt"), "two").unwrap();
 
@@ -174,10 +172,9 @@ async fn git_cli_scrubs_token_from_transport_failure() {
     let tmp = tempfile::tempdir().unwrap();
     git_cli(tmp.path(), &["init", "-b", "main"]).await.unwrap();
 
-    // Fetch from a token-in-URL remote that refuses immediately (port 1).
-    // git echoes the full URL — including the token — in its stderr; the
-    // `git_cli` failure branch must scrub it before returning/logging, so
-    // even a routine EnsureBinding fetch failure cannot leak the token.
+    // Fetch from a remote whose URL embeds a token and that refuses immediately (port 1)
+    // git echoes the full URL (including the token) in its stderr
+    // The `git_cli` failure branch must scrub it before returning/logging, so even a routine EnsureBinding fetch failure cannot leak the token
     let err = git_cli(
         tmp.path(),
         &[
@@ -210,12 +207,11 @@ fn detect_default_branch_prefers_remote_head_then_config() {
         .commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
         .unwrap();
 
-    // No remote HEAD → config.
+    // With no remote HEAD, detection falls back to config
     assert_eq!(detect_default_branch(&repo).as_deref(), Some("trunk"));
 
-    // A lone remote-tracking branch without `origin/HEAD` still falls back
-    // to config: detection keys on the `origin/HEAD` symbolic ref, never on
-    // guessing from the remote-tracking branch set.
+    // A lone remote-tracking branch without `origin/HEAD` still falls back to config
+    // Detection reads the `origin/HEAD` symbolic ref and never guesses from the remote-tracking branches
     repo.reference("refs/remotes/origin/main", oid, false, "test")
         .unwrap();
     assert_eq!(detect_default_branch(&repo).as_deref(), Some("trunk"));
@@ -243,7 +239,7 @@ fn test_resolve_persisted_session_git_metadata_collects_sorted_unique_remotes() 
     // Use a different host to avoid CI insteadOf rules collapsing URLs.
     repo.remote("backup", "https://gitlab.com/xai-org/example.git")
         .unwrap();
-    // Same effective URL as origin after credential stripping — tests dedup.
+    // Same effective URL as origin after credential stripping, so it tests dedup
     repo.remote("duplicate", "https://github.com/xai-org/example.git")
         .unwrap();
 
@@ -270,7 +266,7 @@ fn test_resolve_persisted_session_git_metadata_captures_head() {
     repo.remote("origin", "https://github.com/xai-org/example.git")
         .unwrap();
 
-    // Before any commit, HEAD is unborn — fields should be None.
+    // Before any commit, HEAD is unborn, so both fields are None
     let metadata = resolve_persisted_session_git_metadata_sync(tmp.path());
     assert!(metadata.head_commit.is_none());
     assert!(metadata.head_branch.is_none());
@@ -318,7 +314,6 @@ fn test_resolve_persisted_session_git_metadata_detached_head() {
         .commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
         .unwrap();
 
-    // Detach HEAD to the commit directly.
     repo.set_head_detached(commit_oid).unwrap();
 
     let metadata = resolve_persisted_session_git_metadata_sync(tmp.path());
@@ -326,16 +321,14 @@ fn test_resolve_persisted_session_git_metadata_detached_head() {
         metadata.head_commit.as_deref(),
         Some(commit_oid.to_string().as_str()),
     );
-    // Detached HEAD should yield None for branch, consistent with
-    // `git branch --show-current` used in the git watcher path.
+    // Detached HEAD yields None for branch, matching `git branch --show-current` in the git watcher path
     assert!(metadata.head_branch.is_none());
 }
 
 #[test]
 fn test_resolve_persisted_session_git_metadata_worktree_resolves_remotes() {
-    // Set up a main repo with a remote, then create a worktree and verify
-    // that resolve_persisted_session_git_metadata_sync on the worktree cwd
-    // correctly follows the commondir back to the shared config.
+    // Set up a main repo with a remote, then create a worktree
+    // resolve_persisted_session_git_metadata_sync on the worktree cwd must follow the commondir back to the shared config
     let tmp = tempfile::tempdir().unwrap();
     let main_path = tmp.path().join("main-repo");
     std::fs::create_dir_all(&main_path).unwrap();
@@ -374,7 +367,7 @@ fn test_resolve_persisted_session_git_metadata_worktree_resolves_remotes() {
     )
     .unwrap();
 
-    // Verify from worktree cwd — should find remotes via commondir.
+    // Verify from the worktree cwd: the remotes resolve through the commondir
     let metadata = resolve_persisted_session_git_metadata_sync(&wt_path);
 
     assert_eq!(
@@ -678,7 +671,7 @@ fn test_strip_prefix_canonicalized_unrelated_returns_none() {
 
 #[test]
 fn test_strip_prefix_canonicalized_nonexistent_child() {
-    // Deleted files can't be canonicalized — falls back to raw match.
+    // Deleted files can't be canonicalized, so the helper falls back to a raw match
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     let deleted = root.join("gone").join("file.txt");
@@ -698,7 +691,7 @@ fn test_effective_worktree_path_no_git_root() {
 fn test_effective_worktree_path_at_root() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    // source_cwd == git_root → no offset
+    // source_cwd == git_root, so there is no offset
     let result = effective_worktree_path(Path::new("/wt"), root, Some(root));
     assert_eq!(result, Path::new("/wt"));
 }
@@ -717,7 +710,7 @@ fn test_effective_worktree_path_subdir() {
 
 #[test]
 fn test_effective_worktree_path_non_prefix() {
-    // source_cwd is not under git_root → returns worktree_root unchanged.
+    // source_cwd is not under git_root, so it returns worktree_root unchanged
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
     let wt = Path::new("/wt");
@@ -837,8 +830,7 @@ fn test_effective_cwd_roundtrip_with_compute_offset() {
     assert_eq!(effective, format!("{}/src/lib", worktree_root));
 }
 
-// Tests for find_git_root_from_path — the function used by new_session to
-// populate isGitRepo / gitRoot in the session metadata.
+// Tests for find_git_root_from_path, the function new_session uses to populate isGitRepo / gitRoot in the session metadata
 
 #[test]
 fn test_find_git_root_from_repo_root() {
@@ -871,12 +863,11 @@ fn test_find_git_root_from_subdir_returns_repo_root() {
 #[test]
 fn test_find_git_root_outside_repo_returns_err() {
     let tmp = tempfile::tempdir().unwrap();
-    // No git init — plain directory.
+    // No git init, just a plain directory
     assert!(find_git_root_from_path(tmp.path()).is_err());
 }
 
-// Tests for discover_git_root — the typed wrapper used by new_session to
-// decide whether to show the non-git warning.
+// Tests for discover_git_root, the typed wrapper new_session uses to decide whether to show the non-git warning
 
 #[test]
 fn test_discover_git_root_found_at_repo_root() {
@@ -928,9 +919,7 @@ fn test_discover_git_root_bare_repo_returns_discovery_failed() {
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init_bare(tmp.path()).unwrap();
 
-    // Bare repos have no workdir, so discover_git_root should return
-    // DiscoveryFailed (not NotARepo — the repo exists, we just can't
-    // extract a working directory).
+    // Bare repos have no workdir: the repo exists but a working directory can't be extracted
     assert!(
         matches!(
             discover_git_root(tmp.path()),
@@ -1106,11 +1095,8 @@ fn test_parse_porcelain_v2_rename() {
     assert!(matches!(staged[0].change_type, ChangeType::Rename));
 }
 
-/// Test that `status()` succeeds on a repo with split-index enabled.
-/// It should fail the libgit2 path and fall back to CLI.
-///
-/// Skipped under Bazel sandbox tests where the `git` CLI is unavailable
-/// (set `BAZEL_TEST=1` to skip; cargo runs the test normally).
+/// Split index makes libgit2's status fail, so `status()` must fall back to the CLI.
+/// Skipped under Bazel sandbox tests where the `git` CLI is unavailable (set `BAZEL_TEST=1` to skip; cargo runs the test normally).
 #[tokio::test]
 #[cfg_attr(
     not(unix),
@@ -1131,15 +1117,14 @@ async fn test_status_with_split_index_falls_back_to_cli() {
             .unwrap();
     }
 
-    // Enable split index via CLI — this writes the `link` extension.
+    // Enable split index via CLI; this writes the `link` extension
     git_cli(tmp.path(), &["update-index", "--split-index"])
         .await
         .expect("failed to enable split index");
 
     std::fs::write(tmp.path().join("test.txt"), "hello").unwrap();
 
-    // status() should succeed via CLI fallback even though libgit2 can't
-    // read the split index.
+    // status() succeeds via the CLI fallback even though libgit2 can't read the split index
     let result = status(tmp.path(), true, true, false, false).await;
     assert!(result.is_ok(), "status() failed: {:?}", result.err());
 
@@ -1455,7 +1440,6 @@ fn resolve_normalized_remote_urls_deduplicates_across_transports() {
         .unwrap();
 
     let urls = resolve_normalized_remote_urls(tmp.path());
-    // Both should normalize to the same value and dedup.
     assert_eq!(urls, vec!["github.com/xai-org/example"]);
 }
 
@@ -1476,9 +1460,8 @@ fn init_git2_repo_with_commit(dir: &Path) -> (git2::Repository, git2::Oid) {
     (repo, oid)
 }
 
-/// Point HEAD's branch at an `oid` with no backing object (git2's ref API
-/// refuses, so write the ref file directly), then assert peeling now fails —
-/// the precondition that makes the refs-only tests real.
+/// Point HEAD's branch at an `oid` with no backing object (git2's ref API refuses, so write the ref file directly).
+/// Then assert that peeling fails, the precondition that makes the refs-only tests real.
 fn point_head_at_missing_object(repo: &git2::Repository, oid: &str) {
     let head_ref = repo.head().expect("head").name().expect("name").to_string();
     std::fs::write(repo.commondir().join(&head_ref), format!("{oid}\n")).expect("write ref");
@@ -1510,7 +1493,7 @@ fn metadata_resolves_head_when_object_missing() {
     assert_eq!(metadata.head_branch.as_deref(), Some(branch.as_str()));
 }
 
-/// `get_current_commit`: unborn → `None`, live → OID, missing object → OID.
+/// `get_current_commit` returns `None` for an unborn HEAD, and the OID whether the commit object is live or missing.
 #[tokio::test]
 async fn get_current_commit_reads_head_from_refs() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -1532,9 +1515,8 @@ async fn get_current_commit_reads_head_from_refs() {
     );
 }
 
-/// End-to-end: `status()` reports the HEAD hash even when the commit object is
-/// gone. libgit2's status tolerates a missing HEAD tree (it diffs against an
-/// empty tree), so the refs-only OID read supplies it; the old peel gave `None`.
+/// End-to-end: `status()` reports the HEAD hash even when the commit object is gone.
+/// libgit2's status tolerates a missing HEAD tree (it diffs against an empty tree), so the refs-only OID read supplies the hash.
 #[tokio::test]
 async fn status_reports_head_oid_when_object_missing() {
     xai_test_utils::require_git!();
@@ -1554,8 +1536,8 @@ async fn status_reports_head_oid_when_object_missing() {
     assert_eq!(data.commit.as_deref(), Some(MISSING_OID));
 }
 
-/// A HEAD whose object is missing must not report "already checked out"; the
-/// fast path falls through to the repair fetch (which fails here — no origin).
+/// A HEAD whose object is missing must not report "already checked out".
+/// The fast path falls through to the repair fetch, which fails here because the repo has no origin.
 #[tokio::test]
 async fn checkout_commit_with_fetch_repairs_missing_head_object() {
     xai_test_utils::require_git!();

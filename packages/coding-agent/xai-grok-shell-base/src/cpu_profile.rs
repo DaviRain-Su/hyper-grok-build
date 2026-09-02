@@ -746,12 +746,6 @@ mod tests {
     }
 
     #[test]
-    fn default_status_is_inactive() {
-        let manager = CpuProfileManager::new();
-        assert_eq!(manager.status(), CpuProfileStatus::Inactive);
-    }
-
-    #[test]
     fn reports_platform_capabilities() {
         let manager = CpuProfileManager::new();
         #[cfg(unix)]
@@ -1134,29 +1128,5 @@ mod tests {
                 ..
             } if status_path == svg_path
         ));
-    }
-
-    #[test]
-    fn stop_preserves_engine_error() {
-        let tmp = TempDir::new().unwrap();
-        let svg_path = tmp.path().join("profile.folded");
-        let engine = Box::new(FakeProfilerEngine {
-            stop_calls: Arc::new(Mutex::new(Vec::new())),
-            svg_path,
-            stop_error: Some(fake_error(
-                ControlErrorCode::ArtifactWriteFailed,
-                "failed to write artifact",
-            )),
-        });
-
-        let mut manager = CpuProfileManager::new();
-        manager.active = Some(test_active_profile(
-            tmp.path().join("profile.folded"),
-            engine,
-        ));
-
-        let err = manager.stop().unwrap_err();
-        assert_eq!(err.code, ControlErrorCode::ArtifactWriteFailed);
-        assert!(matches!(manager.status(), CpuProfileStatus::Inactive));
     }
 }

@@ -1,15 +1,9 @@
-//! Multi-client leader cluster: one shared leader, N pager clients, plus
-//! inspection of the durable session log so reattach tests can assert on
-//! what actually persisted.
+//! Multi-client leader cluster: one shared leader plus N pager clients.
 //!
-//! Every other leader test is single-client/single-leader; [`LeaderCluster`]
-//! is the missing abstraction for "one leader, several pager clients sharing
-//! its session". One [`ContentController`] gives one shared `$HOME` (hence one
-//! elected leader) plus a fixed leader socket beneath its `GROK_HOME`; clients
-//! spawn with the `--leader`/`--leader-socket` flags so they all attach to the
-//! SAME leader. It also exposes the leader's durable `updates.jsonl` log so a
-//! reattach test can assert on the persisted, replayable turn-completion
-//! records — the genuine end-to-end signal behind durable turn completion.
+//! Every other leader test is single-client/single-leader; [`LeaderCluster`] covers "one leader, several pager clients sharing its session".
+//! One [`ContentController`] gives one shared `$HOME` (hence one elected leader) plus a fixed leader socket beneath its `GROK_HOME`.
+//! Clients spawn with the `--leader`/`--leader-socket` flags so they all attach to the SAME leader.
+//! It also exposes the leader's durable `updates.jsonl` log so a reattach test can assert on the persisted, replayable turn-completion records.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -29,14 +23,12 @@ pub struct LeaderCluster {
 }
 
 impl LeaderCluster {
-    /// Start the cluster: one [`ContentController`] (one shared `$HOME` =>
-    /// one leader) and a fixed leader socket under its `GROK_HOME`.
+    /// Start the cluster: one [`ContentController`] (one shared `$HOME`, so one leader) and a fixed leader socket under its `GROK_HOME`.
     pub async fn start(rows: u16, cols: u16) -> Result<Self> {
         let content = ContentController::start()
             .await
             .context("start content controller")?;
-        // One shared GROK_HOME => one leader; the socket lives beneath it so
-        // every client (sharing the same env) elects/attaches to the same one.
+        // One shared GROK_HOME means one leader; the socket lives beneath it so every client (sharing the same env) elects/attaches to the same one
         let grok_home = content.home().join(".grok");
         std::fs::create_dir_all(&grok_home).context("create grok home")?;
         let socket = grok_home.join("leader-e2e.sock");
@@ -50,21 +42,18 @@ impl LeaderCluster {
         })
     }
 
-    /// Spawn the leader-electing client (`--leader --leader-socket <S>` plus
-    /// `extra_args`); it starts a fresh session and brings up the leader.
+    /// Spawn the leader-electing client (`--leader --leader-socket <S>` plus `extra_args`); it starts a fresh session and brings up the leader.
     pub fn spawn_leader(&self, extra_args: &[&str]) -> Result<PtyHarness> {
         self.spawn_client(&[], extra_args)
     }
 
-    /// Attach another client that resumes the shared session through the SAME
-    /// leader (`--leader --leader-socket <S> --resume` plus `extra_args`).
+    /// Attach another client that resumes the shared session through the SAME leader (`--leader --leader-socket <S> --resume` plus `extra_args`).
     pub fn attach(&self, extra_args: &[&str]) -> Result<PtyHarness> {
         self.spawn_client(&["--resume"], extra_args)
     }
 
-    /// Spawn a client wired to the shared leader socket. `mode_args` carries
-    /// the per-role flag (`--resume` for attachers); `extra_args` is the
-    /// caller's.
+    /// Spawn a client wired to the shared leader socket.
+    /// `mode_args` carries the per-role flag (`--resume` for attachers); `extra_args` is the caller's.
     fn spawn_client(&self, mode_args: &[&str], extra_args: &[&str]) -> Result<PtyHarness> {
         let socket = self.socket.to_str().context("socket path is utf-8")?;
         let mut args: Vec<&str> = vec!["--leader", "--leader-socket", socket];
@@ -74,26 +63,22 @@ impl LeaderCluster {
             .context("spawn pager client on shared leader")
     }
 
-    /// The shared content controller (mock inference server + sandbox env).
+    /// The shared content controller (mock inference server and sandbox env).
     pub fn content(&self) -> &ContentController {
         &self.content
     }
 
-    /// The cluster's sessions root: `GROK_HOME/sessions` (layout below is
-    /// `sessions/<encoded-cwd>/<session-id>/updates.jsonl`).
+    /// The cluster's sessions root: `GROK_HOME/sessions` (layout below is `sessions/<encoded-cwd>/<session-id>/updates.jsonl`).
     fn sessions_dir(&self) -> PathBuf {
         self.content.home().join(".grok").join("sessions")
     }
 
-    /// The session-update payload of every record across every `updates.jsonl`
-    /// under the cluster's [`sessions_dir`](Self::sessions_dir) — i.e. the
-    /// `params.update` object of each persisted envelope line, so a caller can
-    /// match on its `sessionUpdate` tag directly. Scans ALL sessions under the
-    /// cluster (fine for the single-session clusters these tests build).
+    /// The session-update payload of every record across every `updates.jsonl` under the cluster's [`sessions_dir`](Self::sessions_dir).
+    /// Each entry is the `params.update` object of a persisted envelope line, so a caller can match on its `sessionUpdate` tag directly.
+    /// Scans ALL sessions under the cluster (fine for the single-session clusters these tests build).
     ///
-    /// Infallible by design: a file that vanishes mid-walk, or whose appended
-    /// tail tore across a multi-byte UTF-8 boundary (so `read_to_string`
-    /// fails), is skipped for this call and picked up on the next one.
+    /// Infallible by design: a file that vanishes mid-walk, or whose appended tail tore across a multi-byte UTF-8 boundary, is skipped.
+    /// `read_to_string` fails on such a file; the next call picks it up again.
     pub fn session_updates(&self) -> Vec<Value> {
         let mut files = Vec::new();
         collect_updates_files(&self.sessions_dir(), &mut files);
@@ -107,10 +92,9 @@ impl LeaderCluster {
         out
     }
 
-    /// Poll [`session_updates`](Self::session_updates) until a record with
-    /// `sessionUpdate == "turn_completed"` appears, returning that (inner)
-    /// update payload, or error on timeout. Scans ALL sessions under the
-    /// cluster (fine for the single-session clusters these tests build).
+    /// Poll [`session_updates`](Self::session_updates) until a record with `sessionUpdate == "turn_completed"` appears.
+    /// Returns that (inner) update payload, or errors on timeout.
+    /// Scans ALL sessions under the cluster (fine for the single-session clusters these tests build).
     pub fn wait_for_turn_completed(&self, timeout: Duration) -> Result<Value> {
         let deadline = Instant::now() + timeout;
         loop {
@@ -119,9 +103,8 @@ impl LeaderCluster {
                 return Ok(rec.clone());
             }
             if Instant::now() >= deadline {
-                // Surface what WAS persisted so "zero records / env problem" is
-                // distinguishable from "records present but no turn_completed /
-                // producer regression".
+                // Include what WAS persisted in the error
+                // Zero records means an env problem; records without a turn_completed mean a producer regression
                 let tags: std::collections::BTreeSet<&str> = updates
                     .iter()
                     .filter_map(|u| u.get("sessionUpdate").and_then(Value::as_str))
@@ -133,8 +116,7 @@ impl LeaderCluster {
                     updates.len(),
                 );
             }
-            // Sync FS poll mirrors the harness's blocking wait_for_text; a stat
-            // every 150ms is cheap and fine on a multi_thread runtime worker.
+            // Sync FS poll mirrors the harness's blocking wait_for_text; a stat every 150ms is cheap and fine on a multi_thread runtime worker
             std::thread::sleep(Duration::from_millis(150));
         }
     }
@@ -145,13 +127,10 @@ fn is_turn_completed(update: &Value) -> bool {
     update.get("sessionUpdate").and_then(Value::as_str) == Some("turn_completed")
 }
 
-/// Parse the `params.update` payload out of each non-blank line of an
-/// `updates.jsonl` body, assuming the enveloped on-disk shape current sessions
-/// always write (`{..,"params":{"update":{..}}}`). A line that is blank, fails
-/// to parse (a torn trailing line that is still valid UTF-8), or carries no
-/// `params.update` is skipped — never failing the batch. (A torn *multi-byte*
-/// tail instead fails the file read upstream, skipping the whole file for that
-/// poll; see [`LeaderCluster::session_updates`].)
+/// Parse the `params.update` payload out of each non-blank line of an `updates.jsonl` body.
+/// Assumes the enveloped on-disk shape current sessions always write (`{..,"params":{"update":{..}}}`).
+/// A line that is blank, fails to parse (a torn trailing line that is still valid UTF-8), or carries no `params.update` is skipped.
+/// (A torn *multi-byte* tail instead fails the file read upstream, skipping the whole file for that poll; see [`LeaderCluster::session_updates`].)
 fn parse_update_payloads(text: &str) -> Vec<Value> {
     text.lines()
         .filter_map(|line| {
@@ -165,16 +144,14 @@ fn parse_update_payloads(text: &str) -> Vec<Value> {
         .collect()
 }
 
-/// Recursively collect every `updates.jsonl` beneath `dir` (a manual walk to
-/// avoid a new crate dep). A missing/unreadable dir yields nothing — sessions
-/// may not exist yet, and the walk is re-run on every poll.
+/// Recursively collect every `updates.jsonl` beneath `dir` (a manual walk to avoid a new crate dep).
+/// A missing/unreadable dir yields nothing; sessions may not exist yet, and the walk is re-run on every poll.
 fn collect_updates_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
-        // No-follow file type: a symlinked directory has `is_dir() == false`,
-        // so a symlink cycle can never recurse forever here.
+        // No-follow file type: a symlinked directory has `is_dir() == false`, so a symlink cycle can never recurse forever here
         let Ok(file_type) = entry.file_type() else {
             continue;
         };

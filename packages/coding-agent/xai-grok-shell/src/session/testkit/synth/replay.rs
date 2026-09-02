@@ -1,6 +1,5 @@
-//! Session synthesis for replay/load tests: writes
-//! `updates.jsonl`/`rewind_points.jsonl` directly, for exact control over ACU
-//! redundancy and rewind points.
+//! Session synthesis for replay and load tests.
+//! Writes `updates.jsonl` and `rewind_points.jsonl` directly, for exact control over ACU redundancy and rewind points.
 
 use std::path::{Path, PathBuf};
 
@@ -23,12 +22,10 @@ fn parse_or<T: std::str::FromStr>(key: &str, found: Option<String>, default: T) 
     }
 }
 
-/// Generation parameters; fields double as the defaults for
-/// [`SessionSpec::from_env_prefixed`].
+/// Generation parameters; fields double as the defaults for [`SessionSpec::from_env_prefixed`].
 pub struct SessionSpec {
     pub turns: usize,
-    /// `available_commands_update`s persisted per turn: the redundant catalog
-    /// a real session re-advertises on every skill/subagent boundary.
+    /// `available_commands_update`s persisted per turn: the redundant catalog a real session re-advertises on every skill or subagent boundary.
     pub acu_per_turn: usize,
     pub catalog_commands: usize,
     pub catalog_desc_len: usize,
@@ -40,8 +37,7 @@ pub struct SessionSpec {
 }
 
 impl Default for SessionSpec {
-    /// Baseline yielding a ~20 MB `updates.jsonl`; callers override the knobs
-    /// they scale up.
+    /// Baseline yielding a ~20 MB `updates.jsonl`; callers override the knobs they scale up.
     fn default() -> Self {
         Self {
             turns: 60,
@@ -58,14 +54,12 @@ impl Default for SessionSpec {
 }
 
 impl SessionSpec {
-    /// Read `<prefix>_*` env overrides on top of `defaults`, scaling `turns` and
-    /// `rewind_points` by `<prefix>_SCALE`.
+    /// Read `<prefix>_*` env overrides on top of `defaults`, scaling `turns` and `rewind_points` by `<prefix>_SCALE`.
     pub fn from_env_prefixed(prefix: &str, defaults: Self) -> Self {
         Self::from_lookup(prefix, defaults, |key| std::env::var(key).ok())
     }
 
-    /// [`from_env_prefixed`] with an injectable lookup, so the override and
-    /// scale arithmetic is unit-testable without touching process env.
+    /// [`from_env_prefixed`] with an injectable lookup, so the override and scale arithmetic is unit-testable without touching process env.
     fn from_lookup(prefix: &str, defaults: Self, get: impl Fn(&str) -> Option<String>) -> Self {
         let val = |name: &str, default| {
             let key = format!("{prefix}_{name}");
@@ -110,8 +104,7 @@ fn text_chunk(text: String) -> acp::ContentChunk {
     acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(text)))
 }
 
-/// One large `AvailableCommandsUpdate`: the redundant catalog re-persisted
-/// thousands of times in the real session.
+/// One large `AvailableCommandsUpdate`: the redundant catalog re-persisted thousands of times in the real session.
 fn available_commands_update(spec: &SessionSpec) -> acp::SessionUpdate {
     let desc = filler(spec.catalog_desc_len);
     let commands: Vec<acp::AvailableCommand> = (0..spec.catalog_commands)
@@ -165,8 +158,7 @@ fn write_updates_jsonl(path: &Path, session_id: &str, spec: &SessionSpec) {
     std::fs::write(path, out).expect("write updates.jsonl");
 }
 
-/// Replay keeps the per-turn user and agent chunks and drops ACUs; keep in sync
-/// with `write_updates_jsonl`.
+/// Replay keeps the per-turn user and agent chunks and drops ACUs; keep in sync with `write_updates_jsonl`.
 pub fn expected_replay_lines(spec: &SessionSpec) -> usize {
     spec.turns * (1 + spec.agent_chunks_per_turn)
 }
@@ -209,9 +201,8 @@ pub fn locate_session_dir(root: &Path, id: &str) -> PathBuf {
     );
 }
 
-/// Synthesize a session on disk under `root` for working dir `cwd`: the summary
-/// through the production storage adapter, then `updates.jsonl` and
-/// `rewind_points.jsonl` written directly. Returns the `Info` and its directory.
+/// Synthesize a session on disk under `root` for working dir `cwd`.
+/// The summary goes through the production storage adapter; `updates.jsonl` and `rewind_points.jsonl` are written directly.
 pub async fn prepare_session(root: &Path, cwd: &Path, spec: &SessionSpec) -> (Info, PathBuf) {
     let adapter = JsonlStorageAdapter::with_root(root.to_path_buf());
     let id = uuid::Uuid::new_v4().to_string();

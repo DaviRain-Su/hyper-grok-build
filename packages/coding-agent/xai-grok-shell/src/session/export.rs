@@ -1,7 +1,6 @@
 //! Session export for sharing via the remote session-sharing backend.
 //!
-//! Uses `updates.jsonl` (ACP SessionNotifications) as the source of truth,
-//! not `chat_history.jsonl` which is only for LLM API calls.
+//! Uses `updates.jsonl` (ACP SessionNotifications) as the source of truth, not `chat_history.jsonl` which is only for LLM API calls.
 
 use crate::session::info::Info;
 use crate::session::persistence::Summary;
@@ -9,14 +8,12 @@ use crate::session::storage::{JsonlStorageAdapter, PersistedData, SessionUpdate,
 use agent_client_protocol as acp;
 use serde::{Deserialize, Serialize};
 
-/// JSON-RPC wrapper for ACP notifications.
 #[derive(Debug, Serialize)]
 struct AcpJsonRpcNotification<'a> {
     method: &'static str,
     params: &'a acp::SessionNotification,
 }
 
-/// JSON-RPC wrapper for xAI extension notifications.
 #[derive(Debug, Serialize)]
 struct XaiJsonRpcNotification<'a> {
     method: &'static str,
@@ -95,29 +92,22 @@ pub struct ExportedMetadata {
     /// Subagent type (e.g., "general-purpose", "explore", "plan").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_type: Option<String>,
-    /// Named persona applied to this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_persona: Option<String>,
-    /// Named role applied to this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_role: Option<String>,
     /// Effective context source ("new" or "resumed").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_context_source: Option<String>,
-    /// Subagent nesting depth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_depth: Option<u32>,
-    /// Whether `title` was set by a manual rename. Omitted when `None`
-    /// (`skip_serializing_if = "Option::is_none"`). Producers write
-    /// `Some(true)` via `then_some(true)` / `manual_title_opt()`, and
-    /// `ClearTitle` writes `Some(false)` so a merge-style backend drops
-    /// a prior pin. Auto `SetTitle` still omits the field.
+    /// Whether `title` was set by a manual rename; omitted when `None`.
+    /// `ClearTitle` writes `Some(false)` so a merge-style backend drops a prior pin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title_is_manual: Option<bool>,
 }
 
 impl ExportedMetadata {
-    /// Build metadata from a [`Summary`].
     pub(crate) fn from_summary(summary: &Summary) -> Self {
         Self {
             title: summary.display_title_opt(),

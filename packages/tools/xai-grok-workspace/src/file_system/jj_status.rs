@@ -1,12 +1,9 @@
-//! Compact jj status for the system prompt.
-
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::file_system::FsError;
 
-/// jj template: change ID, commit ID, description, bookmarks.
 const JJ_LOG_TEMPLATE: &str = r#"separate("\n",
   "Change: " ++ change_id.shortest(8),
   "Commit: " ++ commit_id.shortest(8),
@@ -20,27 +17,22 @@ const JJ_LOG_TEMPLATE: &str = r#"separate("\n",
 
 /// Compact jj status for the system prompt (~1k chars max).
 pub async fn jj_status(working_directory: impl Into<PathBuf>) -> Result<String, FsError> {
-    let working_directory = working_directory.into();
-    tokio::task::spawn_blocking(move || jj_status_impl(&working_directory))
-        .await
-        .map_err(|e| FsError::Other(format!("jj status task failed: {e}")))?
-}
-
-fn jj_status_impl(cwd: &Path) -> Result<String, FsError> {
+    let cwd = working_directory.into();
     let max_chars = 1000;
     let mut out = String::with_capacity(max_chars);
 
     let log = run_jj(
-        cwd,
+        &cwd,
         &["log", "--no-graph", "-r", "@", "-T", JJ_LOG_TEMPLATE],
     )
+    .await
     .ok_or_else(|| FsError::Other("not a jujutsu repository".into()))?;
 
     for line in log.lines().filter(|l| !l.is_empty()) {
         let _ = writeln!(out, "{line}");
     }
 
-    match run_jj(cwd, &["st"]) {
+    match run_jj(&cwd, &["st"]).await {
         Some(st) if st.contains("The working copy is clean") || st.is_empty() => {
             let _ = writeln!(out, "\nWorking copy is clean");
         }
@@ -64,8 +56,9 @@ fn jj_status_impl(cwd: &Path) -> Result<String, FsError> {
     Ok(out)
 }
 
-/// Run a jj command synchronously, returning trimmed stdout or `None` on failure.
-fn run_jj(cwd: &Path, args: &[&str]) -> Option<String> {
+/// Run a jj command and return trimmed stdout, or `None` on failure.
+/// A cancelled gather (a dropped, unconsumed prefetch) kills jj's whole process group, so its children can't run past the drop either.
+async fn run_jj(cwd: &Path, args: &[&str]) -> Option<String> {
     let mut cmd = Command::new("jj");
     cmd.arg("--ignore-working-copy")
         .args(args)
@@ -73,8 +66,10 @@ fn run_jj(cwd: &Path, args: &[&str]) -> Option<String> {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .stdin(std::process::Stdio::null());
-    xai_grok_tools::util::detach_std_command(&mut cmd);
-    let output = cmd.output().ok()?;
+    xai_tty_utils::detach_std_command(&mut cmd);
+    let output = super::process::output_killing_group_on_drop(cmd)
+        .await
+        .ok()?;
 
     if !output.status.success() {
         return None;

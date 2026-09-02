@@ -1,9 +1,6 @@
-//! Refresh of copied local plugin installs from their live source.
-//!
-//! A local install is a full directory copy under `installed-plugins/` (not a
-//! live symlink), so agents/skills added to the live source after install do not
-//! surface until the snapshot is re-copied. This module re-copies refreshable
-//! local installs (under-home or trusted) at session spawn and `/plugins reload`.
+//! A local install is a full directory copy under `installed-plugins/`, not a live symlink.
+//! Agents/skills added to the live source after install do not show up until the snapshot is re-copied.
+//! This module re-copies refreshable local installs (under-home or trusted) at session spawn and `/plugins reload`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -15,8 +12,7 @@ use super::git_install::{
 use super::install_registry::{InstallError, InstallKind, InstallRegistry, RepoPlugin};
 use super::trust::TrustStore;
 
-/// Orphaned tmp/backup siblings younger than this may belong to a concurrent live
-/// refresh, so [`sweep_stale`] only reclaims entries older than this.
+/// Orphaned tmp/backup siblings younger than this may belong to a concurrent live refresh, so [`sweep_stale`] only reclaims older entries.
 const STALE_SWEEP_AGE: Duration = Duration::from_secs(3600);
 
 /// Counts from a [`refresh_local_installs`] pass, for logging and tests.
@@ -27,13 +23,11 @@ pub(crate) struct RefreshSummary {
     pub errors: usize,
 }
 
-/// Load the install registry, [`refresh_local_installs`], and persist it if a
-/// snapshot changed.
+/// Load the install registry, [`refresh_local_installs`], and persist it if a snapshot changed.
 ///
-/// Runs only at genuine session spawn (`force=false`, cheap skip-unchanged) and
-/// explicit `/plugins reload` (`force=true`, always re-copies — the guaranteed
-/// manual remedy). Refresh implies continuous re-consent for under-home / trusted
-/// sources (install-time trust re-applies every spawn). Non-fatal on failure.
+/// Runs only at genuine session spawn (`force=false`, cheap skip-unchanged) and explicit `/plugins reload` (`force=true`, always re-copies).
+/// Trust granted at install time re-applies at every spawn: the refresh keeps copying whatever the source now contains.
+/// Failures are non-fatal.
 pub(crate) fn refresh_local_installs_from_disk(trust: &TrustStore, force: bool) -> RefreshSummary {
     let mut registry = InstallRegistry::load();
     let summary = refresh_local_installs(&mut registry, trust, force);
@@ -45,9 +39,8 @@ pub(crate) fn refresh_local_installs_from_disk(trust: &TrustStore, force: bool) 
     summary
 }
 
-/// A local install snapshotted out of the registry so the refresh loop can mutate
-/// the registry while iterating. `expected` is the recorded plugin set used to
-/// guard against scope-changing rediscovery.
+/// A local install snapshotted out of the registry so the refresh loop can mutate the registry while iterating.
+/// `expected` is the recorded plugin set used to guard against scope-changing rediscovery.
 struct RefreshTarget {
     key: String,
     source_path: PathBuf,
@@ -56,13 +49,11 @@ struct RefreshTarget {
     expected: HashMap<String, RepoPlugin>,
 }
 
-/// Re-copy refreshable local installs from their live `source_path` into the
-/// managed snapshot, rediscovering plugins so new components surface.
+/// Re-copy refreshable local installs from their live `source_path` into the managed snapshot, rediscovering plugins so new components show up.
 ///
-/// A source is refreshable when it is under the user's home (auto-trusted, same
-/// rule as config-path plugins) or in the trust store; remote git installs are
-/// handled by `update_repo`, not here. Unless `force`, snapshots already matching
-/// the live source are skipped (a stat-walk, not a byte copy).
+/// A source is refreshable when it is under the user's home (auto-trusted, same rule as config-path plugins) or in the trust store.
+/// Remote git installs are handled by `update_repo`, not here.
+/// Unless `force`, snapshots already matching the live source are skipped (a stat-walk, not a byte copy).
 fn refresh_local_installs(
     registry: &mut InstallRegistry,
     trust: &TrustStore,
@@ -117,8 +108,6 @@ fn refresh_local_installs(
                 summary.refreshed += 1;
             }
             Ok(None) => {
-                // Kept the snapshot: rediscovered plugin set/scope differs from
-                // recorded (e.g. legacy install without a persisted `subdir`).
                 tracing::debug!(
                     repo_key = %key,
                     "kept stale local plugin snapshot: rediscovered plugin set/scope differs from recorded"
@@ -135,10 +124,9 @@ fn refresh_local_installs(
     summary
 }
 
-/// The set of `(relative_path, file_len)` for every non-symlink file under a
-/// tree. Symlinks are skipped, matching [`copy_dir_recursive`]. Comparing two of
-/// these detects add / remove / rename / size-change with no stored fingerprint
-/// and no brittle src-vs-dst mtime compare (a copy does not preserve mtimes).
+/// The set of `(relative_path, file_len)` for every non-symlink file under a tree.
+/// Symlinks are skipped, matching [`copy_dir_recursive`].
+/// Comparing two of these detects add/remove/rename/size-change with no stored fingerprint and no mtime compare (a copy does not preserve mtimes).
 fn tree_file_set(root: &Path) -> Option<BTreeMap<PathBuf, u64>> {
     fn walk(base: &Path, dir: &Path, out: &mut BTreeMap<PathBuf, u64>) -> std::io::Result<()> {
         for entry in std::fs::read_dir(dir)? {
@@ -162,8 +150,8 @@ fn tree_file_set(root: &Path) -> Option<BTreeMap<PathBuf, u64>> {
     Some(out)
 }
 
-/// Whether the snapshot at `dest` matches the live `source` by `(relpath, len)`
-/// set. Catches add/remove/rename/resize; misses only a same-path/same-len edit.
+/// Whether the snapshot at `dest` matches the live `source` by `(relpath, len)` set.
+/// Catches add/remove/rename/resize; misses only a same-path/same-len edit.
 fn snapshot_matches_source(source: &Path, dest: &Path) -> bool {
     match (tree_file_set(source), tree_file_set(dest)) {
         (Some(src), Some(dst)) => src == dst,
@@ -171,17 +159,14 @@ fn snapshot_matches_source(source: &Path, dest: &Path) -> bool {
     }
 }
 
-/// Re-copy `source_path` into `dest`, returning the rediscovered plugins, or
-/// `Ok(None)` to keep the existing snapshot unchanged.
+/// Re-copy `source_path` into `dest`, returning the rediscovered plugins, or `Ok(None)` to keep the existing snapshot unchanged.
 ///
-/// Invariant: refresh only syncs file contents within the existing plugin set;
-/// if rediscovery is empty or changes the `(name, subdir)` set, the snapshot is
-/// kept as-is (protects legacy entries whose `subdir` wasn't persisted).
+/// Invariant: refresh only syncs file contents within the existing plugin set.
+/// If rediscovery is empty or changes the `(name, subdir)` set, the snapshot is kept (protects legacy entries whose `subdir` wasn't persisted).
 ///
-/// `subdir` scopes discovery as it did at install time; symlinks in the source
-/// are skipped (see [`copy_dir_recursive`]). The swap is rename-aside (move live
-/// snapshot to backup, promote tmp, drop backup) so `dest` is never absent during
-/// a slow delete and a failed promote rolls back to the previous snapshot.
+/// `subdir` scopes discovery as it did at install time; symlinks in the source are skipped (see [`copy_dir_recursive`]).
+/// The swap is rename-aside: move the live snapshot to backup, promote tmp, drop backup.
+/// `dest` is never absent during a slow delete, and a failed promote rolls back to the previous snapshot.
 fn recopy_local_install(
     source_path: &Path,
     subdir: Option<&str>,
@@ -243,8 +228,7 @@ fn recopy_local_install(
     }
     if let Err(e) = promote_tmp_to_dest(&tmp, dest) {
         let _ = remove_repo_path(&tmp);
-        // Promote failed: restore the prior tree so `dest` is never left missing
-        // (rename, then copy fallback), unless a peer already repopulated `dest`.
+        // Promote failed: restore the prior tree so `dest` is never missing (rename, then copy fallback), unless a peer already repopulated `dest`
         if dest.exists() {
             let _ = remove_repo_path(&backup);
         } else if std::fs::rename(&backup, dest).is_err() {
@@ -270,8 +254,7 @@ fn recopy_local_install(
     Ok(Some(repo_plugin_map(&discovered)))
 }
 
-/// Promote the freshly-copied `tmp` tree onto `dest`. A test hook can force this
-/// to fail to exercise the rename-aside rollback path.
+/// A test hook can force this to fail to exercise the rename-aside rollback path.
 fn promote_tmp_to_dest(tmp: &Path, dest: &Path) -> std::io::Result<()> {
     #[cfg(test)]
     {
@@ -284,10 +267,8 @@ fn promote_tmp_to_dest(tmp: &Path, dest: &Path) -> std::io::Result<()> {
     std::fs::rename(tmp, dest)
 }
 
-/// Best-effort removal of orphaned `.<name>.refresh-*` / `.<name>.backup-*`
-/// siblings left by a crash between copy and promote. Only entries older than
-/// [`STALE_SWEEP_AGE`] are reaped, so a concurrent live refresh's in-flight
-/// working dir (pid-named, freshly created) is never deleted out from under it.
+/// Best-effort removal of orphaned `.<name>.refresh-*` / `.<name>.backup-*` siblings left by a crash between copy and promote.
+/// Only entries older than [`STALE_SWEEP_AGE`] are reaped, so a still-running refresh's freshly created working dir is never deleted.
 fn sweep_stale(parent: &Path, file_name: &str) {
     let refresh_prefix = format!(".{file_name}.refresh-");
     let backup_prefix = format!(".{file_name}.backup-");
@@ -320,8 +301,8 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
-    /// RAII guard: sets an env var, restores the prior value (or unsets) on drop,
-    /// so a test never leaves process-global env pointing at a dropped tempdir.
+    /// RAII guard: sets an env var, restores the prior value (or unsets) on drop.
+    /// A test must never leave the process-global env pointing at a dropped tempdir.
     struct EnvVarGuard {
         key: &'static str,
         prev: Option<std::ffi::OsString>,
@@ -344,8 +325,8 @@ mod tests {
         }
     }
 
-    // Canonical home: under-home auto-trust canonicalizes the candidate but not
-    // `$HOME` (macOS `/var` -> `/private/var`). The guard restores `$HOME` on drop.
+    // Canonical home: under-home auto-trust canonicalizes the candidate but not `$HOME` (macOS `/var` -> `/private/var`)
+    // The guard restores `$HOME` on drop
     fn home_tempdir() -> (tempfile::TempDir, PathBuf, EnvVarGuard) {
         let tmp = tempfile::tempdir().unwrap();
         let home = dunce::canonicalize(tmp.path()).unwrap();
@@ -367,8 +348,7 @@ mod tests {
         .unwrap();
     }
 
-    // Install `source` (optionally scoped to `subdir`) and record it in
-    // `registry`, mirroring what the install command persists.
+    // Install `source` (optionally scoped to `subdir`) and record it in `registry`, mirroring what the install command persists
     fn register_local_install(
         registry: &mut InstallRegistry,
         source: &Path,
@@ -432,8 +412,7 @@ mod tests {
         let mut registry = InstallRegistry::empty(home.join(".grok").join("installed-plugins"));
         let installed = register_local_install(&mut registry, &source, None);
 
-        // No edit to the source: snapshot matches, so refresh is a stat-walk skip
-        // with no re-copy.
+        // No edit to the source: snapshot matches, so refresh is a stat-walk skip with no re-copy
         let snapshot = installed.repo_path.join("agents/old.md");
         let before = std::fs::metadata(&snapshot).unwrap().modified().unwrap();
         let trust = TrustStore::load_from(home.join(".grok").join("trusted-plugins"));
@@ -455,8 +434,7 @@ mod tests {
         let mut registry = InstallRegistry::empty(home.join(".grok").join("installed-plugins"));
         let installed = register_local_install(&mut registry, &source, None);
 
-        // Rename keeps file count, total size, and the file's (old) mtime — the
-        // old aggregate fingerprint skipped this; the structural file-set catches it.
+        // Rename keeps file count, total size, and the file's (old) mtime, so only the structural (relpath, len) set catches it
         std::fs::rename(
             source.join("agents/old.md"),
             source.join("agents/renamed.md"),
@@ -484,8 +462,7 @@ mod tests {
         let mut registry = InstallRegistry::empty(home.join(".grok").join("installed-plugins"));
         let installed = register_local_install(&mut registry, &source, None);
 
-        // Change the source so a refresh attempts a re-copy, then force the
-        // promote rename to fail and assert the prior snapshot is restored.
+        // Change the source so a refresh attempts a re-copy, then force the promote rename to fail and assert the prior snapshot is restored
         write_agent_md(&source, "new");
         let trust = TrustStore::load_from(home.join(".grok").join("trusted-plugins"));
         let summary = {
@@ -596,9 +573,8 @@ mod tests {
     #[serial(home_env)]
     fn refresh_keeps_stale_when_legacy_subdir_scope_lost() {
         let (_home_tmp, home, _home_guard) = home_tempdir();
-        // Legacy multi-package source: the real plugin is at plugins/foo;
-        // other-dir is unrelated root-level content that root-scope discovery
-        // would pick up.
+        // Legacy multi-package source: the real plugin is at plugins/foo
+        // other-dir is unrelated root-level content that root-scope discovery would pick up
         let workspace = home.join("workspace");
         write_plugin_json(&workspace.join("plugins/foo"), "foo");
         write_agent_md(&workspace.join("other-dir"), "noise");
@@ -609,8 +585,7 @@ mod tests {
         let dest = install_dir.join("foo-legacy");
         copy_dir_recursive(&workspace, &dest).unwrap();
 
-        // Legacy entry: install-level `subdir` was never persisted (None), but the
-        // per-plugin RepoPlugin recorded the correct scope.
+        // Legacy entry: install-level `subdir` was never persisted (None), but the per-plugin RepoPlugin recorded the correct scope
         let mut registry = InstallRegistry::empty(install_dir);
         let now = chrono::Utc::now().to_rfc3339();
         registry.insert(
@@ -637,12 +612,11 @@ mod tests {
         // Edit the source under plugins/foo so a content refresh would trigger.
         write_agent_md(&workspace.join("plugins/foo"), "added");
 
-        // force=true so the unchanged-skip can't mask the scope-identity guard.
+        // force=true so the skip for unchanged sources can't mask the scope guard
         let trust = TrustStore::load_from(home.join(".grok").join("trusted-plugins"));
         let summary = refresh_local_installs(&mut registry, &trust, true);
 
-        // Root-scope rediscovery would change the plugin set/scope, so keep stale:
-        // no refresh, and repo.plugins / repo.kind must be untouched (no corruption).
+        // Root-scope rediscovery would change the plugin set/scope, so the stale snapshot is kept untouched
         assert_eq!(
             summary.refreshed, 0,
             "scope change must keep stale: {summary:?}"

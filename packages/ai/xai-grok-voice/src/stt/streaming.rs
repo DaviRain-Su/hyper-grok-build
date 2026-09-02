@@ -46,13 +46,10 @@ impl StreamingSttSession {
                 .map_err(|e| VoiceError::WebSocket(format!("auth header: {e}")))?,
         );
 
-        // Request-identity headers so the backend can attribute and meter voice
-        // usage by client, mirroring what the sampler / imagine request paths
-        // send. Billing itself follows the `Authorization` bearer (per-user for
-        // OAuth, BYOK key owner otherwise); these are purely for usage
-        // attribution. Skipped when empty (e.g. the probe binary / tests) or
-        // when a value isn't a valid header (never fatal — the connection is
-        // still fully authorized without them).
+        // These headers identify the client so the backend can attribute and meter voice usage, mirroring the sampler and imagine request paths
+        // Billing itself follows the `Authorization` bearer (per-user for OAuth, BYOK key owner otherwise); these only enrich attribution
+        // They are skipped when empty (e.g. the probe binary and tests) or when a value isn't a valid header.
+        // A skip is never fatal: the connection is fully authorized without them
         insert_optional_header(
             &mut request,
             "x-grok-client-identifier",
@@ -124,15 +121,12 @@ impl StreamingSttSession {
                             break;
                         }
                     }
-                    // Non-text frames (Close/Binary/Ping/Pong): ignore and let a
-                    // subsequent `None` terminate the loop. A graceful close is
-                    // treated as a normal end, not an error.
+                    // Non-text frames (Close/Binary/Ping/Pong): ignore and let a subsequent `None` terminate the loop
+                    // A graceful close is treated as a normal end, not an error
                     Some(Ok(_)) => continue,
-                    // Transport-level failure: surface it so the pager can render
-                    // and stop listening — except for an abrupt reset, which is
-                    // also what we see when the socket is torn down at the end of
-                    // a turn (incl. our own teardown), so reporting it would just
-                    // produce a spurious "connection lost" toast.
+                    // Transport-level failure: report it so the pager can render the error and stop listening
+                    // The exception is an abrupt reset, which is also what we see when the socket is torn down at the end of a turn (ours included)
+                    // Reporting that would produce a spurious "connection lost" toast
                     Some(Err(e)) => {
                         if !is_benign_disconnect(&e) {
                             let _ = event_tx
@@ -196,22 +190,18 @@ impl StreamingSttSession {
 
 impl Drop for StreamingSttSession {
     fn drop(&mut self) {
-        // Dropping a `JoinHandle` only detaches the task — it does not stop it.
-        // Abort both halves so an aborted setup (e.g. `connect` returning `Err`
-        // after `wait_ready` fails, or the caller failing to open the mic after
-        // a successful connect) tears the socket down immediately instead of
-        // leaving the writer to emit a stray `audio.done` and the reader to
-        // linger on an idle connection. On the healthy path both tasks have
-        // already finished (audio drained, `audio.done` flushed) before drop,
-        // so these aborts are no-ops.
+        // Dropping a `JoinHandle` only detaches the task; it does not stop it
+        // Abort both halves so an abandoned setup tears the socket down immediately
+        // (`connect` can return `Err` after `wait_ready` fails, or the caller can fail to open the mic after a successful connect.)
+        // Otherwise the writer would emit a stray `audio.done` and the reader would linger on an idle connection
+        // On the healthy path both tasks have already finished (audio drained, `audio.done` flushed) before drop, so these aborts are no-ops
         self._writer_task.abort();
         self._reader_task.abort();
     }
 }
 
-/// Disconnects that aren't worth surfacing to the user: a socket torn down
-/// without a closing handshake is the normal result of ending a turn (the
-/// client or server just drops the connection), not a real failure.
+/// Disconnects that aren't worth reporting to the user.
+/// A socket torn down without a closing handshake is the normal result of ending a turn: the client or server drops the connection.
 fn is_benign_disconnect(err: &WsError) -> bool {
     matches!(
         err,
@@ -221,10 +211,9 @@ fn is_benign_disconnect(err: &WsError) -> bool {
     )
 }
 
-/// Insert `name: value` into the handshake request, unless `value` is empty
-/// (header omitted) or not a valid header value (skipped with a debug log). A
-/// missing identity header never fails the connection — the bearer alone fully
-/// authorizes the request; these headers only enrich server-side attribution.
+/// Insert `name: value` into the handshake request, unless `value` is empty (header omitted) or invalid (skipped with a debug log).
+/// A missing identity header never fails the connection; the bearer alone fully authorizes the request.
+/// These headers only enrich server-side attribution.
 fn insert_optional_header(request: &mut WsRequest, name: &'static str, value: &str) {
     if value.is_empty() {
         return;
@@ -243,8 +232,7 @@ fn insert_optional_header(request: &mut WsRequest, name: &'static str, value: &s
 }
 
 fn build_stt_ws_url(config: &VoiceConfig) -> Result<Url, VoiceError> {
-    // Resolve `auto` / aliases here so the wire value is always a concrete
-    // catalog code (the STT API does not accept `auto`, unlike TTS).
+    // Resolve `auto` and aliases here so the wire value is always a concrete catalog code (the STT API does not accept `auto`, unlike TTS)
     let language = crate::language_for_api(&config.language);
     Url::parse_with_params(
         &config.stt_ws_url()?,
@@ -328,8 +316,7 @@ mod tests {
     #[test]
     fn optional_header_skips_invalid_value_without_panic() {
         let mut req = "wss://api.x.ai/v1/stt".into_client_request().unwrap();
-        // A control char is not a valid header value; it must be dropped
-        // silently, never panic or fail the (already-authorized) handshake.
+        // A control char is not a valid header value; it must be dropped silently, never panic or fail the (already-authorized) handshake
         insert_optional_header(&mut req, "User-Agent", "bad\nvalue");
         assert!(
             req.headers().get("user-agent").is_none(),

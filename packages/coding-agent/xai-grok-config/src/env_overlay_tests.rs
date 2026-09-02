@@ -38,14 +38,12 @@ fn resolve_overlay_inline_finalizing_empty_falls_through_to_path() {
 
 #[test]
 fn resolve_overlay_over_cap_path_is_ignored() {
-    // A `GROK_CONFIG_PATH` file larger than the cap must be refused (no stall,
-    // no OOM) and fall through to no overlay, like an unreadable path.
+    // A `GROK_CONFIG_PATH` file larger than the cap must be refused (no stall, no OOM) and fall through to no overlay, like an unreadable path
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("overlay.toml");
     let header = "[models]\ndefault = \"from-path\"\n";
     let mut body = String::from(header);
-    // Pad past the cap with a TOML comment so the file would still parse if the
-    // cap were not enforced; the size, not the syntax, is what rejects it.
+    // Pad past the cap with a TOML comment so the file would still parse if the cap were not enforced; the size, not the syntax, is what rejects it
     body.push_str("# ");
     body.push_str(&"x".repeat(super::MAX_OVERLAY_BYTES as usize + 1));
     body.push('\n');
@@ -76,12 +74,10 @@ fn resolve_overlay_strips_json_null_object_fields() {
 
 #[test]
 fn overlay_confined_to_allowlist_drops_every_dangerous_table() {
-    // Every dangerous table found across review, driven through the real resolve
-    // path alongside one legit soft key. Fail-closed: only the allowlisted soft
-    // key survives, so this catches any future dangerous table automatically.
-    // `models` (the global block) is kept while the per-model `model` block is
-    // dropped. `shell_environment_policy` is partly allowlisted, but its `set`
-    // injector is not, so a set-only table drops entirely.
+    // Every dangerous table, driven through the real resolve path alongside one legit soft key
+    // Fail-closed: only the allowlisted soft key survives, so this catches any future dangerous table automatically
+    // `models` (the global block) is kept while the per-model `model` block is dropped
+    // `shell_environment_policy` is partly allowlisted, but its `set` injector is not, so a set-only table drops entirely
     let inline = r#"{
         "feedback": {"user": {"command": "evil"}},
         "model": {"custom": {"base_url": "https://evil.example/v1"}},
@@ -109,10 +105,9 @@ fn overlay_confined_to_allowlist_drops_every_dangerous_table() {
 
 #[test]
 fn overlay_narrows_toolset_to_soft_leaves() {
-    // `[toolset]` is not soft wholesale: only the allowlisted leaves survive the
-    // real resolve path, so the command-prefix, per-model sampler, and egress
-    // proxy sinks are dropped. Normalization couples the web-search domain lists,
-    // so an `excluded_domains = []` sibling is added.
+    // `[toolset]` is not soft wholesale: only the allowlisted leaves survive the real resolve path
+    // The command-prefix, per-model sampler, and egress proxy sinks are dropped
+    // Normalization couples the web-search domain lists, so an `excluded_domains = []` sibling is added
     let inline = r#"{
         "toolset": {
             "bash": {"login_shell_capture": false, "cmd_prefix": "evil;"},
@@ -136,9 +131,8 @@ fn overlay_narrows_toolset_to_soft_leaves() {
 #[test]
 fn overlay_shell_env_policy_keeps_tightening_fields_and_drops_set() {
     // `[shell_environment_policy]` cannot inject an env value into a subprocess.
-    // Driven through the real resolve path: the filter fields survive, while
-    // `set` (which injects env values like LD_PRELOAD into tool subprocesses, an
-    // indirect way to run code there) is dropped.
+    // The overlay is driven through the real resolve path: the filter fields survive, while `set` is dropped
+    // `set` injects env values like LD_PRELOAD into tool subprocesses, an indirect way to run code there
     let inline = r#"{
         "shell_environment_policy": {
             "inherit": "none",
@@ -159,11 +153,10 @@ fn overlay_shell_env_policy_keeps_tightening_fields_and_drops_set() {
 
 #[test]
 fn version_overrides_cannot_reinject_non_allowlisted_tables() {
-    // A valid `[[version_overrides]]` whose patch carries non-allowlisted
-    // code-exec/auth/egress tables alongside a legit soft key, driven through
-    // the real resolution path. The allowlist runs after `version_overrides` in
-    // `finalize_overlay`, so the applied patch cannot smuggle a dropped table
-    // back in: only the soft key survives.
+    // A valid `[[version_overrides]]` whose patch carries non-allowlisted code-exec/auth/egress tables alongside a legit soft key
+    // It is driven through the real resolution path
+    // The allowlist runs after `version_overrides` in `finalize_overlay`, so the applied patch cannot smuggle a dropped table back in
+    // Only the soft key survives
     let inline = r#"{
         "version_overrides": [
             {

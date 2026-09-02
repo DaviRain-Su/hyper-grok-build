@@ -205,6 +205,13 @@ mkdir -p "$DOWNLOAD_DIR" "$BIN_DIR"
 
 platform="${os}-${arch}"
 CHANNEL="${GROK_CHANNEL:-stable}"
+case "$CHANNEL" in
+    stable|alpha|enterprise) ;;
+    *)
+        echo "Invalid GROK_CHANNEL: '${CHANNEL}' (expected stable, alpha, or enterprise)" >&2
+        exit 1
+        ;;
+esac
 
 # Pick a working BASE_URL: try Cloudflare-fronted x.ai first, fall back to
 # direct GCS if it's unreachable. The probe doubles as the channel-pointer
@@ -324,9 +331,10 @@ fi
 # Persist installer source and channel to config
 CONFIG_FILE="$HOME/.grok/config.toml"
 CLI_BLOCK="installer = \"internal\""
-if [ "$CHANNEL" != "stable" ]; then
-    CLI_BLOCK="${CLI_BLOCK}\nchannel = \"${CHANNEL}\""
-fi
+case "$CHANNEL" in
+    alpha) CLI_BLOCK="${CLI_BLOCK}\nchannel = \"alpha\"" ;;
+    enterprise) CLI_BLOCK="${CLI_BLOCK}\nchannel = \"enterprise\"" ;;
+esac
 if [ ! -f "$CONFIG_FILE" ]; then
     printf '[cli]\n%b\n' "$CLI_BLOCK" > "$CONFIG_FILE"
 elif grep -q '^\[cli\]' "$CONFIG_FILE"; then

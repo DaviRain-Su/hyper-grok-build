@@ -10,6 +10,7 @@ path = "src/bin/hyper_verify_release_archive.rs"
 required-features = ["community-build"]
 
 [dependencies]
+dunce = { workspace = true }
 anyhow = { workspace = true }
 futures = { workspace = true }
 indicatif = { workspace = true }
@@ -34,7 +35,6 @@ zstd = { workspace = true }
 # (flate2 is always on: the pager-install download ships compressed, and
 # community-build's `dep:flate2` gate reuses the same optional dep.)
 flate2 = { workspace = true, optional = true }
-dunce = { workspace = true, optional = true }
 fs2 = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 tar = { workspace = true, optional = true }
@@ -45,7 +45,7 @@ libc = { workspace = true }
 
 [features]
 default = ["dep:flate2"]
-community-build = ["dep:dunce", "dep:flate2", "dep:fs2", "dep:sha2", "dep:tar", "dep:zip"]
+community-build = ["dep:flate2", "dep:fs2", "dep:sha2", "dep:tar", "dep:zip"]
 # Test-only install failpoints for transactional rollback coverage. Never enable
 # in release/distribution builds.
 community-update-test-hooks = ["community-build"]

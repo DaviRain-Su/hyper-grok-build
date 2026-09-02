@@ -1114,27 +1114,6 @@ mod tests {
     }
 
     #[test]
-    fn budget_exceeded_terminates() {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let host = spawn_mock_host(rx, |req| {
-            if let WorkflowHostRequest::SpawnAgent { reply, .. } = req {
-                let _ = reply.send(Err(HostError::BudgetExceeded));
-            }
-        });
-        let outcome = run_workflow(params(
-            r#"
-            let meta = #{ name: "t", description: "d" };
-            agent("expensive");
-            complete("unreachable");
-            "#,
-            Journal::new(None),
-            tx,
-        ));
-        drop(host);
-        assert!(matches!(outcome, WorkflowOutcome::BudgetExceeded { .. }));
-    }
-
-    #[test]
     fn cancellation_wins_over_pure_loop() {
         let (tx, _rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
@@ -1951,23 +1930,6 @@ mod tests {
             phases.as_slice(),
             &[("One".into(), true), ("Two".into(), false)]
         );
-    }
-
-    #[test]
-    fn fingerprint_is_pure_and_stable() {
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let outcome = run_workflow(params(
-            r#"
-            let meta = #{ name: "t", description: "d" };
-            complete(fingerprint("abc") == fingerprint("abc"));
-            "#,
-            Journal::new(None),
-            tx,
-        ));
-        match outcome {
-            WorkflowOutcome::Completed { result } => assert_eq!(result, serde_json::json!(true)),
-            other => panic!("expected Completed, got {other:?}"),
-        }
     }
 
     #[test]

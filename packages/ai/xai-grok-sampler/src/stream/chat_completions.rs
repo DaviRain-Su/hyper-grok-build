@@ -1,7 +1,7 @@
 //! Layer-2 stream transform for the Chat Completions API.
 //!
-//! Consumes a raw `ChatCompletionChunk` stream and produces
-//! [`SamplingEvent`]s. Pure: no I/O, no shell coupling.
+//! Consumes a raw `ChatCompletionChunk` stream and produces [`SamplingEvent`]s.
+//! Pure: no I/O, no shell coupling.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -18,19 +18,13 @@ use crate::events::{SamplingChannel, SamplingErrorInfo, SamplingEvent};
 use crate::metrics::InferenceLatencyStats;
 use crate::types::RequestId;
 
-/// Transform a raw Chat Completions chunk stream into a stream of
-/// [`SamplingEvent`]s.
-///
-/// The output stream emits exactly one terminal event per request:
-/// [`SamplingEvent::Completed`] on normal stream end, or
-/// [`SamplingEvent::Failed`] on error / idle timeout. Callers must not
-/// consume past the terminal event (the implementation `return`s after
-/// yielding it).
+/// The output stream emits exactly one terminal event per request.
+/// A normal stream end emits [`SamplingEvent::Completed`]; an error or idle timeout emits [`SamplingEvent::Failed`].
+/// Callers must not consume past the terminal event (the implementation `return`s after yielding it).
 ///
 /// `idle_timeout` covers two cases:
 /// 1. The transport stops yielding chunks at all (`tokio::time::timeout`).
-/// 2. The transport keeps yielding empty / keepalive chunks but no
-///    meaningful content (separate `last_content_chunk_at` timer).
+/// 2. The transport keeps yielding empty / keepalive chunks but no meaningful content (separate `last_content_chunk_at` timer).
 ///
 /// Both produce `SamplingEvent::Failed { kind: IdleTimeout }`.
 pub fn stream_chat_completions<'a>(
@@ -43,8 +37,7 @@ pub fn stream_chat_completions<'a>(
         let stream_start = Instant::now();
         let mut chunk_timestamps: Vec<Instant> = Vec::new();
 
-        // Emit StreamStarted before reading any chunks so subscribers
-        // can record TTFB / TTLB baselines.
+        // Emit StreamStarted before reading any chunks so subscribers can record TTFB / TTLB baselines
         yield SamplingEvent::StreamStarted {
             request_id: request_id.clone(),
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
@@ -69,27 +62,19 @@ pub fn stream_chat_completions<'a>(
 
         let mut content_acc = String::new();
         let mut reasoning_acc = String::new();
-        // Tool call deltas keyed by positional index. Each entry is
-        // (id, name, arguments_buffer); the first chunk for an index
-        // carries id+name and starts the arguments buffer, subsequent
-        // chunks append to arguments only.
+        // Tool call deltas keyed by positional index; each entry is (id, name, arguments_buffer)
+        // The first chunk for an index carries the id and name and starts the arguments buffer; later chunks append to arguments only
         let mut tool_call_acc: BTreeMap<u32, (String, String, String)> = BTreeMap::new();
 
-        // Index counter spanning text + reasoning chunks (matches the
-        // shell's chunk_index used for notification correlation).
+        // Index counter spanning text and reasoning chunks (matches the shell's chunk_index used for notification correlation)
         let mut chunk_index: u64 = 0;
-        // Separate counter for AgentMessageChunk (text-only) emissions;
-        // mirrored onto ConversationResponse.message_chunks_emitted so
-        // downstream can detect lost-streaming-events scenarios.
+        // Separate counter for AgentMessageChunk (text-only) emissions
+        // Mirrored onto ConversationResponse.message_chunks_emitted so downstream can detect lost streaming events
         let mut message_chunk_count: u64 = 0;
 
-        // Content-aware idle timer: the outer
-        // `tokio::time::timeout(idle_timeout, stream.next())` already
-        // catches "transport stops yielding chunks". This second timer
-        // catches the more subtle case where the model keeps emitting
-        // keepalive / empty-delta SSE events that satisfy the outer
-        // timer but make no real progress -- some inference engines
-        // do exactly that.
+        // The outer `tokio::time::timeout(idle_timeout, stream.next())` already catches a transport that stops yielding chunks
+        // This second timer catches the model emitting keepalive or empty-delta SSE events: they satisfy the outer timer but make no real progress
+        // Some inference engines do exactly that
         let mut last_content_chunk_at = Instant::now();
 
         let mut stream = raw_stream;
@@ -255,9 +240,9 @@ pub fn stream_chat_completions<'a>(
             .collect();
 
         // Tool calls override the stop reason, even an explicit `length`.
-        // NOTE: opposite precedence from the Messages backend, where Length
-        // wins so the `LengthPolicy` gate can refuse a possibly
-        // argument-truncated trailing call. Load-bearing; don't "fix" here.
+        // NOTE: the Messages backend has the opposite precedence: Length wins there
+        // That lets the `LengthPolicy` gate refuse a trailing call whose arguments may be truncated
+        // Load-bearing; don't "fix" here
         if !tool_calls.is_empty() {
             if finish_reason == Some(StopReason::Length) {
                 tracing::warn!(
@@ -268,7 +253,7 @@ pub fn stream_chat_completions<'a>(
             finish_reason = Some(StopReason::ToolCalls);
         }
 
-        // Build the trailing Assistant + any reasoning sibling.
+        // Build the trailing Assistant and any reasoning sibling
         let mut items: Vec<ConversationItem> = Vec::new();
         if first_choice_seen {
             if !reasoning_acc.is_empty() {
@@ -411,8 +396,7 @@ mod tests {
         ))
         .await;
 
-        // Expected sequence: StreamStarted, FirstToken, ChannelToken(Text)
-        // x 2, Completed.
+        // Expected sequence: StreamStarted, FirstToken, two ChannelToken(Text), Completed
         assert!(matches!(events[0], SamplingEvent::StreamStarted { .. }));
         assert!(matches!(events[1], SamplingEvent::FirstToken { .. }));
 
@@ -465,7 +449,6 @@ mod tests {
         ))
         .await;
 
-        // FirstToken should appear exactly once.
         let first_token_count = events
             .iter()
             .filter(|e| matches!(e, SamplingEvent::FirstToken { .. }))
@@ -503,9 +486,8 @@ mod tests {
         }
     }
 
-    /// A text-only `length` finish completes with `stop_reason=Length` and
-    /// the partial text preserved — fail-vs-salvage belongs to `drive_l2`,
-    /// not this transform.
+    /// A text-only `length` finish completes with `stop_reason=Length` and the partial text preserved.
+    /// Deciding whether to fail or salvage the truncation belongs to `drive_l2`, not this transform.
     #[tokio::test]
     async fn length_finish_completes_with_length_stop() {
         let raw = stream::iter::<Vec<Result<ChatCompletionChunk, SamplingError>>>(vec![
@@ -530,9 +512,8 @@ mod tests {
         }
     }
 
-    /// Pins the load-bearing precedence: tool calls override an explicit
-    /// `length` finish (opposite of the Messages backend) — see the NOTE at
-    /// the override site.
+    /// Pins the load-bearing precedence: tool calls override an explicit `length` finish (opposite of the Messages backend).
+    /// See the NOTE at the override site.
     #[tokio::test]
     async fn tool_calls_override_length_finish() {
         let tool_chunk = make_chunk(vec![ChatChunkDelta {
@@ -574,7 +555,7 @@ mod tests {
 
     #[tokio::test]
     async fn tool_call_stream_emits_deltas_and_assembles_final_call() {
-        // First chunk has id + name + part of arguments.
+        // First chunk has id, name, and part of arguments
         let chunk1 = make_chunk(vec![ChatChunkDelta {
             role: None,
             content: None,
@@ -590,7 +571,7 @@ mod tests {
             }],
             tool_call_id: None,
         }]);
-        // Second chunk has only argument fragment.
+        // Second chunk has only an argument fragment
         let chunk2 = make_chunk(vec![ChatChunkDelta {
             role: None,
             content: None,
@@ -655,7 +636,6 @@ mod tests {
                 assert_eq!(calls[0].id.as_ref(), "call_abc");
                 assert_eq!(calls[0].name, "do_thing");
                 assert_eq!(calls[0].arguments.as_ref(), "{\"x\":1}");
-                // Tool calls force ToolCalls stop reason.
                 assert_eq!(response.stop_reason, Some(StopReason::ToolCalls));
             }
             other => panic!("expected Completed, got {other:?}"),
@@ -703,8 +683,7 @@ mod tests {
         ))
         .await;
 
-        // Stream should emit StreamStarted, FirstToken, ChannelToken
-        // then Failed(IdleTimeout) when the stall hits the deadline.
+        // The stream emits StreamStarted, FirstToken, ChannelToken, then Failed(IdleTimeout) when the stall hits the deadline
         match events.last().unwrap() {
             SamplingEvent::Failed { error, .. } => {
                 assert_eq!(error.kind, crate::events::SamplingErrorKind::IdleTimeout);
@@ -776,8 +755,7 @@ mod tests {
         }
     }
 
-    /// Server-reported cost lands on the response; the REST mapper's `0`
-    /// backfill means "unreported" and must yield `None`.
+    /// Server-reported cost lands on the response; the REST mapper's `0` backfill means "unreported" and must yield `None`.
     #[tokio::test]
     async fn cost_is_extracted_and_zero_is_unreported() {
         for (wire, expected) in [(Some(78), Some(78)), (Some(0), None), (None, None)] {

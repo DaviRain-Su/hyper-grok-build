@@ -4,15 +4,10 @@ use tokio::sync::{mpsc, oneshot};
 use crate::extensions::notification::SessionNotification as XaiSessionNotification;
 use acp::SessionNotification as AcpSessionNotification;
 
-/// Notification destined for the high-frequency event ReplayBuffer).
-/// Variants tag the inner protocol surface because the
-/// merge rules and wire envelopes differ, but routing through `event_tx`
-/// and `ReplayBuffer` is by design -- anything that goes here gets
-/// debounced + merged, and emerges through `emit_buffered` without
-/// firing per-chunk hooks or persistence writes.
-///
-/// One-shot xAI events (RetryState, ImageCompressed, HookExecution,
-/// etc.) take the direct `send_xai_notification` path for per-event hooks and persistence.
+/// A notification headed through `event_tx` into the high-frequency `ReplayBuffer`.
+/// The buffer debounces and merges everything, then `emit_buffered` emits it without firing per-chunk hooks or persistence writes.
+/// The two variants stay separate because ACP and xAI chunks merge under different rules and wire envelopes.
+/// One-shot xAI events (RetryState, ImageCompressed, HookExecution, etc.) instead take `send_xai_notification` for per-event hooks and persistence.
 #[derive(Debug, Clone)]
 pub(crate) enum SessionNotification {
     Acp(Box<AcpSessionNotification>),
@@ -27,8 +22,7 @@ impl SessionNotification {
         }
     }
 
-    /// Returns true if this notification is a streaming chunk that
-    /// should be buffered for merging + debouncing.
+    /// Returns true if this notification is a streaming chunk that should be buffered for merging and debouncing.
     pub(crate) fn is_streaming_chunk(&self) -> bool {
         match self {
             Self::Acp(n) => matches!(
@@ -42,7 +36,6 @@ impl SessionNotification {
         }
     }
 
-    /// Extract `agentTimestampMs` from the notification's meta, if set.
     pub(crate) fn agent_timestamp_ms(&self) -> Option<u64> {
         match self {
             Self::Acp(n) => n
@@ -63,7 +56,7 @@ impl SessionNotification {
         match (prev.agent_timestamp_ms(), self.agent_timestamp_ms()) {
             // ACP events have timestamps, so we can window-check.
             (Some(prev_ts), Some(incoming_ts)) => incoming_ts <= prev_ts + max_duration_ms,
-            // Either side missing the agentTimestampMs meta means we can't window-check.
+            // Either side missing the agentTimestampMs meta means the time window cannot be checked
             _ => true,
         }
     }
@@ -83,8 +76,6 @@ impl From<XaiSessionNotification> for SessionNotification {
 
 #[cfg(test)]
 impl SessionNotification {
-    /// Test-only: borrow the inner ACP notification, panicking if this
-    /// is not the `Acp` variant.
     pub(crate) fn expect_acp(&self) -> &AcpSessionNotification {
         match self {
             Self::Acp(n) => n,
@@ -92,8 +83,6 @@ impl SessionNotification {
         }
     }
 
-    /// Test-only: move the inner ACP notification out, panicking if
-    /// this is not the `Acp` variant.
     pub(crate) fn into_acp(self) -> AcpSessionNotification {
         match self {
             Self::Acp(n) => *n,
@@ -131,9 +120,8 @@ pub(crate) enum FlushReplayError {
 /// Flush replay-buffered notifications through the session actor loop.
 ///
 /// This must only be used from callers that are *outside* `run_session()`.
-/// The `FlushComplete` command runs inside the actor loop and therefore
-/// flushes `replay_buffer` inline to avoid waiting on a mailbox event that
-/// the same loop would need to process.
+/// The `FlushComplete` command runs inside the actor loop, so it flushes `replay_buffer` inline instead.
+/// That avoids waiting on a mailbox event that the same loop would need to process.
 pub(crate) async fn flush_replay_actor(
     event_tx: &mpsc::UnboundedSender<SessionEvent>,
 ) -> Result<(), FlushReplayError> {

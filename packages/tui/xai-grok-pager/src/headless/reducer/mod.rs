@@ -96,12 +96,27 @@ pub(crate) struct ToolCallUpdateEvent {
 }
 
 pub(crate) enum Lifecycle {
-    CompactStarted { percentage: u8 },
-    CompactCompleted { pre_tokens: u64 },
-    CompactFailed { error: String },
+    CompactStarted {
+        percentage: u8,
+    },
+    CompactCompleted {
+        pre_tokens: u64,
+    },
+    CompactFailed {
+        error: String,
+    },
     CompactCancelled,
-    AutoContinue { total_tokens: u64 },
-    ImageCompressed { message: String },
+    AutoContinue {
+        total_tokens: u64,
+    },
+    ImageCompressed {
+        message: String,
+    },
+    MemoryFlushStarted,
+    MemoryFlushCompleted {
+        result: String,
+        path: Option<String>,
+    },
 }
 
 impl Lifecycle {
@@ -124,6 +139,11 @@ impl Lifecycle {
             Lifecycle::CompactCancelled => "Auto-compact cancelled.".to_string(),
             Lifecycle::AutoContinue { .. } => "Resumed after compaction.".to_string(),
             Lifecycle::ImageCompressed { message } => message.clone(),
+            Lifecycle::MemoryFlushStarted => "Memory flush started.".to_string(),
+            Lifecycle::MemoryFlushCompleted { result, path } => match path {
+                Some(path) => format!("Memory flush {result}: {path}"),
+                None => format!("Memory flush {result}."),
+            },
         }
     }
 }

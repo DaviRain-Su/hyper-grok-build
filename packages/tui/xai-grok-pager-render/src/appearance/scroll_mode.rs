@@ -1,12 +1,11 @@
 //! The `scroll_mode` user setting (`auto` | `wheel` | `trackpad`).
 //!
-//! Wheel-vs-trackpad detection is heuristic (terminal scroll events carry no
-//! magnitude), so this setting lets a user force one classification when the
-//! heuristic is wrong for their setup. The pager's input layer maps it onto
-//! `ScrollInputMode` when building its scroll config; this crate only owns
-//! the persisted value type and its cache.
+//! Wheel-vs-trackpad detection is heuristic (terminal scroll events carry no magnitude).
+//! This setting lets a user force one classification when the heuristic is wrong for their setup.
+//! The pager's input layer maps it onto `ScrollInputMode` when building its scroll config.
+//! This crate only owns the persisted value type and its cache.
 
-/// Scroll input classification preference: auto-detect or force one kind.
+/// Whether the pager auto-detects scroll input or forces one classification.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum ScrollMode {
     /// Detect wheel vs trackpad per stream from event timing. Default.
@@ -52,8 +51,7 @@ mod tests {
 
     #[test]
     fn junk_and_case_variants_are_rejected() {
-        // Strict parse: unknown disk/env values must fall back to the default
-        // at the caller (cache seed), never panic or mis-map.
+        // Strict parse: unknown disk/env values must fall back to the default at the caller (cache seed), never panic or mis-map
         for junk in ["", "Auto", "WHEEL", "track pad", "mouse", "1"] {
             assert_eq!(ScrollMode::from_canonical(junk), None, "{junk:?}");
         }

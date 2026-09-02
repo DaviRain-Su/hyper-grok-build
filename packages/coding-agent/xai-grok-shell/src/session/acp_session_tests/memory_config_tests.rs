@@ -97,6 +97,8 @@ async fn create_test_actor_with_memory(
         .map(|_| crate::session::memory::MemoryStorage::new(&cwd_path, None));
     let state = TokioMutex::new(State {
         running_task: None,
+        finalization_gate: Default::default(),
+        message_delivery: Default::default(),
         pending_inputs: VecDeque::new(),
         edit_holds: HashMap::new(),
         pending_notifications: Vec::new(),
@@ -138,6 +140,8 @@ async fn create_test_actor_with_memory(
         .as_ref()
         .map_or_else(Default::default, |mc| mc.initial_injection.clone());
     SessionActor {
+        repo_status_prefetch: crate::session::repo_status_prefix::RepoStatusPrefetchState::default(
+        ),
         transient_retry_enabled: true,
         transient_retries_prompt_total: std::cell::Cell::new(0),
         transient_episode_start: std::cell::Cell::new(None),
@@ -168,6 +172,7 @@ async fn create_test_actor_with_memory(
         chat_state_handle,
         unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
         current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        active_work: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
@@ -216,6 +221,7 @@ async fn create_test_actor_with_memory(
             injection_count: std::sync::atomic::AtomicU64::new(0),
             compaction_recovery_count: std::sync::atomic::AtomicU64::new(0),
             chunks_added: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            init_reindex_handle: std::cell::RefCell::new(None),
             dream_config: Default::default(),
             dream_count: std::sync::atomic::AtomicU64::new(0),
             dream_success_count: std::sync::atomic::AtomicU64::new(0),
@@ -282,6 +288,7 @@ async fn create_test_actor_with_memory(
         goal_classifier_enabled: false,
         goal_planner_enabled: false,
         goal_summary_enabled: false,
+        length_salvage_remote_budget: None,
         goal_verifier_skeptic_count: 1,
         goal_role_models: Default::default(),
         goal_use_current_model_only: false,
@@ -382,8 +389,7 @@ async fn test_is_flushing_suppresses_auto_compact() {
         })
         .await;
 }
-/// Test that `force_compact` triggers auto-compact even below threshold,
-/// and is consumed (reset to false) after a single use.
+/// Test that `force_compact` triggers auto-compact even below threshold, and is consumed (reset to false) after a single use.
 #[tokio::test(flavor = "current_thread")]
 async fn test_force_compact_triggers_below_threshold() {
     let local = tokio::task::LocalSet::new();
@@ -527,9 +533,148 @@ async fn test_memory_storage_created_when_enabled() {
         })
         .await;
 }
-/// Actor with injection enabled and an FTS index matching the test query, so
-/// `first_turn_memory_reminder()` WOULD inject — tests can then prove the
-/// idempotency guard alone is what suppresses re-injection.
+#[tokio::test(flavor = "current_thread")]
+#[allow(clippy::field_reassign_with_default)]
+async fn test_session_close_does_not_run_dream() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+            let mut config = crate::config::MemoryConfig::default();
+            config.enabled = true;
+            let mut actor = create_test_actor_with_memory(
+                50_000,
+                100_000,
+                85,
+                gateway_tx,
+                persistence_tx,
+                Some(config),
+            )
+            .await;
+            let tmp = tempfile::TempDir::new().unwrap();
+            let global_dir = tmp.path().join("memory");
+            let workspace_dir = global_dir.join("test_ws");
+            std::fs::create_dir_all(&workspace_dir).unwrap();
+            crate::session::memory::index::init_sqlite_vec();
+            actor.memory.storage =
+                std::cell::RefCell::new(Some(crate::session::memory::MemoryStorage::with_paths(
+                    global_dir,
+                    workspace_dir.clone(),
+                )));
+            let sessions_dir = actor.memory.storage().unwrap().sessions_dir();
+            std::fs::create_dir_all(&sessions_dir).unwrap();
+            for i in 0..5 {
+                std::fs::write(
+                    sessions_dir.join(format!("20200101-0000{i:02}-priorsession{i}.md")),
+                    "prior session\n",
+                )
+                .unwrap();
+            }
+            actor.chat_state_handle.replace_conversation(vec![
+                xai_grok_sampling_types::ConversationItem::user(
+                    "help me fix the authentication bug in the login flow",
+                ),
+                xai_grok_sampling_types::ConversationItem::assistant("looking at auth.rs"),
+                xai_grok_sampling_types::ConversationItem::user(
+                    "also add integration tests for the token refresh path",
+                ),
+                xai_grok_sampling_types::ConversationItem::assistant("found the issue"),
+                xai_grok_sampling_types::ConversationItem::user(
+                    "great, can you patch the logout handler as well",
+                ),
+                xai_grok_sampling_types::ConversationItem::assistant("done"),
+            ]);
+            let timer = xai_grok_telemetry::session_end::SessionEndTimer::new_shared();
+            actor.run_session_end_memory_pipeline("test", &timer).await;
+            assert_eq!(
+                actor
+                    .memory
+                    .dream_count
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                0,
+                "close must not invoke the dream model call"
+            );
+        })
+        .await;
+}
+/// Drives the real `run_session` loop and asserts the launch dream fires when gated (not a subagent,
+/// memory enabled, open gate). This guards the launch wiring itself: removing the launch
+/// `spawn_dream_check` leaves `dream_count` at 0, which calling `maybe_run_dream` directly would miss.
+#[tokio::test(flavor = "current_thread")]
+#[allow(clippy::field_reassign_with_default)]
+async fn test_run_session_spawns_launch_dream() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+            let mut config = crate::config::MemoryConfig::default();
+            config.enabled = true;
+            let mut actor = create_test_actor_with_memory(
+                50_000,
+                100_000,
+                85,
+                gateway_tx,
+                persistence_tx,
+                Some(config),
+            )
+            .await;
+            let tmp = tempfile::TempDir::new().unwrap();
+            let global_dir = tmp.path().join("memory");
+            let workspace_dir = global_dir.join("test_ws");
+            std::fs::create_dir_all(&workspace_dir).unwrap();
+            crate::session::memory::index::init_sqlite_vec();
+            actor.memory.storage =
+                std::cell::RefCell::new(Some(crate::session::memory::MemoryStorage::with_paths(
+                    global_dir,
+                    workspace_dir.clone(),
+                )));
+            let sessions_dir = actor.memory.storage().unwrap().sessions_dir();
+            std::fs::create_dir_all(&sessions_dir).unwrap();
+            for i in 0..5 {
+                std::fs::write(
+                    sessions_dir.join(format!("20200101-0000{i:02}-priorsession{i}.md")),
+                    "prior session\n",
+                )
+                .unwrap();
+            }
+            let actor = std::sync::Arc::new(actor);
+            let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+            let (_chat_tx, chat_rx) = mpsc::unbounded_channel();
+            let (_event_tx, event_rx) = mpsc::unbounded_channel();
+            let codebase_indexes = std::sync::Arc::new(parking_lot::Mutex::new(
+                xai_grok_workspace::file_system::CodebaseIndexManager::new(),
+            ));
+            tokio::task::spawn_local(super::run_session(
+                actor.clone(),
+                cmd_rx,
+                chat_rx,
+                event_rx,
+                None,
+                codebase_indexes,
+                std::path::PathBuf::from("/tmp"),
+                crate::session::fs_watch::FsWatchCapabilities::none(),
+            ));
+            let mut ran = false;
+            for _ in 0..200 {
+                if actor
+                    .memory
+                    .dream_count
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    == 1
+                {
+                    ran = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            assert!(ran, "run_session must spawn the launch dream when gated");
+        })
+        .await;
+}
+/// Actor with injection enabled and an FTS index matching the test query, so `first_turn_memory_reminder()` would inject.
+/// Tests can then prove the idempotency guard alone is what suppresses re-injection.
 #[allow(clippy::field_reassign_with_default)]
 async fn create_injection_ready_actor(
     initial_conversation: Vec<xai_grok_sampling_types::ConversationItem>,
@@ -586,8 +731,7 @@ async fn create_injection_ready_actor(
         .replace_conversation(initial_conversation);
     actor
 }
-/// Control: proves the harness setup is sufficient for injection, so the
-/// companion test below isolates the idempotency guard.
+/// Control: proves the harness setup is sufficient for injection, so the companion test below isolates the idempotency guard.
 #[tokio::test(flavor = "current_thread")]
 async fn test_first_turn_reminder_injects_without_persisted_block() {
     let local = tokio::task::LocalSet::new();
@@ -655,8 +799,8 @@ async fn test_first_turn_reminder_skips_all_displayed_zero_results() {
         })
         .await;
 }
-/// A block persisted by an earlier `--resume` segment must suppress the
-/// re-search — a re-scored block would bust the prompt-prefix KV cache.
+/// A block persisted by an earlier `--resume` segment must suppress the re-search.
+/// A re-scored block would bust the prompt-prefix KV cache.
 #[tokio::test(flavor = "current_thread")]
 async fn test_first_turn_reminder_skips_when_block_persisted() {
     let local = tokio::task::LocalSet::new();

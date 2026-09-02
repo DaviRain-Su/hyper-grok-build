@@ -1,12 +1,11 @@
 //! Reports `StopFailure` and `StopCancelled`, the two turn-end hooks that run instead of `Stop`.
-//! A reporter claims the turn's one report and hands the payload to a background worker, so an
-//! interrupt cannot abort a hook already running. The gate owns the third report, `Stop`.
+//! A reporter claims the turn's one report and hands the payload to a background worker, so an interrupt cannot abort a hook already running.
+//! The gate owns the third report, `Stop`.
 
 use super::*;
 use xai_grok_hooks::event::{self, StopCancelledReason, StopFailureKind};
 
-/// This path's slice of the session's ten-second exit budget, spent twice per teardown: once by
-/// `flush` and once by `drain`.
+/// This path's slice of the session's ten-second exit budget, spent twice per teardown: once by `flush` and once by `drain`.
 const TURN_END_DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
 
 #[derive(Debug)]
@@ -75,8 +74,8 @@ impl TurnEnd {
     }
 }
 
-/// Only [`Self::Queued`] consumes the turn's one report. The refusals are distinct so a test
-/// can tell them apart.
+/// Only [`Self::Queued`] consumes the turn's one report.
+/// The refusals are distinct so a test can tell them apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ReportOutcome {
     Queued,
@@ -123,8 +122,8 @@ pub(super) fn cancel_reason_for_options(
     }
 }
 
-/// `StationarityEnded` reports too: it is a completion kind, but it never runs the gate, so
-/// `Stop` cannot claim the turn and `StopCancelled` names why the agent stopped.
+/// `StationarityEnded` reports too: it is a completion kind, but it never runs the gate.
+/// `Stop` therefore cannot claim the turn, and `StopCancelled` names why the agent stopped.
 pub(super) fn cancel_reason_for_completion(
     kind: &PromptCompletionKind,
 ) -> Option<StopCancelledReason> {
@@ -168,8 +167,8 @@ pub(super) fn cancel_details(kind: &PromptCompletionKind) -> Option<String> {
 #[must_use = "drain this queue, or the turn-end hooks still in it never run"]
 pub(super) struct TurnEndQueue {
     session: Arc<SessionActor>,
-    /// This queue's own sender, dropped by [`Self::drain`]: the worker's `recv` ends only once
-    /// every sender is gone. Unbounded, since the claim bounds it at one clipped payload a turn.
+    /// This queue's own sender, dropped by [`Self::drain`]: the worker's `recv` ends only once every sender is gone.
+    /// Unbounded, since the claim bounds it at one clipped payload a turn.
     tx: Option<tokio::sync::mpsc::UnboundedSender<QueueItem>>,
     worker: Option<tokio::task::JoinHandle<()>>,
 }
@@ -198,8 +197,7 @@ impl TurnEndQueue {
         }
     }
 
-    /// Clears the session's sender, but only while it is still this queue's: a replaced queue
-    /// must not disarm its successor.
+    /// Clears the session's sender, but only while it is still this queue's: a replaced queue must not disarm its successor.
     fn disarm(&self) {
         let Some(tx) = self.tx.as_ref() else {
             return;
@@ -210,8 +208,8 @@ impl TurnEndQueue {
         }
     }
 
-    /// Waits for what is queued, leaving the queue open: teardown needs an earlier turn's report
-    /// to precede the session-end `Stop`, but a `Graceful` shutdown leaves the turn running.
+    /// Waits for what is queued, leaving the queue open.
+    /// Teardown needs an earlier turn's report to precede the session-end `Stop`, but a `Graceful` shutdown leaves the turn running.
     pub(super) async fn flush(&mut self) {
         let (reached, wait) = tokio::sync::oneshot::channel();
         // Through this queue's own sender, so the flush and the later drain wait on one worker.
@@ -261,8 +259,8 @@ impl Drop for TurnEndQueue {
     /// If the loop unwinds instead of draining, the worker still holds an `Arc<SessionActor>`.
     fn drop(&mut self) {
         if let Some(worker) = self.worker.take() {
-            // Disarm first: `abort` only schedules cancellation, so until the runtime reaps the
-            // task a send still succeeds and would commit a claim nothing will ever dispatch.
+            // Disarm first: `abort` only schedules cancellation
+            // Until the runtime reaps the task a send still succeeds and would commit a claim nothing will ever dispatch
             self.disarm();
             tracing::warn!("the session ended unexpectedly; any queued turn-end hooks did not run");
             worker.abort();
@@ -276,19 +274,17 @@ impl SessionActor {
         if !self.has_enabled_hooks_for(event::HookEventName::StopCancelled) {
             return None;
         }
-        self.chat_state_handle
-            .get_last_assistant_text_in_turn()
-            .await
+        // Joined report: a cancelled salvaged turn's hook payload carries every committed segment, not just the last fragment
+        self.chat_state_handle.get_trailing_assistant_report().await
     }
 
-    /// Reports the running turn, reading the epoch without awaiting so no next turn can start
-    /// in between.
+    /// Reports the running turn, reading the epoch without awaiting so no next turn can start in between.
     pub(super) fn report_turn_end(&self, prompt_id: &str, end: TurnEnd) -> ReportOutcome {
         self.claim_and_queue(prompt_id, self.turn_report.epoch(), end)
     }
 
-    /// Reports the turn named by `epoch`, which a caller may capture before an await: if a newer
-    /// turn started since, the report is refused rather than filed against it.
+    /// Reports the turn named by `epoch`, which a caller may capture before an await.
+    /// If a newer turn started since, the report is refused rather than filed against it.
     pub(super) fn claim_and_queue(
         &self,
         prompt_id: &str,

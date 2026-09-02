@@ -1,12 +1,9 @@
-//! AcpFsAdapter: implements `xai-grok-tools::AsyncFileSystem` using ACP gateway calls.
-//!
-//! This adapter enables file tool execution over ACP (remote filesystem).
-//! It translates xai-grok-tools' `AsyncFileSystem` trait into ACP protocol calls:
+//! This adapter translates xai-grok-tools' `AsyncFileSystem` trait into ACP protocol calls:
 //!   `read_file()` → read_text_file
 //!   `write_file()` → write_text_file
 //!   `delete_file()` → not supported by ACP (returns error)
 //!
-//! Mirrors the pattern of `AcpTerminalAdapter` for terminal execution.
+//! It mirrors the pattern of `AcpTerminalAdapter` for terminal execution.
 
 use std::path::Path;
 
@@ -16,9 +13,8 @@ use xai_grok_tools::computer::types::{AsyncFileSystem, ComputerError};
 
 /// Wraps xai-grok-shell's ACP gateway to satisfy xai-grok-tools' AsyncFileSystem.
 ///
-/// When a client advertises `clientCapabilities.fs.readTextFile` and `writeTextFile`,
-/// file operations from tools (read_file, search_replace, etc.) are routed through
-/// the ACP gateway back to the client instead of hitting the local disk directly.
+/// When a client advertises `clientCapabilities.fs.readTextFile` and `writeTextFile`, tools stop hitting the local disk directly.
+/// File operations (read_file, search_replace, etc.) are routed through the ACP gateway back to the client.
 pub struct AcpFsAdapter {
     gateway: GatewaySender,
     session_id: acp::SessionId,

@@ -1,6 +1,5 @@
 //! A requested quit exits within the exit timeout even when teardown hangs.
-//! `GROK_TEST_HOLD_TEARDOWN_SECS` supplies the hang; a real `SessionEnd`
-//! hook cannot hold teardown past `SESSION_FLUSH_GRACE`.
+//! `GROK_TEST_HOLD_TEARDOWN_SECS` supplies the hang; a real `SessionEnd` hook cannot hold teardown past `SESSION_FLUSH_GRACE`.
 //!
 //! ```bash
 //! cargo test -p xai-grok-pager-pty-harness --test exit_timeout -- --ignored
@@ -23,7 +22,7 @@ const HOLD_SECS: &str = "120";
 async fn double_ctrl_c_exits_within_deadline_when_teardown_hangs() -> Result<()> {
     let (mut pager, _project) = spawn_pager_with_teardown_hold().await?;
 
-    // First Ctrl+C arms the quit confirmation, the second confirms.
+    // The first Ctrl+C opens the quit confirmation, the second confirms
     pager.inject_keys(keys::CTRL_C)?;
     pager.update(Duration::from_millis(250));
     pager.inject_keys(keys::CTRL_C)?;
@@ -43,8 +42,7 @@ async fn single_sighup_exits_within_deadline_when_teardown_hangs() -> Result<()>
     assert_forced_exit(&mut pager, 129)
 }
 
-/// With teardown held for [`HOLD_SECS`], only the exit timeout can end the
-/// process inside the wait budget.
+/// With teardown held for [`HOLD_SECS`], only the exit timeout can end the process inside the wait budget.
 fn assert_forced_exit(pager: &mut PtyHarness, exit_code: u32) -> Result<()> {
     pager.update(Duration::from_secs(10));
     let exit = pager.wait_exit_code(Duration::from_secs(20))?;
@@ -52,8 +50,7 @@ fn assert_forced_exit(pager: &mut PtyHarness, exit_code: u32) -> Result<()> {
     Ok(())
 }
 
-/// Spawn with a short exit timeout and a long teardown hold, then submit a
-/// prompt and let the turn settle so the quit exercises a started session.
+/// Spawn with a short exit timeout and a long teardown hold, then submit a prompt and let the turn settle so the quit exercises a started session.
 async fn spawn_pager_with_teardown_hold() -> Result<(PtyHarness, tempfile::TempDir)> {
     let content = ContentController::start()
         .await

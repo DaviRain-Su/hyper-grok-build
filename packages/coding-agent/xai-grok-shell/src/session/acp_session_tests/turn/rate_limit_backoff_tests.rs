@@ -1,4 +1,4 @@
-//! Turn-loop 429 coverage against a mock server, plus the over-cap burst harness.
+//! Coverage of 429 handling in the turn loop against a mock server, plus the harness that bursts more subagent turns than the concurrency cap.
 
 use super::support::*;
 use super::*;
@@ -177,7 +177,7 @@ async fn subagent_429_wait_is_owned_and_capped_by_the_pacer() {
             let started = tokio::time::Instant::now();
             let outcome = tokio::time::timeout(
                 Duration::from_secs(300),
-                actor.run_turn_via_sampler(request, &mut budget, transient_state(0, true)),
+                actor.run_turn_via_sampler(request, &mut budget, transient_state(0, true), false),
             )
             .await
             .expect("turn must finish within timeout");
@@ -225,7 +225,7 @@ async fn paced_wait_notifies_the_client_with_a_retrying_state() {
 
             let outcome = tokio::time::timeout(
                 Duration::from_secs(30),
-                actor.run_turn_via_sampler(request, &mut budget, transient_state(0, true)),
+                actor.run_turn_via_sampler(request, &mut budget, transient_state(0, true), false),
             )
             .await
             .expect("turn must finish within timeout");
@@ -242,6 +242,7 @@ async fn paced_wait_notifies_the_client_with_a_retrying_state() {
                         attempt,
                         max_retries,
                         reason,
+                        ..
                     } => Some((*attempt, *max_retries, reason.clone())),
                     _ => None,
                 })
@@ -281,7 +282,7 @@ async fn exhausted_subagent_budget_notifies_exhausted_with_the_attempts_taken() 
 
             let outcome = tokio::time::timeout(
                 Duration::from_secs(60),
-                actor.run_turn_via_sampler(request, &mut budget, transient_state(0, true)),
+                actor.run_turn_via_sampler(request, &mut budget, transient_state(0, true), false),
             )
             .await
             .expect("turn must finish within timeout");
@@ -344,7 +345,12 @@ async fn main_session_429_is_owned_by_the_sampler_never_the_pacer() {
 
                 let outcome = tokio::time::timeout(
                     Duration::from_secs(30),
-                    actor.run_turn_via_sampler(request, &mut budget, transient_state(0, true)),
+                    actor.run_turn_via_sampler(
+                        request,
+                        &mut budget,
+                        transient_state(0, true),
+                        false,
+                    ),
                 )
                 .await
                 .expect("turn must finish within timeout");
@@ -408,7 +414,12 @@ async fn run_burst(n: usize, cap: usize) -> BurstMetrics {
                 let mut budget = actor.rate_limit_wait_budget();
                 tokio::time::timeout(
                     Duration::from_secs(60),
-                    actor.run_turn_via_sampler(request, &mut budget, transient_state(0, true)),
+                    actor.run_turn_via_sampler(
+                        request,
+                        &mut budget,
+                        transient_state(0, true),
+                        false,
+                    ),
                 )
                 .await
                 .expect("burst turn must finish within timeout")

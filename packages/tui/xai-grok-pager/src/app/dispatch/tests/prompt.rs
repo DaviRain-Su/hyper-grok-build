@@ -1963,6 +1963,41 @@ fn prompt_response_formatted_402_takes_credit_limit_path() {
 }
 
 #[test]
+fn credit_limit_402_does_not_overwrite_stash_when_in_flight_cleared() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.turn_started_at = Some(std::time::Instant::now());
+        agent.session.in_flight_prompt = None;
+        agent.credit_limit_stashed_prompt = Some(crate::app::agent::InFlightPrompt {
+            text: "kept".into(),
+            images: Vec::new(),
+            scrollback_entry: crate::scrollback::EntryId::new(0),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+    }
+    dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Err("Request failed (402): Grok Build usage balance exhausted".to_string()),
+            http_status: Some(402),
+            prompt_id: None,
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        app.agents[&id]
+            .credit_limit_stashed_prompt
+            .as_ref()
+            .map(|p| p.text.as_str()),
+        Some("kept")
+    );
+}
+
+#[test]
 fn prompt_response_disk_full_suppresses_turn_failed_and_toast() {
     fn run(pre_seed_disk_full: bool, with_user_echo: bool) -> (bool, bool, usize) {
         let mut app = test_app_with_agent();
@@ -3652,6 +3687,119 @@ fn plain_send_during_blocking_wait_trusts_wire_send_now_trigger() {
         count_completed_markers(&app, id),
         0,
         "no substitute completed marker for a wire send-now cancel"
+    );
+}
+
+fn count_user_prompts(app: &AppView, id: AgentId) -> usize {
+    let agent = &app.agents[&id];
+    (0..agent.scrollback.len())
+        .filter(|i| {
+            matches!(
+                agent.scrollback.entry(*i).map(|e| &e.block),
+                Some(RenderBlock::UserPrompt(_))
+            )
+        })
+        .count()
+}
+
+fn cancelled_removed_from_queue(id: AgentId, prompt_id: &str) -> Action {
+    let mut meta = serde_json::Map::new();
+    meta.insert("promptId".into(), prompt_id.into());
+    meta.insert(
+        crate::app::turn_completion::COMPLETION_KIND_KEY.into(),
+        crate::app::turn_completion::REMOVED_FROM_QUEUE_KIND.into(),
+    );
+    Action::TaskComplete(TaskResult::PromptResponse {
+        agent_id: id,
+        result: Ok(acp::PromptResponse::new(acp::StopReason::Cancelled).meta(Some(meta))),
+        http_status: None,
+        prompt_id: Some(prompt_id.into()),
+    })
+}
+
+#[test]
+fn send_during_wake_queues_without_starting_a_turn() {
+    use crate::app::agent_view::RunningWakeTurn;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.running_wake_turn = Some(RunningWakeTurn {
+            prompt_id: "task-completed-wake".into(),
+            cancel_sent: false,
+        });
+    }
+
+    const TEXT: &str = "try again";
+    let effects = dispatch(Action::SendPrompt(TEXT.into()), &mut app);
+    match effects.as_slice() {
+        [Effect::SendPrompt { text, .. }] => assert_eq!(text, TEXT),
+        other => panic!("wake send must go to the server queue, got {other:?}"),
+    }
+    let agent = &app.agents[&id];
+    assert_eq!(
+        count_user_prompts(&app, id),
+        0,
+        "queued follow-up must not paint a scrollback bubble mid-wake"
+    );
+    assert!(
+        agent.session.state.is_idle(),
+        "must not start_turn over a non-adopted wake"
+    );
+    assert!(agent.session.current_prompt_id.is_none());
+    assert!(agent.running_wake_turn.is_some());
+}
+
+#[test]
+fn removed_from_queue_completion_kind_is_silent_without_wake_marker() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let effects = dispatch(Action::SendPrompt("try again".into()), &mut app);
+    let prompt_id = match effects.as_slice() {
+        [Effect::SendPrompt { prompt_id, .. }] => prompt_id.clone(),
+        other => panic!("idle drain starts a turn, got {other:?}"),
+    };
+
+    let _ = dispatch(cancelled_removed_from_queue(id, &prompt_id), &mut app);
+    assert_eq!(count_cancelled_markers(&app, id), 0);
+    assert_eq!(count_completed_markers(&app, id), 0);
+}
+
+#[test]
+fn cancelled_response_during_newer_wake_still_shows_cancel_marker() {
+    use crate::app::agent_view::RunningWakeTurn;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let effects = dispatch(Action::SendPrompt("user turn".into()), &mut app);
+    let prompt_id = match effects.as_slice() {
+        [Effect::SendPrompt { prompt_id, .. }] => prompt_id.clone(),
+        other => panic!("idle drain starts a turn, got {other:?}"),
+    };
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.running_wake_turn = Some(RunningWakeTurn {
+            prompt_id: "task-completed-newer".into(),
+            cancel_sent: false,
+        });
+    }
+
+    let mut meta = serde_json::Map::new();
+    meta.insert("promptId".into(), prompt_id.clone().into());
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Ok(acp::PromptResponse::new(acp::StopReason::Cancelled).meta(Some(meta))),
+            http_status: None,
+            prompt_id: Some(prompt_id),
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        count_cancelled_markers(&app, id),
+        1,
+        "ambient wake state must not hide a real cancel"
     );
 }
 

@@ -2,10 +2,9 @@ use std::path::Path;
 
 use xai_grok_workspace::session::git::VcsKind;
 
-// Re-export from xai-chat-state — canonical definition lives there.
+// Re-export from xai-chat-state; the canonical definition lives there
 pub(crate) use xai_chat_state::compaction_utils::extract_user_query;
 
-/// Wraps the user query properly
 pub(crate) fn user_query(user_message: String) -> String {
     format!(
         r#"<user_query>
@@ -15,10 +14,8 @@ pub(crate) fn user_query(user_message: String) -> String {
 }
 
 /// Environment info for constructing the `<user_info>` block.
-///
-/// When `None`, values are read from the local machine. When `Some`,
-/// the provided values are used (e.g. from a remote workspace via
-/// `workspace.info` RPC).
+/// When `None`, values are read from the local machine.
+/// When `Some`, the provided values are used (e.g. from a remote workspace via `workspace.info` RPC).
 pub(crate) struct UserInfoOverride {
     pub os: String,
     pub shell: String,
@@ -28,8 +25,7 @@ pub(crate) struct UserInfoOverride {
 /// Minimal user message prefix for fast-start / headless contexts.
 ///
 /// Intentionally excludes workspace snapshot and git status.
-/// When `override_info` is provided, uses remote workspace info instead
-/// of local machine introspection.
+/// When `override_info` is provided, uses remote workspace info instead of local machine introspection.
 pub(crate) fn construct_user_message_minimal(
     working_directory: &Path,
     override_info: Option<&UserInfoOverride>,
@@ -64,8 +60,7 @@ pub(crate) const USER_INFO_DATE_MARKER: &str = "Today's date:";
 /// Resolve a display string for the user's shell.
 ///
 /// Unix: full path from `$SHELL` (e.g. `/bin/zsh`).
-/// Windows: detected via `detect_windows_shell` cascade
-/// (pwsh > powershell.exe > Git Bash > cmd.exe).
+/// Windows: `detect_windows_shell` tries pwsh, then powershell.exe, then Git Bash, then cmd.exe.
 fn resolve_shell_display() -> String {
     #[cfg(unix)]
     {
@@ -99,123 +94,6 @@ pub(crate) fn format_vcs_status_block(status: &str, vcs_kind: VcsKind) -> String
     format!("\n\n<{tag}>\n{description}\n{status}\n</{tag}>\n")
 }
 
-/// Compute the VCS status block (without the `<user_info>` wrapper).
-pub(crate) async fn compute_vcs_status_block(
-    working_directory: &Path,
-    vcs_kind: VcsKind,
-) -> Option<String> {
-    use xai_grok_workspace::file_system::{git_status_short, jj_status};
-
-    if matches!(vcs_kind, VcsKind::None) {
-        return None;
-    }
-    let mut timer = crate::instrumentation_timer!("session.user_prefix.vcs_status");
-    timer.with_field("vcs", if vcs_kind.is_jj() { "jj" } else { "git" });
-    timer.with_field(
-        "status_mode",
-        if vcs_kind.is_jj() {
-            "jj"
-        } else {
-            "short_untracked_normal"
-        },
-    );
-    timer.with_field("timeout_ms", 5_000_u64);
-    let timeout = std::time::Duration::from_secs(5);
-    let result = if vcs_kind.is_jj() {
-        tokio::time::timeout(timeout, jj_status(working_directory)).await
-    } else {
-        tokio::time::timeout(timeout, git_status_short(working_directory)).await
-    };
-    match result {
-        Ok(Ok(status)) => {
-            timer.with_field("outcome", "success");
-            timer.with_field("output_bytes", status.len() as u64);
-            let status = if vcs_kind.is_jj() {
-                Some(status)
-            } else {
-                xai_grok_agent::prompt::user_message::normalize_git_status(&status)
-            };
-            status.map(|status| format_vcs_status_block(&status, vcs_kind))
-        }
-        Ok(Err(e)) => {
-            timer.with_field("outcome", "error");
-            timer.with_field("output_bytes", 0_u64);
-            tracing::warn!("user prefix VCS status failed: {e}");
-            None
-        }
-        Err(_) => {
-            timer.with_field("outcome", "timeout");
-            timer.with_field("output_bytes", 0_u64);
-            tracing::warn!(vcs = ?vcs_kind, "user prefix VCS status timed out after 5s");
-            None
-        }
-    }
-}
-
-/// Full user message prefix: `<user_info>` + VCS status.
-///
-/// When `override_info` is provided, uses remote workspace info and
-/// `vcs_status_override` (pre-fetched from the remote workspace) instead
-/// of local introspection.
-pub(crate) async fn construct_user_message(
-    working_directory: &Path,
-    vcs_kind: VcsKind,
-    override_info: Option<&UserInfoOverride>,
-    vcs_status_override: Option<String>,
-) -> String {
-    let cwd = working_directory.to_string_lossy().to_string();
-    let vcs_block = if let Some(status) = vcs_status_override {
-        Some(format_vcs_status_block(&status, vcs_kind))
-    } else {
-        let (block, elapsed_ms) = crate::timed!({
-            let mut timer = crate::instrumentation_timer!("session.user_prefix");
-            timer.with_field("cwd", cwd.as_str());
-            compute_vcs_status_block(working_directory, vcs_kind).await
-        });
-        tracing::debug!(elapsed_ms = elapsed_ms as u64, "startup: user_prefix");
-        block
-    };
-    let mut user_info = construct_user_message_minimal(working_directory, override_info);
-    if let Some(vcs) = vcs_block {
-        user_info.push_str(&vcs);
-    }
-    user_info
-}
-
 // Tests for extract_user_query now live in xai_chat_state::compaction_utils.
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use xai_grok_workspace::file_system::FsError;
-
-    /// timeout even when pointed at a non-existent directory (git commands
-    /// fail instantly → no timeout path exercised, but validates the happy
-    /// path doesn't regress).
-    #[tokio::test]
-    async fn construct_user_message_returns_without_git_status_on_bad_dir() {
-        let dir = std::path::Path::new("/tmp/nonexistent-grok-test-dir");
-        let msg = construct_user_message(dir, VcsKind::Git, None, None).await;
-        // user_info block is always present
-        assert!(
-            msg.contains("<user_info>"),
-            "must contain user_info section"
-        );
-        // git_status block should be absent (git commands fail on non-repo)
-        assert!(
-            !msg.contains("<git_status>"),
-            "must not contain git_status for non-repo directory"
-        );
-    }
-
-    #[test]
-    fn git_status_error_omits_block() {
-        // Simulate what construct_user_message does when git_status returns Err
-        let git_status_res: Result<String, FsError> = Err(FsError::Other("timed out".into()));
-        let mut user_info = "<user_info>test</user_info>".to_string();
-        if let Ok(git_status) = git_status_res {
-            user_info = format!("{user_info}\n<git_status>{git_status}</git_status>");
-        }
-        assert!(!user_info.contains("<git_status>"));
-    }
-}
+// The `<user_info>` + status block is assembled by `SessionActor::construct_legacy_prefix`
+// (see `acp_session_impl/prompt_build.rs`) from a single `RepoStatusSnapshot`.

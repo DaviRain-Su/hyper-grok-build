@@ -1,8 +1,5 @@
-//! Concrete `ToolSearchIndex` implementation using BM25.
-//!
 //! Builds a BM25 index over registered MCP tools and searches it.
-//! The index is rebuilt on each search call (sub-millisecond for tens
-//! to low hundreds of tools).
+//! The index is rebuilt on each search call (sub-millisecond for tens to low hundreds of tools).
 
 use std::sync::Arc;
 
@@ -15,12 +12,7 @@ use xai_grok_tools::types::tool_index::{
 
 use super::mcp_servers::MCP_TOOL_NAME_DELIMITER;
 
-/// Split a compound identifier into component words.
-///
-/// Handles `__` (qualified-name delimiter), `_` (snake_case),
-/// `-` (kebab-case), and camelCase / PascalCase boundaries.
-///
-/// Only allocates when the input actually contains a split point.
+/// Handles `__` (qualified-name delimiter), `_` (snake_case), `-` (kebab-case), and camelCase / PascalCase boundaries.
 fn split_identifier(s: &str) -> Vec<&str> {
     let mut words: Vec<&str> = Vec::new();
     for part in s
@@ -31,7 +23,7 @@ fn split_identifier(s: &str) -> Vec<&str> {
         if part.is_empty() {
             continue;
         }
-        // Split on camelCase boundaries: a lowercase→uppercase transition.
+        // Split on camelCase boundaries: a lowercase to uppercase transition
         let bytes = part.as_bytes();
         let mut start = 0;
         for i in 1..bytes.len() {
@@ -45,10 +37,7 @@ fn split_identifier(s: &str) -> Vec<&str> {
     words
 }
 
-/// Normalize a search query by expanding compound identifiers.
-///
-/// If the query contains `__`, `_`, `-`, or camelCase, the split
-/// components are appended so BM25 can match on individual parts.
+/// If the query contains `__`, `_`, `-`, or camelCase, the split components are appended so BM25 can match on individual parts.
 /// Plain natural-language queries pass through unchanged.
 fn normalize_query(query: &str) -> String {
     let needs_split = query.contains("__")
@@ -80,7 +69,6 @@ pub(crate) struct ToolMetadata {
     pub server_name: String,
     /// Search/display tool name.
     pub tool_name: String,
-    /// Tool description.
     pub description: String,
     /// Parameter names from input schema.
     pub parameters: Vec<String>,
@@ -89,10 +77,8 @@ pub(crate) struct ToolMetadata {
 }
 
 impl ToolMetadata {
-    /// Build the BM25 document text for this tool.
-    ///
-    /// Composed of: `{server_name} {tool_name} {description} {parameter_names}`
-    /// plus decomposed identifier components (snake_case, camelCase, kebab-case).
+    /// The document text is `{server_name} {tool_name} {description} {parameter_names}`.
+    /// The server, tool, and parameter names are also split into component words (snake_case, camelCase, kebab-case) and appended.
     /// Exact canonical-name lookup is handled before BM25 ranking.
     fn to_document(&self) -> String {
         let params = self.parameters.join(" ");
@@ -100,9 +86,8 @@ impl ToolMetadata {
             "{} {} {} {}",
             self.server_name, self.tool_name, self.description, params
         );
-        // Decompose identifiers into component words so BM25 can match
-        // individual parts. e.g. "SearchDashboards" → "Search Dashboards",
-        // "grafana-ai" → "grafana ai".
+        // Decompose identifiers into component words so BM25 can match individual parts
+        // e.g. "SearchDashboards" becomes "Search Dashboards", "grafana-ai" becomes "grafana ai".
         let extra: String = [self.server_name.as_str(), self.tool_name.as_str()]
             .iter()
             .flat_map(|s| split_identifier(s))
@@ -113,11 +98,9 @@ impl ToolMetadata {
     }
 }
 
-/// Per-server metadata (name + optional description from the MCP
-/// initialize handshake's `instructions` field). Tool count is derived
-/// from `ToolMetadataSnapshot::tools` at read time, so disabled tools
-/// (which are unregistered from the bridge before the snapshot is
-/// rebuilt) are excluded by construction.
+/// Per-server metadata (name and optional description from the MCP initialize handshake's `instructions` field).
+/// Tool count is derived from `ToolMetadataSnapshot::tools` at read time.
+/// Disabled tools are unregistered from the bridge before the snapshot is rebuilt, so the count never includes them.
 #[derive(Debug, Clone)]
 pub(crate) struct ServerMetadata {
     pub name: String,
@@ -134,10 +117,8 @@ pub(crate) struct ToolMetadataSnapshot {
     pub mcp_initialized: bool,
 }
 
-/// Concrete `ToolSearchIndex` implementation backed by BM25.
-///
 /// Holds a shared snapshot of MCP tool metadata behind a `std::sync::Mutex`.
-/// Using a sync mutex (not TokioMutex) because:
+/// It uses a sync mutex (not TokioMutex) because:
 /// - The lock is held only to clone the snapshot (fast, no I/O)
 /// - `search_snapshot()` is a sync trait method called from async context
 /// - `TokioMutex::blocking_lock()` panics on single-threaded runtimes
@@ -167,8 +148,7 @@ impl ToolSearchIndex for Bm25ToolSearchIndex {
         }
 
         // Fast path: exact match on qualified name or bare tool name.
-        // When the model already knows the tool name (e.g. "grafana-ai__SearchDashboards"
-        // or "SearchDashboards"), skip BM25 entirely and return the match directly.
+        // When the model already knows the tool name (e.g. "grafana-ai__SearchDashboards" or "SearchDashboards"), skip BM25 entirely.
         let query_lower = query.trim().to_lowercase();
         if let Some(exact) = snapshot.tools.iter().find(|t| {
             t.qualified_name.to_lowercase() == query_lower
@@ -256,7 +236,6 @@ impl ToolSearchIndex for Bm25ToolSearchIndex {
     }
 }
 
-/// Extract parameter names from a JSON Schema `properties` object.
 pub(crate) fn extract_parameter_names(schema: &serde_json::Value) -> Vec<String> {
     schema
         .get("properties")

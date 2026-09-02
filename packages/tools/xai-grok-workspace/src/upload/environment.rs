@@ -1,17 +1,15 @@
-//! Workspace environment capture — `workspace_environment.json`.
+//! Workspace environment capture (`workspace_environment.json`).
 //!
-//! Captures the session's owner/host/sandbox context once at session bind
-//! and serializes it to `{session_id}/workspace_environment.json` so the
-//! session can be attributed. [`WorkspaceIdentity`] (who owns
-//! the workspace, also used for upload 401-attribution) is resolved at
-//! workspace construction; [`WorkspaceEnvironment`] is the full on-disk record.
+//! Captures the session's owner/host/sandbox context once at session bind.
+//! It is serialized to `{session_id}/workspace_environment.json` so the session can be attributed.
+//! [`WorkspaceIdentity`] (who owns the workspace, also used to attribute upload 401s) is resolved at workspace construction.
+//! [`WorkspaceEnvironment`] is the full on-disk record.
 
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-/// Schema version stamped into every `workspace_environment.json`; bumped on
-/// incompatible shape changes.
+/// Schema version stamped into every `workspace_environment.json`; bumped on incompatible shape changes.
 pub(crate) const SCHEMA_VERSION: &str = "v1";
 
 /// `principal_type` wire value for a team-scoped principal.
@@ -19,16 +17,13 @@ pub(crate) const PRINCIPAL_TYPE_TEAM: &str = "Team";
 
 /// Identity of the principal that owns a workspace.
 ///
-/// `principal_type` is the OAuth wire string `"User"` or `"Team"`;
-/// `principal_id` carries the team id when `principal_type == "Team"` and is
-/// `None` for personal (`"User"`) principals. `user_id` is always the
-/// individual user behind the bearer token.
+/// `principal_type` and `principal_id` are the OAuth wire values.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceIdentity {
     /// Stable user identifier (owner of the bearer token).
     pub user_id: String,
-    /// `"User"` or `"Team"`. `None` when the auth source does not distinguish
-    /// principal kinds (e.g. a local-dev bearer token).
+    /// `"User"` or `"Team"`.
+    /// `None` when the auth source does not distinguish principal kinds (e.g. a local-dev bearer token).
     pub principal_type: Option<String>,
     /// Team id when `principal_type == "Team"`; otherwise `None`.
     pub principal_id: Option<String>,
@@ -48,10 +43,8 @@ impl WorkspaceIdentity {
         }
     }
 
-    /// Construct a team-scoped identity (`principal_type == "Team"`, the team id
-    /// in `principal_id`). Keeps the `PRINCIPAL_TYPE_TEAM` wire string in one
-    /// place so callers (e.g. the in-process shell identity) don't duplicate the
-    /// `"Team"` literal across crate boundaries.
+    /// Construct a team-scoped identity (`principal_type == "Team"`, the team id in `principal_id`).
+    /// Keeps the `PRINCIPAL_TYPE_TEAM` wire string in one place so callers (e.g. the in-process shell identity) don't duplicate the `"Team"` literal.
     pub fn team(user_id: impl Into<String>, team_id: impl Into<String>) -> Self {
         Self {
             user_id: user_id.into(),
@@ -65,18 +58,14 @@ impl WorkspaceIdentity {
         self.principal_type.as_deref() == Some(PRINCIPAL_TYPE_TEAM)
     }
 
-    /// The team id **iff** this is a team principal: `None` for `"User"`
-    /// principals even if `principal_id` is populated (per the wire contract).
-    /// Deriving `team_id` from `principal_id` is intentional — the standalone
-    /// server's `AuthEntry` never carries the shell's separate
-    /// `GrokAuth.team_id`, and for a Team principal `principal_id` *is* the
-    /// team id.
+    /// The team id **iff** this is a team principal: `None` for `"User"` principals even if `principal_id` is populated (per the wire contract).
+    /// The standalone server's `AuthEntry` never carries the shell's separate `GrokAuth.team_id`, so `team_id` derives from `principal_id`.
+    /// For a Team principal `principal_id` *is* the team id.
     pub(crate) fn team_id(&self) -> Option<String> {
         self.is_team().then(|| self.principal_id.clone()).flatten()
     }
 
-    /// The user id as an `Option`, mapping the empty string (no resolved
-    /// identity, e.g. headless/local-dev) to `None`.
+    /// The user id as an `Option`, mapping the empty string (no resolved identity, e.g. headless/local-dev) to `None`.
     pub(crate) fn user_id_opt(&self) -> Option<String> {
         if self.user_id.is_empty() {
             None
@@ -86,10 +75,9 @@ impl WorkspaceIdentity {
     }
 }
 
-/// Derive the workspace owner identity from the server auth provider's
-/// [`AuthIdentity`](xai_computer_hub_sdk::AuthIdentity). The two types carry the
-/// same principal fields; this is the single conversion point so the workspace
-/// reads identity from `HubConfig.auth` instead of a separate auth.json read.
+/// Derive the workspace owner identity from the server auth provider's [`AuthIdentity`](xai_computer_hub_sdk::AuthIdentity).
+/// The two types carry the same principal fields.
+/// This is the single conversion point so the workspace reads identity from `HubConfig.auth` instead of a separate auth.json read.
 impl From<xai_computer_hub_sdk::AuthIdentity> for WorkspaceIdentity {
     fn from(id: xai_computer_hub_sdk::AuthIdentity) -> Self {
         Self::new(id.user_id, id.principal_type, id.principal_id)
@@ -98,9 +86,8 @@ impl From<xai_computer_hub_sdk::AuthIdentity> for WorkspaceIdentity {
 
 /// On-disk `workspace_environment.json` record.
 ///
-/// Every field is always serialized (no `skip_serializing_if`) so the artifact
-/// presents a stable, fully-populated schema to consumers; absent
-/// values surface as JSON `null`.
+/// Every field is always serialized (no `skip_serializing_if`) so the artifact presents a stable, fully-populated schema to consumers.
+/// Absent values are emitted as JSON `null`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceEnvironment {
     /// Schema version of this record (always [`SCHEMA_VERSION`]).
@@ -140,9 +127,8 @@ pub struct WorkspaceEnvironment {
 }
 
 impl WorkspaceEnvironment {
-    /// Capture the live environment for a session at bind time: host/sandbox
-    /// facts from the process environment, git facts from `cwd`, identity and
-    /// server facts from the caller.
+    /// Capture the live environment for a session at bind time.
+    /// Host/sandbox facts come from the process environment, git facts from `cwd`, identity and server facts from the caller.
     pub(crate) fn capture(
         session_id: &str,
         cwd: &Path,
@@ -165,10 +151,9 @@ impl WorkspaceEnvironment {
         )
     }
 
-    /// Assemble the record from already-resolved facts. Separated from
-    /// [`capture`](Self::capture) so unit tests can inject every field without
-    /// mutating process-global env; only `recorded_at` (`Utc::now()`) is
-    /// non-injected.
+    /// Assemble the record from already-resolved facts.
+    /// Separated from [`capture`](Self::capture) so unit tests can inject every field without mutating process-global env.
+    /// Only `recorded_at` (`Utc::now()`) cannot be injected.
     fn assemble(
         session_id: &str,
         cwd: &Path,
@@ -208,11 +193,9 @@ impl WorkspaceEnvironment {
     }
 }
 
-/// Resolve `(repo_root, origin_remote_url)` for `cwd` via libgit2; both `None`
-/// outside a git repository. The `origin` URL has embedded credentials
-/// stripped before it is stored — HTTPS remotes can carry a token in the
-/// userinfo, and this artifact is uploaded, so the raw URL must never
-/// be persisted.
+/// Resolve `(repo_root, origin_remote_url)` for `cwd` via libgit2; both `None` outside a git repository.
+/// The `origin` URL has embedded credentials stripped before it is stored.
+/// HTTPS remotes can carry a token in the userinfo, and this artifact is uploaded, so the raw URL must never be persisted.
 fn git_repo_facts(cwd: &Path) -> (Option<String>, Option<String>) {
     let Ok(repo) = git2::Repository::discover(cwd) else {
         return (None, None);
@@ -414,8 +397,7 @@ mod tests {
         assert_eq!(value["repo_root"], serde_json::Value::Null);
     }
 
-    /// A token embedded in an HTTPS `origin` must never survive into the
-    /// captured `remote_url`.
+    /// A token embedded in an HTTPS `origin` must never survive into the captured `remote_url`.
     #[test]
     fn git_repo_facts_strips_remote_url_credentials() {
         let dir = tempfile::tempdir().unwrap();

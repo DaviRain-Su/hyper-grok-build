@@ -1,8 +1,7 @@
 //! ACP extension handler for session search (`x.ai/session/search`).
 //!
 //! Exposes session full-text search as an ACP extension method.
-//! The client sends a query and receives ranked results across all
-//! (or workspace-filtered) past sessions.
+//! The client sends a query and receives ranked results across all (or workspace-filtered) past sessions.
 //!
 //! ```text
 //! JSON-RPC -> mvp_agent.ext_method()
@@ -40,8 +39,8 @@ pub(crate) struct SearchSessionsRequest {
     /// Whether to include content snippets in results.
     #[serde(default)]
     pub include_content: bool,
-    /// Headless policy (`"exclude"|"only"|"include"`). Omission preserves
-    /// legacy inclusive search; unknown explicit values fail closed to exclude.
+    /// Headless policy (`"exclude"|"only"|"include"`).
+    /// Omission preserves legacy inclusive search; unknown explicit values fail closed to exclude.
     #[serde(default)]
     pub headless: Option<String>,
 }
@@ -171,10 +170,9 @@ struct ClassifiedPage {
     bootstrapping: bool,
 }
 
-/// Fill one policy-admitted window while classifying at most
-/// [`MAX_CLASSIFIED_HITS`] raw hits. `offset` and pagination metadata describe
-/// the filtered view. Exhaustion yields an exact total; a capped walk returns
-/// no exact total and no continuation claim rather than doing unbounded I/O.
+/// Fill one policy-admitted window while classifying at most [`MAX_CLASSIFIED_HITS`] raw hits.
+/// `offset` and pagination metadata describe the filtered view.
+/// Exhaustion yields an exact total; a capped walk returns no exact total and no continuation claim rather than doing unbounded I/O.
 async fn walk_admitted_window<F, Fut>(
     mut fetch: F,
     offset: usize,
@@ -197,8 +195,7 @@ where
     let mut page = first_page;
     loop {
         let remaining = MAX_CLASSIFIED_HITS.saturating_sub(index_offset);
-        // A truncated last FTS page still has unclassified tail hits, so
-        // `has_more == false` is not exhaustion of the filtered view.
+        // A truncated last FTS page still has unclassified tail hits, so `has_more == false` is not exhaustion of the filtered view
         let truncated = page.hits.len() > remaining;
         let page_len = page.hits.len().min(remaining);
         for (hit, kind) in page.hits.into_iter().take(page_len) {

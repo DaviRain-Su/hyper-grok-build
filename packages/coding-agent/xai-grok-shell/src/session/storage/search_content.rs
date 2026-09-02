@@ -1,9 +1,7 @@
 //! Extracting searchable text from session update files.
 //!
-//! The peek structs are shared with the resume/replay collectors in
-//! [`super`], so the indexed text cannot drift from what a resumed session
-//! replays. Everything downstream of the extracted string (hashing, dedup,
-//! the SQLite index itself) lives in `xai-grok-session-search`.
+//! The peek structs are shared with the resume/replay collectors in [`super`], so the indexed text cannot drift from what a resumed session replays.
+//! Everything downstream of the extracted string (hashing, dedup, the SQLite index itself) lives in `xai-grok-session-search`.
 
 use std::io::{self, BufRead};
 use std::path::Path;
@@ -16,9 +14,9 @@ use crate::session::wire_tags::{REWIND_MARKER, USER_MESSAGE_CHUNK};
 
 const SEARCH_CONTENT_CHAR_LIMIT: usize = 200_000;
 
-// Zero-copy peek structs. Text-bearing fields are `Cow`, not `&str`: serde
-// cannot borrow `&str` from JSON strings containing escapes, so borrowing
-// would error and silently drop the message from the index.
+// Zero-copy peek structs
+// Text-bearing fields are `Cow`, not `&str`: serde cannot borrow `&str` from JSON strings containing escapes
+// Borrowing would error and silently drop the message from the index
 
 /// Peek for assistant text (agent_message_chunk content.text).
 #[derive(serde::Deserialize)]
@@ -41,8 +39,8 @@ struct AgentTextPeek<'a> {
     text: Option<std::borrow::Cow<'a, str>>,
 }
 
-/// Peek for user message content (user_message_chunk content.text). Reuses
-/// [`ContentPeek`] so the peeked fields stay single-sourced.
+/// Peek for user message content (user_message_chunk content.text).
+/// Reuses [`ContentPeek`] so the peeked fields are defined in one place.
 #[derive(serde::Deserialize)]
 struct UserContentPeek<'a> {
     #[serde(borrow)]
@@ -57,7 +55,7 @@ struct UserUpdatePeek<'a> {
     meta: Option<super::RawChunkMetaPeek>,
 }
 
-/// Peek for tool call metadata (tool_call title + locations[].path).
+/// Peek for tool call metadata (tool_call title and locations[].path).
 #[derive(serde::Deserialize)]
 struct ToolCallPeek<'a> {
     #[serde(borrow)]
@@ -78,8 +76,7 @@ struct ToolLocationPeek<'a> {
     path: Option<std::borrow::Cow<'a, str>>,
 }
 
-/// Collect all indexable content from a session's `updates.jsonl` in one
-/// pass, without materializing full `acp::SessionNotification` objects.
+/// Collect all indexable content from a session's `updates.jsonl` in one pass, without deserializing full `acp::SessionNotification` objects.
 pub(super) fn collect_all_indexable_content_single_pass(
     updates_path: &Path,
 ) -> io::Result<(String, u64)> {
@@ -103,8 +100,7 @@ pub(super) fn collect_all_indexable_content_single_pass(
     const TOOL_MAX_CALLS: usize = 200;
     const TOOL_MAX_CHARS: usize = 100_000;
 
-    // Flush the assistant buffer on turn boundary; called in every
-    // non-agent_message_chunk branch to match `collect_assistant_text`.
+    // Flush the assistant buffer on turn boundary; called in every non-agent_message_chunk branch to match `collect_assistant_text`
     let flush_assistant = |current: &mut String, texts: &mut Vec<String>| {
         if !current.is_empty() {
             let t = current.trim().to_string();
@@ -120,8 +116,7 @@ pub(super) fn collect_all_indexable_content_single_pass(
             Ok(l) => l,
             Err(e) => {
                 tracing::warn!(error = %e, "skipping unreadable line in single-pass content collector");
-                // An I/O error is a turn boundary, matching the
-                // iterator-based collectors.
+                // An I/O error is a turn boundary, matching the iterator-based collectors
                 flush_assistant(&mut current_assistant, &mut assistant_texts);
                 prompt_events.push(PromptExtractEvent::NotUserMessage);
                 continue;
@@ -146,8 +141,7 @@ pub(super) fn collect_all_indexable_content_single_pass(
             .and_then(|p| p.update);
         let tag = update_peek.as_ref().map(|u| u.session_update);
 
-        // Content events arrive on ACP "session/update"; control events
-        // (rewind markers) on the xAI "_x.ai/session/update" extension.
+        // Content events arrive on ACP "session/update"; control events (rewind markers) on the xAI "_x.ai/session/update" extension
         if !is_xai {
             match tag {
                 Some(t) if t == *USER_MESSAGE_CHUNK => {
@@ -184,7 +178,7 @@ pub(super) fn collect_all_indexable_content_single_pass(
                     }
                 }
                 Some("agent_message_chunk") => {
-                    // Same assistant turn: no flush.
+                    // This chunk continues the same assistant turn, so the buffer is not flushed
                     if assistant_chars < ASSISTANT_MAX_CHARS
                         && let Ok(peek) = serde_json::from_str::<AgentContentPeek<'_>>(raw_params)
                         && let Some(content) = peek.update.content
@@ -212,7 +206,7 @@ pub(super) fn collect_all_indexable_content_single_pass(
                     prompt_events.push(PromptExtractEvent::NotUserMessage);
                 }
                 Some("agent_thought_chunk") => {
-                    // Same assistant turn: not indexed, but must not flush.
+                    // A thought chunk continues the same assistant turn: it is not indexed, but must not flush the buffer
                     prompt_events.push(PromptExtractEvent::NotUserMessage);
                 }
                 Some("tool_call") => {

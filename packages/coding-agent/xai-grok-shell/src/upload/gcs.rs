@@ -1,29 +1,20 @@
-//! Shell-side adapter that threads the live `AuthManager` through to the
-//! `StorageClient` constructed inside `xai_file_utils::gcs::*` helpers.
+//! Shell-side adapter that threads the live `AuthManager` through to the `StorageClient` constructed inside `xai_file_utils::gcs::*` helpers.
 //!
-//! Background: the data-collector helpers (`upload_bytes`,
-//! `upload_file`, `upload_stream`, `upload_bytes_signed`)
-//! build a `StorageClient` per call. Without a `StorageConfig` impl that
-//! provides `proxy_credentials` / `proxy_attribution`, that client falls
-//! back to a static `user_token` snapshot baked into `TraceExportConfig`
-//! at construction time and emits no attribution event on 401. That
-//! snapshot becomes stale on rotation and is empty during the 5-minute
-//! pre-refresh buffer window in `AuthManager`, both of which manifest
-//! as `POST /v1/storage` 401s at the proxy.
+//! Background: the data-collector helpers (`upload_bytes`, `upload_file`, `upload_stream`, `upload_bytes_signed`) build a `StorageClient` per call.
+//! Without a `StorageConfig` impl that provides `proxy_credentials` / `proxy_attribution`, that client falls back to a static `user_token` snapshot.
+//! The snapshot is baked into `TraceExportConfig` at construction time, and no attribution event is emitted on 401.
+//! That snapshot becomes stale on rotation and is empty during the 5-minute pre-refresh buffer window in `AuthManager`.
+//! Both show up as `POST /v1/storage` 401s at the proxy.
 //!
-//! [`TraceExportConfigWithAuth`] wraps a bare `TraceExportConfig` plus an
-//! optional `Arc<AuthManager>` and implements `StorageConfig` such that, when
-//! the manager is present, the constructed `StorageClient` gets:
+//! [`TraceExportConfigWithAuth`] wraps a bare `TraceExportConfig` plus an optional `Arc<AuthManager>` and implements `StorageConfig`.
+//! When the manager is present, the constructed `StorageClient` gets:
 //!
-//!   1. A refresh-aware `ShellAuthCredentialProvider` (live token from
-//!      `auth_manager.current()`, falling back to `expired_auth()` so
-//!      the buffer window is covered), and
-//!   2. A `StorageClientAttributionBridge` that emits the
-//!      `auth_401_attribution` event on 401 with the right consumer tag.
+//!   1. A refresh-aware `ShellAuthCredentialProvider`.
+//!      It serves the live token from `auth_manager.current()` and falls back to `expired_auth()` so the buffer window is covered.
+//!   2. A `StorageClientAttributionBridge` that emits the `auth_401_attribution` event on 401 with the right consumer tag.
 //!
-//! Use [`WithAuth::with_auth`] at every shell-side upload call site that
-//! has an `AuthManager` in scope, immediately before passing the config
-//! to an `xai_file_utils::gcs::*` helper.
+//! Use [`WithAuth::with_auth`] at every shell-side upload call site that has an `AuthManager` in scope.
+//! Call it immediately before passing the config to an `xai_file_utils::gcs::*` helper.
 use crate::auth::AuthManager;
 use crate::auth::credential_provider::{
     ShellAuthCredentialProvider, StorageClientAttributionBridge,
@@ -33,15 +24,10 @@ use xai_file_utils::gcs::StorageConfig;
 use xai_file_utils::storage_client::Auth401AttributionCallback;
 use xai_file_utils::{TraceExportConfig, UploadMethod};
 use xai_grok_auth::AuthCredentialProvider;
-/// Owned wrapper that pairs a `TraceExportConfig` with an optional live
-/// `AuthManager`. See module docs for why this exists; in short, it's the
-/// shell-side adapter that lets `xai_file_utils::gcs::*` helpers wire
-/// refresh-aware credentials and 401-attribution into the per-call
-/// `StorageClient` they construct internally.
+/// See the module docs for why this exists.
 ///
-/// `auth_manager == None` is supported (for tests, direct-mode upload,
-/// and a few sites without an `AuthManager` in scope) and degrades to
-/// the pre-existing snapshot-based behavior.
+/// `auth_manager == None` is supported (for tests, direct-mode upload, and a few sites without an `AuthManager` in scope).
+/// It degrades to the pre-existing snapshot-based behavior.
 #[derive(Clone)]
 pub(crate) struct TraceExportConfigWithAuth {
     inner: TraceExportConfig,
@@ -92,8 +78,7 @@ impl StorageConfig for TraceExportConfigWithAuth {
         Some(crate::http::shared_upload_client())
     }
 }
-/// Convenience trait for wrapping a `TraceExportConfig` at upload call
-/// sites. Pattern:
+/// Convenience trait for wrapping a `TraceExportConfig` at upload call sites. Pattern:
 ///
 /// ```ignore
 /// xai_file_utils::gcs::upload_bytes(
@@ -102,8 +87,7 @@ impl StorageConfig for TraceExportConfigWithAuth {
 /// ).await
 /// ```
 ///
-/// At sites without an `AuthManager` in scope, pass `None` (degrades to
-/// snapshot behavior; same as calling the helper with the bare config).
+/// At sites without an `AuthManager` in scope, pass `None` (degrades to snapshot behavior; same as calling the helper with the bare config).
 pub(crate) trait WithAuth {
     fn with_auth(&self, auth_manager: Option<Arc<AuthManager>>) -> TraceExportConfigWithAuth;
 }
@@ -112,14 +96,11 @@ impl WithAuth for TraceExportConfig {
         TraceExportConfigWithAuth::new(self.clone(), auth_manager)
     }
 }
-/// Default GCS bucket for session trace uploads. Override at runtime with
-/// `GROK_TELEMETRY_GCS_BUCKET`; `None` disables trace uploads until a bucket
-/// is configured.
+/// Override at runtime with `GROK_TELEMETRY_GCS_BUCKET`; `None` disables trace uploads until a bucket is configured.
 pub(crate) const SESSION_TRACES_BUCKET: Option<&str> =
     option_env!("GROK_SESSION_TRACES_BUCKET_DEFAULT");
-/// Upload bytes to the `auth-diagnostics/{version}/{user_id}/{ts}.jsonl` path
-/// for easy aggregation across users. Used by both the auth refresh failure
-/// uploader and the 401/404 error trace uploader.
+/// Upload bytes to the `auth-diagnostics/{version}/{user_id}/{ts}.jsonl` path for easy aggregation across users.
+/// Used by both the auth refresh failure uploader and the 401/404 error trace uploader.
 pub(crate) async fn upload_to_auth_diagnostics(
     log_bytes: &[u8],
     user_id: &str,

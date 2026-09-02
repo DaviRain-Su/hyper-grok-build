@@ -1,5 +1,4 @@
-//! OS resource ceilings read at startup, so EMFILE/EAGAIN/OOM crash reports
-//! carry the limits that were in effect.
+//! OS resource ceilings read at startup, so EMFILE/EAGAIN/OOM crash reports carry the limits that were in effect.
 
 /// Read once, rendered for the diagnostic log and for telemetry.
 pub(crate) struct ProcessLimits {
@@ -89,9 +88,8 @@ fn rlimit(_kind: RlimitKind) -> Option<(Option<u64>, Option<u64>)> {
     None
 }
 
-/// Best-effort cgroup v2 pids/memory ceilings — the limits behind EAGAIN
-/// thread-spawn failures and memcg OOM kills on shared hosts. `None` on any
-/// read error or non-cgroup-v2 environment.
+/// Best-effort cgroup v2 pids/memory ceilings, the limits behind EAGAIN thread-spawn failures and memcg OOM kills on shared hosts.
+/// `None` on any read error or non-cgroup-v2 environment.
 #[cfg(target_os = "linux")]
 fn cgroup_v2_limits() -> Option<serde_json::Value> {
     let cgroup = std::fs::read_to_string("/proc/self/cgroup").ok()?;

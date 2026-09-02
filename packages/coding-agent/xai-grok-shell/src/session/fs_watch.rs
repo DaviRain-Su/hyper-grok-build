@@ -1,8 +1,6 @@
-//! Session-level fs-watch policy over [`xai_fsnotify`].
-//!
-//! Mechanism (OS watch, coalesce, refcount) lives in `xai_fsnotify`. This module
-//! decides which consumers exist, fans events through three explicit phases, and
-//! owns one `select!` loop (event hot path + debounced refresh).
+//! The mechanism (OS watch, coalesce, refcount) lives in `xai_fsnotify`.
+//! This module decides which consumers exist, fans events through three explicit phases, and owns one `select!` loop.
+//! The loop serves the event hot path and the debounced refresh.
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -24,8 +22,8 @@ use crate::session::{ClientFsConfig, ClientFsMode};
 
 // ── shared helpers ────────────────────────────────────────────────────────
 
-/// True if `path` lies under a hidden component below `cwd`. Only the part
-/// *below* `cwd` is inspected — a hidden ancestor of `cwd` itself is ignored.
+/// True if `path` lies under a hidden component below `cwd`.
+/// Only the part *below* `cwd` is inspected; a hidden ancestor of `cwd` itself is ignored.
 pub(crate) fn is_under_hidden_dir(path: &Path, cwd: &Path) -> bool {
     let has_hidden = |rel: &Path| {
         rel.components().any(|c| {
@@ -37,8 +35,7 @@ pub(crate) fn is_under_hidden_dir(path: &Path, cwd: &Path) -> bool {
     if let Ok(rel) = path.strip_prefix(cwd) {
         return has_hidden(rel);
     }
-    // Spelling mismatch (symlink/relative): retry on canonical roots before
-    // giving up — never scan the whole absolute path.
+    // Spelling mismatch (symlink/relative): retry on canonical roots before giving up; never scan the whole absolute path
     if let (Ok(p), Ok(c)) = (dunce::canonicalize(path), dunce::canonicalize(cwd))
         && let Ok(rel) = p.strip_prefix(&c)
     {
@@ -47,7 +44,7 @@ pub(crate) fn is_under_hidden_dir(path: &Path, cwd: &Path) -> bool {
     false
 }
 
-/// Forward fs event to hunk tracker, skipping hidden dirs.
+/// Forwards fs events to the hunk tracker, skipping hidden dirs.
 pub(crate) fn forward_to_hunk_tracker(
     paths: &[PathBuf],
     kind: FsEventKind,
@@ -70,11 +67,10 @@ pub(crate) fn forward_to_hunk_tracker(
     }
 }
 
-/// Dedup key for `x.ai/git_head_changed`, shared by the watcher's `GitHead`
-/// consumer and the post-edit `maybe_notify_git_branch` path so both compute
-/// the same identity (branch | is_worktree | main_repo | commit). The commit
-/// SHA is included so a same-branch commit (agent runs `git commit`) still
-/// notifies clients — the changes panel must drop the now-committed files.
+/// Dedup key for `x.ai/git_head_changed`, shared by the watcher's `GitHead` consumer and the post-edit `maybe_notify_git_branch` path.
+/// Both compute the same identity (branch | is_worktree | main_repo | commit).
+/// The commit SHA is included so a same-branch commit (agent runs `git commit`) still notifies clients.
+/// The changes panel must drop the now-committed files.
 pub(crate) fn git_head_dedup_key(
     branch: Option<&str>,
     is_worktree: bool,
@@ -180,8 +176,8 @@ fn parse_diff_name_status_line(
     }
 }
 
-/// After a HEAD change, diff ORIG_HEAD..HEAD and send targeted events
-/// to the codebase graph. Falls back to full rebuild if too many changes.
+/// After a HEAD change, diff ORIG_HEAD..HEAD and send targeted events to the codebase graph.
+/// Falls back to a full rebuild when too many files changed.
 async fn refresh_codebase_graph_after_head_change(
     idx: &xai_codebase_graph::IndexManagerHandle,
     repo_root: &Path,
@@ -228,7 +224,7 @@ async fn refresh_codebase_graph_after_head_change(
 // ── capabilities / deps / plan ────────────────────────────────────────────
 
 /// What the client wants from the watcher: pure, `Copy`, mode-independent.
-/// Proxy/hub gating of the actual spawn lives at the call site, not here.
+/// Whether a proxy/hub session actually spawns the watcher is gated at the call site, not here.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct FsWatchCapabilities {
     pub client_notify: bool,
@@ -238,7 +234,6 @@ pub(crate) struct FsWatchCapabilities {
 }
 
 impl FsWatchCapabilities {
-    /// True if any consumer needs the watcher.
     pub(crate) fn needs_watcher(self) -> bool {
         self.client_notify || self.hunk_tracking || self.code_nav || self.git_head
     }
@@ -247,7 +242,6 @@ impl FsWatchCapabilities {
         Self::default()
     }
 
-    /// Resolve the client's advertised signals into capabilities.
     pub(crate) fn resolve(inputs: CapabilityInputs) -> Self {
         Self {
             client_notify: inputs.client_notify,
@@ -258,17 +252,17 @@ impl FsWatchCapabilities {
     }
 }
 
-/// Per-consumer signals fed to [`FsWatchCapabilities::resolve`]. Named fields
-/// (not positional bools) so call sites can't silently transpose them.
+/// Per-consumer signals fed to [`FsWatchCapabilities::resolve`].
+/// Named fields (not positional bools) so call sites can't silently transpose them.
 pub(crate) struct CapabilityInputs {
     pub client_notify: bool,
     pub hunk_tracking: bool,
     pub code_nav: bool,
-    /// `x.ai/gitHeadChanged`; opt-in (absent => off).
+    /// `x.ai/gitHeadChanged`; opt-in (absent means off).
     pub git_head_changed: Option<bool>,
 }
 
-/// Handles gathered only when actually building consumers.
+/// These handles are gathered only when consumers are actually built.
 pub(crate) struct FsWatchDeps {
     pub gateway: GatewaySender,
     pub session_id: String,
@@ -280,8 +274,7 @@ pub(crate) struct FsWatchDeps {
     pub client_fs_config: Option<ClientFsConfig>,
     pub persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
     pub last_reported_branch: Arc<parking_lot::Mutex<Option<String>>>,
-    /// A signal, not an entry point: `run_status_emitter` is the only consumer
-    /// and decides whether the row is worth building.
+    /// A signal, not an entry point: `run_status_emitter` is the only consumer and decides whether the row is worth building.
     pub status_wake: Arc<tokio::sync::Notify>,
 }
 
@@ -323,8 +316,7 @@ impl ClientNotify {
 
         match self.mode {
             ClientFsMode::Events => {
-                // Present-tense strings are the `x.ai/fs_notify` wire protocol;
-                // do not sync to internal variant names.
+                // Present-tense strings are the `x.ai/fs_notify` wire protocol; do not sync to internal variant names
                 let kind_str = match kind {
                     FsEventKind::Created => "Create",
                     FsEventKind::Modified => "Modify",
@@ -453,7 +445,7 @@ impl ClientNotify {
 struct HunkTracking {
     handle: HunkTrackerHandle,
     cwd: PathBuf,
-    /// Live per-event forward needs a git root (baselines are HEAD-relative).
+    /// Forwarding live events needs a git root (baselines are HEAD-relative).
     git_root: Option<PathBuf>,
 }
 
@@ -497,8 +489,7 @@ struct GitHead {
     session_id: String,
     cwd: PathBuf,
     persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
-    /// Dedup slot shared with `SessionActor::maybe_notify_git_branch` (see
-    /// `git_head_dedup_key`).
+    /// Dedup slot shared with `SessionActor::maybe_notify_git_branch` (see `git_head_dedup_key`).
     last: Arc<parking_lot::Mutex<Option<String>>>,
     status_wake: Arc<tokio::sync::Notify>,
 }
@@ -540,9 +531,8 @@ impl GitHead {
                         raw.into(),
                     ));
             }
-            // The snapshot carries `workspace.branch`, so a checkout between
-            // turns has to repush it or the row names the old branch until the
-            // next turn ends.
+            // The snapshot carries `workspace.branch`, so a checkout between turns has to repush it
+            // Otherwise the row names the old branch until the next turn ends
             self.status_wake.notify_one();
         }
 
@@ -587,16 +577,14 @@ impl FsWatchPlan {
             }
         });
 
-        // Index handle looked up per-event so a later-created index still receives events.
+        // The index handle is looked up per event so a later-created index still receives events
         let index = caps.code_nav.then(|| CodebaseIndex {
             indexes: deps.codebase_indexes,
             root: deps.index_root,
         });
 
-        // Built only when the client opted into git-head notifications. The
-        // restore-code consumer (the pager) advertises it, so it persists HEAD
-        // here on every refresh; the end-of-turn `PersistGitHead` is a
-        // best-effort fallback (trace-gated), not the load-bearing path.
+        // The restore-code consumer (the pager) advertises the capability, so it persists HEAD here on every refresh
+        // The end-of-turn `PersistGitHead` is only a best-effort, trace-gated fallback
         let git_head = caps.git_head.then(|| GitHead {
             gateway: deps.gateway,
             session_id: deps.session_id,
@@ -616,7 +604,7 @@ impl FsWatchPlan {
         }
     }
 
-    // Phase subsets differ on purpose — replay excludes hunk (baselines on refresh).
+    // Phase subsets differ on purpose: replay excludes the hunk consumer, whose baselines the refresh pass reconciles instead
 
     async fn on_files_changed(&self, paths: &[PathBuf], kind: FsEventKind) {
         if let Some(h) = &self.hunk {
@@ -639,8 +627,7 @@ impl FsWatchPlan {
         }
     }
 
-    /// A self-contained refresh (clones the handles it needs) so it runs on its
-    /// own `spawn_local` without blocking the event loop's `recv`.
+    /// A self-contained refresh (clones the handles it needs) so it runs on its own `spawn_local` without blocking the event loop's `recv`.
     fn refresh_future(
         &self,
         rebuild_index: bool,
@@ -666,10 +653,9 @@ impl FsWatchPlan {
 
 type FsBatch = (Vec<PathBuf>, FsEventKind);
 
-/// Resolve a completed git op: report the batches to replay plus whether a
-/// codebase-graph rebuild is needed. Occupancy is sampled *before* the buffer
-/// is drained, so an EdenFS-degraded `goto` (`head_changed: false` but a
-/// replayed flood) still requests the rebuild.
+/// Resolve a completed git op: report the batches to replay and whether a codebase-graph rebuild is needed.
+/// Whether the buffer held batches is sampled *before* it is drained.
+/// An EdenFS-degraded `goto` completes with `head_changed: false` but with a buffered flood, so it still requests the rebuild.
 fn resolve_completed_op(head_changed: bool, op_buffer: &mut Vec<FsBatch>) -> (Vec<FsBatch>, bool) {
     let had_buffered = !op_buffer.is_empty();
     let replay = if head_changed {
@@ -681,23 +667,22 @@ fn resolve_completed_op(head_changed: bool, op_buffer: &mut Vec<FsBatch>) -> (Ve
     (replay, head_changed || had_buffered)
 }
 
-/// Cap on batches buffered during a git op; exceeding it means the completion
-/// boundary was lost (crashed git / stale `.git` lock) or a settle-merged op
-/// is bigger than we are willing to buffer and replay, so recover with a
-/// rebuild refresh instead of buffering forever.
+/// Exceeding it means the completion boundary was lost (crashed git, a stale `.git` lock).
+/// It can also mean the settle window merged an op too big to buffer and replay.
+/// Either way, recover with a rebuild refresh instead of buffering forever.
 const MAX_OP_BUFFER: usize = 10_000;
 
-/// What the loop should do with one fs event. Pure (no I/O, no timers) so the
-/// `in_op`/`op_buffer` state machine is unit-testable; the loop performs the
-/// async consumer work and owns the debounce timer.
+/// What the loop should do with one fs event.
+/// Pure (no I/O, no timers) so the `in_op`/`op_buffer` state machine is unit-testable.
+/// The loop performs the async consumer work and owns the debounce timer.
 enum Outcome {
-    /// Op started, event buffered, or ignored — nothing to do now.
+    /// Op started, event buffered, or ignored; nothing to do now.
     Buffered,
     /// Forward a live change to the consumers.
     Forward(FsBatch),
     /// Replay these batches, then refresh (rebuild the graph if set).
     Completed { replay: Vec<FsBatch>, rebuild: bool },
-    /// Refresh only (rebuild if set) — git-metadata change or a resync.
+    /// Refresh only (rebuild if set): a git-metadata change or a resync.
     Refresh { rebuild: bool },
 }
 
@@ -728,8 +713,7 @@ fn on_event(ev: FsEvent, in_op: &mut bool, op_buffer: &mut Vec<FsBatch>) -> Outc
     }
 }
 
-/// Recovery after a dropped broadcast event (`Lagged`): a missed GitOperation
-/// boundary could leave `in_op` stuck and `op_buffer` orphaned.
+/// Recovery after a dropped broadcast event (`Lagged`): a missed GitOperation boundary could leave `in_op` stuck and `op_buffer` orphaned.
 fn on_resync(in_op: &mut bool, op_buffer: &mut Vec<FsBatch>) -> Outcome {
     *in_op = false;
     op_buffer.clear();
@@ -741,9 +725,9 @@ const REFRESH_DEBOUNCE_MAX_WAIT: Duration = Duration::from_secs(3);
 
 /// Debounce state owned by the watcher loop (single task, no locking).
 struct Debounce {
-    /// Cap from first event in the burst.
+    /// The max-wait cap, set at the first event of the burst.
     max_deadline: Option<tokio::time::Instant>,
-    /// Quiet window; reset on each mid-burst notify.
+    /// The quiet window, reset on each mid-burst notify.
     quiet_deadline: Option<tokio::time::Instant>,
 }
 
@@ -759,7 +743,7 @@ impl Debounce {
         self.max_deadline.is_some()
     }
 
-    /// Earliest of the quiet window and the max-wait cap — whichever fires first.
+    /// The earlier of the quiet window and the max-wait cap.
     fn next_deadline(&self) -> Option<tokio::time::Instant> {
         match (self.quiet_deadline, self.max_deadline) {
             (Some(a), Some(b)) => Some(a.min(b)),
@@ -788,30 +772,25 @@ impl Debounce {
     }
 }
 
-/// Give-up bound on consecutive in-op deferrals: at the 500ms quiet cadence
-/// this is ~60s, matching the watcher's stale-lock threshold. A crashed git
-/// leaving `.git/index.lock` parks the source in its locked state forever
-/// (no Completed, no resync, buffer never overflows on a quiet workspace),
-/// so without a bound the deferral would starve refreshes indefinitely; one
-/// forced fire per minute also caps the cost on pathologically long real ops.
+/// Give-up bound on consecutive in-op deferrals: at the 500ms quiet cadence this is ~60s, matching the watcher's stale-lock threshold.
+/// A crashed git leaving `.git/index.lock` parks the source in its locked state forever.
+/// No Completed arrives, no resync, the buffer never overflows on a quiet workspace, so without a bound the deferral would starve refreshes forever.
+/// One forced fire per minute also caps the cost on pathologically long real ops.
 const MAX_CONSECUTIVE_IN_OP_DEFERS: u32 = 120;
 
-/// Decision for a due debounce deadline. Split out of the select loop's
-/// settle arm (pure bookkeeping, no I/O) so tests drive the real logic.
+/// Decision for a due debounce deadline.
+/// Split out of the select loop's settle arm (pure bookkeeping, no I/O) so tests drive the real logic.
 enum SettleAction {
     /// Run the refresh now, with the accumulated rebuild request.
     Fire { rebuild: bool },
-    /// Not now — re-armed to retry after the next quiet window.
+    /// Not now; re-armed to retry after the next quiet window.
     Defer,
 }
 
-/// The settle arm's decision: defer while a git op is in flight (a debounce
-/// armed by pre-op edits or meta changes would otherwise scan a mid-op
-/// worktree; Completed bumps the window afterwards anyway) or while the
-/// single-flight refresh is still running (coalesce into the next pass);
-/// otherwise fire, taking the rebuild flag. In-op deferrals are bounded by
-/// [`MAX_CONSECUTIVE_IN_OP_DEFERS`] so a wedged op (stale lock file) cannot
-/// starve refreshes forever.
+/// Defers while a git op is in flight: a debounce armed by pre-op edits or meta changes would otherwise scan a mid-op worktree.
+/// Completed bumps the window afterwards anyway.
+/// Also defers while the single-flight refresh is running, coalescing into the next pass.
+/// In-op deferrals are bounded by [`MAX_CONSECUTIVE_IN_OP_DEFERS`] so a wedged op (stale lock file) cannot starve refreshes forever.
 fn on_settle_due(
     in_op: bool,
     refreshing: bool,
@@ -821,17 +800,15 @@ fn on_settle_due(
 ) -> SettleAction {
     debounce.clear();
     if refreshing {
-        // Single-flight is self-limiting (the running refresh completes), so
-        // it never counts toward the give-up bound.
+        // Single-flight is self-limiting (the running refresh completes), so it never counts toward the give-up bound
         debounce.arm();
         return SettleAction::Defer;
     }
     if in_op && *in_op_defers < MAX_CONSECUTIVE_IN_OP_DEFERS {
         *in_op_defers += 1;
-        // Deferral re-arms in full, intentionally resetting the max-wait cap:
-        // every deferral means a refresh is already owed and retried each
-        // quiet window, so the cap's job (bounding un-fired bursts) is moot
-        // here; the give-up bound above owns wedged-op starvation instead.
+        // Deferral re-arms in full, intentionally resetting the max-wait cap
+        // Every deferral means a refresh is already owed and retried each quiet window, so the cap's job (bounding un-fired bursts) is moot here
+        // The give-up bound above handles starvation from a wedged op instead
         debounce.arm();
         return SettleAction::Defer;
     }
@@ -841,8 +818,7 @@ fn on_settle_due(
     }
 }
 
-/// Bookkeeping shared by the `Completed`/`Refresh` outcome arms: record the
-/// rebuild request and (re)start the debounce quiet window.
+/// Bookkeeping shared by the `Completed`/`Refresh` outcome arms: record the rebuild request and (re)start the debounce quiet window.
 fn note_refresh_request(rebuild: bool, debounce: &mut Debounce, rebuild_flag: &mut bool) {
     *rebuild_flag |= rebuild;
     debounce.bump();
@@ -921,8 +897,8 @@ pub(crate) fn spawn(plan: FsWatchPlan) -> FsWatchHandle {
         let mut op_buffer: Vec<FsBatch> = Vec::new();
         let mut debounce = Debounce::idle();
         let mut in_op_defers = 0u32;
-        // Single-flight: refresh runs on its own task so the loop keeps draining
-        // events; a settle while one is in flight re-arms instead of overlapping.
+        // Single-flight: the refresh runs on its own task so the loop keeps draining events
+        // A settle while one is in flight re-arms instead of overlapping
         let refreshing = Rc::new(Cell::new(false));
 
         loop {
@@ -953,8 +929,7 @@ pub(crate) fn spawn(plan: FsWatchPlan) -> FsWatchHandle {
                             let fut = plan.refresh_future(rebuild);
                             let reset = ResetOnDrop(refreshing.clone());
                             tokio::task::spawn_local(async move {
-                                // Reset on completion OR panic so a panicking refresh
-                                // can't wedge single-flight for the session's life.
+                                // Reset on completion OR panic so a panicking refresh can't wedge single-flight for the session's life
                                 let _reset = reset;
                                 fut.await;
                             });
@@ -979,9 +954,7 @@ pub(crate) fn spawn(plan: FsWatchPlan) -> FsWatchHandle {
                             for (paths, kind) in replay {
                                 plan.on_replayed_change(&paths, kind).await;
                             }
-                            // Always refresh on completion: a same-branch commit
-                            // moves HEAD with no rebuild, but branch/commit still
-                            // need the pass.
+                            // Always refresh on completion: a same-branch commit moves HEAD with no rebuild, but branch/commit still need the pass
                             note_refresh_request(rebuild, &mut debounce, &mut rebuild_codebase_graph);
                         }
                         Outcome::Refresh { rebuild } => {
@@ -1079,9 +1052,8 @@ mod tests {
 
     #[test]
     fn is_under_hidden_dir_unrelated_path_is_not_dropped() {
-        // strip_prefix fails and the (nonexistent) paths can't canonicalize, so
-        // we must NOT scan the absolute path and treat the `.cache` ancestor as
-        // hidden — that would silently drop every event for a repo under one.
+        // strip_prefix fails and the (nonexistent) paths can't canonicalize
+        // We must NOT scan the absolute path and treat the `.cache` ancestor as hidden; that would silently drop every event for a repo under one
         assert!(!is_under_hidden_dir(
             &PathBuf::from("/home/user/.cache/repo/src/main.rs"),
             &PathBuf::from("/some/other/root"),
@@ -1135,7 +1107,7 @@ mod tests {
 
     #[test]
     fn resolve_reflects_capabilities() {
-        // git_head is opt-in: absent => off, advertised value otherwise.
+        // git_head is opt-in: absent means off, the advertised value otherwise
         assert!(!FsWatchCapabilities::resolve(inputs(false, None)).git_head);
         assert!(FsWatchCapabilities::resolve(inputs(false, Some(true))).git_head);
         assert!(!FsWatchCapabilities::resolve(inputs(false, Some(false))).git_head);
@@ -1165,8 +1137,7 @@ mod tests {
             base,
             git_head_dedup_key(Some("main"), false, Some("/other"), Some("abc123"))
         );
-        // A same-branch commit moves HEAD and must not dedup away — the
-        // changes panel relies on this to drop the now-committed files.
+        // A same-branch commit moves HEAD and must not dedup away; the changes panel relies on this to drop the now-committed files
         assert_ne!(
             base,
             git_head_dedup_key(Some("main"), false, Some("/repo"), Some("def456"))
@@ -1220,8 +1191,7 @@ mod tests {
         )
     }
 
-    /// Head moved: the buffered flood is stale, so it is discarded (no replay)
-    /// and the rebuild is requested; the buffer ends empty.
+    /// Head moved: the buffered flood is stale, so it is discarded (no replay) and the rebuild is requested; the buffer ends empty.
     #[test]
     fn head_change_discards_buffer_and_requests_rebuild() {
         let mut op_buffer = vec![batch(), batch()];
@@ -1239,9 +1209,8 @@ mod tests {
         assert!(rebuild);
     }
 
-    /// EdenFS-degraded `goto`: head reads unchanged but a flood was buffered, so
-    /// the batches are replayed AND the rebuild is requested. Guards the ordering:
-    /// sampling occupancy after the drain would read empty and drop the rebuild.
+    /// EdenFS-degraded `goto`: head reads unchanged but a flood was buffered, so the batches are replayed AND the rebuild is requested.
+    /// Guards the ordering: sampling the buffer after the drain would read empty and drop the rebuild.
     #[test]
     fn degraded_goto_replays_buffer_and_requests_rebuild() {
         let mut op_buffer = vec![batch(), batch()];
@@ -1275,7 +1244,6 @@ mod tests {
             Outcome::Buffered
         ));
         assert!(in_op);
-        // In-op changes accumulate; live changes forward.
         assert!(matches!(
             on_event(files_changed("/r/a"), &mut in_op, &mut buf),
             Outcome::Buffered
@@ -1312,8 +1280,7 @@ mod tests {
 
     #[test]
     fn on_event_op_buffer_cap_recovers() {
-        // A lost completion boundary would otherwise grow the buffer forever and
-        // swallow every event; the cap recovers (unstick, clear, force rebuild).
+        // A lost completion boundary would otherwise grow the buffer forever and swallow every event
         let mut in_op = true;
         let mut buf: Vec<FsBatch> = (0..MAX_OP_BUFFER).map(|_| batch()).collect();
         match on_event(files_changed("/r/a"), &mut in_op, &mut buf) {
@@ -1357,21 +1324,19 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn debounce_bump_arms_then_extends_quiet_keeping_cap() {
         let mut d = Debounce::idle();
-        d.bump(); // idle -> arm
+        d.bump();
         assert!(d.active());
         let (quiet0, max0) = (d.quiet_deadline.unwrap(), d.max_deadline.unwrap());
 
         tokio::time::advance(Duration::from_millis(100)).await;
-        d.bump(); // active -> extend the quiet window, keep the max-wait cap
+        d.bump();
         assert!(d.quiet_deadline.unwrap() > quiet0);
         assert_eq!(d.max_deadline.unwrap(), max0, "bump must not push the cap");
     }
 
-    /// Advance the paused clock to `target`, resolving every debounce
-    /// deadline that falls due on the way through the real settle arm
-    /// (`on_settle_due`) under the given `in_op`; count the fires. Deadlines
-    /// coinciding with `target` resolve before the event at `target` is
-    /// processed, matching the loop's biased select order.
+    /// Advance the paused clock to `target`, resolving every debounce deadline that falls due on the way.
+    /// Each due deadline runs through the real settle arm (`on_settle_due`) under the given `in_op`, and fires are counted.
+    /// Deadlines coinciding with `target` resolve before the event at `target` is processed, matching the loop's biased select order.
     async fn advance_resolving_settles(
         target: tokio::time::Instant,
         debounce: &mut Debounce,
@@ -1403,21 +1368,18 @@ mod tests {
         }
     }
 
-    /// Feed the event stream a K-pick rebase produces through the real
-    /// `on_event`/`note_refresh_request`/`on_settle_due` seams; return the
-    /// number of refresh fires. Models fsnotify's settle semantics: the
-    /// source holds Completed for `SETTLE_MS` after each unlock, so picks
-    /// whose lock-free gap fits inside the settle window merge into a single
-    /// Started/Completed pair, while slower cadences emit per-pick pairs
-    /// whose Completed lags the unlock by the settle window.
+    /// Feed the event stream a K-pick rebase produces through the real `on_event`/`note_refresh_request`/`on_settle_due` functions.
+    /// Returns the number of refresh fires.
+    /// Models how fsnotify settles: the source holds Completed for `SETTLE_MS` after each unlock.
+    /// Picks whose lock-free gap fits inside the settle window merge into a single Started/Completed pair.
+    /// Slower cadences emit per-pick pairs whose Completed lags the unlock by the settle window.
     async fn run_rebase_cadence(
         picks: usize,
         pick_period: Duration,
         pick_duration: Duration,
     ) -> usize {
         let settle = Duration::from_millis(xai_fsnotify::SETTLE_MS);
-        // Uniform cadence: either every re-lock lands inside the previous
-        // pick's settle window (one merged op) or none does (per-pick pairs).
+        // Uniform cadence: either every re-lock lands inside the previous pick's settle window (one merged op) or none does (per-pick pairs)
         let merged = pick_period - pick_duration <= settle;
 
         let mut in_op = false;
@@ -1489,11 +1451,8 @@ mod tests {
         fires
     }
 
-    /// Picks slower than the settle window (1s apart, the big-repo rebase
-    /// cadence): the source still emits per-pick pairs, but every quiet
-    /// deadline lands inside the next pick's op window, so the settle arm
-    /// defers it — the single refresh fires after the last pick completes.
-    /// Before the in-op deferral this fired once per inter-pick gap.
+    /// Picks slower than the settle window (1s apart, the big-repo rebase cadence): the source still emits per-pick pairs.
+    /// Every quiet deadline lands inside the next pick's op window, so the settle arm defers it.
     #[tokio::test(start_paused = true)]
     async fn rebase_cadence_defers_mid_op_and_fires_once() {
         let fires =
@@ -1501,9 +1460,7 @@ mod tests {
         assert_eq!(fires, 1, "one refresh per rebase, after the last pick");
     }
 
-    /// Picks faster than the settle window: fsnotify merges all 16 lock
-    /// cycles into one operation, so the loop sees a single pair and fires a
-    /// single refresh. Before the merge this hit the max-wait cap twice.
+    /// Picks faster than the settle window: fsnotify merges all 16 lock cycles into one operation.
     #[tokio::test(start_paused = true)]
     async fn dense_rebase_cadence_merges_into_one_fire() {
         let fires =
@@ -1511,8 +1468,6 @@ mod tests {
         assert_eq!(fires, 1, "one refresh for the merged operation");
     }
 
-    /// on_settle_due decision table: mid-op and mid-refresh defer (re-armed,
-    /// rebuild request kept); otherwise fire, taking the request.
     #[tokio::test(start_paused = true)]
     async fn settle_due_defers_in_op_or_refreshing_and_fires_otherwise() {
         let mut d = Debounce::idle();
@@ -1544,10 +1499,8 @@ mod tests {
         assert_eq!(defers, 0, "fire resets the give-up counter");
     }
 
-    /// The give-up bound: a wedged op (stale `.git/index.lock`, no Completed
-    /// ever) defers exactly [`MAX_CONSECUTIVE_IN_OP_DEFERS`] times, then the
-    /// refresh fires anyway and the cycle restarts — refreshes are starved
-    /// for at most ~a minute, not forever.
+    /// The give-up bound: a wedged op (stale `.git/index.lock`, no Completed ever) defers exactly [`MAX_CONSECUTIVE_IN_OP_DEFERS`] times.
+    /// Then the refresh fires anyway and the cycle restarts, so refreshes starve for at most about a minute.
     #[tokio::test(start_paused = true)]
     async fn wedged_op_deferral_is_bounded() {
         let mut d = Debounce::idle();
@@ -1573,9 +1526,9 @@ mod tests {
         assert_eq!(defers, 0, "forced fire restarts the bound");
     }
 
-    /// The max-wait cap still owns non-op bursts: sustained sub-quiet bumps
-    /// (e.g. background-fetch ref churn arriving as GitMetaChanged) keep
-    /// pushing the quiet window, so the 3s cap is what forces the refresh.
+    /// The max-wait cap still bounds non-op bursts.
+    /// Bumps arriving faster than the quiet window (e.g. background-fetch ref churn delivered as GitMetaChanged) keep pushing it.
+    /// So the 3s cap is what forces the refresh.
     #[tokio::test(start_paused = true)]
     async fn sustained_non_op_bumps_fire_on_max_wait_cap() {
         let mut debounce = Debounce::idle();
@@ -1584,9 +1537,8 @@ mod tests {
         let mut fires = 0usize;
         let start = tokio::time::Instant::now();
 
-        // Bumps every 400ms (< 500ms quiet) from t=0 to t=2.8s: quiet never
-        // elapses between bumps, so only the cap (armed at t=0, due t=3.0s,
-        // before the last quiet deadline at 3.3s) can fire.
+        // Bumps every 400ms (under the 500ms quiet window) from t=0 to t=2.8s: quiet never elapses between bumps
+        // So only the cap (armed at t=0, due t=3.0s, before the last quiet deadline at 3.3s) can fire
         for k in 0..8u32 {
             advance_resolving_settles(
                 start + Duration::from_millis(400) * k,
@@ -1614,10 +1566,8 @@ mod tests {
         assert!(!debounce.active(), "cap fire clears the debounce");
     }
 
-    /// The residual mid-op hole: a debounce armed by pre-op activity (a
-    /// git-meta refresh request here) must not fire while the op is in
-    /// flight; the deferral re-arms it and the refresh runs exactly once
-    /// after Completed, rebuild request intact.
+    /// A debounce armed by pre-op activity (a git-meta refresh request here) must not fire while the op is in flight.
+    /// The deferral re-arms it and the refresh runs exactly once after Completed, rebuild request intact.
     #[tokio::test(start_paused = true)]
     async fn debounce_armed_pre_op_defers_mid_op_and_fires_once_after_completed() {
         let mut in_op = false;
@@ -1655,8 +1605,7 @@ mod tests {
         ));
         assert!(debounce.active() && rebuild_flag);
 
-        // Op completes (no head move, nothing buffered): the re-armed
-        // deadline fires exactly once, with the preserved rebuild request.
+        // Op completes (no head move, nothing buffered): the re-armed deadline fires exactly once, with the preserved rebuild request
         match on_event(
             FsEvent::GitOperationCompleted {
                 head_changed: false,

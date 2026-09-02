@@ -1,29 +1,22 @@
 //! Procedural art assets for the `/gboom` easter egg.
 //!
-//! Everything is generated in code — no binary assets, no copyrighted
-//! material. Wall textures are synthesized from hash noise, sprites are
-//! hand-drawn char-map pixel art, and text uses a tiny 5x7 pixel font.
+//! Everything is generated in code: no binary assets, no copyrighted material.
+//! Wall textures are synthesized from hash noise, sprites are hand-drawn char-map pixel art, and text uses a tiny 5x7 pixel font.
 
-/// RGB color.
 pub(super) type Rgb = [u8; 3];
 
 /// Wall texture side length (square).
 pub(super) const TEX_SIZE: usize = 64;
 
-/// The signature crimson red, shared by the title screen, end screens,
-/// and the overlay chrome so they always match.
+/// The signature crimson red, shared by the title screen, end screens, and the overlay chrome so they always match.
 pub const GBOOM_RED: Rgb = [235, 40, 32];
 
-/// Imp eye color. The renderer exempts exactly this color from distance
-/// fog so eyes glow in the dark; keep the sprite art and renderer in sync
-/// through this constant.
+/// Imp eye color. The renderer exempts exactly this color from distance fog so eyes glow in the dark.
+/// Keep the sprite art and renderer in sync through this constant.
 pub(super) const EYE_GLOW: Rgb = [255, 216, 0];
 
-/// Minimal xorshift64* PRNG.
-///
-/// The game needs determinism-friendly, allocation-free randomness for
-/// damage rolls and the fire effect — not `rand`-crate quality. Seeded
-/// per consumer so simulation and visuals stay independent streams.
+/// Minimal xorshift64* PRNG. Damage rolls and the fire effect need deterministic, allocation-free randomness, not `rand`-crate quality.
+/// Each consumer gets its own seed so simulation and visuals stay independent streams.
 pub(super) struct XorShift64(u64);
 
 impl XorShift64 {
@@ -44,7 +37,7 @@ impl XorShift64 {
     }
 }
 
-/// Deterministic 2D integer hash → `[0.0, 1.0)`. Used for texture noise.
+/// Deterministic 2D integer hash into `[0.0, 1.0)`, used for texture noise.
 fn hash01(x: u32, y: u32, seed: u32) -> f32 {
     let mut h = x
         .wrapping_mul(0x9E37_79B9)
@@ -96,7 +89,7 @@ fn brick() -> Texture {
             let c = if in_mortar {
                 mortar
             } else {
-                // Per-brick tone variation + per-pixel grain.
+                // Per-brick tone variation and per-pixel grain
                 let brick_id = (row as u32) * 31 + (((x + off) / 16) as u32);
                 let tone = 0.82 + 0.30 * hash01(brick_id, 7, 1);
                 let grain = 0.92 + 0.16 * hash01(x as u32, y as u32, 2);
@@ -158,8 +151,7 @@ fn tech() -> Texture {
     Texture { pixels }
 }
 
-/// Floor: large worn stone tiles with grime patches, kept dark so the
-/// fog gradient toward the horizon reads naturally.
+/// Floor: large worn stone tiles with grime patches, kept dark so the fog gradient toward the horizon reads naturally.
 pub(super) fn build_floor_texture() -> Texture {
     let base: Rgb = [96, 86, 74];
     let grout: Rgb = [44, 40, 36];
@@ -187,8 +179,8 @@ pub(super) fn build_floor_texture() -> Texture {
     Texture { pixels }
 }
 
-/// Ceiling: dark metal panels with sparse emissive light squares. The
-/// lights stay bright through fog shading simply by starting near white.
+/// Ceiling: dark metal panels with sparse emissive light squares.
+/// The lights stay bright through fog shading by starting near white.
 pub(super) fn build_ceiling_texture() -> Texture {
     let base: Rgb = [52, 56, 66];
     let seam: Rgb = [30, 32, 38];
@@ -267,7 +259,7 @@ fn sprite_color(ch: u8) -> Option<Rgb> {
     }
 }
 
-/// A char-map sprite: rows of equal length, `.` = transparent.
+/// A char-map sprite: rows of equal length, `.` is transparent.
 pub(super) struct Sprite {
     pub w: usize,
     pub h: usize,
@@ -636,9 +628,8 @@ mod tests {
 
     #[test]
     fn every_sprite_palette_char_is_used_in_art() {
-        // Keep the palette free of dead entries: every mapped char's color
-        // must appear in at least one sprite. Palette colors are distinct,
-        // so matching on color is equivalent to matching on char.
+        // Keep the palette free of dead entries: every mapped char's color must appear in at least one sprite
+        // Palette colors are distinct, so matching on color is equivalent to matching on char
         let mut used: std::collections::HashSet<Rgb> = std::collections::HashSet::new();
         let imps = build_imp_sprites();
         let guns = build_gun_sprites();

@@ -1,9 +1,6 @@
-//! ACP stdio clients for testing grok sessions end-to-end: the typed
-//! [`GrokStdioClient`] (`agent-client-protocol::ClientSideConnection` —
-//! authentication, session lifecycle, permissions, notification streaming) and
-//! the raw-wire [`RawStdioClient`] (verbatim JSON-RPC lines for shapes the
-//! typed client can't produce), all backed by the shared [`TestProcess`]
-//! lifecycle owner.
+//! ACP stdio clients for testing grok sessions end-to-end, both backed by the shared [`TestProcess`].
+//! [`GrokStdioClient`] drives the typed `agent-client-protocol` connection.
+//! [`RawStdioClient`] writes verbatim JSON-RPC lines for wire shapes the typed client cannot produce.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -110,7 +107,7 @@ impl acp::Client for TestAcpClient {
 
 /// Drives `grok agent stdio` via the ACP protocol over pipes.
 ///
-/// Handles the full lifecycle: spawn → initialize → authenticate → session → prompt.
+/// Handles the full lifecycle: spawn, initialize, authenticate, session, prompt.
 /// Child process is killed on drop.
 pub struct GrokStdioClient {
     conn: acp::ClientSideConnection,
@@ -229,7 +226,6 @@ impl GrokStdioClient {
         resp.session_id
     }
 
-    /// Create a session with a specific model pre-selected.
     pub async fn create_session_with_model(&self, cwd: &Path, model_id: &str) -> acp::SessionId {
         let resp = self
             .conn
@@ -317,7 +313,7 @@ impl GrokStdioClient {
         self.sandbox.as_ref().expect("test sandbox already taken")
     }
 
-    /// Timing breadcrumb for tuning CI timeout budgets (visible with --nocapture).
+    /// Logs elapsed time for tuning CI timeout budgets (visible with --nocapture).
     fn log_timing(what: &str, started: std::time::Instant) {
         eprintln!("[harness-timing] {what}: {:?}", started.elapsed());
     }
@@ -397,8 +393,8 @@ impl GrokStdioClient {
         session_id: &acp::SessionId,
         cwd: &Path,
     ) -> acp::LoadSessionResponse {
-        // 60s: session/load replays history and is slower under Rosetta
-        // (macos-x86_64 lifecycle CI). 20s flaked repeatedly there.
+        // 60s: session/load replays history and is slower under Rosetta (macos-x86_64 lifecycle CI)
+        // 20s flaked repeatedly there
         tokio::time::timeout(
             scaled(Duration::from_secs(60)),
             self.conn.load_session(
@@ -426,10 +422,9 @@ impl GrokStdioClient {
 
 /// Drives `grok agent stdio` with verbatim newline-delimited JSON-RPC lines.
 ///
-/// Exists for wire shapes the typed [`GrokStdioClient`] (`ClientSideConnection`,
-/// integer ids) can never produce — e.g. Xcode's Swift/Foundation `JSONEncoder`
-/// output: escaped-slash methods (`"session\/prompt"`) and string UUID request
-/// ids. Child process is killed on drop.
+/// Exists for wire shapes the typed [`GrokStdioClient`] (`ClientSideConnection`, integer ids) can never produce.
+/// Example: Xcode's Swift/Foundation `JSONEncoder` output, with escaped-slash methods (`"session\/prompt"`) and string UUID request ids.
+/// Child process is killed on drop.
 pub struct RawStdioClient {
     stdin: tokio::process::ChildStdin,
     stdout: tokio::io::BufReader<crate::process::TestProcessStdout>,
@@ -489,14 +484,12 @@ impl RawStdioClient {
         self.stdin.flush().await.expect("flush agent stdin");
     }
 
-    /// Read stdout lines until the response to `id` arrives (no `method` key +
-    /// exact string-id match) — returning IS the id-echo assertion: an id
-    /// echoed with different bytes or as a different JSON type never matches
-    /// and surfaces in the timeout diagnostics instead. Notifications are
-    /// skipped; any agent→client request is refused with a JSON-RPC error so a
-    /// turn can never hang on this capability-less client. On timeout the
-    /// panic reports how much non-matching traffic was seen (0 = true
-    /// silence, the acp-0.6 escaped-method symptom) plus the last few lines.
+    /// Read stdout lines until the response to `id` arrives: a message with no `method` key and an exact string-id match.
+    /// Returning is itself the id-echo assertion: an id echoed with different bytes or as a different JSON type never matches.
+    /// Notifications are skipped.
+    /// Any agent-to-client request is refused with a JSON-RPC error so a turn can never hang on this client, which advertises no capabilities.
+    /// On timeout the panic reports how much non-matching traffic was seen and the last few lines.
+    /// Zero traffic means true silence, the acp-0.6 escaped-method symptom.
     pub async fn response_for_id(
         &mut self,
         id: &str,
@@ -549,8 +542,7 @@ impl RawStdioClient {
     }
 }
 
-/// Record a non-matching line for [`RawStdioClient::response_for_id`]'s timeout
-/// diagnostics: bump the count, keep the last 3 lines (truncated).
+/// Record a non-matching line for [`RawStdioClient::response_for_id`]'s timeout diagnostics: bump the count, keep the last 3 lines (truncated).
 fn push_skipped_tail(skipped: &mut usize, tail: &mut Vec<String>, line: &str) {
     *skipped += 1;
     if tail.len() == 3 {

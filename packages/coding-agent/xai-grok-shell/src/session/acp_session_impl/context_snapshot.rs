@@ -1,15 +1,13 @@
-//! Session-start context occupancy snapshot.
+//! Counts the tokens each context category occupies when a session starts.
 //!
-//! Token counts come from `POST {xai_api_base_url}/tokenize-text` (the model's
-//! tokenizer), not the bytes/4 `/context` heuristic. Category texts are sent
-//! in parallel; the session-metrics event only receives the resulting counts.
+//! Token counts come from `POST {xai_api_base_url}/tokenize-text` (the model's tokenizer), not the bytes/4 `/context` heuristic.
+//! Category texts are sent in parallel; the session-metrics event only receives the resulting counts.
 
 use super::*;
 
 impl SessionActor {
-    /// Record itemized context occupancy for this session. No-op when
-    /// session metrics are disabled or there is no credential for the
-    /// tokenizer endpoint.
+    /// Record itemized context occupancy for this session.
+    /// No-op when session metrics are disabled or there is no credential for the tokenizer endpoint.
     pub(super) async fn emit_session_context_snapshot(&self) {
         if !self.telemetry_enabled || !xai_grok_telemetry::is_session_metrics_enabled() {
             return;
@@ -19,9 +17,9 @@ impl SessionActor {
             return;
         };
         let info = self.build_session_info().await;
-        // `/tokenize-text` is the xAI tokenizer. Always use the baked product
-        // default (`default_models.json` → grok-4.6), not the session model
-        // (which may be a third-party id the endpoint does not serve).
+        // `/tokenize-text` is the xAI tokenizer
+        // Always use the baked product default (grok-4.6 from `default_models.json`), not the session model
+        // The session model may be a third-party id the endpoint does not serve
         let model = crate::models::default_model();
         tracing::info!(model, "session_context_snapshot: tokenizing");
         let texts = self.snapshot_texts().await;

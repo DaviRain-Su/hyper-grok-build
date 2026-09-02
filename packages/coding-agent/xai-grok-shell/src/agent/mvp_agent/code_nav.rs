@@ -4,8 +4,8 @@
 use super::*;
 
 impl MvpAgent {
-    /// Parse the `x.ai/codeNavigation.enabled` capability from an initialize
-    /// request.  Returns `false` if the field is absent or not `true`.
+    /// Parse the `x.ai/codeNavigation.enabled` capability from an initialize request.
+    /// Returns `false` if the field is absent or not `true`.
     pub(crate) fn parse_code_nav_capability(init: &acp::InitializeRequest) -> bool {
         init.client_capabilities
             .meta
@@ -18,13 +18,11 @@ impl MvpAgent {
 
     /// Start (or reuse) the codebase index for an eligible code-nav request.
     ///
-    /// Returns `Some((handle, was_newly_started))` on success or `None` when
-    /// config/git-root checks prevent starting.  The bool is the authoritative
-    /// "first spawn vs reuse" signal threaded up from `CodebaseIndexManager`.
+    /// Returns `Some((handle, was_newly_started))` on success or `None` when config/git-root checks prevent starting.
+    /// The bool is the authoritative "first spawn vs reuse" signal threaded up from `CodebaseIndexManager`.
     ///
-    /// This is the narrow `pub(crate)` entry point for lazy index startup
-    /// from `extensions/code_nav.rs`.  Callers must verify eligibility with
-    /// [`code_nav_eligibility_for_request`] before calling this.
+    /// This is the narrow `pub(crate)` entry point for lazy index startup from `extensions/code_nav.rs`.
+    /// Callers must verify eligibility with [`code_nav_eligibility_for_request`] before calling this.
     #[tracing::instrument(name = "code_nav.index_start", skip_all)]
     pub(crate) fn start_codebase_index_for_code_nav(
         &self,
@@ -32,8 +30,7 @@ impl MvpAgent {
         cwd: &std::path::Path,
     ) -> Option<(std::sync::Arc<xai_codebase_graph::IndexManagerHandle>, bool)> {
         let (handle, was_newly_started) = self.resolve_codebase_index(cwd)?;
-        // Pin the index to the requesting session so the Weak in
-        // CodebaseIndexManager doesn't orphan it immediately.
+        // Pin the index to the requesting session so the Weak in CodebaseIndexManager doesn't orphan it immediately
         if let Some(sid) = session_id {
             self.session_registry
                 .set_codebase_index(sid, std::sync::Arc::clone(&handle));
@@ -41,12 +38,10 @@ impl MvpAgent {
         Some((handle, was_newly_started))
     }
 
-    /// Core eligibility check — pure function that accepts explicit client
-    /// context rather than reading global agent state.
+    /// Core eligibility check: a pure function that accepts explicit client context rather than reading global agent state.
     ///
-    /// This is the single place that applies all four gates.  Call it via
-    /// [`code_nav_eligibility_for_request`] (leader-mode safe) or
-    /// [`code_nav_eligibility`] (global state, non-leader use only).
+    /// This is the single place that applies all four gates.
+    /// Call it via [`code_nav_eligibility_for_request`] (leader-mode safe) or [`code_nav_eligibility`] (global state, non-leader use only).
     pub(super) fn code_nav_eligibility_inner(
         &self,
         cwd: &std::path::Path,
@@ -121,12 +116,10 @@ impl MvpAgent {
 
     /// Check eligibility using per-session context (leader-mode safe).
     ///
-    /// When `session_id` is provided, reads the session's own client type
-    /// and code-nav capability — the values that were in effect when that
-    /// specific client created the session.  This is correct in leader mode
-    /// where multiple clients share one agent process and `initialize()` is
-    /// called once per connection; the global fields on `MvpAgent` reflect
-    /// only the **last** client to call `initialize()`.
+    /// When `session_id` is provided, reads the session's own client type and code-nav capability.
+    /// Those are the values that were in effect when that specific client created the session.
+    /// This is correct in leader mode, where multiple clients share one agent process and `initialize()` is called once per connection.
+    /// The global fields on `MvpAgent` reflect only the **last** client to call `initialize()`.
     ///
     /// Falls back to global agent state when no session_id is given.
     pub(crate) fn code_nav_eligibility_for_request(
@@ -136,9 +129,9 @@ impl MvpAgent {
     ) -> Result<(), CodeNavEligibility> {
         let session_id = match session_id {
             Some(sid) => sid,
-            // No session_id: per-client capability cannot be determined without a
-            // session.  Reject with SessionRequired rather than fall back to shared
-            // global state.  Callers must provide sessionId for x.ai/code/* requests.
+            // No session_id: per-client capability cannot be determined without a session
+            // Reject with SessionRequired rather than fall back to shared global state
+            // Callers must provide sessionId for x.ai/code/* requests
             None => return Err(CodeNavEligibility::SessionRequired),
         };
 
@@ -147,20 +140,17 @@ impl MvpAgent {
             let ct = crate::http::client_type_from_origin(handle.origin_client.as_ref());
             (ct, handle.code_nav_enabled)
         } else {
-            // Session not found (evicted/unknown): reject rather than silently
-            // falling back to shared global state: that would reintroduce the
-            // last-client-wins bug for stale session IDs in leader mode.
+            // Session not found (evicted/unknown): reject rather than silently falling back to shared global state
+            // The fallback would reintroduce the last-client-wins bug for stale session IDs in leader mode
             return Err(CodeNavEligibility::SessionRequired);
         };
         self.code_nav_eligibility_inner(cwd, client_type, code_nav_enabled)
     }
 
-    /// Resolve and get-or-create the codebase index for `cwd`, applying config
-    /// and git-root eligibility checks.
+    /// Resolve and get-or-create the codebase index for `cwd`, applying config and git-root eligibility checks.
     ///
-    /// Returns `Some((handle, was_newly_started))` when an index is available,
-    /// `None` when config or git-root checks rule it out.  The bool is the
-    /// authoritative "was this a first spawn?" signal from the manager.
+    /// Returns `Some((handle, was_newly_started))` when an index is available, `None` when config or git-root checks rule it out.
+    /// The bool is the authoritative "was this a first spawn?" signal from the manager.
     pub(super) fn resolve_codebase_index(
         &self,
         cwd: &std::path::Path,
@@ -203,8 +193,7 @@ impl MvpAgent {
 
         let target = git_root.unwrap_or_else(|| cwd.to_path_buf());
         // get_or_create returns the authoritative (handle, was_newly_started) pair.
-        // Log only on actual first spawn so reuse requests are not misleadingly
-        // labelled as "starting".
+        // Log only on actual first spawn so reuse requests are not misleadingly labelled as "starting"
         let (handle, was_newly_started) = self.get_or_create_codebase_index(target.clone());
         if was_newly_started {
             tracing::info!(
@@ -229,8 +218,8 @@ impl MvpAgent {
         Vec::new()
     }
 
-    /// Returns `(handle, was_newly_started)` — the bool is the authoritative
-    /// "did this call spawn a new actor?" bit from `CodebaseIndexManager::get_or_create`.
+    /// Returns `(handle, was_newly_started)`.
+    /// The bool is the authoritative "did this call spawn a new actor?" bit from `CodebaseIndexManager::get_or_create`.
     pub(super) fn get_or_create_codebase_index(
         &self,
         cwd: PathBuf,

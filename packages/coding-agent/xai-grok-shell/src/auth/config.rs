@@ -10,8 +10,7 @@ fn default_oidc_scopes() -> Vec<String> {
         "api:access".into(),
     ]
 }
-/// Default scopes for the xAI OAuth2 provider. Includes `grok-cli:access`
-/// which authorizes the token for API proxy requests.
+/// Default scopes for the xAI OAuth2 provider. `grok-cli:access` authorizes the token for API proxy requests.
 fn default_oauth2_scopes() -> Vec<String> {
     vec![
         "openid".into(),
@@ -39,16 +38,15 @@ fn default_team_oauth2_scopes() -> Vec<String> {
         "workspaces:write".into(),
     ]
 }
-/// Pin automatic auth to one method via `[auth] preferred_method`. When set and
-/// the method is unavailable, auth fails with no fallthrough; unset keeps
-/// multi-method fallthrough. Config file only, not remote settings or env.
+/// Pins automatic auth to one method via `[auth] preferred_method`.
+/// When the pinned method is unavailable, auth fails rather than falling back; unset keeps the multi-method fallback.
+/// Only the config file can set this, not remote settings or env.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PreferredAuthMethod {
     /// `XAI_API_KEY` / auth.json `xai::api_key` / per-model BYOK (`xai.api_key`).
     ApiKey,
-    /// OIDC / OAuth2 session (`cached_token`, interactive `grok.com` / `oidc`,
-    /// including devbox-minted OIDC).
+    /// OIDC / OAuth2 session (`cached_token`, interactive `grok.com` / `oidc`, including devbox-minted OIDC).
     Oidc,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,28 +58,25 @@ pub struct GrokComConfig {
     /// OIDC config for customer-provided IdPs. See [`OidcAuthConfig`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oidc: Option<OidcAuthConfig>,
-    /// OAuth2 provider config. When set, preferred over the legacy relay flow.
+    /// OAuth2 provider config. When set, it is preferred over the legacy relay flow.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth2: Option<OAuth2ProviderConfig>,
-    /// External auth provider command (stdout = token, stderr = user UX, exit 0 = success).
+    /// External auth provider command; stdout carries the token, stderr the user-facing output, and exit 0 means success.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_provider_command: Option<String>,
     /// Login button label (env: `GROK_AUTH_PROVIDER_LABEL`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_provider_label: Option<String>,
-    /// Token TTL in seconds for external auth providers that output bare
-    /// tokens without `expires_in`. Synthesizes `expires_at` so proactive
-    /// refresh works. Env: `GROK_AUTH_TOKEN_TTL`.
+    /// Token TTL in seconds for external auth providers that output bare tokens without `expires_in`.
+    /// Synthesizes `expires_at` so proactive refresh works. Env: `GROK_AUTH_TOKEN_TTL`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_token_ttl: Option<u64>,
-    /// Admin kill switch: when `Some(true)`, the `xai.api_key` auth method is
-    /// neither advertised nor accepted, so `XAI_API_KEY`/per-model credentials
-    /// can't bypass the deployment's IdP login. Env: `GROK_DISABLE_API_KEY_AUTH`.
+    /// Admin kill switch: when `Some(true)`, the `xai.api_key` auth method is neither advertised nor accepted.
+    /// `XAI_API_KEY` and per-model credentials then can't bypass the deployment's IdP login. Env: `GROK_DISABLE_API_KEY_AUTH`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disable_api_key_auth: Option<bool>,
-    /// Restrict login to a specific team: the login token's team principal must
-    /// equal this. Also settable via `GROK_FORCE_LOGIN_TEAM_ID`; see
-    /// `resolve_force_login_team` for how the tiers resolve.
+    /// Restricts login to a specific team: the login token's team principal must equal this.
+    /// Also settable via `GROK_FORCE_LOGIN_TEAM_ID`; see `resolve_force_login_team` for how the tiers resolve.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_login_team_uuid: Option<ForceLoginTeam>,
     /// See [`PreferredAuthMethod`].
@@ -94,7 +89,7 @@ pub struct GrokComConfig {
 pub enum ForceLoginTeam {
     /// The only allowed team.
     Single(String),
-    /// Allowed teams; empty = fail closed.
+    /// Allowed teams; an empty list fails closed.
     AnyOf(Vec<String>),
 }
 /// Customer OIDC Identity Provider configuration (`[grok_com_config.oidc]`).
@@ -109,7 +104,7 @@ pub struct OidcAuthConfig {
 }
 /// OAuth2 provider configuration (`GROK_OAUTH2_ISSUER` / `GROK_OAUTH2_CLIENT_ID`).
 ///
-/// Uses the standard OAuth 2.1 Auth Code + PKCE flow via [`OidcAuthConfig`].
+/// Uses the standard OAuth 2.1 authorization code flow with PKCE via [`OidcAuthConfig`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OAuth2ProviderConfig {
     pub issuer: String,
@@ -120,14 +115,12 @@ pub struct OAuth2ProviderConfig {
     pub principal_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal_id: Option<String>,
-    /// Client-supplied referrer for OAuth usage-attribution analytics.
+    /// Client-supplied referrer so analytics can attribute OAuth usage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub referrer: Option<String>,
 }
 pub const XAI_OAUTH2_ISSUER: &str = "https://auth.x.ai";
-/// Production accounts-app origin allowlist. Its own const so the frozen
-/// contract test pins the production allowlist even when the non-production
-/// feature adds staging/local origins.
+/// A separate const so the frozen contract test pins the production allowlist even when the non-production feature adds staging and local origins.
 const PROD_ACCOUNTS_APP_ORIGINS: &[&str] = &["https://accounts.x.ai"];
 /// Production build: accepts only the production accounts app.
 pub(crate) fn allowed_accounts_app_origins() -> Vec<String> {
@@ -136,8 +129,7 @@ pub(crate) fn allowed_accounts_app_origins() -> Vec<String> {
         .map(|o| o.to_string())
         .collect()
 }
-/// Build a CORS layer that accepts requests from the accounts-app deployments
-/// listed in [`allowed_accounts_app_origins`] for the given HTTP method.
+/// Builds a CORS layer accepting requests from the deployments in [`allowed_accounts_app_origins`] for the given HTTP method.
 pub(crate) fn accounts_app_cors_layer(method: axum::http::Method) -> tower_http::cors::CorsLayer {
     tower_http::cors::CorsLayer::new()
         .allow_origin(tower_http::cors::AllowOrigin::list(
@@ -156,15 +148,13 @@ pub(crate) fn accounts_app_cors_layer(method: axum::http::Method) -> tower_http:
 /// Local-dev OAuth2 issuer (accounts-app running on localhost).
 const XAI_OAUTH2_LOCAL_ISSUER: &str = "http://localhost:22255";
 const DEFAULT_OAUTH2_REFERRER: &str = "grok-build";
-/// Returns `true` when `GROK_LOCAL_AUTH=1` is set,
-/// indicating the local accounts-app should be used as the OAuth2 issuer.
+/// Returns `true` when `GROK_LOCAL_AUTH=1` is set, indicating the local accounts-app should be used as the OAuth2 issuer.
 pub(crate) fn use_local_auth() -> bool {
     std::env::var("GROK_LOCAL_AUTH")
         .map(|v| !v.is_empty() && v != "0")
         .unwrap_or(false)
 }
-/// Returns the active xAI OAuth2 issuer: the local-dev issuer when
-/// `GROK_LOCAL_AUTH=1` is set, otherwise the production issuer.
+/// Returns the active xAI OAuth2 issuer: the local-dev issuer when `GROK_LOCAL_AUTH=1` is set, otherwise the production issuer.
 pub fn xai_oauth2_issuer() -> &'static str {
     if use_local_auth() {
         XAI_OAUTH2_LOCAL_ISSUER
@@ -173,8 +163,7 @@ pub fn xai_oauth2_issuer() -> &'static str {
     }
 }
 /// Whether `issuer` is a recognised xAI OAuth2 issuer (production or local-dev).
-/// Use this instead of comparing to [`XAI_OAUTH2_ISSUER`] so local-dev counts as
-/// first-party xAI auth.
+/// Use this instead of comparing to [`XAI_OAUTH2_ISSUER`] so local-dev counts as first-party xAI auth.
 pub fn is_xai_oauth2_issuer(issuer: &str) -> bool {
     issuer == XAI_OAUTH2_ISSUER || issuer == XAI_OAUTH2_LOCAL_ISSUER
 }
@@ -182,19 +171,16 @@ pub fn is_xai_oauth2_issuer(issuer: &str) -> bool {
 /// Matches the key format produced by the original `accounts.x.ai` relay auth.
 pub(crate) const LEGACY_AUTH_SCOPE: &str = "https://accounts.x.ai/sign-in";
 impl GrokComConfig {
-    /// Whether `xai.api_key` auth is disabled. Pinning a team
-    /// (`force_login_team_uuid`) implies this: team membership can't be verified
-    /// from a bare API key. The `GROK_DISABLE_API_KEY_AUTH` env lockdown is
-    /// OR-ed in live, so a lower-trust user `config.toml` cannot turn it back
-    /// off; `requirements.toml` already wins by layer precedence.
+    /// Pinning a team (`force_login_team_uuid`) disables `xai.api_key` auth: team membership can't be verified from a bare API key.
+    /// The `GROK_DISABLE_API_KEY_AUTH` env lockdown is read at call time and OR-ed in, so a lower-trust user `config.toml` cannot turn it back off.
+    /// `requirements.toml` already wins by layer precedence.
     pub(crate) fn api_key_auth_disabled(&self) -> bool {
         self.disable_api_key_auth == Some(true)
             || self.force_login_team_uuid.is_some()
             || env_lockdown_forced()
     }
-    /// When `preferred_method = api_key`, automatic OIDC paths (devbox mint,
-    /// interactive browser login, external auth provider) must not run: the pin
-    /// is fail-closed. Explicit `grok login --devbox`/`--api-key` bypass this.
+    /// When `preferred_method = api_key`, automatic OIDC paths (devbox mint, interactive browser login, external auth provider) must not run.
+    /// The pin is fail-closed; explicit `grok login --devbox` and `--api-key` bypass it.
     pub(crate) fn blocks_automatic_oidc(&self) -> bool {
         matches!(self.preferred_method, Some(PreferredAuthMethod::ApiKey))
     }
@@ -290,45 +276,39 @@ impl Default for GrokComConfig {
         }
     }
 }
-/// Parse a boolean env-var value for grok's on/off flags. Bare presence enables
-/// the flag, but falsy spellings (`0`, `false`, `off`, `no`, empty) count as
-/// disabled, so `GROK_DISABLE_API_KEY_AUTH=false` does NOT enable the flag.
+/// Parses a boolean env-var value for grok's on/off flags.
+/// Bare presence enables the flag, but falsy spellings (`0`, `false`, `off`, `no`, empty) count as disabled.
+/// `GROK_DISABLE_API_KEY_AUTH=false` therefore does NOT enable the flag.
 fn env_flag_enabled(value: &str) -> bool {
     !matches!(
         value.trim().to_ascii_lowercase().as_str(),
         "" | "0" | "false" | "off" | "no"
     )
 }
-/// True when the admin has set `GROK_DISABLE_API_KEY_AUTH` to a truthy value in
-/// the process environment. Read live (call-time) and OR-ed into
-/// `api_key_auth_disabled()` so the env lockdown is non-overridable by a
-/// user-layer `config.toml`.
+/// True when the admin has set `GROK_DISABLE_API_KEY_AUTH` to a truthy value in the process environment.
+/// It is read at call time and OR-ed into `api_key_auth_disabled()`, so a user-layer `config.toml` cannot override the lockdown.
 fn env_lockdown_forced() -> bool {
     std::env::var("GROK_DISABLE_API_KEY_AUTH")
         .ok()
         .is_some_and(|v| env_flag_enabled(&v))
 }
-/// Env var for the login-team pin. Named `..._TEAM_ID` (the user-facing "team
-/// id") while the config key stays `force_login_team_uuid` for backward
-/// compatibility; the two intentionally differ, so do not rename either.
+/// Env var for the login-team pin.
+/// It is named `..._TEAM_ID` (the user-facing "team id") while the config key stays `force_login_team_uuid` for backward compatibility.
+/// The two intentionally differ, so do not rename either.
 const FORCE_LOGIN_TEAM_ID_ENV: &str = "GROK_FORCE_LOGIN_TEAM_ID";
-/// The `GROK_FORCE_LOGIN_TEAM_ID` env override; the env tier in
-/// [`resolve_force_login_team`].
+/// The `GROK_FORCE_LOGIN_TEAM_ID` env override; the env tier in [`resolve_force_login_team`].
 pub(crate) fn force_login_team_from_env() -> Option<ForceLoginTeam> {
     let raw = std::env::var(FORCE_LOGIN_TEAM_ID_ENV).ok()?;
     parse_force_login_team(&raw)
 }
-/// The `force_login_team_uuid` pin from the merged `requirements.toml` / MDM
-/// layers; the non-overridable tier in [`resolve_force_login_team`]. Read live
-/// so the clamp holds on config-load paths that build `GrokComConfig` without a
-/// separate `apply_requirements` pass.
+/// The `force_login_team_uuid` pin from the merged `requirements.toml` / MDM layers; the non-overridable tier in [`resolve_force_login_team`].
+/// It is read at call time so the clamp holds on config-load paths that build `GrokComConfig` without a separate `apply_requirements` pass.
 pub(crate) fn force_login_team_from_requirements() -> Option<ForceLoginTeam> {
     force_login_team_from_requirements_value(&crate::config::load_merged_requirements()?)
 }
-/// Extract the `force_login_team_uuid` pin from a merged requirements value,
-/// reading the `[grok_com_config]` key and its `[auth]` alias. A present but
-/// unparseable value fails closed (an empty any-of, which blocks login), so a
-/// malformed pin on the highest-trust tier cannot silently drop the restriction.
+/// Extracts the `force_login_team_uuid` pin from a merged requirements value, reading the `[grok_com_config]` key and its `[auth]` alias.
+/// A present but unparseable value fails closed (an empty any-of, which blocks login).
+/// A malformed pin on the highest-trust tier therefore cannot silently drop the restriction.
 fn force_login_team_from_requirements_value(requirements: &toml::Value) -> Option<ForceLoginTeam> {
     let value = requirements
         .get("grok_com_config")
@@ -348,10 +328,9 @@ fn force_login_team_from_requirements_value(requirements: &toml::Value) -> Optio
         }
     }
 }
-/// Resolve the effective login-team pin by tier, highest precedence first:
-/// `requirements.toml` / MDM > `GROK_FORCE_LOGIN_TEAM_ID` env > merged
-/// user/managed `config.toml`. `requirements` is the non-overridable pin; the
-/// env override wins over user config but is clamped by it.
+/// Resolves the effective login-team pin by tier: `requirements` beats `env` beats `config`.
+/// `requirements` is the non-overridable `requirements.toml` / MDM pin.
+/// `env` (`GROK_FORCE_LOGIN_TEAM_ID`) wins over the merged user/managed `config.toml`.
 pub(crate) fn resolve_force_login_team(
     requirements: Option<ForceLoginTeam>,
     env: Option<ForceLoginTeam>,
@@ -359,11 +338,10 @@ pub(crate) fn resolve_force_login_team(
 ) -> Option<ForceLoginTeam> {
     requirements.or(env).or(config)
 }
-/// Parse a `GROK_FORCE_LOGIN_TEAM_ID` value into a [`ForceLoginTeam`]: a bare
-/// value is a single team, a JSON array is an any-of set (each element trimmed),
-/// and an empty or whitespace-only value yields `None`. A value that looks like
-/// a JSON array but does not parse fails closed (an empty any-of, which blocks
-/// login), so a typo in the array cannot silently drop the restriction.
+/// Parses a `GROK_FORCE_LOGIN_TEAM_ID` value into a [`ForceLoginTeam`].
+/// A bare value is a single team, a JSON array is an any-of set (each element trimmed), and an empty or whitespace-only value yields `None`.
+/// A value that looks like a JSON array but does not parse fails closed (an empty any-of, which blocks login).
+/// A typo in the array therefore cannot silently drop the restriction.
 fn parse_force_login_team(raw: &str) -> Option<ForceLoginTeam> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -435,10 +413,9 @@ mod tests {
         };
         assert_eq!(cfg.auth_scope(), "https://auth.x.ai::client-123");
     }
-    /// FROZEN loopback contract: the accounts-app origins the CLI's loopback
-    /// callback server accepts cross-origin requests from. The consent page
-    /// (served from accounts.x.ai) delivers the code via `fetch(..., cors)`, so
-    /// removing an origin breaks loopback delivery for already-installed CLIs.
+    /// FROZEN loopback contract: the accounts-app origins the CLI's loopback callback server accepts cross-origin requests from.
+    /// The consent page (served from accounts.x.ai) delivers the code via `fetch(..., cors)`.
+    /// Removing an origin therefore breaks loopback delivery for already-installed CLIs.
     /// Keep in sync with the oauth2-provider / accounts-app deployments.
     /// Non-production / local-dev origins are opt-in only.
     #[test]
@@ -447,8 +424,7 @@ mod tests {
         assert_eq!(allowed_accounts_app_origins(), PROD_ACCOUNTS_APP_ORIGINS);
     }
     /// FROZEN client contract: the 10 scopes the xAI OAuth2 client requests.
-    /// The server must keep accepting all of them; existing tokens carry
-    /// exactly this set.
+    /// The server must keep accepting all of them; existing tokens carry exactly this set.
     #[test]
     fn default_oauth2_scopes_are_frozen() {
         let scopes = default_oauth2_scopes();
@@ -488,8 +464,7 @@ mod tests {
         let cfg: GrokComConfig = toml::from_str("").expect("parse empty");
         assert_eq!(cfg.preferred_method, None);
     }
-    /// Every `GROK_FORCE_LOGIN_TEAM_ID` shape: bare value, arrays, empty-array,
-    /// malformed, and empty/whitespace.
+    /// Every `GROK_FORCE_LOGIN_TEAM_ID` shape: bare value, arrays, empty-array, malformed, and empty/whitespace.
     #[test]
     fn parse_force_login_team_handles_all_shapes() {
         assert_eq!(
@@ -518,7 +493,7 @@ mod tests {
         assert_eq!(parse_force_login_team(""), None);
         assert_eq!(parse_force_login_team("   "), None);
     }
-    /// Precedence by tier: requirements > env > user/managed config.
+    /// Precedence by tier: requirements wins over env, which wins over user/managed config.
     #[test]
     fn resolve_force_login_team_precedence() {
         let req = || Some(ForceLoginTeam::Single("req-team".into()));
@@ -532,9 +507,8 @@ mod tests {
         assert_eq!(resolve_force_login_team(None, None, cfg()), cfg());
         assert_eq!(resolve_force_login_team(None, None, None), None);
     }
-    /// Requirements extraction from the `[grok_com_config]` key and its `[auth]`
-    /// alias. A present but malformed value fails closed (empty any-of), never
-    /// `None`; an absent field is `None`.
+    /// Extraction from the `[grok_com_config]` key and its `[auth]` alias.
+    /// A present but malformed value fails closed (empty any-of), never `None`; an absent field is `None`.
     #[test]
     fn force_login_team_from_requirements_value_extracts_and_fails_closed() {
         fn pin(toml_str: &str) -> Option<ForceLoginTeam> {

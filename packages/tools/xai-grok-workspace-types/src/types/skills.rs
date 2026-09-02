@@ -1,13 +1,10 @@
-//! Discovery shapes for skills surfaced by `OpsChunk::Skills` and
-//! `WorkspaceEvent::SkillsChanged`.
+//! Discovery shapes for skills carried by `OpsChunk::Skills` and `WorkspaceEvent::SkillsChanged`.
 //!
-//! NOTE: this `source`-keyed `SkillInfo` is **not** the wire shape of
-//! the `workspace.discover_skills` RPC -- that is
-//! [`crate::rpc::skills::SkillInfo`] (`scope`-keyed).
+//! NOTE: this `source`-keyed `SkillInfo` is **not** the wire shape of the `workspace.discover_skills` RPC.
+//! That RPC uses [`crate::rpc::skills::SkillInfo`] (`scope`-keyed).
 
 use serde::{Deserialize, Serialize};
 
-/// Discovered skill metadata.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillInfo {
     /// Stable identifier (also the slash-command name).

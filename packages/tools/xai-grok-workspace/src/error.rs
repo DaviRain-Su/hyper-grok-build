@@ -1,4 +1,3 @@
-//! Workspace error types.
 use crate::capability::CapabilityMode;
 /// Errors surfaced by the workspace public API.
 ///
@@ -26,8 +25,8 @@ pub enum WorkspaceError {
     },
     #[error("session {caller:?} is not authorised to operate on session {target:?}")]
     Unauthorized { caller: String, target: String },
-    /// A toolset mutation was rejected because the target session has an
-    /// active turn. Retryable at the turn boundary (`after_turn`).
+    /// A toolset mutation was rejected because the target session has an active turn.
+    /// Retryable at the turn boundary (`after_turn`).
     #[error("turn active for session {0}; retry the tool-config update at the turn boundary")]
     TurnActive(String),
     #[error("maximum fork depth exceeded for parent session {parent:?}")]
@@ -50,22 +49,18 @@ pub enum WorkspaceError {
         kind: xai_grok_workspace_types::rpc::export_github::ExportGithubError,
         message: String,
     },
-    /// The workspace is draining/shutting down and is no longer accepting new
-    /// sessions. Surfaced when a `bind`/create races a terminal drain so the
-    /// shared upload queue is never torn down out from under a fresh session.
+    /// The workspace is draining/shutting down and is no longer accepting new sessions.
+    /// Surfaced when a `bind`/create races a terminal drain so the shared upload queue is never torn down out from under a fresh session.
     #[error("workspace is shutting down; not accepting new sessions")]
     ShuttingDown,
-    /// The session's toolset is externally owned — installed by a local
-    /// (shell) bind, its `Terminal` resource is not the session-owned
-    /// backend — so an RPC-driven toolset mutation is refused instead of
-    /// silently skipped. Hard error: retrying cannot succeed while the
-    /// local bind holds the toolset.
+    /// The session's toolset is externally owned: a local (shell) bind installed it, and its `Terminal` resource is not the session-owned backend.
+    /// An RPC-driven toolset mutation is refused instead of silently skipped.
+    /// Hard error: retrying cannot succeed while the local bind holds the toolset.
     #[error("toolset externally owned (local bind), mutation refused: {0}")]
     ToolsetExternallyOwned(String),
 }
 impl WorkspaceError {
-    /// Low-cardinality `error_kind` metric label: the variant name in
-    /// snake_case; `DeployError` reports its per-kind `wire_code()`.
+    /// Low-cardinality `error_kind` metric label: the variant name in snake_case; `DeployError` reports its per-kind `wire_code()`.
     pub fn metric_kind(&self) -> &'static str {
         match self {
             Self::ParentSessionNotFound(_) => "parent_session_not_found",
@@ -90,7 +85,6 @@ impl WorkspaceError {
         }
     }
 }
-/// Convenience alias for the workspace's primary `Result` type.
 pub type WorkspaceResult<T> = Result<T, WorkspaceError>;
 #[cfg(test)]
 mod tests {

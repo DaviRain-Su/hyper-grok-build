@@ -1,9 +1,5 @@
-//! Hook dispatch concern for `SessionActor`: run contexts, hook execution
-//! notifications and telemetry, and turn/tool outcome mapping.
-
 use super::*;
 
-/// Map a turn result to the hub protocol's `TurnHookOutcome`.
 pub(super) fn turn_result_to_hook_outcome(
     result: &Result<TurnOutcome, acp::Error>,
 ) -> xai_tool_protocol::turn_hook::TurnHookOutcome {
@@ -19,10 +15,8 @@ pub(super) fn turn_result_to_hook_outcome(
     }
 }
 
-/// Encode a [`CancellationCategory`](crate::session::events::CancellationCategory)
-/// as its bare snake_case wire string for the `after_turn` hook payload.
-/// Deliberately `serde_json::to_value` + `as_str`, NOT `to_string` — the
-/// latter yields the quoted form and fails the workspace decode.
+/// Encode a [`CancellationCategory`](crate::session::events::CancellationCategory) as its bare snake_case wire string for the `after_turn` payload.
+/// Deliberately `serde_json::to_value` then `as_str`, not `to_string`: that yields the quoted form and fails the workspace decode.
 pub(super) fn cancellation_category_to_wire_string(
     category: Option<crate::session::events::CancellationCategory>,
 ) -> Option<String> {
@@ -32,13 +26,8 @@ pub(super) fn cancellation_category_to_wire_string(
         .and_then(|v| v.as_str().map(String::from))
 }
 
-/// Map shell-internal `ToolOutcome` to the hub protocol's `ToolCallOutcome`.
-///
-/// The shell's granular `ToolOutcome` variants collapse to the hub protocol's
-/// three:
-/// - `Success` → tool executed and returned a result
-/// - `Error` → tool failed to execute or was invalid
-/// - `Cancelled` → tool never ran (permission, doom-loop, hook, followup)
+/// The shell's granular `ToolOutcome` variants collapse to the hub protocol's three.
+/// `Cancelled` means the tool never ran (permission, doom-loop, hook, followup).
 pub(super) fn map_tool_outcome(
     outcome: crate::session::events::ToolOutcome,
 ) -> xai_tool_protocol::session_event::ToolCallOutcome {
@@ -55,13 +44,11 @@ pub(super) fn map_tool_outcome(
     }
 }
 
-/// Returns `(notification_type, message, title, level)` when this update should
-/// trigger a vendor-compatible `Notification` hook.
+/// Returns `(notification_type, message, title, level)` when this update should trigger a vendor-compatible `Notification` hook.
 ///
-/// Internal/high-frequency updates (hook scrollback, retry progress, config
-/// changes) are excluded so migrated hooks only fire on user-attention
-/// events — not on every tool call or session tick. `DiffReview` always waits
-/// on the user, so it is safe to fire `permission_prompt` here.
+/// Internal and high-frequency updates (hook scrollback, retry progress, config changes) are excluded.
+/// Migrated hooks fire only on updates that need the user's attention.
+/// `DiffReview` always waits on the user, so it is safe to fire `permission_prompt` here.
 #[allow(clippy::type_complexity)]
 pub(super) fn notification_hook_for_update(
     update: &XaiSessionUpdate,
@@ -95,6 +82,11 @@ pub(super) fn notification_hook_for_update(
     }
 }
 
+pub(super) struct DeferredPostToolUseScrollback {
+    tool_name: String,
+    results: Vec<xai_grok_hooks::result::HookRunResult>,
+}
+
 impl SessionActor {
     pub(super) fn hook_run_ctx(&self) -> xai_grok_hooks::runner::RunContext<'_> {
         xai_grok_hooks::runner::RunContext {
@@ -104,10 +96,7 @@ impl SessionActor {
         }
     }
 
-    /// Send a hook annotation to the TUI scrollback.
-    ///
-    /// Rendered inline with the preceding tool call block rather than as
-    /// a separate agent message.
+    /// The annotation renders inline with the preceding tool call block rather than as a separate agent message.
     pub(super) async fn send_hook_annotation(&self, message: &str) {
         self.send_xai_notification(XaiSessionUpdate::HookAnnotation {
             message: message.to_string(),
@@ -115,10 +104,7 @@ impl SessionActor {
         .await;
     }
 
-    /// Send structured hook execution data for rich scrollback rendering.
-    ///
-    /// `prompt_id` is `None` for session-level dispatches (session_start /
-    /// session-end stop).
+    /// `prompt_id` is `None` for session-level dispatches (session_start / session-end stop).
     pub(super) async fn send_hook_execution(
         &self,
         event_name: &str,
@@ -207,13 +193,12 @@ impl SessionActor {
         }
     }
 
-    /// Returns the resolved workspace root for hook envelopes.
     pub(super) fn hook_workspace_root(&self) -> String {
         self.hook_resolved_workspace_root.clone()
     }
 
-    /// Subagent type for tool-hook attribution, or `None` for the top-level session. Prefers
-    /// the task `subagent_type`, falling back to the agent definition name for older spawns.
+    /// Subagent type for tool-hook attribution, or `None` for the top-level session.
+    /// Prefers the task `subagent_type`, falling back to the agent definition name for older spawns.
     pub(super) fn subagent_type_label(&self) -> Option<String> {
         if !self.startup_hints.is_subagent {
             return None;
@@ -226,7 +211,6 @@ impl SessionActor {
         )
     }
 
-    /// The session's current permission mode (`plan` / `bypassPermissions` / `auto` / `default`).
     pub(super) fn permission_mode_label(&self) -> &'static str {
         if self.plan_mode.lock().is_active() {
             "plan"
@@ -239,9 +223,7 @@ impl SessionActor {
         }
     }
 
-    /// Dispatch a non-blocking hook event: build the envelope, fire observe-only
-    /// client hooks, then run the on-disk registry. No-op (no payload built) when no
-    /// hook listens for `event`, so it stays inert when unused.
+    /// Dispatch a non-blocking hook event: build the envelope, fire observe-only client hooks, then run the on-disk registry.
     pub(super) async fn dispatch_hook(
         &self,
         event: xai_grok_hooks::event::HookEventName,
@@ -258,8 +240,7 @@ impl SessionActor {
             return;
         };
         let ctx = self.hook_run_ctx();
-        // Prompt-gate events go through dispatch_prompt_submit_hook;
-        // dispatch_non_blocking debug-asserts observe-only.
+        // Prompt-gate events go through dispatch_prompt_submit_hook; dispatch_non_blocking debug-asserts observe-only
         let results =
             xai_grok_hooks::dispatcher::dispatch_non_blocking(&registry, event, &envelope, &ctx)
                 .await;
@@ -269,9 +250,139 @@ impl SessionActor {
             .await;
     }
 
-    /// Enforcement scope for a prompt-gate block: only a real user prompt on
-    /// a top-level session. The event fires for every origin, but synthetic
-    /// wakes and subagent sessions run the gate observe-only.
+    pub(super) async fn dispatch_post_tool_use_hook(
+        &self,
+        prepared: &PreparedToolCall,
+        output: &ToolsToolOutput,
+        duration_ms: Option<u64>,
+    ) -> (PostToolUseDelivery, Option<DeferredPostToolUseScrollback>) {
+        use xai_grok_hooks::event::{HookEventName, HookPayload, truncate_payload};
+
+        if !self.may_have_hooks_for(HookEventName::PostToolUse) {
+            return (PostToolUseDelivery::default(), None);
+        }
+
+        let tool_result = serde_json::to_value(output).unwrap_or(serde_json::Value::Null);
+        let raw_input: serde_json::Value =
+            serde_json::from_str(&prepared.raw_arguments).unwrap_or(serde_json::Value::Null);
+        let (tool_input_value, tool_input_truncated) = truncate_payload(raw_input);
+        let (tool_result_value, tool_result_truncated) = truncate_payload(tool_result);
+        let hook_tool_name = prepared.hook_tool_name().to_owned();
+
+        let event = HookEventName::PostToolUse.to_string();
+        let envelope = self.make_hook_envelope(
+            HookEventName::PostToolUse,
+            None,
+            HookPayload::PostToolUse {
+                tool_name: hook_tool_name.clone(),
+                tool_use_id: prepared.call_id.clone(),
+                tool_input: tool_input_value,
+                tool_result: tool_result_value,
+                tool_input_truncated,
+                tool_result_truncated,
+                duration_ms,
+                is_backgrounded: false,
+                subagent_type: self.subagent_type_label(),
+            },
+        );
+        let registry = self.hook_registry.borrow().clone();
+        let mut dispatch_result = if let Some(registry) = registry {
+            let ctx = self.hook_run_ctx();
+            xai_grok_hooks::dispatcher::dispatch_post_tool_use(&registry, &envelope, &ctx).await
+        } else {
+            xai_grok_hooks::dispatcher::PostToolUseResult::default()
+        };
+        // Client PostToolUse runs the awaited gate though it is not yet in
+        // ADVERTISED_BLOCKING_EVENTS; SDK clients dispatch by callback id and answer.
+        dispatch_result.merge(self.run_post_tool_use_client_hooks(&envelope).await);
+
+        let mut results = std::mem::take(&mut dispatch_result.results);
+        let delivery = plan_post_tool_use_delivery(
+            dispatch_result,
+            output,
+            self.reminder_wrapper_tag(),
+            &mut results,
+        );
+
+        self.emit_hook_executed_telemetry(&event, Some(&hook_tool_name), &results)
+            .await;
+        let deferred = DeferredPostToolUseScrollback {
+            tool_name: hook_tool_name,
+            results,
+        };
+        (delivery, Some(deferred))
+    }
+
+    pub(super) async fn emit_post_tool_use_scrollback(
+        &self,
+        deferred: DeferredPostToolUseScrollback,
+    ) {
+        let event = xai_grok_hooks::event::HookEventName::PostToolUse.to_string();
+        self.send_hook_execution(&event, Some(&deferred.tool_name), None, &deferred.results)
+            .await;
+    }
+
+    /// Build the `PostToolUseFailure` payload from a dispatched call and run the
+    /// context-only failure path. Sole hook-presence gate for both failure
+    /// sites (MCP error result and hard dispatch error).
+    pub(super) async fn dispatch_tool_failure(
+        &self,
+        prepared: &PreparedToolCall,
+        error_text: String,
+        duration_ms: u64,
+    ) -> Vec<xai_grok_hooks::dispatcher::AdditionalContext> {
+        if !self.may_have_hooks_for(xai_grok_hooks::event::HookEventName::PostToolUseFailure) {
+            return Vec::new();
+        }
+        let raw_input: serde_json::Value =
+            serde_json::from_str(&prepared.raw_arguments).unwrap_or(serde_json::Value::Null);
+        let (tool_input, tool_input_truncated) = xai_grok_hooks::event::truncate_payload(raw_input);
+        let hook_tool_name = prepared.hook_tool_name();
+        self.dispatch_post_tool_use_failure_hook(
+            xai_grok_hooks::event::HookPayload::PostToolUseFailure {
+                tool_name: hook_tool_name.to_owned(),
+                tool_use_id: prepared.call_id.clone(),
+                tool_input,
+                tool_input_truncated,
+                error: error_text,
+                duration_ms: Some(duration_ms),
+                // No clean abort/cancel signal at these dispatch sites; failures
+                // here are tool-reported, never interrupts.
+                is_interrupt: false,
+                subagent_type: self.subagent_type_label(),
+            },
+            hook_tool_name,
+        )
+        .await
+    }
+
+    /// Dispatch a `PostToolUseFailure` event: fire observe-only client hooks,
+    /// then run the on-disk registry's context-only failure path. Returns the
+    /// aggregated `additionalContext` notes for the caller to deliver after the
+    /// failed tool result. Context-only — no block or output replacement.
+    async fn dispatch_post_tool_use_failure_hook(
+        &self,
+        payload: xai_grok_hooks::event::HookPayload,
+        tool_name: &str,
+    ) -> Vec<xai_grok_hooks::dispatcher::AdditionalContext> {
+        let event = xai_grok_hooks::event::HookEventName::PostToolUseFailure;
+        let envelope = self.fire_hook(event, None, payload);
+        let Some(registry) = self.hook_registry.borrow().clone() else {
+            return Vec::new();
+        };
+        let ctx = self.hook_run_ctx();
+        let result =
+            xai_grok_hooks::dispatcher::dispatch_post_tool_use_failure(&registry, &envelope, &ctx)
+                .await;
+        self.send_hook_execution(&event.to_string(), Some(tool_name), None, &result.results)
+            .await;
+        self.emit_hook_executed_telemetry(&event.to_string(), Some(tool_name), &result.results)
+            .await;
+        result.additional_context
+    }
+
+    /// Enforcement scope for a prompt-gate block: only a real user prompt on a top-level session.
+    /// The event fires for every origin, but synthetic wakes and subagent sessions run the gate observe-only.
     pub(super) fn should_enforce_prompt_block(
         &self,
         policy: &xai_agent_lifecycle::InputPolicy,
@@ -279,10 +390,8 @@ impl SessionActor {
         policy.authority.is_human_intent() && !self.startup_hints.is_subagent
     }
 
-    /// Run the `UserPromptSubmit` prompt gate: observe client hooks, then the
-    /// on-disk registry, with the shared scrollback and telemetry side
-    /// effects. Returns the gate verdict; the caller decides whether to
-    /// enforce it (`Block` rejects the prompt).
+    /// Run the `UserPromptSubmit` prompt gate: observe client hooks, then the on-disk registry, with shared scrollback and telemetry side effects.
+    /// Returns the gate verdict; the caller decides whether to enforce it (`Block` rejects the prompt).
     pub(super) async fn dispatch_prompt_submit_hook(
         &self,
         payload: xai_grok_hooks::event::HookPayload,
@@ -383,6 +492,7 @@ mod notification_hook_filter_tests {
             attempt: 1,
             max_retries: 3,
             reason: "timeout".into(),
+            error_type: None,
         });
         assert!(notification_hook_for_update(&update).is_none());
     }

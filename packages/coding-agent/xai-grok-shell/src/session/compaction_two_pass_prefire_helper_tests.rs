@@ -19,7 +19,7 @@ fn fingerprint_changes_when_prefix_content_changes() {
     ];
     let edited = vec![
         ConversationItem::system("sys"),
-        ConversationItem::user("HELLO there"), // a real edit/rewind of the prefix
+        ConversationItem::user("HELLO there"), // The changed text stands in for a real edit or rewind of the prefix
     ];
     assert_ne!(
         fingerprint_prefix(&base),

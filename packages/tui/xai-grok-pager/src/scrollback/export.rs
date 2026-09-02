@@ -56,7 +56,7 @@ pub fn render_blocks_to_markdown<'a>(blocks: impl IntoIterator<Item = &'a Render
                 out.push('\n');
                 last_was_agent = false;
             }
-            // Skip all non-conversation chrome: Thinking, System, SessionEvent, BgTask, Subagent, Btw, CreditLimit, Stub, etc
+            // Skip all non-conversation chrome: Thinking, System, SessionEvent, BgTask, Subagent, Btw, Stub, etc
             // A skipped Thinking block leaves `last_was_agent` set, so agent messages around it share one header
             _ => {}
         }

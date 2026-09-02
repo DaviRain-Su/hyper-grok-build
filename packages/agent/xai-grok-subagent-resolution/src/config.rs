@@ -326,17 +326,6 @@ description = "Path to write the summary"
     }
 
     #[test]
-    fn render_io_summary_empty_description_falls_through_to_instructions() {
-        let persona = SubagentPersona {
-            description: Some("".to_owned()),
-            instructions: Some("Actual description here.".to_owned()),
-            ..Default::default()
-        };
-        let summary = persona.render_io_summary("test");
-        assert!(summary.contains("Actual description here."));
-    }
-
-    #[test]
     fn render_io_summary_whitespace_description_falls_through_to_instructions() {
         let persona = SubagentPersona {
             description: Some("   ".to_owned()),

@@ -1,16 +1,11 @@
-//! Minimal shell-token syntax for completion: find the token under the
-//! cursor and re-quote completed components to match how it was typed.
-//! Consumed by the file provider; the natural home for the $PATH provider's
-//! segmentation too, once it learns quoting.
+//! Minimal shell-token syntax for completion: find the token under the cursor and re-quote completed components to match how it was typed.
+//! Consumed by the file provider; the natural home for the $PATH provider's segmentation too, once it learns quoting.
 //!
 //! ## Scope (deliberately minimal)
 //!
-//! [`parse_current_token`] understands just enough POSIX-shell syntax to
-//! find the token under the cursor: double/single quotes, backslash
-//! escapes, whitespace, the segment separators `|`/`;`/`&`, and the
-//! redirection operators `<`/`>`. It does NOT model the full grammar:
-//! no subshells or `$(…)`, no here-docs, no brace/glob expansion, no
-//! `~user` home lookup.
+//! [`parse_current_token`] understands just enough POSIX-shell syntax to find the token under the cursor.
+//! It handles double/single quotes, backslash escapes, whitespace, the segment separators `|`/`;`/`&`, and the redirection operators `<`/`>`.
+//! It does NOT model the full grammar: no subshells or `$(…)`, no here-docs, no brace/glob expansion, no `~user` home lookup.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum QuoteStyle {
@@ -22,33 +17,30 @@ pub(super) enum QuoteStyle {
 /// The shell token under the cursor plus the segment facts completion needs.
 #[derive(Debug)]
 pub(super) struct CurrentToken {
-    /// Byte offset in the request text where the token starts (an opening
-    /// quote is part of the token) — the start of the replace range.
+    /// Byte offset in the request text where the token starts (an opening quote is part of the token); the start of the replace range.
     pub(super) start: usize,
     /// Unquoted/unescaped value typed so far.
     pub(super) value: String,
     /// `value` length right after its last `/` (`None`: no slash).
     pub(super) dir_value_len: Option<usize>,
-    /// Byte offset just after the last raw `/` (== `start` without one).
+    /// Byte offset just after the last raw `/` (equals `start` when there is none).
     pub(super) dir_raw_end: usize,
     /// Quote state at the cursor.
     pub(super) quote: QuoteStyle,
     /// Byte offset of the still-open quote (meaningful when `quote != None`).
     pub(super) open_quote_idx: usize,
-    /// Quote structure of the REPLACED component when no quote is open at
-    /// the cursor: the style of a quote whose closer sits inside the
-    /// component (at/after `dir_raw_end`), plus whether its opener does too
-    /// (and so needs re-emitting). `None`: quote-free component.
+    /// Quote structure of the REPLACED component when no quote is open at the cursor.
+    /// It holds the style of a quote whose closer sits inside the component (at/after `dir_raw_end`).
+    /// The bool says whether its opener sits inside too (and so needs re-emitting). `None`: quote-free component.
     pub(super) closed_quote: Option<(QuoteStyle, bool)>,
-    /// Byte-aligned with `value`: `true` where the char was consumed
-    /// unquoted and unescaped — the only spellings the shell expands
-    /// `~`/`$` in (`'$HOME'`, `\$HOME`, and `"~/…` are literal to it).
+    /// Byte-aligned with `value`: `true` where the char was consumed unquoted and unescaped.
+    /// Those are the only spellings the shell expands `~`/`$` in (`'$HOME'`, `\$HOME`, and `"~/…` are literal to it).
     pub(super) plain_mask: Vec<bool>,
     /// Completed tokens before this one in the current segment.
     pub(super) tokens_before: usize,
     /// The segment's command word (first non-redirect-target token value).
     pub(super) command: Option<String>,
-    /// Token directly follows `<`/`>` — always a file argument.
+    /// Token directly follows `<`/`>`: always a file argument.
     pub(super) after_redirect: bool,
 }
 
@@ -65,8 +57,7 @@ struct TokenBuild {
 }
 
 impl TokenBuild {
-    /// `plain`: the char reached `value` unquoted and unescaped — the only
-    /// provenance the shell expands `~`/`$` in.
+    /// `plain`: the char reached `value` unquoted and unescaped, the only spelling the shell expands `~`/`$` in.
     fn push(&mut self, i: usize, c: char, plain: bool) {
         self.value.push(c);
         self.plain_mask
@@ -104,10 +95,9 @@ fn finish_token(
     }
 }
 
-/// Scan the cursor prefix and return the token being typed. Quotes hide
-/// separators (`echo "a | b` is one segment), backslashes escape the next
-/// char, and `|`/`;`/`&` reset the segment. A dangling backslash at the
-/// cursor contributes no value char but stays inside the token extent.
+/// Scan the cursor prefix and return the token being typed.
+/// Quotes hide separators (`echo "a | b` is one segment), backslashes escape the next char, and `|`/`;`/`&` reset the segment.
+/// A dangling backslash at the cursor contributes no value char but stays inside the token extent.
 pub(super) fn parse_current_token(prefix: &str) -> CurrentToken {
     let mut cur: Option<TokenBuild> = None;
     let mut quote = QuoteStyle::None;
@@ -117,10 +107,9 @@ pub(super) fn parse_current_token(prefix: &str) -> CurrentToken {
     let mut command: Option<String> = None;
     let mut pending_redirect = false;
 
-    // Escape/quote state implies a token exists (`ensure_token` ran when the
-    // state was entered), so the `ensure_token` calls below are no-op
-    // lookups on valid input — but this parses arbitrary wire text, and a
-    // mis-tokenized line must degrade, never panic the agent.
+    // Escape/quote state implies a token exists (`ensure_token` ran when the state was entered)
+    // So the `ensure_token` calls below are no-op lookups on valid input
+    // But this parses arbitrary wire text, and a mis-tokenized line must degrade, never panic the agent
     for (i, c) in prefix.char_indices() {
         if escape {
             escape = false;
@@ -215,9 +204,8 @@ pub(super) fn parse_current_token(prefix: &str) -> CurrentToken {
                 Vec::new(),
             ),
         };
-    // A closure before the component boundary is raw-dir-internal
-    // (balanced, kept verbatim) — only closers the component consumed
-    // constrain how it re-renders.
+    // A quote closed before the component boundary stays inside the raw dir (balanced, kept verbatim)
+    // Only closers the component consumed constrain how it re-renders
     let closed_quote = last_close.and_then(|(open, close, style)| {
         (close >= dir_raw_end).then_some((style, open >= dir_raw_end))
     });
@@ -238,10 +226,8 @@ pub(super) fn parse_current_token(prefix: &str) -> CurrentToken {
 
 // ── Insert-token construction (quoting) ─────────────────────────────────
 
-/// Build the replacement for the whole token: the user's verbatim directory
-/// prefix plus the completed component escaped for the quote context at the
-/// cursor. Files close an open quote; directories keep it open (and get the
-/// trailing `/`) so the next Tab drills down, bash-style.
+/// Build the replacement for the whole token: the user's verbatim directory prefix plus the completed component escaped for the quote context.
+/// Files close an open quote; directories keep it open (and get the trailing `/`) so the next Tab drills down, bash-style.
 pub(super) fn build_insert_token(
     tok: &CurrentToken,
     raw_dir: &str,
@@ -250,19 +236,16 @@ pub(super) fn build_insert_token(
 ) -> String {
     let mut out = String::with_capacity(raw_dir.len() + name.len() + 4);
     out.push_str(raw_dir);
-    // A completed component starting with `-` would otherwise insert a
-    // flag-looking argument (`rm ` + Tab → `rm -rf`, invisible when the
-    // single-candidate insta-accept skips the dropdown); quoting wouldn't
-    // help (`rm "-rf"` is still a flag to rm). Anchor bare names as
-    // explicit paths — deliberately stricter than bash.
+    // A completed component starting with `-` would otherwise insert a flag-looking argument
+    // Tab on `rm ` could produce `rm -rf`, invisible when the single-candidate insta-accept skips the dropdown
+    // Quoting wouldn't help (`rm "-rf"` is still a flag to rm)
+    // Anchor bare names as explicit paths, deliberately stricter than bash
     if raw_dir.is_empty() && name.starts_with('-') {
         out.push_str("./");
     }
-    // The quote context the component renders in: the quote still open at
-    // the cursor, or one the component CLOSED (`cat "My Dir/fi"` — raw_dir
-    // keeps the dangling opener, so dropping the closer would emit an
-    // unbalanced line). A quote opened INSIDE the component (after the
-    // last `/`) is not part of `raw_dir` — re-emit it.
+    // The quote context the component renders in: the quote still open at the cursor, or one the component CLOSED
+    // In `cat "My Dir/fi"`, raw_dir keeps the dangling opener, so dropping the closer would emit an unbalanced line
+    // A quote opened INSIDE the component (after the last `/`) is not part of `raw_dir`; re-emit it
     let (style, reopen) = match tok.quote {
         QuoteStyle::None => tok.closed_quote.unwrap_or((QuoteStyle::None, false)),
         open => (open, tok.open_quote_idx >= tok.dir_raw_end),
@@ -295,8 +278,7 @@ pub(super) fn build_insert_token(
 }
 
 /// Bash-ish set of characters that need a backslash outside quotes.
-/// Deliberately generous: over-escaping is harmless to the shell,
-/// under-escaping breaks the command.
+/// Deliberately generous: over-escaping is harmless to the shell, under-escaping breaks the command.
 fn needs_backslash(c: char) -> bool {
     matches!(
         c,
@@ -326,8 +308,7 @@ fn needs_backslash(c: char) -> bool {
 }
 
 fn escape_unquoted(name: &str) -> String {
-    // Control chars (newlines…) can't be backslash-escaped portably (`\` +
-    // newline is a line continuation) — single-quote the whole component.
+    // Control chars (newlines…) can't be backslash-escaped portably (`\` then a newline is a line continuation); single-quote the whole component
     if name.chars().any(char::is_control) {
         return format!("'{}'", escape_single_quoted(name));
     }
@@ -417,8 +398,7 @@ mod tests {
         assert_eq!(tok.quote, QuoteStyle::Single);
     }
 
-    /// Closed-quote token: quote state returns to None at the cursor and the
-    /// raw dir keeps the user's quoting verbatim.
+    /// Closed-quote token: quote state returns to None at the cursor and the raw dir keeps the user's quoting verbatim.
     #[test]
     fn parse_closed_quote_dir_prefix() {
         let tok = parse_current_token("cat \"My Dir\"/fi");
@@ -428,8 +408,7 @@ mod tests {
         assert_eq!(tok.dir_value_len, Some(7));
     }
 
-    /// `<`/`>` end the preceding token and flag the next as a redirect
-    /// target without resetting the segment (the command survives).
+    /// `<`/`>` end the preceding token and flag the next as a redirect target without resetting the segment (the command survives).
     #[test]
     fn parse_redirect_sets_flag_and_boundary() {
         let tok = parse_current_token("echo hi > lo");
@@ -449,8 +428,8 @@ mod tests {
         assert_eq!(tok.value, "foo");
     }
 
-    /// The mask records per-byte quote/escape provenance: quoted and escaped
-    /// chars are not `plain` (the shell would not expand `~`/`$` there).
+    /// The mask records per byte whether a char arrived quoted or escaped.
+    /// Those chars are not `plain` (the shell would not expand `~`/`$` there).
     #[test]
     fn parse_plain_mask_tracks_quote_and_escape_provenance() {
         let tok = parse_current_token("cat '$A'/b\\$c");
@@ -518,9 +497,8 @@ mod tests {
         );
     }
 
-    /// Open double quote: files close it, directories keep it open for
-    /// drill-down (bash behavior). Slashless tokens have an empty raw dir —
-    /// the still-open quote sits inside the replaced component (reopen path).
+    /// Open double quote: files close it, directories keep it open for drill-down (bash behavior).
+    /// Slashless tokens have an empty raw dir; the still-open quote sits inside the replaced component (reopen path).
     #[test]
     fn insert_token_preserves_open_double_quote() {
         let tok = parse_current_token("cat \"My Fi");
@@ -535,8 +513,7 @@ mod tests {
         );
     }
 
-    /// A quote opened after the last `/` sits inside the replaced component
-    /// and must be re-emitted.
+    /// A quote opened after the last `/` sits inside the replaced component and must be re-emitted.
     #[test]
     fn insert_token_reopens_quote_after_slash() {
         let tok = parse_current_token("cat dir/\"fi");
@@ -558,10 +535,8 @@ mod tests {
         );
     }
 
-    /// THE closed-at-cursor case: the closer sits inside the replaced
-    /// component while `raw_dir` keeps the opener — the rebuilt insert must
-    /// still close it (files) or keep drilling (dirs), never emit
-    /// `"My Dir/file.txt` with a dangling opener.
+    /// THE closed-at-cursor case: the closer sits inside the replaced component while `raw_dir` keeps the opener.
+    /// The rebuilt insert must still close it (files) or keep drilling (dirs), never emit `"My Dir/file.txt` with a dangling opener.
     #[test]
     fn insert_token_quote_closed_at_cursor_keeps_closer() {
         let tok = parse_current_token("cat \"My Dir/fi\"");
@@ -583,8 +558,7 @@ mod tests {
         );
     }
 
-    /// Cursor still INSIDE the quotes (closer not part of the prefix): the
-    /// open-quote path is unchanged by the closed-quote tracking.
+    /// Cursor still INSIDE the quotes (closer not part of the prefix): the open-quote path is unchanged by the closed-quote tracking.
     #[test]
     fn insert_token_cursor_inside_quotes_unchanged() {
         let tok = parse_current_token("cat \"My Dir/fi");
@@ -596,8 +570,7 @@ mod tests {
         );
     }
 
-    /// Balanced quotes entirely inside a slashless component are replaced
-    /// wholesale: the insert re-opens AND closes them.
+    /// Balanced quotes entirely inside a slashless component are replaced wholesale: the insert re-opens AND closes them.
     #[test]
     fn insert_token_balanced_slashless_quotes_reopen_and_close() {
         let tok = parse_current_token("cat \"fi\"");
@@ -608,8 +581,7 @@ mod tests {
         );
     }
 
-    /// A quote closed BEFORE the last `/` is raw-dir-internal (kept
-    /// verbatim) and must not force quote rendering on the component.
+    /// A quote closed BEFORE the last `/` stays inside the raw dir (kept verbatim) and must not force quote rendering on the component.
     #[test]
     fn insert_token_quote_closed_in_raw_dir_stays_plain() {
         let tok = parse_current_token("cat \"My Dir\"/fi");
@@ -620,10 +592,9 @@ mod tests {
         );
     }
 
-    /// Dash-leading names anchor as `./`-relative paths so a completed bare
-    /// component can never parse as a flag (`rm ` + Tab must not become
-    /// `rm -rf`); quoting alone would not help. Directory-prefixed
-    /// components are already anchored.
+    /// Dash-leading names anchor as `./`-relative paths so a completed bare component can never parse as a flag.
+    /// Tab on `rm ` must not become `rm -rf`; quoting alone would not help.
+    /// Directory-prefixed components are already anchored.
     #[test]
     fn insert_token_anchors_dash_leading_names() {
         let tok = parse_current_token("rm ");

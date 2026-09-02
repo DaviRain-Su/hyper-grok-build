@@ -1,5 +1,4 @@
-//! `AcpTerminalAdapter`: implements `xai-grok-tools::TerminalBackend` over ACP
-//! gateway calls, for bash execution when the terminal is served by the client.
+//! Implements `xai-grok-tools::TerminalBackend` over ACP gateway calls, for bash execution when the client serves the terminal.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -40,8 +39,8 @@ pub(super) struct TrackedTask {
     block_waited: bool,
     explicitly_killed: bool,
     kill_result_delivered: bool,
-    /// In-flight `wait_for_completion` callers. ACP has no oneshot list;
-    /// this is the live-waiter count used for kill delivery.
+    /// In-flight `wait_for_completion` callers.
+    /// ACP has no oneshot list; this is the live-waiter count used for kill delivery.
     live_waiters: usize,
     kind: TaskKind,
     owner_session_id: Option<String>,
@@ -49,7 +48,7 @@ pub(super) struct TrackedTask {
     output_byte_limit: usize,
 }
 
-/// Hand-written (`SystemTime` has no `Default`); call sites spread from it.
+/// Hand-written because `SystemTime` has no `Default`; call sites build tasks with `..Default::default()`.
 impl Default for TrackedTask {
     fn default() -> Self {
         Self {
@@ -122,10 +121,9 @@ pub(super) type TaskMap = Arc<Mutex<HashMap<String, TrackedTask>>>;
 struct LiveWaiter<'a> {
     tasks: TaskMap,
     task_id: &'a str,
-    /// Set on the normal return path so Drop does not treat this wait as
-    /// cancelled. A cancelled wait must clear `block_waited` immediately:
-    /// ClientUi kill only does that after the kill RPC, and the exit
-    /// watcher can emit `TaskCompleted` in that gap.
+    /// Set on the normal return path so Drop does not treat this wait as cancelled.
+    /// A cancelled wait must clear `block_waited` immediately.
+    /// ClientUi kill only clears it after the kill RPC, and the exit watcher can emit `TaskCompleted` in that gap.
     finished: bool,
 }
 
@@ -339,8 +337,7 @@ impl TerminalBackend for AcpTerminalAdapter {
             .await
             .ok();
 
-        // The std Mutex guard cannot be held across the await below, so resolve
-        // under the lock and read the log file after releasing it.
+        // The std Mutex guard cannot be held across the await below, so resolve under the lock and read the log file after releasing it
         enum Resolved {
             Ready(TaskSnapshot),
             FromLog {
@@ -377,8 +374,7 @@ impl TerminalBackend for AcpTerminalAdapter {
                         },
                     ))
                 }
-                // Live poll failed: a completed task keeps its authoritative
-                // last_output; only a still-running task falls back to the log.
+                // Live poll failed: a completed task keeps its authoritative last_output; only a still-running task falls back to the log
                 (None, Some(tracked)) => {
                     let snapshot = tracked.to_snapshot(
                         task_id,
@@ -438,12 +434,9 @@ impl TerminalBackend for AcpTerminalAdapter {
                 Some(task) if task.completed => Tracked::Completed,
                 Some(task) => {
                     task.explicitly_killed = true;
-                    // ModelTool/Teardown suppress auto-wake immediately
-                    // (`marks_result_delivered(false)` is true). ClientUi
-                    // waits until after the kill RPC so a cancelled waiter
-                    // is visible. Setting only `explicitly_killed` here
-                    // would let the exit watcher emit TaskCompleted with
-                    // `kill_result_delivered` still false.
+                    // ModelTool/Teardown suppress auto-wake immediately (`marks_result_delivered(false)` is true)
+                    // ClientUi waits until after the kill RPC so a cancelled waiter is visible
+                    // Setting only `explicitly_killed` here would let the exit watcher emit TaskCompleted with `kill_result_delivered` still false
                     if source.marks_result_delivered(false) {
                         task.kill_result_delivered = true;
                     }
@@ -491,11 +484,9 @@ impl TerminalBackend for AcpTerminalAdapter {
             Ok(_) => KillOutcome::Killed,
             Err(_) => KillOutcome::NotFound,
         };
-        // ClientUi: sample waiters after the RPC so a wait cancelled at
-        // its own `.await` (Drop of `LiveWaiter`) is not still counted as
-        // delivered. ACP has no oneshot list; this is the closest we get
-        // to local's `reply.send(...).is_ok()`. ModelTool/Teardown already
-        // marked delivered under the first lock.
+        // ClientUi: sample waiters after the RPC so a wait cancelled at its own `.await` (Drop of `LiveWaiter`) is not still counted as delivered
+        // ACP has no oneshot list; this is the closest we get to local's `reply.send(...).is_ok()`
+        // ModelTool/Teardown already marked delivered under the first lock
         if matches!(tracked, Tracked::Running)
             && !source.marks_result_delivered(false)
             && let Ok(mut tasks) = self.tasks.lock()
@@ -540,13 +531,11 @@ impl TerminalBackend for AcpTerminalAdapter {
         match start {
             WaitStart::Immediate => return self.get_task(task_id).await,
             WaitStart::ProbeThenMaybeBlock => {
-                // Not tracked as running: one output probe. A dead or unknown
-                // terminal must not burn the wait budget on WaitForTerminalExit.
-                // Match kill's untracked probe: `get_task` maps every
-                // TerminalOutput error to None, so a transport/channel blip
-                // on a still-live resumed terminal must not look like
-                // not-found. Only a client that answered and disowned the
-                // id is a definitive miss.
+                // Not tracked as running: one output probe
+                // A dead or unknown terminal must not burn the wait budget on WaitForTerminalExit
+                // Match kill's untracked probe: `get_task` maps every TerminalOutput error to None
+                // So a transport/channel blip on a still-live resumed terminal must not look like not-found
+                // Only a client that answered and disowned the id is a definitive miss
                 let probe = self
                     .gateway
                     .send(acp::TerminalOutputRequest::new(

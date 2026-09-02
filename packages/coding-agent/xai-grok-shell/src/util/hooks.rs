@@ -1,5 +1,3 @@
-//! Shared hook source path discovery.
-
 use std::path::{Path, PathBuf};
 
 use xai_grok_config::resolve_global_hook_sources;
@@ -45,8 +43,8 @@ fn include_cursor_hooks(compat: &xai_grok_tools::types::compat::CompatConfig) ->
     compat.cursor.hooks
 }
 
-/// Global + project hook source paths. Registry file is never a discovery
-/// source; compatible vendor globals are appended when their gates are on.
+/// Global and project hook source paths.
+/// The registry file is never a discovery source; Claude and Cursor sources are appended when their compat gates are on.
 pub(crate) fn discover_hook_source_paths(
     git_root: Option<&Path>,
     compat: &xai_grok_tools::types::compat::CompatConfig,
@@ -56,7 +54,7 @@ pub(crate) fn discover_hook_source_paths(
     let include_claude = include_claude_hooks(compat);
     let include_cursor = include_cursor_hooks(compat);
 
-    // Soft hooks-paths I/O keeps fixed slots; hard resolve omits Grok globals.
+    // An unreadable hooks-paths file keeps the fixed Grok sources; a hard resolve failure omits all Grok global sources
     let mut global: Vec<PathBuf> =
         match resolve_global_hook_sources(grok.as_deref(), /* reject_symlinks */ false) {
             Ok(resolved) => {
@@ -105,27 +103,23 @@ pub(crate) fn discover_hook_source_paths(
     HookSourcePaths { global, project }
 }
 
-/// Single load entry point: build compat-aware sources, gate project sources on
-/// trust, then load. Every session-startup and mid-session reload site routes
-/// through here so the source policy stays in one place.
+/// Single load entry point: build compat-aware sources, gate project sources on trust, then load.
+/// Every session-startup and mid-session reload site routes through here so the source policy stays in one place.
 pub(crate) fn discover_hooks(
     git_root: Option<&Path>,
     compat: &xai_grok_tools::types::compat::CompatConfig,
     trusted: bool,
 ) -> (xai_grok_hooks::discovery::HookRegistry, Vec<HookError>) {
-    // Read fresh each call (not cached): a mid-session `/hooks` reload must see an
-    // updated `config.toml` / `managed_config.toml`. This is lighter than
-    // `ConfigLayers::load` (only the small per-layer files, no campaigns, version
-    // overrides, or MDM).
+    // Read fresh each call (not cached): a mid-session `/hooks` reload must see an updated `config.toml` or `managed_config.toml`
+    // This is lighter than `ConfigLayers::load` (only the small per-layer files, no campaigns, version overrides, or MDM)
     let config_layers = xai_grok_config::hook_config_layers();
     assemble_hooks(&config_layers, git_root, compat, trusted)
 }
 
-/// Pure, injectable core: combine config-layer hooks with file-source hooks and
-/// dedup once. Config-layer specs are placed first so that, under the first-wins
-/// dedup in [`xai_grok_hooks::discovery::registry_from_specs_deduped`], a config
-/// hook wins over a byte-identical file hook. `config_layers` is a parameter (not
-/// read here) so tests can drive it with hand-built layers.
+/// Pure, injectable core: combine config-layer hooks with file-source hooks and dedup once.
+/// Config-layer specs go first.
+/// The first-wins dedup in [`xai_grok_hooks::discovery::registry_from_specs_deduped`] then lets a config hook beat a byte-identical file hook.
+/// `config_layers` is a parameter (not read here) so tests can drive it with hand-built layers.
 pub(crate) fn assemble_hooks(
     config_layers: &[xai_grok_config::HookConfigLayer],
     git_root: Option<&Path>,
@@ -154,16 +148,13 @@ mod tests {
     use xai_grok_hooks::config::HookProvenance;
     use xai_grok_hooks::event::HookEventName;
 
-    /// Write `content` as `<dir>/requirements.toml`.
     fn write_requirements(dir: &Path, content: &str) {
         std::fs::write(dir.join("requirements.toml"), content).unwrap();
     }
 
-    /// A temp policy layer pinning hooks for `SessionStart`, `UserPromptSubmit`,
-    /// and `PreToolUse` flows through the real requirements read
-    /// (`hook_config_layers_at`) and the real assembly (`assemble_hooks`) and
-    /// registers all three with `Requirements` provenance — the provenance the
-    /// disable exemption keys on.
+    /// A temp policy layer pins hooks for `SessionStart`, `UserPromptSubmit`, and `PreToolUse`.
+    /// It flows through the real requirements read (`hook_config_layers_at`) and the real assembly (`assemble_hooks`).
+    /// All three register with `Requirements` provenance, the provenance the disable exemption keys on.
     #[test]
     fn requirements_layer_pins_hooks_with_requirements_provenance() {
         let system_dir = tempfile::tempdir().unwrap();
@@ -231,12 +222,9 @@ timeout = 5
         }
     }
 
-    /// A realistic enterprise policy hooks shape (command hooks with
-    /// `timeout: 5`; `PreToolUse` with `matcher: "*"` and two hooks in one
-    /// group; matcher-less lifecycle groups) parses and registers through
-    /// the real path. The two `PreToolUse` hooks are byte-identical, so both
-    /// parse but content dedup registers one effective hook (running the
-    /// same script twice per event is collapsed).
+    /// A realistic enterprise policy hooks shape parses and registers through the real path.
+    /// The shape: command hooks with `timeout: 5`, `PreToolUse` with `matcher: "*"` and two hooks in one group, and matcher-less lifecycle groups.
+    /// The two `PreToolUse` hooks are byte-identical, so both parse but content dedup registers one effective hook.
     #[test]
     fn enterprise_policy_hooks_shape_registers() {
         let system_dir = tempfile::tempdir().unwrap();
@@ -293,9 +281,8 @@ timeout = 5
             assert_eq!(spec.timeout_ms, 5000, "timeout 5s converts to 5000ms");
         }
 
-        // Registry level through the real assembly: all three events register
-        // with requirements provenance; the byte-identical PreToolUse
-        // duplicate collapses to one effective hook.
+        // Registry level through the real assembly: all three events register with requirements provenance
+        // The byte-identical PreToolUse duplicate collapses to one effective hook
         let compat = xai_grok_tools::types::compat::CompatConfig::default();
         let (registry, errors) = assemble_hooks(&layers, None, &compat, false);
         assert!(errors.is_empty(), "errors: {errors:?}");

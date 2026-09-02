@@ -11,7 +11,7 @@ use super::*;
 #[path = "extensions/idle_prompt.rs"]
 mod idle_prompt;
 
-/// A user-attention event bound for the vendor-compatible `Notification` hook rail.
+/// An event that asks for the user's attention, delivered through the vendor-compatible `Notification` hook.
 pub(super) struct NotificationEvent {
     pub(super) notification_type: &'static str,
     pub(super) message: Option<String>,
@@ -19,13 +19,13 @@ pub(super) struct NotificationEvent {
     pub(super) level: Option<String>,
 }
 
-/// Fire-and-forget sink extensions emit [`NotificationEvent`]s through; delivery stays host-owned.
+/// Sink that extensions emit [`NotificationEvent`]s through, fire and forget; the host owns delivery.
 pub(super) trait NotificationEventSink {
     fn emit(&self, event: NotificationEvent);
 }
 
-/// The host's sink. Holds the actor weakly, so extensions cannot keep a dead session alive;
-/// emitting on a gone session is a no-op.
+/// The host's sink.
+/// Holds the actor weakly, so extensions cannot keep a dead session alive; emitting on a gone session is a no-op.
 struct SessionNotificationSink {
     session: Weak<SessionActor>,
 }

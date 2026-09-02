@@ -258,8 +258,10 @@ impl AgentView {
                 }
             }
             ButtonAction::ToggleSelectedHook | ButtonAction::RemoveSelectedHook => {
-                if let TabDataState::Loaded(ref data) = state.hooks_data
-                    && let Some(idx) = state.selected_data_index()
+                let TabDataState::Loaded(ref data) = state.hooks_data else {
+                    return (None, None);
+                };
+                if let Some(idx) = state.selected_data_index()
                     && let Some(hook) = data.hooks.get(idx)
                 {
                     let label = if matches!(action, ButtonAction::ToggleSelectedHook)
@@ -271,6 +273,16 @@ impl AgentView {
                     } else {
                         hook.name.clone()
                     };
+                    (Some(label), next_enabled)
+                } else if matches!(action, ButtonAction::RemoveSelectedHook)
+                    && let Some(source_dir) = state
+                        .entry_group_keys
+                        .get(state.picker_state.selected)
+                        .and_then(|k| k.as_ref())
+                {
+                    // Group header: removal targets the whole source.
+                    let (label, _) =
+                        crate::views::extensions_modal::derive_source_label(source_dir);
                     (Some(label), next_enabled)
                 } else {
                     (None, None)
@@ -1585,19 +1597,30 @@ impl AgentView {
             ButtonAction::RemoveSelectedHook => {
                 use crate::views::extensions_modal::TabDataState;
                 // `x` removes the whole source_dir, so gate at source level: a pinned member may hide behind an unpinned row
+                // Group headers carry no data index; resolve them via their group key so the advertised `x` acts there too
                 let selected = if let Some(ref state) = self.extensions_modal
                     && let TabDataState::Loaded(ref data) = state.hooks_data
-                    && let Some(idx) = state.selected_data_index()
-                    && let Some(hook) = data.hooks.get(idx)
                 {
-                    Some((
-                        crate::views::extensions_modal::hook_source_pinned(
-                            &data.hooks,
-                            &hook.source_dir,
-                        ),
-                        hook.removable,
-                        hook.source_dir.clone(),
-                    ))
+                    let source_dir = if let Some(idx) = state.selected_data_index() {
+                        data.hooks.get(idx).map(|h| h.source_dir.clone())
+                    } else {
+                        state
+                            .entry_group_keys
+                            .get(state.picker_state.selected)
+                            .and_then(|k| k.clone())
+                    };
+                    source_dir.map(|source_dir| {
+                        (
+                            crate::views::extensions_modal::hook_source_pinned(
+                                &data.hooks,
+                                &source_dir,
+                            ),
+                            data.hooks
+                                .iter()
+                                .any(|h| h.source_dir == source_dir && h.removable),
+                            source_dir,
+                        )
+                    })
                 } else {
                     None
                 };
@@ -2505,6 +2528,70 @@ mod extensions_action_target_tests {
             }
             other => panic!("expected Info refusal, got {other:?}"),
         }
+    }
+
+    /// Headers carry no data index, so `x` resolves them via group key: the
+    /// advertised remove must reach the confirm on a removable source and the
+    /// policy refusal on a pinned one (never a silent no-op).
+    #[test]
+    fn remove_on_group_header_resolves_source_via_group_key() {
+        use crate::views::extensions_modal::ModalMessage;
+
+        let mut agent = super::test_fixtures::make_agent();
+        let mut removable = hook_info("user/hook-a", "/reg/user", false);
+        removable.removable = true;
+        let mut modal = hooks_modal(vec![removable]);
+        modal.entry_data_indices = vec![None, Some(0)];
+        modal.entry_group_keys = vec![Some("/reg/user".to_string()), None];
+        modal.picker_state.selected = 0;
+        agent.extensions_modal = Some(modal);
+
+        agent.execute_modal_button_action(ButtonAction::RemoveSelectedHook);
+        match &agent.extensions_modal.as_ref().unwrap().modal_message {
+            Some(ModalMessage::Confirmation { message, .. }) => {
+                assert!(
+                    message.contains("Remove hook source"),
+                    "unexpected copy: {message}"
+                );
+            }
+            other => panic!("expected remove confirm from header selection, got {other:?}"),
+        }
+
+        let mut agent = super::test_fixtures::make_agent();
+        let mut pinned = hook_info("policy/hook-a", "/etc/grok", false);
+        pinned.pinned = true;
+        pinned.removable = true;
+        let mut modal = hooks_modal(vec![pinned]);
+        modal.entry_data_indices = vec![None, Some(0)];
+        modal.entry_group_keys = vec![Some("/etc/grok".to_string()), None];
+        modal.picker_state.selected = 0;
+        agent.extensions_modal = Some(modal);
+
+        agent.execute_modal_button_action(ButtonAction::RemoveSelectedHook);
+        match &agent.extensions_modal.as_ref().unwrap().modal_message {
+            Some(ModalMessage::Info(msg)) => {
+                assert!(msg.contains("managed policy"), "unexpected copy: {msg}");
+            }
+            other => panic!("expected Info refusal from header selection, got {other:?}"),
+        }
+    }
+
+    /// Telemetry target for a header-initiated remove is the source label,
+    /// mirroring what the handler removes.
+    #[test]
+    fn remove_target_resolves_source_label_on_group_header() {
+        let mut removable = hook_info("user/hook-a", "/reg/user", false);
+        removable.removable = true;
+        let mut modal = hooks_modal(vec![removable]);
+        modal.entry_data_indices = vec![None, Some(0)];
+        modal.entry_group_keys = vec![Some("/reg/user".to_string()), None];
+        modal.picker_state.selected = 0;
+
+        let (target, enabled) =
+            AgentView::extensions_action_target(&modal, &ButtonAction::RemoveSelectedHook);
+        let expected_label = crate::views::extensions_modal::derive_source_label("/reg/user").0;
+        assert_eq!(target.as_deref(), Some(expected_label.as_str()));
+        assert_eq!(enabled, None);
     }
 
     #[test]

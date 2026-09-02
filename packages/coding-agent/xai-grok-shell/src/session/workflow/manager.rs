@@ -19,6 +19,11 @@ use super::tracker::WorkflowTracker;
 pub(crate) const WORKFLOW_MAX_ACTIVE_RUNS_PER_SESSION: usize = 4;
 pub(crate) const WORKFLOW_DEFAULT_AGENT_BUDGET: u64 = xai_workflow::DEFAULT_AGENT_BUDGET;
 
+static WORKFLOW_RUNS_ACTIVE: xai_grok_telemetry::activity::ActivityGauge =
+    xai_grok_telemetry::activity::ActivityGauge::work(
+        xai_grok_telemetry::activity::WORKFLOW_RUNS_ACTIVE_KEY,
+    );
+
 struct ActiveRun {
     cancel: CancellationToken,
     pause_intent: Arc<AtomicBool>,
@@ -59,6 +64,7 @@ pub(crate) struct WorkflowManager {
     session_dir: Option<PathBuf>,
     cwd: PathBuf,
     tracker: Arc<parking_lot::Mutex<WorkflowTracker>>,
+    active_work: Arc<std::sync::atomic::AtomicUsize>,
     store: WorkflowRunStore,
     notify: WorkflowNotifySender,
     subagent_event_tx: mpsc::UnboundedSender<
@@ -79,6 +85,7 @@ impl WorkflowManager {
         session_dir: Option<PathBuf>,
         cwd: PathBuf,
         tracker: Arc<parking_lot::Mutex<WorkflowTracker>>,
+        active_work: Arc<std::sync::atomic::AtomicUsize>,
         store: WorkflowRunStore,
         notify: WorkflowNotifySender,
         subagent_event_tx: mpsc::UnboundedSender<
@@ -94,6 +101,7 @@ impl WorkflowManager {
             session_dir,
             cwd,
             tracker,
+            active_work,
             store,
             notify,
             subagent_event_tx,
@@ -244,9 +252,10 @@ impl WorkflowManager {
         self.notify
             .emit(&state, self.tracker.lock().elapsed_ms(&run_id), 0);
 
-        let active = xai_grok_telemetry::activity::WORKFLOW_RUNS_ACTIVE.enter();
+        let active = WORKFLOW_RUNS_ACTIVE.enter();
+        let work = crate::session::handle::WorkGuard::new(self.active_work.clone());
         debug_assert!(
-            xai_grok_telemetry::activity::WORKFLOW_RUNS_ACTIVE.get() >= 1,
+            WORKFLOW_RUNS_ACTIVE.get() >= 1,
             "WorkflowRunStarted must stamp a self-inclusive count"
         );
         log_run_started(
@@ -327,6 +336,7 @@ impl WorkflowManager {
         let execution_epoch = self.tracker.lock().execution_epoch(&run_id).unwrap_or(0);
         tokio::spawn(async move {
             let _active = active;
+            let _work = work;
             let mut outcome = exec.await.unwrap_or_else(|e| WorkflowOutcome::Failed {
                 error: format!("workflow executor panicked: {e}"),
             });
@@ -348,8 +358,7 @@ impl WorkflowManager {
                             .into(),
                 };
             }
-            // Epoch check and lifecycle mutation stay under one lock, or a
-            // quick resume could let this stale watcher stomp the successor.
+            // Epoch check and lifecycle mutation stay under one lock, or a quick resume could let this stale watcher stomp the successor
             let (epoch_matches, state) = {
                 let mut tracker = tracker.lock();
                 if tracker.execution_epoch(&watcher_run_id) != Some(execution_epoch) {
@@ -375,8 +384,7 @@ impl WorkflowManager {
                 }
             };
             if !epoch_matches {
-                // A quick resume took over; close this episode as superseded
-                // (cumulative fields may reflect the successor).
+                // A quick resume took over; close this episode as superseded (cumulative fields may reflect the successor)
                 let (elapsed, agents_used, agent_budget) = {
                     let tracker = tracker.lock();
                     let run = tracker.get(&watcher_run_id);
@@ -402,8 +410,7 @@ impl WorkflowManager {
                 return;
             }
             if state.is_none() {
-                // The run left the tracker; close the episode so its
-                // `workflow_run_started` is not orphaned.
+                // The run left the tracker; close the episode so its `workflow_run_started` is not orphaned
                 log_run_ended(
                     RunEndMetadata {
                         run_id: &watcher_run_id,
@@ -439,7 +446,7 @@ impl WorkflowManager {
                         tracing::error!(run_id = %watcher_run_id, %interrupt_error, "failed to persist workflow interruption marker");
                     }
                 }
-                // Emit before the persist-failure return: starts always pair.
+                // Emit before the persist-failure return: every start event gets an end event
                 let elapsed = tracker.lock().elapsed_ms(&watcher_run_id);
                 log_run_ended(
                     RunEndMetadata {
@@ -504,6 +511,7 @@ impl WorkflowManager {
             session_dir,
             std::env::temp_dir(),
             tracker.clone(),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             store,
             notify,
             mpsc::unbounded_channel().0,
@@ -762,8 +770,7 @@ fn log_run_started(
             WorkflowSource::Inline => WorkflowSourceKind::Inline,
             WorkflowSource::File(_) => WorkflowSourceKind::File,
         },
-        // Only built-in workflow names leave the machine; user script names
-        // and paths stay local.
+        // Only built-in workflow names leave the machine; user script names and paths stay local
         workflow_name: (*source == WorkflowSource::Builtin).then(|| state.name.clone()),
         agent_budget: state.agent_budget,
         max_concurrent_agents: u32::try_from(max_concurrent_agents).unwrap_or(u32::MAX),
@@ -886,6 +893,7 @@ mod tests {
             session_dir,
             std::env::temp_dir(),
             tracker,
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             store,
             notify,
             subagent_tx,
@@ -971,6 +979,45 @@ mod tests {
                 .join(&run_id)
                 .join("script.rhai")
                 .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn running_workflow_keeps_session_active_work_nonzero() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut manager, mut rx) = test_manager(Some(dir.path().to_path_buf()));
+
+        assert_eq!(
+            manager.active_work.load(Ordering::Acquire),
+            0,
+            "no active work before any run launches"
+        );
+
+        let (_run_id, outcome_rx) = manager
+            .launch(resolve_inline(parallel_n_script(1)).unwrap(), spec())
+            .unwrap();
+        let req = recv_spawn(&mut rx).await;
+        assert!(
+            manager.active_work.load(Ordering::Acquire) > 0,
+            "a running workflow must count toward the session's active work (GBT-6282)"
+        );
+
+        complete_spawn(req);
+        assert!(matches!(
+            outcome_rx.await.unwrap(),
+            WorkflowOutcome::Completed { .. }
+        ));
+        for _ in 0..200 {
+            if manager.active_work.load(Ordering::Acquire) == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            manager.active_work.load(Ordering::Acquire),
+            0,
+            "active work returns to zero once the run completes"
         );
     }
 

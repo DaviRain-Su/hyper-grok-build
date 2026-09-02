@@ -1,5 +1,4 @@
-//! Behavior tests for session transcript replay peeks, prepare, stream, and
-//! child path lookup.
+//! Behavior tests for session transcript replay peeks, prepare, stream, and child path lookup.
 
 use agent_client_protocol as acp;
 
@@ -35,8 +34,7 @@ fn acp_envelope_with_meta(session_update_json: &str, meta_json: &str) -> String 
     )
 }
 
-/// A session with no `updates.jsonl` streams nothing, so the emission gate
-/// reports `Empty` and forwards no updates.
+/// A session with no `updates.jsonl` streams nothing, so the emission gate reports `Empty` and forwards no updates.
 #[test]
 fn stream_replay_updates_at_missing_session_is_empty() {
     let grok_home = tempfile::tempdir().unwrap();
@@ -50,10 +48,9 @@ fn stream_replay_updates_at_missing_session_is_empty() {
     assert_eq!(count, 0);
 }
 
-/// A resolvable session whose `updates.jsonl` cannot be read surfaces the
-/// error rather than folding to `Empty`, so the caller logs a real fault
-/// instead of mistaking it for an absent transcript. (The path is a
-/// directory, which `read_to_string` rejects.)
+/// A resolvable session whose `updates.jsonl` cannot be read surfaces the error rather than folding to `Empty`.
+/// The caller then logs a real fault instead of mistaking it for an absent transcript.
+/// (The path is a directory, which `read_to_string` rejects.)
 #[test]
 fn stream_replay_updates_at_surfaces_read_errors() {
     let grok_home = tempfile::tempdir().unwrap();
@@ -69,9 +66,8 @@ fn stream_replay_updates_at_surfaces_read_errors() {
     );
 }
 
-/// End-to-end: the streaming core (`for_each_replay_update_in_file`, what
-/// `stream_replay_updates_at` wraps) applies rewind over a real file and
-/// yields the same survivors as the typed parse-all path.
+/// End-to-end: the streaming core (`for_each_replay_update_in_file`, what `stream_replay_updates_at` wraps) applies rewind over a real file.
+/// It yields the same survivors as the typed parse-all path.
 #[test]
 fn streaming_replay_applies_rewind_like_the_typed_path() {
     let u1 = acp_envelope(
@@ -137,7 +133,7 @@ fn prepare_replay_cursor_skips_to_position() {
     let raw = format!("{u1}\n{a1}\n{u2}\n");
 
     let prepared = prepare_replay_lines(&raw, Some("ev2"));
-    // Should skip ev1 and ev2, return only ev3
+    // The ev2 cursor skips ev1 and ev2, so only ev3 replays
     assert_eq!(prepared.lines.len(), 1);
     assert!(!prepared.mark_replay);
     assert!(prepared.lines[0].contains("new"));
@@ -156,9 +152,8 @@ fn prepare_replay_cursor_not_found_returns_all() {
     assert!(prepared.mark_replay); // fallback to full replay
 }
 
-/// A resolved cursor is refused when the tail contains an eventId-less
-/// line (older-binary history): the line has no client-side dedup and no
-/// future cursor can cover it, so an incremental tail would re-apply it.
+/// A resolved cursor is refused when the tail contains an eventId-less line (older-binary history).
+/// Such a line has no client-side dedup and no future cursor can cover it, so an incremental tail would re-apply it.
 /// Full replay is the safe fallback.
 #[test]
 fn prepare_replay_cursor_refused_when_tail_has_event_id_less_line() {
@@ -185,8 +180,7 @@ fn prepare_replay_cursor_refused_when_tail_has_event_id_less_line() {
     assert_eq!(prepared.lines.len(), 1);
     assert!(prepared.lines[0].contains("trailing"));
 
-    // An id-less ACU in the tail is exempt from the refusal — ACUs are
-    // dropped before forwarding, so they can never be re-applied.
+    // An id-less ACU in the tail is exempt from the refusal: ACUs are dropped before forwarding, so they can never be re-applied
     let acu =
         acp_envelope(r#"{"sessionUpdate":"available_commands_update","availableCommands":[]}"#);
     let raw = format!("{a1}\n{acu}\n");
@@ -203,11 +197,8 @@ fn prepare_replay_cursor_refused_when_tail_has_event_id_less_line() {
 
 #[test]
 fn prepare_replay_extracts_max_event_seq() {
-    // eventId is "{sessionId}-{counter}" and session ids contain dashes, so
-    // the counter is the suffix after the LAST '-'. max_event_seq is the
-    // highest counter across all live lines — used to re-seed the global
-    // event counter on resume so post-load live events stay monotonic and
-    // don't get dropped by the client's eventId dedup.
+    // eventId is "{sessionId}-{counter}" and session ids contain dashes, so the counter is the suffix after the LAST '-'
+    // max_event_seq re-seeds the global event counter on resume so post-load live events stay monotonic and survive the client's eventId dedup
     let a1 = acp_envelope_with_meta(
         r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"a"}}"#,
         r#"{"eventId":"019e-abcd-7","totalTokens":100}"#,
@@ -234,8 +225,7 @@ fn prepare_replay_extracts_max_event_seq() {
 
 #[test]
 fn prepare_replay_no_event_ids_yields_none_max_seq() {
-    // Lines without a parseable numeric eventId suffix (older shell) yield
-    // None, so the counter is left untouched on resume.
+    // Lines without a parseable numeric eventId suffix (older shell) yield None, so the counter is left untouched on resume
     let a1 = acp_envelope(
         r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"a"}}"#,
     );
@@ -244,7 +234,7 @@ fn prepare_replay_no_event_ids_yields_none_max_seq() {
     assert_eq!(prepared.max_event_seq, None);
 }
 
-// ── available_commands_update skip (T1) + single-pass equivalence ─────────
+// ── available_commands_update skip + single-pass equivalence ─────────
 
 #[test]
 fn acu_line_detection_exact_and_no_false_positive() {
@@ -259,22 +249,20 @@ fn acu_line_detection_exact_and_no_false_positive() {
     assert!(!line_is_available_commands_update(&user_mentions));
 }
 
-/// The anchor must reject the discriminant when it sits inside `_meta` (not
-/// at the `params.update` position) — the real update here is a non-ACU.
+/// The anchor must reject the discriminant when it sits inside `_meta` (not at the `params.update` position); the real update here is a non-ACU.
 #[test]
 fn acu_anchor_ignores_discriminant_in_meta() {
     let line = acp_envelope_with_meta(
         r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}"#,
         r#"{"sessionUpdate":"available_commands_update"}"#,
     );
-    // The exact `"sessionUpdate":"available_commands_update"` substring IS
-    // present (in _meta), but it's not anchored to `"update":{`.
+    // The exact `"sessionUpdate":"available_commands_update"` substring IS present (in _meta), but it's not anchored to `"update":{`
     assert!(line.contains(r#""sessionUpdate":"available_commands_update""#));
     assert!(!line_is_available_commands_update(&line));
 }
 
-/// A NON-ACU line whose `_meta` embeds an ACU-shaped object must not be dropped:
-/// typed peek reads `params.update.sessionUpdate`, not nested `_meta`.
+/// A NON-ACU line whose `_meta` embeds an ACU-shaped object must not be dropped.
+/// The typed peek reads `params.update.sessionUpdate`, not nested `_meta`.
 #[test]
 fn acu_confirm_rejects_nested_update_anchor_in_meta() {
     let line = acp_envelope_with_meta(
@@ -291,10 +279,8 @@ fn acu_confirm_rejects_nested_update_anchor_in_meta() {
     assert!(prepared.lines[0].contains("tool_call"));
 }
 
-/// Pin the cross-crate assumption behind [`line_is_available_commands_update`]:
-/// the structural `params.update` serializes BEFORE the optional `_meta`. Run a
-/// genuine ACU through the real write path ([`SessionUpdateEnvelope::from_update`])
-/// and assert its first `"update":` precedes any `"_meta":`, and the detector accepts it.
+/// Pin the cross-crate assumption behind [`line_is_available_commands_update`].
+/// The structural `params.update` serializes BEFORE the optional `_meta`.
 #[test]
 fn acu_real_write_path_serializes_update_before_meta() {
     let notif = acp::SessionNotification::new(
@@ -382,13 +368,12 @@ fn prepare_replay_rewind_truncates_and_drops_acu() {
     assert_eq!(prepared.lines.len(), 1);
     assert!(prepared.lines[0].contains("p1"));
     assert_eq!(prepared.total_live, 1);
-    // last_tokens recomputed from the surviving timeline (p1 = 9).
+    // last_tokens recomputed from the surviving timeline (p1 carries 9)
     assert_eq!(prepared.last_tokens, 9);
     assert!(prepared.mark_replay);
 }
 
-/// The single-pass implementation must match an independent reference that
-/// drops ACU then applies the (canonical) rewind filter — for a mixed input.
+/// The single-pass implementation must match an independent reference that drops ACU then applies the (canonical) rewind filter, for a mixed input.
 #[test]
 fn prepare_replay_single_pass_matches_reference() {
     let lines_src = [
@@ -423,9 +408,8 @@ fn prepare_replay_single_pass_matches_reference() {
     assert_eq!(prepared.last_tokens, 11); // last kept line carrying tokens
 }
 
-/// The prompt-extract fast-reject must not be fooled by lines that merely
-/// contain the discriminant substring inside their content — the full parse
-/// still classifies them by the real `sessionUpdate` tag.
+/// The prompt-extract fast-reject must not be fooled by lines that merely contain the discriminant substring inside their content.
+/// The full parse still classifies them by the real `sessionUpdate` tag.
 #[test]
 fn fast_reject_handles_discriminant_substring_in_content() {
     let line = acp_envelope(
@@ -437,11 +421,10 @@ fn fast_reject_handles_discriminant_substring_in_content() {
     );
 }
 
-/// A `rewind_marker` appearing only inside content must NEVER become a
-/// `RewindTo` (which would corrupt prompt_index / turn numbering).
+/// A `rewind_marker` appearing only inside content must NEVER become a `RewindTo` (which would corrupt prompt_index / turn numbering).
 #[test]
 fn fast_reject_rewind_marker_in_content() {
-    // (a) agent message mentioning rewind_marker → NotUserMessage.
+    // (a) an agent message mentioning rewind_marker yields NotUserMessage
     let agent = acp_envelope(
         r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"about rewind_marker semantics"}}"#,
     );
@@ -450,8 +433,7 @@ fn fast_reject_rewind_marker_in_content() {
         PromptExtractEvent::NotUserMessage
     );
 
-    // (b) an ACP (non-xai) update carrying rewind_marker in content is NOT a
-    // real xai rewind_marker → NotUserMessage (no RewindTo).
+    // (b) an ACP (non-xai) update carrying rewind_marker in content is NOT a real xai rewind_marker; it yields NotUserMessage (no RewindTo)
     let acp_rewindish = acp_envelope(
         r#"{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"rewind_marker"}}"#,
     );
@@ -460,8 +442,7 @@ fn fast_reject_rewind_marker_in_content() {
         PromptExtractEvent::NotUserMessage
     );
 
-    // (c) a user_message_chunk whose text contains rewind_marker → still the
-    // user text (the discriminant is user_message_chunk).
+    // (c) a user_message_chunk whose text contains rewind_marker still yields the user text (the discriminant is user_message_chunk)
     let user = acp_envelope(
         r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"explain rewind_marker please"}}"#,
     );
@@ -471,17 +452,14 @@ fn fast_reject_rewind_marker_in_content() {
     );
 }
 
-/// A user prompt whose text contains the literal escaped-JSON ACU
-/// discriminant must NOT be dropped as an `available_commands_update` — the
-/// `"update":{` anchor only matches the real structural discriminant, not the
-/// escaped fragment in content.
+/// A user prompt whose text contains the literal escaped-JSON ACU discriminant must NOT be dropped as an `available_commands_update`.
+/// The `"update":{` anchor only matches the real structural discriminant, not the escaped fragment in content.
 #[test]
 fn acu_drop_ignores_escaped_json_in_content() {
     let line = acp_envelope(
         r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"paste: {\"sessionUpdate\":\"available_commands_update\"}"}}"#,
     );
-    // The bare phrase appears in the (escaped) content, but it's not at the
-    // structural `"update":{"sessionUpdate":...` position, so it's kept.
+    // The bare phrase appears in the (escaped) content, but it's not at the structural `"update":{"sessionUpdate":...` position, so it's kept
     assert!(line.contains("available_commands_update"));
     assert!(!line_is_available_commands_update(&line));
 
@@ -491,9 +469,8 @@ fn acu_drop_ignores_escaped_json_in_content() {
     assert!(prepared.lines[0].contains("available_commands_update"));
 }
 
-/// An idle client reconnecting with the cursor pointing at the LAST persisted
-/// event — an ACU (the post-load re-advertise) — must resolve the cursor on the
-/// ACU-inclusive set rather than fall back to full replay.
+/// An idle client can reconnect with the cursor pointing at the LAST persisted event, an ACU (the post-load re-advertise).
+/// The cursor must resolve on the ACU-inclusive set rather than fall back to full replay.
 #[test]
 fn prepare_replay_cursor_on_dropped_acu_resolves() {
     let u = acp_envelope_with_meta(
@@ -510,21 +487,19 @@ fn prepare_replay_cursor_on_dropped_acu_resolves() {
     );
     let raw = format!("{u}\n{a}\n{acu}\n");
 
-    // Cursor == the ACU's eventId → resolved; nothing after → no replay,
-    // and crucially NOT a full replay.
+    // The cursor equals the ACU's eventId, so it resolves; nothing follows, so no lines replay and NOT a full replay
     let prepared = prepare_replay_lines(&raw, Some("ev3"));
     assert!(!prepared.mark_replay, "must not fall back to full replay");
     assert!(prepared.lines.is_empty(), "client is already caught up");
 
-    // Cursor == ev1 → replay ev2, ev3; the ACU (ev3) is dropped from the tail.
+    // A cursor at ev1 replays ev2 and ev3; the ACU (ev3) is dropped from the tail
     let prepared = prepare_replay_lines(&raw, Some("ev1"));
     assert!(!prepared.mark_replay);
     assert_eq!(prepared.lines.len(), 1);
     assert!(prepared.lines[0].contains("yo"));
 }
 
-/// A trailing `rewind_marker` empties the live set and yields
-/// `last_tokens == 0` (the `unwrap_or(0)` path).
+/// A trailing `rewind_marker` empties the live set and yields `last_tokens == 0` (the `unwrap_or(0)` path).
 #[test]
 fn prepare_replay_trailing_rewind_marker_empties() {
     let u0 = acp_envelope_with_meta(
@@ -558,7 +533,7 @@ fn prepare_replay_trailing_acu_dropped() {
     assert_eq!(prepared.total_live, 1);
 }
 
-/// Rewind + cursor + ACU together, with explicit expected values.
+/// Rewind, cursor, and ACU together, with explicit expected values.
 #[test]
 fn prepare_replay_rewind_then_cursor_with_acu() {
     let u0 = acp_envelope_with_meta(
@@ -586,8 +561,8 @@ fn prepare_replay_rewind_then_cursor_with_acu() {
     );
     let raw = format!("{u0}\n{a0}\n{acu0}\n{rw}\n{u1}\n{acu1}\n{a1}\n");
 
-    // Rewind to 0 kills u0/a0/acu0; surviving live = [u1(e2), acu1, a1(e3)].
-    // Cursor on e2 → tail = [acu1, a1]; drop acu1 → lines = [a1].
+    // Rewind to 0 kills u0/a0/acu0; the surviving live set is [u1(e2), acu1, a1(e3)]
+    // The cursor on e2 makes the tail [acu1, a1]; dropping acu1 leaves [a1]
     let prepared = prepare_replay_lines(&raw, Some("e2"));
     assert!(!prepared.mark_replay);
     assert_eq!(prepared.lines.len(), 1);
@@ -596,8 +571,7 @@ fn prepare_replay_rewind_then_cursor_with_acu() {
     assert_eq!(prepared.total_live, 2); // ACU-free survivors: u1, a1
 }
 
-/// The delta-replay helper (shared with the initial path) drops blanks + ACUs
-/// and applies the canonical rewind filter.
+/// The delta-replay helper (shared with the initial path) drops blanks and ACUs and applies the canonical rewind filter.
 #[test]
 fn filter_delta_replay_drops_blank_acu_and_rewinds() {
     let u1 = acp_envelope(
@@ -621,8 +595,7 @@ fn filter_delta_replay_drops_blank_acu_and_rewinds() {
     let raw = format!("{u1}\n\n{acu}\n{a1}\n{u2}\n{a2}\n{rw}\n");
 
     let live = filter_delta_replay_lines(&raw);
-    // Blank + ACU dropped; the rewind to prompt 1 truncates the dead branch
-    // (u2/a2) and consumes the marker, leaving only p1/a1.
+    // Blank and ACU dropped; the rewind to prompt 1 truncates the dead branch (u2/a2) and consumes the marker, leaving only p1/a1
     assert_eq!(live.len(), 2);
     assert!(
         live.iter()
@@ -660,8 +633,7 @@ fn prepare_replay_reports_spawn_without_finish() {
     );
 }
 
-/// Legacy lines put `sessionId`/`update` at the top level (no `params`
-/// envelope); orphan detection must still pair them.
+/// Legacy lines put `sessionId`/`update` at the top level (no `params` envelope); orphan detection must still pair them.
 #[test]
 fn collect_unfinished_subagents_handles_legacy_top_level_lines() {
     let lines = vec![
@@ -669,16 +641,16 @@ fn collect_unfinished_subagents_handles_legacy_top_level_lines() {
         r#"{"sessionId":"s","update":{"sessionUpdate":"subagent_finished","subagent_id":"a","child_session_id":"ca","status":"completed","tool_calls":0,"turns":0,"duration_ms":0}}"#,
         r#"{"sessionId":"s","update":{"sessionUpdate":"subagent_spawned","subagent_id":"b","parent_session_id":"s","child_session_id":"cb","subagent_type":"general-purpose","description":"task"}}"#,
     ];
-    // `a` is paired (spawn+finish); `b` only spawned → orphan.
+    // `a` is paired (spawn and finish); `b` only spawned, so it is the orphan
     assert_eq!(
         collect_unfinished_subagents(&lines),
         vec![("b".to_string(), "cb".to_string())]
     );
 }
 
-/// Resume idempotency seam: the finish the stream reconcile emits must
-/// re-pair the orphan's spawn on the next resume (emit→serialize→collect),
-/// so a second resume doesn't re-emit. Guards a `SubagentFinished` shape drift.
+/// Resume idempotency: the finish the stream reconcile emits must re-pair the orphan's spawn on the next resume (emit, serialize, collect).
+/// A second resume then doesn't re-emit.
+/// Guards a `SubagentFinished` shape drift.
 #[test]
 fn collect_pairs_a_reconcile_emitted_finish_with_its_spawn() {
     use crate::extensions::notification::{SessionNotification, SessionUpdate};
@@ -936,7 +908,7 @@ fn stream_replay_collapses_tool_call_and_skips_in_progress() {
     let raw = format!("{tool}\n{start}\n{ip}\n{done}\n{acu}\n");
     std::fs::write(dir.join(UPDATES_FILE), &raw).unwrap();
 
-    // Line peeks must drop ACU + InProgress before serde; collapse still runs.
+    // Line peeks must drop ACU and InProgress before serde; collapse still runs
     let prepared = prepare_replay_lines(&raw, None);
     assert_eq!(prepared.lines.len(), 3, "tool + start-meta + completed");
 
@@ -986,9 +958,8 @@ fn stream_replay_forwards_completed_tool_call_update_without_base() {
     assert!(matches!(&updates[0], acp::SessionUpdate::ToolCallUpdate(_)));
 }
 
-/// Persisted xAI child events (compaction, retry) are forwarded in file
-/// order alongside the ACP stream, so a rebuilt child view keeps its
-/// non-ACP markers, but they never count toward `Emitted`.
+/// Persisted xAI child events (compaction, retry) are forwarded in file order alongside the ACP stream.
+/// A rebuilt child view thus keeps its non-ACP markers, but they never count toward `Emitted`.
 #[test]
 fn stream_replay_forwards_xai_updates_in_file_order() {
     let home = tempfile::tempdir().unwrap();
@@ -1019,9 +990,8 @@ fn stream_replay_forwards_xai_updates_in_file_order() {
     assert_eq!(kinds, vec![true, false], "xai then acp, in file order");
 }
 
-/// The stream forwards each persisted line's `_meta` alongside the ACP
-/// update, so a child rebuild can restore original timestamps
-/// (`agentTimestampMs`) instead of stamping entries at rebuild time.
+/// The stream forwards each persisted line's `_meta` alongside the ACP update.
+/// A child rebuild can then restore original timestamps (`agentTimestampMs`) instead of stamping entries at rebuild time.
 #[test]
 fn stream_replay_forwards_persisted_line_meta() {
     let home = tempfile::tempdir().unwrap();
@@ -1054,9 +1024,8 @@ fn stream_replay_forwards_persisted_line_meta() {
     );
 }
 
-/// A transcript holding only xAI events replays them but stays `Empty`:
-/// eviction decisions must not settle on a file the client cannot rebuild
-/// transcript content from.
+/// A transcript holding only xAI events replays them but stays `Empty`.
+/// Eviction decisions must not settle on a file the client cannot rebuild transcript content from.
 #[test]
 fn xai_only_transcript_forwards_but_stays_empty() {
     let home = tempfile::tempdir().unwrap();
@@ -1069,6 +1038,7 @@ fn xai_only_transcript_forwards_but_stays_empty() {
             attempt: 1,
             max_retries: 3,
             reason: "overloaded".into(),
+            error_type: None,
         },
     ));
     std::fs::write(dir.join(UPDATES_FILE), format!("{retry}\n")).unwrap();
@@ -1085,11 +1055,9 @@ fn xai_only_transcript_forwards_but_stays_empty() {
     assert_eq!(emission, ReplayEmission::Empty);
 }
 
-/// The eviction probe verifies EMISSION, not file size: it must agree with
-/// what [`stream_replay_updates_at_hinted`] would actually emit, because a
-/// `true` licenses dropping the only in-memory transcript copy. Non-empty
-/// content that replays `Empty` — xAI-only lines, a torn/unparseable line,
-/// a start-only ToolCallUpdate — must report false.
+/// The eviction probe verifies EMISSION, not file size.
+/// It must agree with what [`stream_replay_updates_at_hinted`] would actually emit: a `true` licenses dropping the only in-memory transcript copy.
+/// Non-empty content that replays `Empty` (xAI-only lines, a torn/unparseable line, a start-only ToolCallUpdate) must report false.
 #[test]
 fn replay_would_emit_requires_an_emitting_acp_line() {
     let home = tempfile::tempdir().unwrap();

@@ -48,9 +48,8 @@ fn rebuilt_projection_removes_renamed_active_message_tool() {
 
 #[test]
 fn verbatim_mirror_projection_strips_root_only_keeps_ordinary_byte_identical() {
-    // Ordinary tools stay field-identical for radix-cache alignment; root-only
-    // ActiveAgentMessage is dropped even on the mirror path (by kind rename and
-    // by canonical name when kind lookup is unavailable).
+    // Ordinary tools pass through unchanged, so the child's specs serialize to the parent's exact bytes and the radix cache stays aligned
+    // The ActiveAgentMessage tool exists only at the root, so even the mirror drops it: by kind when renamed, by canonical name with no kind known
     let parent = vec![
         tool(
             "read_file",
@@ -93,7 +92,7 @@ fn verbatim_mirror_projection_strips_root_only_keeps_ordinary_byte_identical() {
         serde_json::to_vec(&expected).unwrap()
     );
 
-    // Name fallback alone (child bridge has no kind for the inherited tool).
+    // With the kind lookup returning None, only the canonical-name check is left to drop the tool
     let name_only = child_safe_tool_specs(
         vec![
             tool("read_file", Some("read"), serde_json::json!({})),
@@ -117,8 +116,7 @@ fn verbatim_mirror_projection_strips_root_only_keeps_ordinary_byte_identical() {
 
 #[test]
 fn verbatim_mirror_path_strips_ask_user_and_active_message() {
-    // Mirrors the production turn/spawn path: child_safe projection then the
-    // subagent-only ask_user_question strip.
+    // Runs the same two steps as production spawn: child_safe_tool_specs, then strip_ask_user_question_tool
     let parent = vec![
         tool(
             "read_file",

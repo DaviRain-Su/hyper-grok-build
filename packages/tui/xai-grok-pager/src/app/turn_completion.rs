@@ -25,6 +25,11 @@ pub(crate) const CANCELLATION_CATEGORY_KEY: &str = "cancellationCategory";
 /// `_meta` key of a cancelled terminal's structured detail (hook name, reason).
 /// It is stamped beside the category; absent on older shells.
 pub(crate) const CANCELLATION_CONTEXT_KEY: &str = "cancellationContext";
+/// `_meta` key distinguishing a queued prompt that never ran from a real cancel.
+pub(crate) const COMPLETION_KIND_KEY: &str = xai_grok_shell::session::commands::COMPLETION_KIND_KEY;
+/// `_meta.completionKind` of [`xai_grok_shell::session::commands::PromptCompletionKind::RemovedFromQueue`].
+pub(crate) const REMOVED_FROM_QUEUE_KIND: &str =
+    xai_grok_shell::session::commands::REMOVED_FROM_QUEUE_KIND;
 
 /// Unknown tokens stay [`TurnStopReason::Unknown`], which maps to `TurnCompleted` (live `_` arm).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

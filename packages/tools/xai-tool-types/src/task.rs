@@ -763,9 +763,10 @@ pub fn task_output_waits(timeout_ms: Option<u64>) -> bool {
 }
 
 /// Default ceiling on a single blocking wait (`get_task_output` with a positive
-/// `timeout_ms`, `wait_tasks`). Capping is safe because a completed task pings
-/// the model, so a truncated wait costs one more poll, not the result.
-pub const MAX_WAIT_BLOCK_MS_DEFAULT: u64 = 600_000;
+/// `timeout_ms`, `wait_tasks`). One hour: above the p99 of timeouts the model
+/// actually requests, so the harness rarely hands back "still running" first.
+/// Hosts with a shorter transport deadline set `GROK_MAX_WAIT_BLOCK_MS`.
+pub const MAX_WAIT_BLOCK_MS_DEFAULT: u64 = 3_600_000;
 
 /// The blocking-wait ceiling in effect, honoring `GROK_MAX_WAIT_BLOCK_MS`.
 ///
@@ -780,16 +781,18 @@ pub fn max_wait_block_ms() -> u64 {
         .unwrap_or(MAX_WAIT_BLOCK_MS_DEFAULT)
 }
 
-/// Render a wait ceiling for tool descriptions, e.g. `600000 (~10 min)`.
+/// Render a wait ceiling for tool descriptions, e.g. `3600000 (~1 h)`.
 ///
 /// The unit is derived from the value, so it cannot drift from the millisecond
-/// figure beside it. Both branches round *down*: a cap must never read as
+/// figure beside it. All branches round *down*: a cap must never read as
 /// longer than it is.
 pub fn format_wait_cap_ms(ms: u64) -> String {
     if ms < 60_000 {
         format!("{ms} (~{} s)", ms / 1_000)
-    } else {
+    } else if ms < 3_600_000 {
         format!("{ms} (~{} min)", ms / 60_000)
+    } else {
+        format!("{ms} (~{} h)", ms / 3_600_000)
     }
 }
 
@@ -2262,8 +2265,9 @@ mod tests {
     fn format_wait_cap_ms_derives_its_unit_and_rounds_down() {
         assert_eq!(
             format_wait_cap_ms(MAX_WAIT_BLOCK_MS_DEFAULT),
-            "600000 (~10 min)"
+            "3600000 (~1 h)"
         );
+        assert_eq!(format_wait_cap_ms(3_600_000), "3600000 (~1 h)");
         assert_eq!(format_wait_cap_ms(300_000), "300000 (~5 min)");
         // Rounds down: 1.5 min must not read as 2.
         assert_eq!(format_wait_cap_ms(90_000), "90000 (~1 min)");

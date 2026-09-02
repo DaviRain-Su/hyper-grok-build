@@ -1,4 +1,3 @@
-//! AgentBuilder — fluent construction API for building Agents.
 use crate::agent::Agent;
 use crate::compaction::CompactionPolicy;
 use crate::config::{AGENT_TASK_CLASSIFIER_RE, short_tool_name, tool_id_eq, tool_id_matches};
@@ -16,13 +15,12 @@ use xai_grok_tools::implementations::grok_build::task::types::SubagentCapability
 use xai_grok_tools::notification::ToolNotificationHandle;
 use xai_grok_tools::registry::types::SessionContext;
 use xai_grok_tools::types::tool::ToolKind;
-/// The Grok [`ToolKind`] a vendor-compat `tools:` allowlist entry resolves to, so
-/// a plugin's upstream allowlist still binds. Backed by the shared vendor-to-Grok
-/// tool registry in `xai-grok-tools` (also used by the hook matcher).
+/// The Grok [`ToolKind`] a vendor-compat `tools:` allowlist entry resolves to, so a plugin's upstream allowlist still binds.
+/// Backed by the shared vendor-to-Grok tool registry in `xai-grok-tools` (also used by the hook matcher).
 fn claude_tool_kind(name: &str) -> Option<ToolKind> {
     xai_grok_tools::types::kind_for(name)
 }
-/// Builds an Agent from an AgentDefinition + session context.
+/// Builds an Agent from an AgentDefinition and session context.
 ///
 /// Two main flows:
 ///
@@ -57,8 +55,7 @@ pub struct AgentBuilder {
     owner_session_id: Option<String>,
     parent_scheduler_handle:
         Option<xai_grok_tools::implementations::grok_build::scheduler::types::SchedulerHandle>,
-    /// The agent definition — set via from_definition() or built up
-    /// via individual with_*() calls.
+    /// The agent definition, set via from_definition() or built up via individual with_*() calls.
     definition: Option<AgentDefinition>,
     /// Pre-rendered persona IO summaries for the task tool description.
     persona_summaries: Vec<String>,
@@ -88,9 +85,8 @@ pub struct AgentBuilder {
     state_path: Option<PathBuf>,
     memory_backend: Option<Arc<dyn xai_grok_tools::types::memory_backend::MemoryBackend>>,
     web_search_config: xai_grok_tools::implementations::web_search::WebSearchConfig,
-    /// When true, web search and X search are available as native server-side
-    /// tool candidates. The session projects these candidates onto the active
-    /// provider on every request; local web-search credentials are unrelated.
+    /// When true, web search and X search go to the agentic sampler as native server-side tools instead of registering as local Function tools.
+    /// The session projects these candidates onto the active provider on every request; local web-search credentials are unrelated.
     backend_search: bool,
     web_fetch_config: xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig,
     lsp: Option<std::sync::Arc<dyn xai_grok_tools::implementations::lsp::LspBackend>>,
@@ -106,9 +102,8 @@ pub struct AgentBuilder {
     subagent_toggle: HashMap<String, bool>,
     task_model_slugs: Vec<String>,
     skills_config: crate::prompt::skills::SkillsConfig,
-    /// Resolved vendor-compat config governing which vendor (`.claude`/`.cursor`)
-    /// dirs are scanned for skills / rules / AGENTS.md. Defaults to all-on,
-    /// which reproduces the historical behavior.
+    /// Resolved vendor-compat config governing which vendor (`.claude`/`.cursor`) dirs are scanned for skills / rules / AGENTS.md.
+    /// Defaults to all-on, which reproduces the historical behavior.
     compat: xai_grok_tools::types::compat::CompatConfig,
     bash_params_json: Option<serde_json::Map<String, serde_json::Value>>,
     ask_user_question_params_json: Option<serde_json::Map<String, serde_json::Value>>,
@@ -116,29 +111,24 @@ pub struct AgentBuilder {
     context_window_tokens: Option<u64>,
     api_key_provider: Option<xai_grok_tools::types::SharedApiKeyProvider>,
     attribution_callback: Option<xai_grok_tools::SharedAttributionCallback>,
-    /// Session-scoped MCP tool-result inline cap (bytes). When `Some`, seeded
-    /// into the toolset's `TruncationCfg` resource after finalize, where the
-    /// MCP truncation path consults it before the process-global cap. The
-    /// shell passes the winning repo-level `[mcp] max_output_bytes` here (and
-    /// only when that tier wins the precedence stack — see
-    /// `resolve_max_mcp_output_bytes_for_cwd` in xai-grok-shell).
+    /// Session-scoped MCP tool-result inline cap (bytes).
+    /// When `Some`, it is seeded into the toolset's `TruncationCfg` resource after finalize.
+    /// The MCP truncation path consults that resource before the process-global cap.
+    /// The shell passes the winning repo-level `[mcp] max_output_bytes` here only when that tier wins the precedence stack.
+    /// See `resolve_max_mcp_output_bytes_for_cwd` in xai-grok-shell.
     mcp_max_output_bytes: Option<usize>,
     /// System-reminder tag name for tool result text. Defaults to `"system-reminder"`.
     /// IDE-compat agent_type should set this to `"system_reminder"`.
     system_reminder_tag: &'static str,
     /// Persisted announced skill names from a previous session.
-    /// When set, restored into the SkillManager before `seed()` so that
-    /// `seed()` sees non-empty `announced_names` and skips the
-    /// `BaselineChange` pending, preventing duplicate system-reminder
-    /// injection on session resume.
+    /// Restored into the SkillManager before `seed()`, so `seed()` sees non-empty `announced_names` and skips the `BaselineChange` pending.
+    /// That avoids injecting a duplicate system-reminder on session resume.
     persisted_announced_skill_names: Option<std::collections::HashSet<String>>,
     /// Pre-discovered skills inherited from a parent session.
-    /// When set, `build()` uses these directly instead of running
-    /// `list_skills_with_plugins()`.
+    /// When set, `build()` uses these directly instead of running `list_skills_with_plugins()`.
     preloaded_skills: Option<Vec<xai_grok_tools::implementations::skills::types::SkillInfo>>,
 }
-/// Ensure plan mode tools (`enter_plan_mode`, `exit_plan_mode`,
-/// `ask_user_question`) are present in the tool config.
+/// Ensure plan mode tools (`enter_plan_mode`, `exit_plan_mode`, `ask_user_question`) are present in the tool config.
 fn ensure_plan_mode_tools(tool_config: &mut xai_grok_tools::registry::types::ToolServerConfig) {
     use xai_grok_tools::implementations::grok_build;
     let existing: std::collections::HashSet<&str> =
@@ -163,8 +153,7 @@ fn ensure_plan_mode_tools(tool_config: &mut xai_grok_tools::registry::types::Too
             .push((&grok_build::AskUserQuestionTool).into());
     }
 }
-/// Merge a shell-resolved params map into every matching tool's
-/// `ToolConfig.params` (single copy of the loop the per-tool injections share).
+/// Merge a shell-resolved params map into every matching tool's `ToolConfig.params` (single copy of the loop the per-tool injections share).
 fn merge_tool_params(
     tool_config: &mut xai_grok_tools::registry::types::ToolServerConfig,
     ids: &[&str],
@@ -260,12 +249,8 @@ impl AgentBuilder {
             preloaded_skills: None,
         }
     }
-    /// Set persisted announced skill names for session resume.
-    ///
-    /// These names are restored into the `SkillManager` inside `build()`,
-    /// after `ToolBridge::finalize_builder()` but before
-    /// `seed_skill_discovery()`.  This ensures `seed()` sees non-empty
-    /// `announced_names` and skips setting `pending = BaselineChange`.
+    /// These names are restored into the `SkillManager` inside `build()`, after `ToolBridge::finalize_builder()` but before `seed_skill_discovery()`.
+    /// `seed()` then sees non-empty `announced_names` and skips setting `pending = BaselineChange`.
     pub fn with_persisted_announced_skill_names(
         mut self,
         names: std::collections::HashSet<String>,
@@ -273,9 +258,8 @@ impl AgentBuilder {
         self.persisted_announced_skill_names = Some(names);
         self
     }
-    /// Supply pre-discovered skills from a parent session instead of
-    /// running filesystem discovery. When set, `build()` skips
-    /// `list_skills_with_plugins()` and uses the snapshot directly.
+    /// Supply pre-discovered skills from a parent session instead of running filesystem discovery.
+    /// When set, `build()` skips `list_skills_with_plugins()` and uses the snapshot directly.
     pub fn with_preloaded_skills(
         mut self,
         skills: Vec<xai_grok_tools::implementations::skills::types::SkillInfo>,
@@ -283,7 +267,6 @@ impl AgentBuilder {
         self.preloaded_skills = Some(skills);
         self
     }
-    /// Load from a pre-parsed AgentDefinition.
     pub fn from_definition(mut self, def: AgentDefinition) -> Self {
         self.definition = Some(def);
         self
@@ -293,7 +276,6 @@ impl AgentBuilder {
         self.persona_summaries = summaries;
         self
     }
-    /// Set the prompt audience (Primary or Subagent).
     pub fn with_prompt_audience(
         mut self,
         audience: crate::prompt::context::PromptAudience,
@@ -362,12 +344,9 @@ impl AgentBuilder {
         self.memory_workspace_path = workspace_path;
         self
     }
-    /// Mark this session as non-interactive (headless / SDK / stdio /
-    /// generic-ACP). Suppresses prompt sections that only make sense when
-    /// a human is typing into the TUI prompt input (e.g. the `! <command>`
-    /// shell-prefix tip and the `<user_guide>` TUI pointer), and stamps
-    /// `non_interactive` into the ask_user_question params so an unanswered
-    /// questionnaire returns no-operator text instead of "user declined".
+    /// Mark this session as non-interactive (headless / SDK / stdio / generic-ACP).
+    /// Suppresses prompt sections that assume a human at the TUI prompt (the `! <command>` shell-prefix tip and the `<user_guide>` TUI pointer).
+    /// Stamps `non_interactive` into the ask_user_question params so an unanswered questionnaire returns no-operator text instead of "user declined".
     pub fn with_is_non_interactive(mut self, value: bool) -> Self {
         self.is_non_interactive = value;
         self
@@ -386,10 +365,9 @@ impl AgentBuilder {
     }
     /// Session-scoped MCP tool-result inline cap (bytes).
     ///
-    /// `Some(v)` is seeded into the toolset's `TruncationCfg` resource after
-    /// finalize, so the MCP truncation path uses `v` instead of the
-    /// process-global cap. `None` (default) seeds nothing — MCP truncation
-    /// falls through to the process-global resolution.
+    /// `Some(v)` is seeded into the toolset's `TruncationCfg` resource after finalize.
+    /// The MCP truncation path then uses `v` instead of the process-global cap.
+    /// `None` (default) seeds nothing; MCP truncation falls through to the process-global resolution.
     pub fn with_mcp_max_output_bytes(mut self, bytes: Option<usize>) -> Self {
         self.mcp_max_output_bytes = bytes;
         self
@@ -400,9 +378,8 @@ impl AgentBuilder {
     }
     /// Set the memory backend for cross-session knowledge retrieval.
     ///
-    /// When set, the `memory_search` and `memory_get` tools can access
-    /// the indexed memory store. When `None` (default), those tools
-    /// return "Memory is not enabled".
+    /// When set, the `memory_search` and `memory_get` tools can access the indexed memory store.
+    /// When `None` (default), those tools return "Memory is not enabled".
     pub fn with_memory_backend(
         mut self,
         backend: Arc<dyn xai_grok_tools::types::memory_backend::MemoryBackend>,
@@ -413,8 +390,7 @@ impl AgentBuilder {
     /// Set a custom filesystem backend for the ToolBridge.
     ///
     /// When `None` (default), tools use `LocalFs` (direct disk I/O).
-    /// Pass an ACP-backed implementation when the client advertises
-    /// `clientCapabilities.fs.readTextFile` and `writeTextFile`.
+    /// Pass an ACP-backed implementation when the client advertises `clientCapabilities.fs.readTextFile` and `writeTextFile`.
     pub fn with_fs(mut self, fs: Arc<dyn AsyncFileSystem>) -> Self {
         self.fs_backend = fs;
         self
@@ -434,10 +410,8 @@ impl AgentBuilder {
     }
     /// Set the web search configuration.
     ///
-    /// When `Enabled`, a `WebSearchClient` is created and injected into
-    /// the ToolBridge's resources so the `web_search` tool can call the
-    /// Responses API. When `Disabled` (default), the tool returns a
-    /// graceful error if invoked.
+    /// When `Enabled`, a `WebSearchClient` is created and injected into the ToolBridge's resources so `web_search` can call the Responses API.
+    /// When `Disabled` (default), the tool returns a graceful error if invoked.
     pub fn with_web_search_config(
         mut self,
         config: xai_grok_tools::implementations::web_search::WebSearchConfig,
@@ -445,20 +419,17 @@ impl AgentBuilder {
         self.web_search_config = config;
         self
     }
-    /// When true, web search and X search are sent as native server-side
-    /// tools for execution by the agentic sampler, instead of being
-    /// registered as local Function tools. Per-model gating is applied
-    /// at request time, not here.
+    /// When true, web search and X search go to the agentic sampler as native server-side tools instead of registering as local Function tools.
+    /// Per-model gating is applied at request time, not here.
     pub fn with_backend_search(mut self, enabled: bool) -> Self {
         self.backend_search = enabled;
         self
     }
     /// Set the web fetch configuration.
     ///
-    /// When `Enabled`, the `web_fetch` tool is registered and a `WebFetchClient`
-    /// is injected into `Resources`. When `Disabled` (default), the tool is not
-    /// registered. Feature-flagged via remote settings `web_fetch_enabled` and
-    /// `GROK_WEB_FETCH` env var.
+    /// When `Enabled`, the `web_fetch` tool is registered and a `WebFetchClient` is injected into `Resources`.
+    /// When `Disabled` (default), the tool is not registered.
+    /// Feature-flagged via remote settings `web_fetch_enabled` and `GROK_WEB_FETCH` env var.
     pub fn with_web_fetch_config(
         mut self,
         config: xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig,
@@ -475,10 +446,9 @@ impl AgentBuilder {
     }
     /// Set the image generation configuration.
     ///
-    /// When `Enabled`, an `ImageGenClient` is created and injected into
-    /// the ToolBridge's resources and the `image_gen` tool is registered,
-    /// allowing image generation via the xAI Imagine API with session
-    /// credentials. When `Disabled` (default), the tool is not registered.
+    /// When `Enabled`, an `ImageGenClient` is created and injected into the ToolBridge's resources and the `image_gen` tool is registered.
+    /// The tool calls the xAI Imagine API with session credentials.
+    /// When `Disabled` (default), the tool is not registered.
     pub fn with_image_gen_config(
         mut self,
         config: xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig,
@@ -488,11 +458,9 @@ impl AgentBuilder {
     }
     /// Set the video generation configuration.
     ///
-    /// When `Enabled`, a `VideoGenClient` is created and injected into
-    /// the ToolBridge's resources and the `video_gen` tool is registered,
-    /// allowing video generation via the xAI Video Generation API with
-    /// session credentials. When `Disabled` (default), the tool is not
-    /// registered.
+    /// When `Enabled`, a `VideoGenClient` is created and injected into the ToolBridge's resources and the `video_gen` tool is registered.
+    /// The tool calls the xAI Video Generation API with session credentials.
+    /// When `Disabled` (default), the tool is not registered.
     pub fn with_video_gen_config(
         mut self,
         config: xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig,
@@ -534,9 +502,8 @@ impl AgentBuilder {
     }
     /// Override the system-reminder tag name used in tool result text.
     ///
-    /// Defaults to `"system-reminder"` (hyphen). Harnesses trained on a
-    /// different tag name (e.g. an underscore variant) should call this so
-    /// that reminders match the tag name their model was trained on.
+    /// Defaults to `"system-reminder"` (hyphen).
+    /// Harnesses trained on a different tag name (e.g. an underscore variant) should call this so reminders match what their model was trained on.
     pub fn with_system_reminder_tag(mut self, tag: &'static str) -> Self {
         self.system_reminder_tag = tag;
         self
@@ -553,9 +520,7 @@ impl AgentBuilder {
     }
     /// Enable or disable subagent (task tool) support.
     ///
-    /// When disabled, the `TaskTool` is stripped from the
-    /// agent's tool config during `build()`, preventing the model from
-    /// spawning child agent sessions.
+    /// When disabled, `build()` strips the `TaskTool` from the agent's tool config, so the model cannot spawn child agent sessions.
     pub fn with_subagents_enabled(mut self, enabled: bool) -> Self {
         self.subagents_enabled = enabled;
         self
@@ -571,30 +536,27 @@ impl AgentBuilder {
     }
     /// Enable or disable the `ask_user_question` tool for a primary agent.
     ///
-    /// Subagents never receive this tool. Otherwise, when disabled,
-    /// `GrokBuild:ask_user_question` is stripped from the agent's tool config
-    /// after `ensure_plan_mode_tools` injection, so the model cannot ask the
-    /// user structured questions regardless of which built-in profile is in
-    /// use. Driven by the shell's resolved gate (the `ask_user_question`
-    /// feature, default ON: remote settings/config/env act as a kill-switch)
-    /// and/or the pager's `--no-ask-user` (`_meta.askUserQuestion`).
+    /// Subagents never receive this tool.
+    /// Otherwise, when disabled, `GrokBuild:ask_user_question` is stripped from the agent's tool config after `ensure_plan_mode_tools` injection.
+    /// The model then cannot ask the user structured questions regardless of which built-in profile is in use.
+    /// Driven by the shell's resolved gate (the `ask_user_question` feature, default ON: remote settings/config/env act as a kill-switch).
+    /// The pager's `--no-ask-user` (`_meta.askUserQuestion`) also disables it.
     pub fn with_ask_user_question_enabled(mut self, enabled: bool) -> Self {
         self.ask_user_question_enabled = enabled;
         self
     }
     /// Set per-subagent enable/disable toggles from `[subagents.toggle]`.
     ///
-    /// Keys are agent names, values are booleans. Omitted agents default
-    /// to enabled. When combined with `with_subagents_enabled(true)`, this
-    /// controls which individual subagents appear in the Task tool description
-    /// and are accepted at spawn time.
+    /// Keys are agent names, values are booleans.
+    /// Omitted agents default to enabled.
+    /// Combined with `with_subagents_enabled(true)`, it controls which subagents appear in the Task tool description and are accepted at spawn time.
     pub fn with_subagent_toggle(mut self, toggle: HashMap<String, bool>) -> Self {
         self.subagent_toggle = toggle;
         self
     }
-    /// Set the resolved vendor-compat config. Threaded into both startup
-    /// discovery (`list_skills_with_plugins` / `read_agents_config_with_paths`)
-    /// and the dynamic-discovery seeds (`SkillManager` / `AgentsMdTracker`).
+    /// Set the resolved vendor-compat config.
+    /// Threaded into startup discovery (`list_skills_with_plugins` / `read_agents_config_with_paths`).
+    /// Also threaded into the dynamic-discovery seeds (`SkillManager` / `AgentsMdTracker`).
     pub fn with_compat_config(
         mut self,
         compat: xai_grok_tools::types::compat::CompatConfig,
@@ -614,8 +576,7 @@ impl AgentBuilder {
         self.bash_params_json = Some(params);
         self
     }
-    /// Inject the shell-resolved `[toolset.ask_user_question]` params
-    /// (timeout policy) into the ask_user_question tool.
+    /// Inject the shell-resolved `[toolset.ask_user_question]` params (timeout policy) into the ask_user_question tool.
     pub fn with_ask_user_question_params(
         mut self,
         params: serde_json::Map<String, serde_json::Value>,
@@ -637,13 +598,7 @@ impl AgentBuilder {
         self
     }
     /// Override the working directory shown in the system prompt.
-    ///
-    /// When set, `PromptContext.working_directory` (and therefore the
-    /// `Workspace Path` in the `<user_info>` block) uses this value instead
-    /// of the real `working_directory`. Tool execution paths are unaffected.
-    ///
-    /// Used by forked sessions so the model sees the original project path
-    /// rather than the internal overlay/worktree path.
+    /// Used by forked sessions so the model sees the original project path rather than the internal overlay/worktree path.
     pub fn with_prompt_working_directory(mut self, cwd: String) -> Self {
         self.prompt_working_directory = Some(cwd);
         self
@@ -674,9 +629,6 @@ impl AgentBuilder {
         def.disallowed_tools = self.disallowed_tools.clone();
         def
     }
-    /// Build the Agent.
-    ///
-    /// This is the full 10-step build process from the architecture doc.
     pub async fn build(mut self) -> Result<Agent, AgentBuildError> {
         let mut definition = self.resolve_definition();
         let working_dir_str = self.working_directory.to_str().unwrap_or(".").to_string();
@@ -1276,8 +1228,8 @@ const TASK_TOOL_NAMING: xai_tool_types::TaskToolNaming<'static> = xai_tool_types
     background_retrieval_tool: "${{ tools.by_kind.background_task_action }}",
     isolation_param: "${{ params.task.isolation }}",
 };
-/// Concise task-tool description for child sessions. Delegation from a child
-/// is possible but discouraged — prefer doing the work directly.
+/// Concise task-tool description for child sessions.
+/// Delegation from a child is possible but discouraged; prefer doing the work directly.
 ///
 /// Built-in type names stay aligned with [`xai_tool_types::BUILTIN_SUBAGENTS`].
 /// Keep this list in sync when adding a new built-in, or generate it
@@ -1292,10 +1244,8 @@ Prefer doing the work yourself unless delegation is clearly necessary.\n\
 Usage: specify ${{ params.task.subagent_type }} (\"general-purpose\", \"explore\", \"plan\", \"oracle\", or \"xdotcom\"), \n\
 a short ${{ params.task.description }}, and a detailed ${{ params.task.prompt }}.\n\
 ${{ params.task.run_in_background }}: Returns immediately with a subagent_id. Use the task output tool to retrieve results. This is set to true by default.";
-/// CLI [`xai_tool_types::SubagentToolNaming`]: each kind maps to its
-/// `${{ tools.by_kind.* }}` template placeholder, so rendering a built-in's
-/// `tools_template` reproduces the placeholders for the CLI's `TemplateRenderer`
-/// to resolve at finalize time.
+/// CLI [`xai_tool_types::SubagentToolNaming`]: each kind maps to its `${{ tools.by_kind.* }}` template placeholder.
+/// Rendering a built-in's `tools_template` thus reproduces the placeholders for the CLI's `TemplateRenderer` to resolve at finalize time.
 const SUBAGENT_TOOL_NAMING: xai_tool_types::SubagentToolNaming<'static> =
     xai_tool_types::SubagentToolNaming {
         execute: "${{ tools.by_kind.execute }}",
@@ -1306,10 +1256,8 @@ const SUBAGENT_TOOL_NAMING: xai_tool_types::SubagentToolNaming<'static> =
         web_search: "${{ tools.by_kind.web_search }}",
         plan: "${{ tools.by_kind.plan }}",
     };
-/// Return the tool-access fragment for a built-in subagent type, sourced from the
-/// shared [`xai_tool_types`] catalog and rendered with [`SUBAGENT_TOOL_NAMING`]
-/// (which re-emits the `${{ tools.by_kind.* }}` placeholders for the CLI's
-/// `TemplateRenderer` to resolve at finalize time).
+/// Return the tool-access fragment for a built-in subagent type from the shared [`xai_tool_types`] catalog.
+/// Rendering with [`SUBAGENT_TOOL_NAMING`] re-emits the `${{ tools.by_kind.* }}` placeholders for the CLI's `TemplateRenderer`.
 fn builtin_tools_fragment(name: BuiltinAgentName) -> String {
     let subagent = match name {
         BuiltinAgentName::GeneralPurpose => xai_tool_types::GENERAL_PURPOSE_SUBAGENT,
@@ -1345,12 +1293,10 @@ fn task_model_guidance(model_slugs: &[String]) -> String {
 }
 /// Build the Task tool description with the effective subagent list.
 ///
-/// Maps each [`SubagentEntry`] to the shared
-/// [`xai_tool_types::SubagentDescriptor`] and defers to
-/// [`xai_tool_types::build_task_description`] so the CLI and the prod chat
-/// stack share one builder. Built-in (unshadowed) entries carry the hardcoded
-/// tool-name fragment; user-defined entries carry `None` so their raw
-/// `description` is used verbatim (markdown is fine — it's model-facing text).
+/// Maps each [`SubagentEntry`] to the shared [`xai_tool_types::SubagentDescriptor`].
+/// Defers to [`xai_tool_types::build_task_description`] so the CLI and the prod chat stack share one builder.
+/// Built-in (unshadowed) entries carry the hardcoded tool-name fragment.
+/// User-defined entries carry `None` so their raw `description` is used verbatim (markdown is fine; it's model-facing text).
 pub(crate) fn build_task_description(
     subagents: &[SubagentEntry],
     model_slugs: &[String],
@@ -1708,10 +1654,9 @@ mod tests {
             "should distinguish a fresh restart from resume"
         );
     }
-    /// The bridge's full-discovery snapshot must record every discovered
-    /// skill name — including `paths:`-gated and preloaded skills that the
-    /// listing baseline (`slash_skills`) holds back — so session-start
-    /// telemetry can reuse it instead of re-walking the disk.
+    /// The bridge's full-discovery snapshot must record every discovered skill name.
+    /// That includes `paths:`-gated and preloaded skills that the listing baseline (`slash_skills`) holds back.
+    /// Session-start telemetry reuses the snapshot instead of re-walking the disk.
     #[tokio::test]
     async fn discovery_snapshot_records_gated_and_preloaded_skills() {
         use xai_grok_tools::computer::local::LocalTerminalBackend;
@@ -2100,10 +2045,9 @@ mod tests {
             }
         }
     }
-    /// The ask_user_question params merge must run after `ensure_plan_mode_tools`:
-    /// a profile that does NOT pre-declare the tool still gets the shell-resolved
-    /// timeout params on the injected instance. Fails if the merge is ever
-    /// hoisted above the injection.
+    /// The ask_user_question params merge must run after `ensure_plan_mode_tools`.
+    /// A profile that does NOT pre-declare the tool still gets the shell-resolved timeout params on the injected instance.
+    /// Fails if the merge is ever hoisted above the injection.
     #[tokio::test]
     async fn plan_mode_injected_ask_user_question_receives_params() {
         use xai_grok_tools::computer::local::LocalTerminalBackend;
@@ -2141,9 +2085,8 @@ mod tests {
         assert_eq!(applied.0.timeout_secs, Some(5));
         assert_eq!(applied.0.non_interactive, None);
     }
-    /// A non-interactive build stamps `non_interactive: true` into the AUQ
-    /// params (session state, not user config) so cancel/timeout return the
-    /// no-operator text.
+    /// A non-interactive build stamps `non_interactive: true` into the ask_user_question params (session state, not user config).
+    /// Cancel/timeout then return the no-operator text.
     #[tokio::test]
     async fn non_interactive_build_stamps_ask_user_question_params() {
         use xai_grok_tools::computer::local::LocalTerminalBackend;
@@ -2183,8 +2126,7 @@ mod tests {
         .await
         .unwrap()
     }
-    /// Build a default agent under a session allowlist + the agent's own
-    /// allowlist, returning the effective (short) tool names.
+    /// Build a default agent under a session allowlist and the agent's own allowlist, returning the effective (short) tool names.
     async fn session_clamp_tool_names(
         own_tools: Vec<String>,
         session_allow: Vec<String>,
@@ -2210,9 +2152,8 @@ mod tests {
             .map(|d| d.function.name.clone())
             .collect()
     }
-    /// The session clamp and the agent's own allowlist both bind the effective
-    /// toolset (intersection), and a disjoint pair yields deny-all — never the
-    /// "empty list == inherit all" collapse.
+    /// The session clamp and the agent's own allowlist both bind the effective toolset (intersection).
+    /// A disjoint pair yields deny-all, never the "empty list == inherit all" collapse.
     #[tokio::test]
     async fn session_clamp_intersects_own_allowlist() {
         let has = |v: &[String], t: &str| v.iter().any(|n| n == t);
@@ -2248,8 +2189,7 @@ mod tests {
             "must not inherit-all: {names:?}"
         );
     }
-    /// An unresolved own-allowlist entry makes step 4 fall back to the full
-    /// toolset; the session clamp (step 4b) must still bind afterward.
+    /// An unresolved own-allowlist entry makes step 4 fall back to the full toolset; the session clamp (step 4b) must still bind afterward.
     #[tokio::test]
     async fn session_clamp_binds_when_own_allowlist_falls_back() {
         let names = session_clamp_tool_names(
@@ -2385,8 +2325,7 @@ mod tests {
             Some(vec!["worker".into()])
         );
     }
-    /// Compat allowlist names (`Read`, `Bash`, `Grep`) map to their Grok
-    /// equivalents by `ToolKind` — a real restricted toolset, not zero tools.
+    /// Compat allowlist names (`Read`, `Bash`, `Grep`) map to their Grok equivalents by `ToolKind`: a real restricted toolset, not zero tools.
     #[tokio::test]
     async fn claude_tool_names_map_to_grok_equivalents() {
         let tools = vec!["Read".into(), "Bash".into(), "Grep".into()];
@@ -2414,8 +2353,7 @@ mod tests {
             "Edit must be excluded by the allowlist; got: {names:?}"
         );
     }
-    /// Shell, LSP, ask, and task-lifecycle tool names resolve to their grok
-    /// `ToolKind`, so those allowlists are honored instead of failing open.
+    /// Shell, LSP, ask, and task-lifecycle tool names resolve to their grok `ToolKind`, so those allowlists are honored instead of failing open.
     #[test]
     fn shell_lsp_ask_and_task_tool_names_map() {
         assert_eq!(claude_tool_kind("PowerShell"), Some(ToolKind::Execute));
@@ -2428,9 +2366,8 @@ mod tests {
         assert_eq!(claude_tool_kind("EnterPlanMode"), None);
         assert_eq!(claude_tool_kind("ExitPlanMode"), None);
     }
-    /// `[Read, Edit, AskUserQuestion]` builds end-to-end: the allowlist is
-    /// honored (no full-toolset fallback) and `ask_user_question` stands
-    /// alone after the injected plan-mode tools are dropped.
+    /// `[Read, Edit, AskUserQuestion]` builds end-to-end: the allowlist is honored (no full-toolset fallback).
+    /// `ask_user_question` stands alone after the injected plan-mode tools are dropped.
     #[tokio::test]
     async fn ask_user_question_allowlist_builds_without_plan_tools() {
         let tools = vec!["Read".into(), "Edit".into(), "AskUserQuestion".into()];
@@ -2448,8 +2385,7 @@ mod tests {
             assert!(!names.contains(&dropped.to_string()), "got: {names:?}");
         }
     }
-    /// Entries we can't match or map (a typo, a renamed/absent tool) fall back
-    /// to the full toolset rather than crippling the agent.
+    /// Entries we can't match or map (a typo, a renamed/absent tool) fall back to the full toolset rather than crippling the agent.
     #[tokio::test]
     async fn unmappable_allowlist_falls_back_to_full_toolset() {
         let tools = vec!["Frobnicate".into(), "Wibble".into()];
@@ -2470,8 +2406,7 @@ mod tests {
             "got: {names:?}"
         );
     }
-    /// End-to-end: an on-disk plugin agent parsed via `from_file_frontmatter_only`
-    /// with a compat-style `tools:` allowlist gets the mapped toolset (not 0 tools).
+    /// An on-disk plugin agent parsed via `from_file_frontmatter_only` with a compat-style `tools:` allowlist gets the mapped toolset, not 0 tools.
     #[tokio::test]
     async fn plugin_style_agent_file_maps_claude_tools() {
         use xai_grok_tools::computer::local::LocalTerminalBackend;
@@ -2522,9 +2457,9 @@ mod tests {
             "Edit must be excluded; got: {names:?}"
         );
     }
-    /// A restrictive allowlist must never strip MCP access. Compat allowlists
-    /// treat `mcp__*` as always-on, so grok keeps the MCP meta-tools
-    /// (`search_tool` / `use_tool`) regardless of what the allowlist names.
+    /// A restrictive allowlist must never strip MCP access.
+    /// Compat allowlists treat `mcp__*` as always-on.
+    /// Grok keeps the MCP meta-tools (`search_tool`/`use_tool`) regardless of what the allowlist names.
     #[tokio::test]
     async fn restrictive_allowlist_keeps_mcp_access() {
         let agent = build_with_tools(vec!["Read".into()], vec![]).await;
@@ -2621,9 +2556,8 @@ mod tests {
             assert!(!names.contains(&excluded.to_string()), "got: {names:?}");
         }
     }
-    /// grok-build toolsets have no Skill tool — skills are read from
-    /// `SKILL.md` via `read_file` — so a compat `Skill` allowlist entry grants
-    /// toolset.
+    /// grok-build toolsets have no Skill tool; skills are read from `SKILL.md` via `read_file`.
+    /// A compat `Skill` allowlist entry therefore grants `read_file` (plus always-on MCP access) without falling back to the full toolset.
     #[tokio::test]
     async fn skill_allowlist_maps_to_read() {
         let agent = build_with_tools(vec!["Skill".into()], vec![]).await;
@@ -2647,9 +2581,8 @@ mod tests {
             "no full-toolset fallback — unlisted tools must be excluded; got: {names:?}"
         );
     }
-    /// `Read` and `Skill` both map to `ToolKind::Read`, but the allowlist phase
-    /// `read_file` (plus always-on MCP access) without falling back to the full
-    /// single base `read_file` entry is kept exactly once, never double-registered.
+    /// `Read` and `Skill` both map to `ToolKind::Read`, but the allowlist phase is a filter (`retain`) over a `HashSet` of kinds, not an inserter.
+    /// The single base `read_file` entry is therefore kept exactly once, never double-registered.
     #[tokio::test]
     async fn read_and_skill_allowlist_keeps_single_read_file() {
         let agent = build_with_tools(vec!["Read".into(), "Skill".into()], vec![]).await;
@@ -2665,8 +2598,7 @@ mod tests {
             "read_file must be registered exactly once for tools: [Read, Skill]; got: {names:?}"
         );
     }
-    /// A compat-style `mcp__server__tool` allowlist entry is always allowed: it
-    /// neither triggers the full-toolset fallback nor strips MCP access.
+    /// A compat-style `mcp__server__tool` allowlist entry is always allowed: it neither triggers the full-toolset fallback nor strips MCP access.
     #[tokio::test]
     async fn mcp_prefixed_allowlist_entry_keeps_mcp_access() {
         let tools = vec!["mcp__github__create_issue".into(), "Read".into()];
@@ -2691,9 +2623,8 @@ mod tests {
             "no full-toolset fallback — unlisted tools must be excluded; got: {names:?}"
         );
     }
-    /// Compat `ToolSearch` meta-tool maps to grok's `search_tool` (MCP
-    /// is a filter (`retain`) over a `HashSet` of kinds, not an inserter — so the
-    /// falling back to the full toolset.
+    /// Compat `ToolSearch` meta-tool maps to grok's `search_tool` (MCP discovery).
+    /// Naming it in an allowlist keeps MCP access without falling back to the full toolset.
     #[tokio::test]
     async fn tool_search_allowlist_maps_to_search_tool() {
         let agent = build_with_tools(vec!["ToolSearch".into()], vec![]).await;
@@ -2775,8 +2706,7 @@ mod tests {
             "function web_search tool must be removed when disallowed"
         );
     }
-    /// Regression: with backend search + web search both enabled, both
-    /// hosted tools appear and `backend_search_enabled()` is true.
+    /// Regression: with backend search and web search both enabled, both hosted tools appear and `backend_search_enabled()` is true.
     #[tokio::test]
     async fn hosted_tools_populated_when_backend_search_and_web_search_enabled() {
         let agent = build_with_web_search(true, true, &[], None).await;
@@ -2814,8 +2744,7 @@ mod tests {
             "expected XSearch hosted tool, got: {hosted:?}"
         );
     }
-    /// Backend search off: gate bool false and no hosted tools, regardless
-    /// of web-search config.
+    /// Backend search off: `backend_search_enabled()` is false and no hosted tools appear, regardless of web-search config.
     #[tokio::test]
     async fn hosted_tools_empty_when_backend_search_disabled() {
         let agent = build_with_web_search(true, false, &[], None).await;

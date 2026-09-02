@@ -1,17 +1,11 @@
-//! Reconciles delivered key events with physical input state for
-//! terminal/OS pairs that drop modifier bits the application needs.
-//! [`KeyboardNormalizer`] pairs an OS-level [`ModifierProbe`] with a
-//! [`ModifierDelivery`] classification and rewrites incoming
-//! `KeyEvent`s in place so every downstream surface sees the canonical
-//! form.
+//! Reconciles delivered key events with physical input state for terminal/OS pairs that drop modifier bits the application needs.
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
 use crate::terminal::ModifierDelivery;
 
 /// Snapshot of physically-held modifier keys at a single point in time.
-/// Future probes can populate more bits; consumers should only read what
-/// they need.
+/// Future probes can populate more bits; consumers should only read what they need.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub struct ModifierState {
     pub command: bool,
@@ -59,8 +53,8 @@ impl<P: ModifierProbe> KeyboardNormalizer<P> {
         Self { probe, delivery }
     }
 
-    /// Upgrade a [`KeyEvent`] when a modifier is held but absent from the
-    /// event. Returns `Some` only if the delivered event changed.
+    /// Upgrade a [`KeyEvent`] when a modifier is held but absent from the event.
+    /// Returns `Some` only if the delivered event changed.
     pub fn rescue_key(&self, key: KeyEvent) -> Option<KeyEvent> {
         if key.code == KeyCode::Char('\u{0002}') && key.modifiers.is_empty() {
             let mut out = key;
@@ -68,7 +62,9 @@ impl<P: ModifierProbe> KeyboardNormalizer<P> {
             out.modifiers = KeyModifiers::CONTROL;
             return Some(out);
         }
-        if !self.delivery.benefits_from_rescue() {
+        if !self.delivery.benefits_from_rescue()
+            || super::terminal_support::os_modifier_rescue_suppressed()
+        {
             return None;
         }
         if !key.modifiers.is_empty() {
@@ -78,8 +74,7 @@ impl<P: ModifierProbe> KeyboardNormalizer<P> {
             return None;
         }
         let state = self.probe.snapshot();
-        // Cmd wins per macOS convention: Cmd+Backspace (line-kill) is the
-        // stronger action; almost no one holds Cmd+Opt simultaneously.
+        // Cmd wins per macOS convention: Cmd+Backspace (line-kill) is the stronger action; almost no one holds Cmd+Opt simultaneously
         let added = match (
             state.command && self.delivery.cmd.benefits_from_rescue(),
             state.option && self.delivery.opt.benefits_from_rescue(),
@@ -98,8 +93,7 @@ impl<P: ModifierProbe> KeyboardNormalizer<P> {
         Some(out)
     }
 
-    /// Upgrade an [`Event`] in place, owning a fresh `Event::Key` only
-    /// when a rescue actually fires.
+    /// Upgrade an [`Event`] in place, owning a fresh `Event::Key` only when a rescue actually fires.
     pub fn rescue<'a>(&self, ev: &'a Event) -> std::borrow::Cow<'a, Event> {
         if let Event::Key(k) = ev
             && let Some(upgraded) = self.rescue_key(*k)
@@ -157,6 +151,24 @@ mod tests {
         assert_eq!(out.modifiers, KeyModifiers::CONTROL);
         assert!(!crate::input::key::is_text_input_key(&out));
         assert!(crate::key!('b', CONTROL).matches(&out));
+    }
+
+    #[test]
+    fn queued_event_suppression_skips_os_probe_but_keeps_raw_ctrl_b_normalization() {
+        let n = make(
+            ModifierState {
+                command: true,
+                option: true,
+                ..Default::default()
+            },
+            drops_both(),
+        );
+        let _guard = crate::input::terminal_support::suppress_os_modifier_rescue();
+        assert!(n.rescue_key(bare(KeyCode::Backspace)).is_none());
+        let raw = KeyEvent::new(KeyCode::Char('\u{0002}'), KeyModifiers::NONE);
+        let out = n.rescue_key(raw).expect("raw Ctrl+B still canonicalizes");
+        assert_eq!(out.code, KeyCode::Char('b'));
+        assert_eq!(out.modifiers, KeyModifiers::CONTROL);
     }
 
     #[test]
@@ -260,9 +272,8 @@ mod tests {
 
     #[test]
     fn rescue_only_adds_modifier_for_dropped_axis() {
-        // Cmd is Native, only Opt is Dropped → bare Backspace + Cmd held
-        // must NOT be rescued (we'd be claiming a modifier the terminal
-        // would have delivered).
+        // Cmd is Native and only Opt is Dropped, so a bare Backspace with Cmd held must NOT be rescued
+        // Rescuing it would claim a modifier the terminal would have delivered
         let opt_only = ModifierDelivery::new_for_test(ModifierFate::Native, ModifierFate::Dropped);
         let n = make(
             ModifierState {

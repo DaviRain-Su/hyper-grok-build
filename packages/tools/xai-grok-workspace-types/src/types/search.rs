@@ -1,4 +1,4 @@
-//! Minimal serializable search-related shapes (ripgrep + fuzzy file search).
+//! Minimal serializable search-related shapes (ripgrep and fuzzy file search).
 //!
 //! TODO(workspace): align with the canonical ripgrep / fuzzy types in
 //! `xai_grok_shell::file_system` when the search subsystem moves
@@ -14,7 +14,7 @@ pub struct RipgrepArgs {
     /// Optional working directory (relative to workspace root).
     #[serde(default)]
     pub cwd: Option<String>,
-    /// Glob filters (positive + negative `!` prefixed patterns).
+    /// Glob filters (positive and negative `!` prefixed patterns).
     #[serde(default)]
     pub globs: Vec<String>,
     /// Case insensitive search.

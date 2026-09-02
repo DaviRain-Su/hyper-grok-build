@@ -8,7 +8,7 @@ pub enum AuthError {
     #[error("Not logged in. Run `grok login`.")]
     NotLoggedIn,
 
-    /// Token expired and no refresh authority available.
+    /// The token expired and no refresh authority is available.
     #[error("Token expired. Run `grok login` to re-authenticate.")]
     TokenExpiredNoRefresh,
 
@@ -16,53 +16,48 @@ pub enum AuthError {
     #[error("Authentication rejected by server. Run `grok login` to re-authenticate.")]
     ServerRejectedNoRecovery,
 
-    /// All recovery strategies exhausted.
+    /// All recovery strategies are exhausted.
     #[error("Auth recovery exhausted; re-authentication required.")]
     RecoveryExhausted,
 
     /// A session's team principal violates the `force_login_team_uuid` pin.
-    /// `message` states which team is required vs. returned.
+    /// `message` states which team is required and which was returned.
     #[error("{message} Run `grok login` to sign in with the required team.")]
     PinnedTeamMismatch { message: String },
 
-    /// Cached API-key session rejected because API-key auth is disabled.
+    /// The cached API-key session was rejected because API-key auth is disabled.
     #[error("API-key auth is disabled by your administrator. Run `grok login` to authenticate.")]
     ApiKeyAuthDisabled,
 
-    /// Outcome of a refresh-authority attempt. Recoverability (and, for
-    /// permanent failures, the reason) lives in [`RefreshTokenError`].
+    /// Outcome of a refresh-authority attempt.
+    /// Recoverability (and, for permanent failures, the reason) lives in [`RefreshTokenError`].
     #[error(transparent)]
     Refresh(#[from] RefreshTokenError),
 }
 
-/// Recoverability axis of a token-refresh attempt. Deliberately total (no
-/// `#[non_exhaustive]`): "permanent vs transient" is a closed decision every
-/// caller must make, so a future third state should break consumers loudly.
+/// Whether a token-refresh failure is permanent or transient.
+/// Deliberately not `#[non_exhaustive]`: "permanent or transient" is a decision every caller must make.
+/// A third state should break consumers loudly.
 #[derive(Debug, Error)]
 pub enum RefreshTokenError {
     /// The credential is dead; the user must re-authenticate.
     #[error(transparent)]
     Permanent(#[from] RefreshTokenFailedError),
-    /// Network / 5xx / unknown blip; safe to retry later. Carries the cause.
+    /// A network error, a 5xx, or an unknown blip; safe to retry later, with the cause attached.
     #[error(transparent)]
     Transient(RefreshTransientError),
 }
 
-/// A retryable refresh failure, wrapping its cause. No public `From`:
-/// construct only via [`AuthError::transient`] /
-/// [`AuthError::transient_source`], so a stray `?` on some error can't silently
-/// classify a permanent failure as retryable (mirrors the dedicated
-/// [`RefreshTokenFailedError`] on the permanent arm). Display frames the cause
-/// as an auth-refresh failure so internal messages (lock timeout, sleep defer)
-/// don't surface bare; the permanent arm derives its copy from
-/// [`RefreshTokenFailedReason::user_message`] and is not prefixed.
+/// A retryable refresh failure, wrapping its cause.
+/// No public `From`: construct only via [`AuthError::transient`] or [`AuthError::transient_source`].
+/// That way a stray `?` on some error cannot silently classify a permanent failure as retryable.
+/// Display wraps the cause in "auth refresh failed" so internal messages (lock timeout, sleep defer) are not shown to the user bare.
 #[derive(Debug, Error)]
 #[error("auth refresh failed: {0}")]
 pub struct RefreshTransientError(#[source] Box<dyn std::error::Error + Send + Sync>);
 
-/// A terminal refresh failure. `reason` is machine-readable; the user-facing
-/// copy is derived from it via [`RefreshTokenFailedReason::user_message`], so
-/// the two can never drift.
+/// A terminal refresh failure.
+/// `reason` is machine-readable; the user-facing copy is derived from it via [`RefreshTokenFailedReason::user_message`], so the two can never drift.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("{}", .reason.user_message())]
 #[non_exhaustive]
@@ -76,29 +71,24 @@ impl From<RefreshTokenFailedReason> for RefreshTokenFailedError {
     }
 }
 
-/// Why a token refresh terminally failed, grounded in the OAuth2 error codes
-/// our IdP actually emits.
+/// Why a token refresh terminally failed, grounded in the OAuth2 error codes our IdP actually emits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RefreshTokenFailedReason {
-    /// `invalid_grant` — the refresh token is no longer valid (expired, reused,
-    /// or revoked; the IdP does not distinguish these).
+    /// `invalid_grant`: the refresh token is no longer valid (expired, reused, or revoked; the IdP does not distinguish these).
     RefreshTokenRejected,
-    /// `invalid_client` — the client/app credential was rejected.
+    /// `invalid_client`: the client/app credential was rejected.
     ClientRejected,
-    /// The operator's `auth_provider_command` could not mint a credential in a
-    /// headless run (`GROK_AUTH_EXPIRED=1`).
+    /// The operator's `auth_provider_command` could not produce a credential in a headless run (`GROK_AUTH_EXPIRED=1`).
     ProviderInteractiveRequired,
-    /// Escalation from repeated transient failures (OIDC). Never a raw IdP
-    /// code: an unrecognized terminal code is classified transient, not
-    /// `Other` (see `classify_terminal`).
+    /// Escalation from repeated transient failures (OIDC).
+    /// Never a raw IdP code: an unrecognized terminal code is classified transient, not `Other` (see `classify_terminal`).
     Other,
 }
 
 impl RefreshTokenFailedReason {
-    /// Sticky until the credential changes (never ages out): a revoked refresh
-    /// token never self-heals, whereas client rotation / transient escalation
-    /// recover, so those age out past the TTL.
+    /// Sticky until the credential changes (never ages out): a revoked refresh token never self-heals.
+    /// Client rotation and transient escalation recover, so those age out past the TTL.
     pub(crate) fn is_sticky(self) -> bool {
         match self {
             Self::RefreshTokenRejected => true,
@@ -106,9 +96,8 @@ impl RefreshTokenFailedReason {
         }
     }
 
-    /// Whether the verdict rules out an unattended retry for as long as it
-    /// stands. Orthogonal to [`Self::is_sticky`], which is about whether the
-    /// verdict ever ages out.
+    /// Whether the verdict rules out an unattended retry for as long as it stands.
+    /// Independent of [`Self::is_sticky`], which is about whether the verdict ever ages out.
     pub(crate) fn blocks_unattended_retry(self) -> bool {
         match self {
             Self::RefreshTokenRejected | Self::ProviderInteractiveRequired => true,
@@ -116,8 +105,7 @@ impl RefreshTokenFailedReason {
         }
     }
 
-    /// User-facing copy for a terminal refresh failure; the raw IdP code stays
-    /// in logs.
+    /// User-facing copy for a terminal refresh failure; the raw IdP code stays in logs.
     pub(crate) fn user_message(self) -> Cow<'static, str> {
         match self {
             Self::RefreshTokenRejected => {
@@ -135,7 +123,7 @@ impl RefreshTokenFailedReason {
     }
 }
 
-/// `label` is the operator's `auth_provider_label`, where the surface has one.
+/// `label` is the operator's `auth_provider_label`, when the caller has one.
 pub(crate) fn provider_login_message(label: Option<&str>) -> Cow<'static, str> {
     match label {
         Some(label) => format!(
@@ -150,16 +138,14 @@ pub(crate) fn provider_login_message(label: Option<&str>) -> Cow<'static, str> {
 }
 
 impl AuthError {
-    /// A retryable refresh failure with a message-only cause, for the genuinely
-    /// message-only sites (lock timeout, sleep/dark-wake defer, no refresher);
-    /// use [`Self::transient_source`] when a real error is in hand.
+    /// A retryable refresh failure for the sites that have only a message (lock timeout, sleep/dark-wake defer, no refresher).
+    /// Use [`Self::transient_source`] when a real error is in hand.
     pub(crate) fn transient(message: impl Into<String>) -> Self {
         Self::transient_source(message.into())
     }
 
-    /// A retryable refresh failure that preserves `source` in the error chain
-    /// (`Transient` carries the cause), so callers with a real error don't
-    /// flatten it to a string.
+    /// A retryable refresh failure that preserves `source` in the error chain (`Transient` carries the cause).
+    /// Callers with a real error should use this rather than flattening it to a string.
     pub(crate) fn transient_source(
         source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
     ) -> Self {
@@ -173,7 +159,7 @@ impl AuthError {
         AuthError::Refresh(RefreshTokenError::Permanent(reason.into()))
     }
 
-    /// Retryable refresh failure (network, 5xx, sleep/dark-wake defer, etc.).
+    /// True for a retryable refresh failure (network, 5xx, sleep/dark-wake defer, etc.).
     /// Permanent failures, NotLoggedIn, and policy rejects are not transient.
     pub(crate) fn is_transient(&self) -> bool {
         matches!(self, AuthError::Refresh(RefreshTokenError::Transient(_)))

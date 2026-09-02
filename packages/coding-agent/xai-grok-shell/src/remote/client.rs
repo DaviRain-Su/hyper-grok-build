@@ -1,4 +1,3 @@
-//! HTTP client for backend CRUD operations.
 use crate::auth::backend::{ActiveAuthBackend, AuthBackend};
 use crate::auth::{GrokAuth, GrokComConfig};
 use crate::session::export::{ExportedMessage, ExportedMetadata, ExportedSession};
@@ -9,7 +8,6 @@ use std::time::Duration;
 const GROK_CODE_BACKEND_URL: &str = "https://code.grok.com";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const GROK_CODE_WEB_URL: &str = "https://grok.com";
-/// Build a share URL from a permission ID
 pub fn share_url(permission_id: &str) -> String {
     let web_url =
         std::env::var("GROK_CODE_WEB_URL").unwrap_or_else(|_| GROK_CODE_WEB_URL.to_string());
@@ -86,8 +84,7 @@ async fn add_bundle_fetch_headers(
 }
 /// Fetch the bundled subagent cache payload from cli-chat-proxy `GET /v1/subagents/bundle`.
 ///
-/// Uses the shell's standard proxy-backed auth model: deployment key auth takes
-/// precedence when configured; otherwise user-session token auth is used.
+/// Uses the shell's standard auth for proxy requests: a configured deployment key takes precedence; otherwise the user-session token is used.
 pub async fn fetch_subagent_bundle(
     cli_chat_proxy_base_url: &str,
     auth_manager: Option<&std::sync::Arc<crate::auth::AuthManager>>,
@@ -122,15 +119,13 @@ pub async fn fetch_subagent_bundle(
     );
     Ok(bundle)
 }
-/// The result of fetching a bundle: either raw tar.gz bytes from the new
-/// archive endpoint, or a parsed JSON bundle from the legacy endpoint.
+/// The result of fetching a bundle: either raw tar.gz bytes from the new archive endpoint, or a parsed JSON bundle from the legacy endpoint.
 #[derive(Debug)]
 pub enum FetchedBundle {
     Archive(Vec<u8>),
     Legacy(SubagentBundle),
 }
-/// Fetch a bundle, trying the archive endpoint first and falling back to
-/// legacy JSON on any non-success HTTP status.
+/// Fetch a bundle, trying the archive endpoint first and falling back to legacy JSON on any non-success HTTP status.
 pub async fn fetch_bundle(
     cli_chat_proxy_base_url: &str,
     auth_manager: Option<&std::sync::Arc<crate::auth::AuthManager>>,
@@ -318,8 +313,7 @@ impl BackendClient {
             auth_manager: None,
         }
     }
-    /// Attach a live `AuthManager` so every request resolves a fresh token
-    /// instead of requiring the caller to pass `&GrokAuth`.
+    /// Attach a live `AuthManager` so every request resolves a fresh token instead of requiring the caller to pass `&GrokAuth`.
     pub(crate) fn with_auth_manager(
         mut self,
         manager: std::sync::Arc<crate::auth::AuthManager>,
@@ -336,7 +330,6 @@ impl BackendClient {
         self.auth_manager = Some(manager);
         self
     }
-    /// Resolve auth from the attached `AuthManager`.
     async fn resolve_auth(&self) -> Result<GrokAuth, BackendError> {
         let manager = self
             .auth_manager
@@ -350,13 +343,9 @@ impl BackendClient {
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
-    /// Upload session and create share link.
-    ///
     /// The session data (`save_session_data`) is sent inline to the backend.
-    /// If the backend responds with 413 (payload too large), the error is
-    /// logged as a warning and the share continues — the caller is expected
-    /// to have already uploaded the data to GCS via a signed URL as a
-    /// fallback.
+    /// If the backend responds with 413 (payload too large), the error is logged as a warning and the share continues.
+    /// The caller is expected to have already uploaded the data to GCS via a signed URL as a fallback.
     pub async fn share_session(
         &self,
         session: &ExportedSession,
@@ -480,7 +469,6 @@ impl BackendClient {
         }
         Ok(())
     }
-    /// List all sessions for the authenticated user. `GET /sessions`
     pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>, BackendError> {
         let url = format!("{}/sessions", self.base_url);
         let response = self.send_with_auth(self.reqwest_client.get(&url)).await?;
@@ -542,8 +530,7 @@ impl BackendClient {
         Ok(())
     }
 }
-/// Outcome of a blocking settings fetch. Distinguishes the three cases the
-/// external-OTEL gate cares about (see [`crate::agent::mvp_agent`]).
+/// Distinguishes the three cases the external-OTEL gate cares about (see [`crate::agent::mvp_agent`]).
 #[derive(Debug)]
 #[must_use]
 #[non_exhaustive]
@@ -551,11 +538,10 @@ pub enum SettingsFetch {
     /// Settings fetched and parsed; carries the policy that resolves the gate.
     /// Boxed because `RemoteSettings` is large and the other variants are unit-sized.
     Fetched(Box<crate::util::config::RemoteSettings>),
-    /// Credential unambiguously rejected (401): the remote policy will never reach
-    /// this leader, so the gate may open without waiting.
+    /// Credential unambiguously rejected (401): the remote policy will never reach this leader, so the gate may open without waiting.
     Rejected,
-    /// Transient/ambiguous (network, 5xx exhausted, 403/429/other 4xx, unparseable
-    /// 2xx): outcome unknown. Leave the gate closed (fail-closed), retry later.
+    /// Transient/ambiguous (network, 5xx exhausted, 403/429/other 4xx, unparseable 2xx): outcome unknown.
+    /// Leave the gate closed (fail-closed), retry later.
     Retry,
 }
 impl SettingsFetch {
@@ -567,8 +553,7 @@ impl SettingsFetch {
         }
     }
 }
-/// Blocking settings fetch; makes up to
-/// [`crate::http::SETTINGS_FETCH_MAX_ATTEMPTS`] attempts on transient failures.
+/// Makes up to [`crate::http::SETTINGS_FETCH_MAX_ATTEMPTS`] attempts on transient failures.
 pub fn fetch_settings_blocking(
     cli_chat_proxy_base_url: &str,
     auth: &GrokAuth,
@@ -581,9 +566,7 @@ pub fn fetch_settings_blocking(
         crate::http::SETTINGS_FETCH_MAX_ATTEMPTS,
     )
 }
-/// Settings-fetch core with a caller-chosen attempt budget. Private so the
-/// attempt count stays out of the public API; tests use it to skip retry
-/// backoff on the transient-failure paths.
+/// Private so the attempt count stays out of the public API; tests use it to skip retry backoff on the transient-failure paths.
 fn fetch_settings_blocking_with_attempts(
     cli_chat_proxy_base_url: &str,
     auth: &GrokAuth,
@@ -643,16 +626,15 @@ fn fetch_settings_blocking_with_attempts(
 }
 #[derive(Deserialize)]
 struct LoginConfigResponse {
-    /// Tri-state: `Some` forces a transport; `None`/absent → client default.
+    /// Tri-state: `Some` forces a transport; `None` or an absent flag keeps the client default.
     #[serde(default)]
     device_flow: Option<bool>,
 }
 /// Fetch `grok_build_login_device_flow` from cli-chat-proxy `GET /v1/login-config`.
 ///
 /// Unauthenticated (pre-login); `x-grok-agent-id` is the per-install bucketing key.
-/// Best-effort: any error or unset flag returns `None` so the caller keeps the
-/// loopback default. Caps at 1.5s with no retries since it's on the login path;
-/// `agent_id()` runs on the blocking pool so the fetch never stalls the executor.
+/// Best-effort: any error or unset flag returns `None` so the caller keeps the loopback default.
+/// Caps at 1.5s with no retries since it's on the login path.
 pub async fn fetch_login_device_flow(cli_chat_proxy_base_url: &str) -> Option<bool> {
     let agent_id = tokio::task::spawn_blocking(xai_grok_telemetry::id::agent_id)
         .await
@@ -696,7 +678,7 @@ pub async fn fetch_login_device_flow(cli_chat_proxy_base_url: &str) -> Option<bo
         }
     }
 }
-/// Default context window (256k) when the remote endpoint doesn't provide one.
+/// Default context window when the remote endpoint doesn't provide one.
 pub(crate) const DEFAULT_CONTEXT_WINDOW: u64 = 256_000;
 #[derive(Debug, Deserialize)]
 struct ModelsResponse {
@@ -953,6 +935,22 @@ pub(crate) fn parse_remote_model_value(
             .or_else(|| meta.and_then(|m| m.get("reasoningEfforts")))
             .and_then(|v| v.as_array())
             .map(|arr| xai_grok_sampling_types::parse_reasoning_effort_options(arr))
+            .unwrap_or_default(),
+        variants: obj
+            .get("variants")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr
+                    .iter()
+                    .filter_map(|value| match serde_json::from_value(value.clone()) {
+                        Ok(variant) => Some(variant),
+                        Err(e) => {
+                            tracing::warn!("Dropping a model variant this build cannot read: {e}");
+                            None
+                        }
+                    })
+                    .collect()
+            })
             .unwrap_or_default(),
         supports_backend_search,
         compactions_remaining: obj

@@ -1,8 +1,7 @@
-//! Wire test for ambient-context injection: when events are emitted inside a
-//! `with_session_ctx` scope, the external records must carry `session.id`,
-//! `turn_number`, `prompt.id`, and a monotonic `event.sequence` — and
-//! `prompt.id` must appear on events ONLY, never on metrics (unbounded
-//! cardinality). Complements the other wire tests, which emit outside any ctx.
+//! Wire test for ambient-context injection.
+//! Events emitted inside a `with_session_ctx` scope must carry `session.id`, `turn_number`, `prompt.id`, and a monotonic `event.sequence`.
+//! `prompt.id` must appear on events ONLY, never on metrics (unbounded cardinality).
+//! This complements the other wire tests, which emit outside any ctx.
 
 mod otlp_collector;
 
@@ -36,9 +35,8 @@ fn ambient_ctx_injects_session_turn_and_prompt_id() {
     external::init(Some(cfg));
     assert!(external::is_active());
 
-    // Emit inside a session ctx (turn_number = 3) so the ambient snapshot is
-    // populated. `log_event` is synchronous and runs within the task-local
-    // scope of `with_session_ctx`.
+    // Emit inside a session ctx (turn_number = 3) so the ambient snapshot is populated
+    // `log_event` is synchronous and runs within the task-local scope of `with_session_ctx`
     let ctx = xai_grok_telemetry::TelemetryCtx::new(
         "sess-ctx".to_owned(),
         Arc::new(tokio::sync::Mutex::new(3usize)),
@@ -54,6 +52,7 @@ fn ambient_ctx_injects_session_turn_and_prompt_id() {
             client_identifier: None,
             screen_mode: None,
             prompt_text: None,
+            command_name: None,
         });
         xai_grok_telemetry::log_event(xai_grok_telemetry::events::ModelResponseReceived {
             model_id: "grok-4".into(),
@@ -63,6 +62,8 @@ fn ambient_ctx_injects_session_turn_and_prompt_id() {
             completion_tokens: None,
             reasoning_tokens: None,
             cached_prompt_tokens: None,
+            cache_creation_tokens: None,
+            cost_usd_ticks: None,
         });
     }));
 
@@ -110,8 +111,7 @@ fn ambient_ctx_injects_session_turn_and_prompt_id() {
             !p.attrs.contains_key("turn_number"),
             "turn_number must never reach metrics"
         );
-        // session.id DOES flow to metrics from the ambient ctx (cardinality
-        // opt-in, default on).
+        // session.id DOES flow to metrics from the ambient ctx; that cardinality opt-in defaults to on
         assert_eq!(
             p.attrs.get("session.id").and_then(|v| v.as_str()),
             Some("sess-ctx")

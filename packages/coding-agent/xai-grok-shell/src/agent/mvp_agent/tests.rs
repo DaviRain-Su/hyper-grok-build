@@ -101,8 +101,7 @@ fn resolve_subscription_tier_prefers_display_then_api_key_then_jwt() {
         Some("free")
     );
 }
-/// JWT claim ↔ `/user` tier mapping used to gate post-unblock catalog refresh
-/// (a stale older paid claim must not skip retry).
+/// Maps the JWT tier claim to the `/user` tier name to gate the post-unblock catalog refresh (a stale older paid claim must not skip retry).
 #[test]
 fn jwt_claim_matches_user_subscription_tier_known_pairs() {
     let cases = [
@@ -151,8 +150,7 @@ fn jwt_claim_matches_user_subscription_tier_rejects_stale_and_unknown() {
         "EnterpriseMystery"
     ));
 }
-/// Single-flight flag must clear on Drop even if the retry task panics /
-/// aborts mid-backoff (guards against the flag stuck true forever).
+/// Single-flight flag must clear on Drop even if the retry task panics / aborts mid-backoff (guards against the flag stuck true forever).
 #[test]
 fn post_unblock_jwt_retry_in_flight_guard_clears_on_drop() {
     use std::sync::Arc;
@@ -365,21 +363,6 @@ async fn broadcast_refresh_skill_baseline_tolerates_dropped_receiver() {
         Ok(crate::session::SessionCommand::RefreshSkillBaseline)
     ));
 }
-/// The monotonic turn counter must never wrap on the DB-bound i32 path.
-/// `allocate_turn_number` returns u64; the AB submission casts to i32.
-/// Verify we saturate instead of wrapping.
-#[test]
-fn trace_turn_to_i32_saturates_at_max() {
-    let small: u64 = 42;
-    let result = i32::try_from(small).unwrap_or(i32::MAX);
-    assert_eq!(result, 42);
-    let huge: u64 = (i32::MAX as u64) + 100;
-    let result = i32::try_from(huge).unwrap_or(i32::MAX);
-    assert_eq!(result, i32::MAX);
-    let boundary: u64 = i32::MAX as u64;
-    let result = i32::try_from(boundary).unwrap_or(i32::MAX);
-    assert_eq!(result, i32::MAX);
-}
 #[test]
 fn settings_allow_access_none_settings_is_allowed() {
     assert!(settings_allow_access(None));
@@ -408,30 +391,7 @@ fn settings_allow_access_field_absent_is_allowed() {
     };
     assert!(settings_allow_access(Some(&rs)));
 }
-/// After allocating a turn number, the retained (in-memory) turn counter holds
-/// the next value (current + 1). This is the value that must be persisted via
-/// `SetNextTraceTurn` so the counter survives restarts.
-#[test]
-fn allocate_turn_number_advances_counter() {
-    use std::cell::RefCell;
-    use std::collections::HashMap;
-    let counters: RefCell<HashMap<acp::SessionId, u64>> = RefCell::new(HashMap::new());
-    let sid = acp::SessionId::new("test-session");
-    let allocate = |id: &acp::SessionId| -> u64 {
-        let mut m = counters.borrow_mut();
-        let turn = m.get(id).copied().unwrap_or(0u64);
-        m.insert(id.clone(), turn.saturating_add(1));
-        turn
-    };
-    assert_eq!(allocate(&sid), 0);
-    assert_eq!(*counters.borrow().get(&sid).unwrap(), 1);
-    assert_eq!(allocate(&sid), 1);
-    assert_eq!(*counters.borrow().get(&sid).unwrap(), 2);
-    assert_eq!(allocate(&sid), 2);
-    assert_eq!(*counters.borrow().get(&sid).unwrap(), 3);
-}
-/// Build a synthetic harness `task` call/result pair carrying the
-/// `<subagent_result>` footer, mirroring what the verifier/planner record.
+/// Build a synthetic harness `task` call/result pair carrying the `<subagent_result>` footer, mirroring what the verifier/planner record.
 fn harness_pair(id: &str) -> Vec<xai_grok_sampling_types::conversation::ConversationItem> {
     use xai_grok_sampling_types::ToolCall;
     use xai_grok_sampling_types::conversation::ConversationItem;
@@ -444,11 +404,9 @@ fn harness_pair(id: &str) -> Vec<xai_grok_sampling_types::conversation::Conversa
         ConversationItem::tool_result(id, "<subagent_result>\nsubagent_id: skeptic-1"),
     ]
 }
-/// Agent-side upload path: each drained harness turn takes a distinct,
-/// monotonic turn number that CONTINUES past the user turn, advances the
-/// per-session counter, and is persisted via exactly one `SetNextTraceTurn`.
-/// This is what makes each sibling `turn_{N}` reachable — without the
-/// advance every harness turn would clobber the same GCS path.
+/// Agent-side upload path: each drained harness turn takes a distinct, monotonic turn number that CONTINUES past the user turn.
+/// It advances the per-session counter, persisted via exactly one `SetNextTraceTurn`.
+/// This is what makes each sibling `turn_{N}` reachable: without the advance every harness turn would clobber the same GCS path.
 #[tokio::test(flavor = "current_thread")]
 async fn upload_harness_trace_turns_numbers_siblings_and_persists_counter() {
     let agent = build_minimal_agent_for_tests();
@@ -535,10 +493,8 @@ async fn upload_harness_trace_turns_numbers_siblings_and_persists_counter() {
         "persist the advanced counter once, ahead of the spawned uploads",
     );
 }
-/// With trace upload disabled the agent-side path must NOT burn a turn
-/// number or persist a counter (and spawns no upload). The buffer-clearing
-/// half of the drain is the caller's `TakeHarnessTraceTurns`; this guards
-/// the upload function's uploads-disabled branch.
+/// With trace upload disabled the agent-side path must NOT burn a turn number or persist a counter (and spawns no upload).
+/// The buffer-clearing half of the drain is the caller's `TakeHarnessTraceTurns`; this guards the upload function's uploads-disabled branch.
 #[tokio::test(flavor = "current_thread")]
 async fn upload_harness_trace_turns_uploads_disabled_does_not_burn_counter() {
     let agent = build_minimal_agent_for_tests();
@@ -562,11 +518,10 @@ async fn upload_harness_trace_turns_uploads_disabled_does_not_burn_counter() {
         "uploads-disabled path must not persist a counter",
     );
 }
-/// Guards the per-harness-turn manifest seam: (1) every turn's ctx carries
-/// a FRESH `artifact_tracker`, so turn 1 never inherits turn 0's recorded
-/// artifacts; (2) recording the turn's metadata + turn_messages yields a
-/// manifest listing exactly those two; (3) `fully_uploaded` is true iff
-/// neither failed.
+/// Guards three facts of the per-harness-turn manifest.
+/// (1) Every turn's ctx carries a FRESH `artifact_tracker`, so turn 1 never inherits turn 0's recorded artifacts.
+/// (2) Recording the turn's metadata and turn_messages yields a manifest listing exactly those two.
+/// (3) `fully_uploaded` is true iff neither failed.
 #[tokio::test(flavor = "current_thread")]
 async fn upload_harness_trace_turns_build_per_turn_manifest() {
     use crate::upload::manifest::{
@@ -700,8 +655,7 @@ fn resolve_agent_definition_defaults_to_grok_build() {
         unsafe { std::env::set_var("GROK_AGENT", v) }
     }
 }
-/// When model_agent_type = Some("codex"), the codex agent is selected even
-/// though the default chain would return grok-build.
+/// When model_agent_type = Some("codex"), the codex agent is selected even though the default chain would return grok-build.
 #[test]
 #[serial_test::serial]
 fn resolve_agent_definition_model_agent_type_overrides_default() {
@@ -722,10 +676,8 @@ fn resolve_agent_definition_model_agent_type_overrides_default() {
         unsafe { std::env::set_var("GROK_AGENT", v) }
     }
 }
-/// When model_agent_type is None, the chain-resolved default agent is
-/// NOT overridden. This is the crux of the leader-mode fix: a session whose
-/// model has no agent_type must get the default agent, not a stale value
-/// from a different client's model.
+/// When model_agent_type is None, the chain-resolved default agent is NOT overridden.
+/// In leader mode a session whose model has no agent_type must get the default agent, not a stale value from a different client's model.
 #[test]
 #[serial_test::serial]
 fn resolve_agent_definition_none_agent_type_does_not_override() {
@@ -746,8 +698,7 @@ fn resolve_agent_definition_none_agent_type_does_not_override() {
         unsafe { std::env::set_var("GROK_AGENT", v) }
     }
 }
-/// Regression for the web-client devbox bug: an ACP profile must
-/// win when the model's `agent_type` is the default value.
+/// Regression for the web-client devbox bug: an ACP profile must win when the model's `agent_type` is the default value.
 #[test]
 #[serial_test::serial]
 fn resolve_agent_definition_acp_profile_wins_when_model_agent_type_is_default() {
@@ -777,11 +728,9 @@ fn resolve_agent_definition_acp_profile_wins_when_model_agent_type_is_default() 
         unsafe { std::env::set_var("GROK_AGENT", v) }
     }
 }
-/// Regression: after `DEFAULT_AGENT_TYPE` flipped to
-/// `grok-build-plan`, models in the catalog that still declare
-/// `agent_type = "grok-build"` explicitly must NOT preempt an ACP
-/// profile. Any value in the `grok-build*` family is the stock harness
-/// with no strict requirement.
+/// Regression: `DEFAULT_AGENT_TYPE` flipped to `grok-build-plan`.
+/// Models in the catalog that still declare `agent_type = "grok-build"` explicitly must NOT preempt an ACP profile.
+/// Any value in the `grok-build*` family is the stock harness with no strict requirement.
 #[test]
 #[serial_test::serial]
 fn resolve_agent_definition_acp_profile_wins_for_explicit_grok_build_family() {
@@ -812,8 +761,7 @@ fn resolve_agent_definition_acp_profile_wins_for_explicit_grok_build_family() {
         unsafe { std::env::set_var("GROK_AGENT", v) }
     }
 }
-/// A non-strict (stock / vision-capable) model leaves the template alone, so
-/// such models keep native image input.
+/// A non-strict (stock / vision-capable) model leaves the template alone, so such models keep native image input.
 #[test]
 fn inherited_harness_template_skips_nonstrict_model() {
     use xai_grok_agent::prompt::user_message::UserMessageTemplate;
@@ -827,8 +775,7 @@ fn inherited_harness_template_skips_nonstrict_model() {
         .is_none()
     );
 }
-/// An explicit (non-default) template is never overridden — inheritance only
-/// fills in the default.
+/// An explicit (non-default) template is never overridden; inheritance only fills in the default.
 #[test]
 fn inherited_harness_template_respects_explicit_template() {
     use xai_grok_agent::prompt::user_message::UserMessageTemplate;
@@ -836,8 +783,7 @@ fn inherited_harness_template_respects_explicit_template() {
     let explicit = UserMessageTemplate::Custom("MY CUSTOM TEMPLATE".to_owned());
     assert!(inherited_harness_template(&explicit, Some("cursor"), tmp.path()).is_none());
 }
-/// CLI `--agent-profile` wins when model_agent_type is the default
-/// (also shadowed by the same regression).
+/// CLI `--agent-profile` wins when model_agent_type is the default (also shadowed by the same regression).
 #[test]
 #[serial_test::serial]
 fn resolve_agent_definition_cli_agent_profile_wins_when_model_agent_type_is_default() {
@@ -929,10 +875,10 @@ fn parse_session_plugin_dirs_filters_and_dedupes() {
     let meta = serde_json::json!({
         "pluginDirs": [
             dir.to_string_lossy(),          // kept
-            dir.to_string_lossy(),          // duplicate → deduped
-            file.to_string_lossy(),         // not a directory → skipped
-            "relative/path",                // not absolute → skipped
-            42,                             // not a string → skipped
+            dir.to_string_lossy(),          // duplicate, deduped
+            file.to_string_lossy(),         // not a directory, skipped
+            "relative/path",                // not absolute, skipped
+            42,                             // not a string, skipped
         ]
     });
     assert_eq!(parse_session_plugin_dirs(meta.as_object()), vec![dir]);
@@ -1031,11 +977,9 @@ fn enqueue_replace_system_prompt_override_noop_when_absent_or_empty() {
         "no command should be enqueued without a non-empty override"
     );
 }
-/// Regression for the web-client `_meta.agentProfile` -> `set_session_model`
-/// flow: a zero-turn switch from `grok-build` (a client profile name) to
-/// `grok-build-plan` (the default model agent_type) must be
-/// treated as compatible so the harness rebuild is skipped and the
-/// custom prompt body is preserved.
+/// Regression for the web-client flow where `_meta.agentProfile` drives `set_session_model`.
+/// A zero-turn switch from `grok-build` (a client profile name) to `grok-build-plan` (the default model agent_type) must be treated as compatible.
+/// Compatible means the harness rebuild is skipped and the custom prompt body preserved.
 #[test]
 fn harnesses_are_compatible_for_stock_family_pairs() {
     assert!(harnesses_are_compatible("grok-build", "grok-build-plan"));
@@ -1083,8 +1027,7 @@ fn null_agent_type_returns_to_session_default_after_cursor_switch() {
     assert_eq!(required_after_null, "grok-build-plan");
     assert_ne!(required_after_null, "cursor");
 }
-/// Compatible stock switches (no rebuild) must NOT mutate `agent_name`,
-/// preserving the session's original ACP `agentProfile`.
+/// Compatible stock switches (no rebuild) must NOT mutate `agent_name`, preserving the session's original ACP `agentProfile`.
 #[test]
 fn agent_name_unchanged_without_harness_rebuild() {
     let unchanged = agent_name_after_model_switch(false, "grok-build-plan", "remote-sidebar");
@@ -1093,11 +1036,8 @@ fn agent_name_unchanged_without_harness_rebuild() {
         "a compatible stock switch must preserve the original agent profile name"
     );
 }
-/// End-to-end test: config -> resolve -> override -> finalize -> tool_definitions.
-///
-/// Exercises the full live path through to the finalized toolset, proving
-/// that the hashline tools appear in the actual tool definitions that
-/// would be sent to the model.
+/// End-to-end test: config through resolve, override, and finalize to tool_definitions.
+/// The hashline tools must appear in the actual tool definitions that would be sent to the model.
 #[tokio::test]
 async fn file_toolset_override_e2e_to_finalized_toolset() {
     use crate::tools::{FileToolset, ShellToolsetConfig};
@@ -1172,7 +1112,6 @@ fn file_toolset_override_invalid_config_returns_error() {
     assert!(err.is_err());
     assert!(err.unwrap_err().contains("unknown"));
 }
-/// Helper: creates a real SessionHandle with the given model, yolo, and client id.
 /// Requires a tokio runtime for SessionSignalsHandle::new().
 fn make_test_handle(
     model: &str,
@@ -1197,12 +1136,17 @@ fn make_test_handle(
         pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        active_work: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         info: crate::session::info::Info {
             id: acp::SessionId::new("test"),
             cwd: "/tmp".to_string(),
         },
         max_turns: None,
         resolved_tool_overrides: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
+        spawn_snapshot: crate::session::SpawnSnapshot {
+            applied_tool_overrides: None,
+            scheduler_background_loops: true,
+        },
         hunk_tracker_handle,
         chat_state_handle: xai_chat_state::ChatStateHandle::noop(),
         signals_handle: crate::session::signals::SessionSignalsHandle::new(),
@@ -1224,7 +1168,6 @@ fn make_test_handle(
             std::sync::Arc::new(crate::terminal::LocalTerminalRunner),
         ),
         model_id: acp::ModelId::new(model),
-        scheduler_background_loops: true,
         reasoning_effort: None,
         yolo_mode: yolo,
         origin_client: client_id.map(|s| crate::http::OriginClientInfo {
@@ -1251,7 +1194,6 @@ fn make_test_handle(
         scheduler_handle: None,
     }
 }
-/// lookup_session_model returns the per-session model when one is known.
 #[tokio::test]
 async fn lookup_session_model_returns_per_session_model() {
     let default_model = acp::ModelId::new("default-model");
@@ -1268,7 +1210,6 @@ async fn lookup_session_model_returns_per_session_model() {
         "codex-mini"
     );
 }
-/// lookup_session_model falls back to the default when no session model is known.
 #[tokio::test]
 async fn lookup_session_model_fallback_no_session() {
     let default_model = acp::ModelId::new("grok-3");
@@ -1393,6 +1334,110 @@ async fn apply_supported_effort_assigns_only_when_supported() {
     );
     assert_eq!(none_cfg.reasoning_effort, Some(ReasoningEffort::Low));
 }
+/// Setting `reasoning_effort` without switching the id runs, and bills, whatever the entry opened on.
+/// The status line would still read `low`.
+#[tokio::test]
+async fn an_effort_that_names_its_own_model_switches_the_id() {
+    use crate::agent::config::{EndpointsConfig, ModelEntry, ModelVariant};
+    use crate::agent::mvp_agent::reasoning_effort::EffortTarget;
+    use xai_grok_sampling_types::{ReasoningEffort, ReasoningEffortOption};
+    let agent = build_minimal_agent_for_tests();
+    let option = |value: ReasoningEffort, default: bool| ReasoningEffortOption {
+        id: value.as_str().to_string(),
+        value,
+        label: value.as_str().to_string(),
+        description: None,
+        default,
+    };
+    let variant = |effort: ReasoningEffort, model: &str| ModelVariant {
+        effort,
+        model_id: model.to_string(),
+    };
+    let mut routed = ModelEntry::fallback("routed-high", &EndpointsConfig::default());
+    routed.info.supports_reasoning_effort = true;
+    routed.info.reasoning_efforts = vec![
+        option(ReasoningEffort::Low, false),
+        option(ReasoningEffort::High, true),
+    ];
+    routed.info.variants = vec![
+        variant(ReasoningEffort::Low, "routed-low"),
+        variant(ReasoningEffort::High, "routed-high"),
+    ];
+    agent
+        .models_manager
+        .insert_test_entry("routed-high", routed.clone());
+    let mut plain = ModelEntry::fallback("plain-model", &EndpointsConfig::default());
+    plain.info.supports_reasoning_effort = true;
+    plain.info.reasoning_efforts = vec![
+        option(ReasoningEffort::Low, false),
+        option(ReasoningEffort::High, true),
+    ];
+    agent
+        .models_manager
+        .insert_test_entry("plain-model", plain.clone());
+    let sid = acp::SessionId::new("effort-routing-sess");
+    let mut cfg = agent.prepare_sampling_config_for_model(&routed, None);
+    assert_eq!(cfg.model, "routed-high");
+    agent.models_manager.apply_supported_effort(
+        &mut cfg,
+        Some(ReasoningEffort::Low),
+        &sid,
+        EffortTarget::ModelSwitch,
+    );
+    assert_eq!(cfg.model, "routed-low");
+    assert_eq!(cfg.reasoning_effort, Some(ReasoningEffort::Low));
+    let mut plain_cfg = agent.prepare_sampling_config_for_model(&plain, None);
+    agent.models_manager.apply_supported_effort(
+        &mut plain_cfg,
+        Some(ReasoningEffort::Low),
+        &sid,
+        EffortTarget::ModelSwitch,
+    );
+    assert_eq!(
+        plain_cfg.model, "plain-model",
+        "no id, so the model is left alone"
+    );
+    assert_eq!(plain_cfg.reasoning_effort, Some(ReasoningEffort::Low));
+}
+/// A session persists whichever id the effort picked, and the catalog has to find the entry from it.
+/// Otherwise it resumes on an unrelated model, with its retry, timeout and compaction settings back at the defaults.
+#[tokio::test]
+async fn a_routed_effort_id_resolves_back_to_its_entry() {
+    use crate::agent::config::{EndpointsConfig, ModelEntry, ModelVariant};
+    use xai_grok_sampling_types::{ReasoningEffort, ReasoningEffortOption};
+    let agent = build_minimal_agent_for_tests();
+    let mut entry = ModelEntry::fallback("routed-high", &EndpointsConfig::default());
+    entry.info.supports_reasoning_effort = true;
+    entry.info.reasoning_efforts = vec![ReasoningEffortOption {
+        id: "low".to_string(),
+        value: ReasoningEffort::Low,
+        label: "Low".to_string(),
+        description: None,
+        default: false,
+    }];
+    entry.info.variants = vec![ModelVariant {
+        effort: ReasoningEffort::Low,
+        model_id: "routed-low".to_string(),
+    }];
+    agent
+        .models_manager
+        .insert_test_entry("catalog-key", entry.clone());
+    assert_eq!(entry.info.model, "routed-high");
+    assert_eq!(entry.info.model_at(ReasoningEffort::High), "routed-high");
+    assert!(
+        agent
+            .models_manager
+            .model_supports_reasoning_effort("routed-low"),
+        "the id an effort routes to must resolve back to its entry",
+    );
+    assert_eq!(
+        agent
+            .models_manager
+            .model_for_effort("routed-low", ReasoningEffort::Low),
+        Some("routed-low".to_string()),
+        "so a second application is idempotent rather than losing the entry",
+    );
+}
 #[test]
 fn resolve_new_session_effort_hint_prefers_meta_over_current() {
     use crate::agent::mvp_agent::reasoning_effort::resolve_new_session_effort_hint;
@@ -1426,10 +1471,9 @@ fn split_new_session_effort_routes_hint_to_one_slot() {
         NewSessionEffort::None,
     );
 }
-/// New-session default-model path: composing `parse_reasoning_effort_meta` ->
-/// `split_new_session_effort` -> `apply_supported_effort` seeds a
-/// `_meta.reasoningEffort` hint into the spawn sampling for a supported model and
-/// drops it (keeping the catalog default) for an unsupported one.
+/// New-session default-model path, composing `parse_reasoning_effort_meta`, `split_new_session_effort`, and `apply_supported_effort`.
+/// The chain seeds a `_meta.reasoningEffort` hint into the spawn sampling for a supported model.
+/// It drops the hint (keeping the catalog default) for an unsupported one.
 #[tokio::test]
 async fn new_session_meta_effort_seeds_spawn_for_supported_model_and_drops_for_unsupported() {
     use crate::agent::config::{EndpointsConfig, ModelEntry};
@@ -1481,9 +1525,8 @@ async fn new_session_meta_effort_seeds_spawn_for_supported_model_and_drops_for_u
     );
     assert_eq!(plain_cfg.reasoning_effort, None);
 }
-/// `/new` / `/clear` send no `_meta.reasoningEffort`. The last-used / config
-/// default must seed spawn so a fresh chat does not snap back to the catalog
-/// default (`high` on grok-4.6).
+/// `/new` / `/clear` send no `_meta.reasoningEffort`.
+/// The last-used / config default must seed spawn so a fresh chat does not snap back to the catalog default (`high` on grok-4.6).
 #[tokio::test]
 async fn new_session_without_meta_keeps_current_effort_over_catalog_default() {
     use crate::agent::config::{EndpointsConfig, ModelEntry};
@@ -1523,8 +1566,7 @@ async fn new_session_without_meta_keeps_current_effort_over_catalog_default() {
         "/clear must keep last-used / config effort, not the catalog default",
     );
 }
-/// Drive the real `restore_persisted_model` for a session pinned to an
-/// effort-capable model and report the effort it lands on the session handle.
+/// Drive the real `restore_persisted_model` for a session pinned to an effort-capable model and report the effort it lands on the session handle.
 async fn restore_effort_via_load(
     initial: Option<xai_grok_sampling_types::ReasoningEffort>,
     persisted: Option<xai_grok_sampling_types::ReasoningEffort>,
@@ -1574,10 +1616,8 @@ async fn load_effort_precedence_prefers_meta_hint_over_persisted() {
         Some(ReasoningEffort::Low),
     );
 }
-/// A session persisted under a routing *slug* (not the catalog map key) must
-/// still get reasoning modes and a selected model from
-/// `session_config_options` — the id is resolved to the catalog key before
-/// the catalog effort lookups and the selected-model match.
+/// A session persisted under a routing *slug* (not the catalog map key) must still get reasoning modes and a selected model.
+/// `session_config_options` resolves the id to the catalog key before the catalog effort lookups and the selected-model match.
 #[tokio::test]
 async fn session_config_options_resolves_routing_slug_to_catalog_model() {
     use crate::agent::config::{EndpointsConfig, ModelEntry};
@@ -1610,7 +1650,6 @@ async fn session_config_options_resolves_routing_slug_to_catalog_model() {
         "resolved catalog model must be selected"
     );
 }
-/// YOLO toggle scoped by client_identifier: only matching sessions are updated.
 #[tokio::test]
 async fn yolo_toggle_scoped_by_client_identifier() {
     let sid_tui = acp::SessionId::new("sess-tui");
@@ -1638,8 +1677,7 @@ async fn yolo_toggle_scoped_by_client_identifier() {
         "VS Code session must NOT be affected by TUI's yolo toggle"
     );
 }
-/// A client can explicitly disable YOLO for its own sessions after startup,
-/// even if those sessions were initially created with yolo=true.
+/// A client can explicitly disable YOLO for its own sessions after startup, even if those sessions were initially created with yolo=true.
 #[tokio::test]
 async fn yolo_toggle_can_disable_session_started_with_yolo_enabled() {
     let sid_tui = acp::SessionId::new("sess-tui");
@@ -1667,8 +1705,7 @@ async fn yolo_toggle_can_disable_session_started_with_yolo_enabled() {
         "other client's session must keep its previous yolo state"
     );
 }
-/// `drain_old_session_thread` returns immediately when the thread has
-/// already finished.
+/// `drain_old_session_thread` returns immediately when the thread has already finished.
 #[tokio::test]
 async fn drain_finished_thread_returns_immediately() {
     let session_threads: RefCell<HashMap<acp::SessionId, crate::session::SessionThread>> =
@@ -1782,12 +1819,10 @@ fn parse_code_nav_capability_false_returns_false() {
     );
     assert!(!MvpAgent::parse_code_nav_capability(&init));
 }
-/// Verify that two session handles with different code-nav state produce
-/// independent eligibility outcomes — the key leader-mode isolation test.
+/// Verify that two session handles with different code-nav state produce independent eligibility outcomes, the key leader-mode isolation test.
 ///
-/// This tests the `code_nav_eligibility_for_request` lookup path directly
-/// by inspecting the per-handle fields rather than building a full agent,
-/// which mirrors what the method actually reads at runtime.
+/// This tests the `code_nav_eligibility_for_request` lookup path directly by inspecting the per-handle fields rather than building a full agent.
+/// That mirrors what the method actually reads at runtime.
 #[tokio::test]
 async fn test_per_session_code_nav_isolation() {
     let web_handle = {
@@ -1829,25 +1864,6 @@ async fn test_per_session_code_nav_isolation() {
     assert!(
         check(&web_handle).is_ok(),
         "original web handle must be unaffected"
-    );
-}
-/// Verify that code-nav requests without a sessionId are rejected.
-///
-/// `sessionId` is required so per-client capability gating is unambiguous
-/// in both simple and leader modes.  Falling back to shared global state
-/// (last-client-wins in leader mode) is not safe.
-#[test]
-fn test_sessionless_request_requires_session_id() {
-    let session_id: Option<&acp::SessionId> = None;
-    let result: Result<(), CodeNavEligibility> = if session_id.is_none() {
-        Err(CodeNavEligibility::SessionRequired)
-    } else {
-        Ok(())
-    };
-    assert_eq!(
-        result,
-        Err(CodeNavEligibility::SessionRequired),
-        "cwd-only requests with no sessionId must return SessionRequired"
     );
 }
 #[tokio::test(flavor = "current_thread")]
@@ -1897,8 +1913,8 @@ fn assert_no_update_mcp_servers(cmds: &[SessionCommand]) {
         "mcp/list must not push UpdateMcpServers"
     );
 }
-/// `mcp/list` refresh: two resident sessions, cache=false + committed catalog
-/// fans `RefreshMcpSearchIndex`; failed catalog and cache=true do not.
+/// `mcp/list` refresh with two resident sessions: cache=false with a committed catalog fans `RefreshMcpSearchIndex`.
+/// A failed catalog and cache=true do not.
 #[tokio::test(flavor = "current_thread")]
 async fn mcp_list_gateway_refresh_fans_only_on_committed_uncached_catalog() {
     let local = tokio::task::LocalSet::new();
@@ -2070,8 +2086,7 @@ async fn mcp_list_gateway_off_disables_cached_catalog() {
         })
         .await;
 }
-/// Gateway tools live on the agent catalog, so sessions only rebuild
-/// `search_tool`.
+/// Gateway tools live on the agent catalog, so sessions only rebuild `search_tool`.
 #[tokio::test(flavor = "current_thread")]
 async fn refresh_mcp_search_index_broadcasts_to_sessions() {
     let agent = build_minimal_agent_for_tests();
@@ -2085,7 +2100,6 @@ async fn refresh_mcp_search_index_broadcasts_to_sessions() {
         .expect("channel should stay open");
     assert!(matches!(cmd, SessionCommand::RefreshMcpSearchIndex));
 }
-/// Build a minimal MvpAgent suitable for testing extension methods.
 fn build_minimal_agent_for_tests() -> MvpAgent {
     use crate::agent::config::Config as AgentConfig;
     use crate::auth::{AuthManager, GrokComConfig};
@@ -2129,15 +2143,14 @@ async fn session_usage_dead_chat_state_actor_fails_closed() {
             .expect_err("dead chat-state actor");
     assert_eq!(err.code, acp::Error::internal_error().code);
 }
-/// The session responses publish the value THIS session's spawn pinned, so a
-/// client describing `/loop` fires can never contradict what the fires do.
+/// The session responses publish the value THIS session's spawn pinned, so a client describing `/loop` fires can never contradict what the fires do.
 #[tokio::test(flavor = "current_thread")]
 async fn session_meta_publishes_the_sessions_pinned_scheduler_background_loops() {
     let agent = build_minimal_agent_for_tests();
     let sid = acp::SessionId::new("loop-mode-sess");
     let mut handle = make_test_handle("test-model", false, None);
     handle.info.id = sid.clone();
-    handle.scheduler_background_loops = false;
+    handle.spawn_snapshot.scheduler_background_loops = false;
     agent.insert_resident(&sid, handle);
     let model_state = agent.model_state(Some(&sid));
     let mut meta = serde_json::Map::new();
@@ -2148,7 +2161,6 @@ async fn session_meta_publishes_the_sessions_pinned_scheduler_background_loops()
         "session meta must carry the handle's pinned value"
     );
 }
-/// Build a minimal MvpAgent with pre-loaded auth for gate tests.
 fn build_agent_with_auth(auth: crate::auth::GrokAuth) -> MvpAgent {
     use crate::agent::config::Config as AgentConfig;
     use crate::auth::{AuthManager, GrokComConfig};
@@ -2242,11 +2254,9 @@ async fn feedback_trace_offer_suppressed_for_managed_deployments() {
         "a deployment key must close the one-shot upload path"
     );
 }
-/// Regression: boot-time plugin discovery is deferred past ACP
-/// `initialize`, so the shared plugin registry starts empty.
-/// `resolve_mcp_servers` reads that snapshot to merge plugin-contributed
-/// MCP servers into a new session, so without lazy population the servers
-/// silently vanished until an explicit `/plugins reload`.
+/// Regression: boot-time plugin discovery is deferred past ACP `initialize`, so the shared plugin registry starts empty.
+/// `resolve_mcp_servers` reads that snapshot to merge plugin-contributed MCP servers into a new session.
+/// Without lazy population the servers silently vanished until an explicit `/plugins reload`.
 /// `ensure_plugin_registry` must build the snapshot on first use.
 #[tokio::test]
 #[serial_test::serial]
@@ -2303,8 +2313,7 @@ mod process_scope_reclaim;
 mod session_rename_tests;
 mod session_resume_close_tests;
 mod subagent_spawn_context_tests;
-/// No load in flight and no session → the wait returns immediately
-/// (the caller then surfaces "unknown session id" exactly as before).
+/// With no load in flight and no session the wait returns immediately (the caller then surfaces "unknown session id" exactly as before).
 #[tokio::test]
 async fn wait_for_in_flight_load_returns_immediately_when_idle() {
     let agent = build_minimal_agent_for_tests();
@@ -2316,11 +2325,9 @@ async fn wait_for_in_flight_load_returns_immediately_when_idle() {
     .await
     .expect("wait must not block when no load is in flight");
 }
-/// A waiter racing an in-flight `session/load` blocks until the load
-/// finishes and then observes the registered session. This is the
-/// agent-side guarantee that closes the post-leader-crash
-/// "unknown session id" race: the reconnect replay's `session/load` and
-/// the client's next `session/prompt` can arrive back-to-back.
+/// A waiter racing an in-flight `session/load` blocks until the load finishes and then observes the registered session.
+/// This is the agent-side guarantee that closes the post-leader-crash "unknown session id" race.
+/// The reconnect replay's `session/load` and the client's next `session/prompt` can arrive back-to-back.
 #[tokio::test]
 async fn wait_for_in_flight_load_blocks_until_load_completes() {
     let local = tokio::task::LocalSet::new();
@@ -2353,9 +2360,8 @@ async fn wait_for_in_flight_load_blocks_until_load_completes() {
         })
         .await;
 }
-/// A failed load (guard dropped WITHOUT registering the session) also
-/// wakes waiters — they re-check, find nothing, and the caller surfaces
-/// the regular "unknown session id" error rather than hanging.
+/// A failed load (guard dropped WITHOUT registering the session) also wakes waiters.
+/// They re-check, find nothing, and the caller surfaces the regular "unknown session id" error rather than hanging.
 #[tokio::test]
 async fn wait_for_in_flight_load_wakes_on_failed_load() {
     let local = tokio::task::LocalSet::new();
@@ -2382,9 +2388,8 @@ async fn wait_for_in_flight_load_wakes_on_failed_load() {
         })
         .await;
 }
-/// Two concurrent loads of the same session: the first guard's drop must
-/// not remove the second load's marker (waiters keep waiting on the
-/// newer in-flight load).
+/// Two concurrent loads of the same session: the first guard's drop must not remove the second load's marker.
+/// Waiters keep waiting on the newer in-flight load.
 #[tokio::test]
 async fn concurrent_load_guards_do_not_clobber_each_other() {
     let agent = build_minimal_agent_for_tests();
@@ -2402,10 +2407,9 @@ async fn concurrent_load_guards_do_not_clobber_each_other() {
         "all markers removed once every load finished"
     );
 }
-/// `resident_activity` returns `NeedsInput` whenever the session's
-/// pending-interaction map is non-empty — and that wins even over a
-/// running turn (a session blocked on a permission mid-turn "needs
-/// input"). Clearing the map falls back to Working / Idle.
+/// `resident_activity` returns `NeedsInput` whenever the session's pending-interaction map is non-empty.
+/// That wins even over a running turn (a session blocked on a permission mid-turn "needs input").
+/// Clearing the map falls back to Working / Idle.
 #[tokio::test]
 async fn resident_activity_reports_needs_input_when_pending() {
     use crate::agent::roster::RosterActivity;
@@ -2428,9 +2432,8 @@ async fn resident_activity_reports_needs_input_when_pending() {
     pending.lock().unwrap().clear();
     assert_eq!(agent.resident_activity(&sid), RosterActivity::Working);
 }
-/// Drain the agent gateway, returning the first `x.ai/sessions/changed`
-/// payload that carries an upserted entry (ignoring any unrelated
-/// notifications, which parse into an empty `RosterChanged`).
+/// Drain the agent gateway, returning the first `x.ai/sessions/changed` payload that carries an upserted entry.
+/// Unrelated notifications parse into an empty `RosterChanged` and are ignored.
 fn drain_roster_changed(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpClientMessage>,
 ) -> Option<crate::agent::roster::RosterChanged> {
@@ -2450,13 +2453,10 @@ fn drain_roster_changed(
     }
     found
 }
-/// A turn-boundary activity delta (`push_roster_activity_delta`) broadcasts
-/// an `x.ai/sessions/changed` upsert carrying the *overridden* activity, so
-/// every attached dashboard reflects Working/Idle immediately instead of
-/// waiting for the ≤1s roster poll (turn-start/turn-end). The
-/// override matters because at turn-start the actor has not yet published
-/// `current_prompt_id`, so a natural `resident_activity` read would emit
-/// `Idle` for a session that is in fact starting a turn.
+/// A turn-boundary activity delta (`push_roster_activity_delta`) broadcasts an `x.ai/sessions/changed` upsert carrying the *overridden* activity.
+/// Every attached dashboard then reflects Working/Idle immediately instead of waiting out the roster poll's up-to-1s lag (turn-start/turn-end).
+/// The override matters because at turn-start the actor has not yet published `current_prompt_id`.
+/// A natural `resident_activity` read would emit `Idle` for a session that is in fact starting a turn.
 #[tokio::test]
 async fn headless_residents_are_excluded_from_snapshots_and_deltas() {
     use crate::agent::config::Config as AgentConfig;
@@ -2507,7 +2507,6 @@ async fn push_roster_activity_delta_broadcasts_overridden_activity() {
     let changed = drain_roster_changed(&mut rx).expect("turn-end delta emitted");
     assert_eq!(changed.upserted[0].activity, RosterActivity::Idle);
 }
-/// Extract the inner payload from an ExtResponse.
 #[expect(
     dead_code,
     reason = "unused in production; remove expect when wired or delete the item"
@@ -2520,8 +2519,7 @@ fn parse_ext_body(resp: &acp::ExtResponse) -> serde_json::Value {
         .cloned()
         .unwrap_or_else(|| panic!("ExtResponse has no 'result' key; full JSON: {outer}"))
 }
-/// Replicate the lookup logic of code_nav_eligibility_for_request so we
-/// can test it with a plain sessions HashMap.
+/// Replicate the lookup logic of code_nav_eligibility_for_request so we can test it with a plain sessions HashMap.
 fn check_nav_eligibility_from_sessions(
     sessions: &HashMap<acp::SessionId, crate::session::SessionHandle>,
     session_id: Option<&acp::SessionId>,
@@ -2542,10 +2540,7 @@ fn check_nav_eligibility_from_sessions(
     }
     Ok(())
 }
-/// Web session with code-nav capability is eligible.
-///
-/// This is the "happy path" that allows lazy index startup on the first
-/// code-nav request.
+/// This is the "happy path" that allows lazy index startup on the first code-nav request.
 #[tokio::test]
 async fn test_web_session_with_capability_is_eligible() {
     let sid = acp::SessionId::new("sess-web");
@@ -2583,8 +2578,7 @@ async fn test_web_session_without_capability_is_rejected() {
         "web client without capability must be rejected at gate 2"
     );
 }
-/// Leader-mode isolation: two sessions with different code-nav state return
-/// independent results.
+/// Leader-mode isolation: two sessions with different code-nav state return independent results.
 #[tokio::test]
 async fn test_leader_mode_two_sessions_stay_isolated() {
     let web_sid = acp::SessionId::new("web");
@@ -2604,11 +2598,8 @@ async fn test_leader_mode_two_sessions_stay_isolated() {
         "tui session must remain ineligible even when web session is eligible"
     );
 }
-/// Unknown session ID returns SessionRequired, not a global fallback.
-///
-/// This is the stale/evicted session path: a caller with a session ID that
-/// no longer exists in the sessions map must get SessionRequired, not
-/// accidentally inherit the last-initialized client's eligibility.
+/// This is the stale/evicted session path: a session ID that no longer exists in the sessions map gets SessionRequired.
+/// It must not inherit the last-initialized client's eligibility.
 #[tokio::test]
 async fn test_unknown_session_id_returns_session_required() {
     let known_sid = acp::SessionId::new("known");
@@ -2664,66 +2655,13 @@ mod parse_json_object_env_tests {
         assert!(parse_json_object_env("TEST_JSON_UNSET").is_none());
     }
 }
-mod eligibility_gates {
-    use super::*;
-    /// Standalone replica of the first three eligibility gates.
-    /// Gate 4 (git root) requires a real filesystem and is covered by
-    /// integration tests.
-    fn check_gates(
-        client_type: ClientType,
-        code_nav_enabled: bool,
-        indexing_enabled: bool,
-    ) -> Result<(), CodeNavEligibility> {
-        if !matches!(client_type, ClientType::GrokWeb) {
-            return Err(CodeNavEligibility::ClientNotWeb);
-        }
-        if !code_nav_enabled {
-            return Err(CodeNavEligibility::CapabilityNotAdvertised);
-        }
-        if !indexing_enabled {
-            return Err(CodeNavEligibility::DisabledByConfig);
-        }
-        Ok(())
-    }
-    #[test]
-    fn non_web_client_rejected() {
-        assert_eq!(
-            check_gates(ClientType::Generic, true, true),
-            Err(CodeNavEligibility::ClientNotWeb)
-        );
-    }
-    #[test]
-    fn tui_client_rejected() {
-        assert_eq!(
-            check_gates(ClientType::GrokTUI, true, true),
-            Err(CodeNavEligibility::ClientNotWeb)
-        );
-    }
-    #[test]
-    fn web_client_no_capability_rejected() {
-        assert_eq!(
-            check_gates(ClientType::GrokWeb, false, true),
-            Err(CodeNavEligibility::CapabilityNotAdvertised)
-        );
-    }
-    #[test]
-    fn web_client_with_capability_config_disabled_rejected() {
-        assert_eq!(
-            check_gates(ClientType::GrokWeb, true, false),
-            Err(CodeNavEligibility::DisabledByConfig)
-        );
-    }
-    #[test]
-    fn web_client_with_capability_and_config_passes_first_three_gates() {
-        assert!(check_gates(ClientType::GrokWeb, true, true).is_ok());
-    }
-}
 #[test]
 fn find_model_by_id_prefers_key_then_falls_back_to_slug() {
     let entry = |model: &str| ModelEntry {
         info: config::ModelInfo {
             user_selectable: true,
             id: None,
+            variants: Vec::new(),
             model_family: None,
             model: model.to_string(),
             base_url: String::new(),
@@ -2920,12 +2858,10 @@ fn on_demand_enabled_from_remote_settings() {
     let rs: crate::util::config::RemoteSettings = serde_json::from_value(json).unwrap();
     assert_eq!(rs.on_demand_enabled, None);
 }
-/// Regression for a 401 sequence seen in production. After a long idle
-/// window, the auth manager may have no
-/// live token by the time `session/new` runs. For session-based auth methods
-/// we MUST still report `SessionToken` so chat_state credentials retain the
-/// session-token shape and `try_refresh_session_token` will run on the next
-/// prompt instead of early-returning.
+/// Regression for a 401 sequence seen in production.
+/// After a long idle window, the auth manager may have no live token by the time `session/new` runs.
+/// For session-based auth methods we MUST still report `SessionToken` so chat_state credentials retain the session-token shape.
+/// `try_refresh_session_token` then runs on the next prompt instead of early-returning.
 #[tokio::test(flavor = "current_thread")]
 async fn auth_type_session_based_no_current_returns_session_token() {
     for method_id in [
@@ -2949,10 +2885,9 @@ async fn auth_type_session_based_no_current_returns_session_token() {
         );
     }
 }
-/// BYOK guard. Users with `xai.api_key` must continue to report `ApiKey`
-/// regardless of live-token state -- BYOK sessions have nothing to refresh,
-/// and reporting `SessionToken` would route through cli-chat-proxy paths
-/// (image_gen / video_gen base_url) that don't apply to BYOK keys.
+/// BYOK guard. Users with `xai.api_key` must continue to report `ApiKey` regardless of live-token state.
+/// BYOK sessions have nothing to refresh.
+/// Reporting `SessionToken` would route through cli-chat-proxy paths (image_gen / video_gen base_url) that don't apply to BYOK keys.
 #[tokio::test(flavor = "current_thread")]
 async fn auth_type_xai_api_key_no_current_returns_api_key() {
     let agent = build_minimal_agent_for_tests();
@@ -2967,9 +2902,8 @@ async fn auth_type_xai_api_key_no_current_returns_api_key() {
              behavior to fall back to."
     );
 }
-/// Positive baseline: when both signals agree (session-based method AND
-/// a live in-memory token), `SessionToken` is returned. This is the
-/// common case during a healthy session.
+/// Positive baseline: when both signals agree (session-based method AND a live in-memory token), `SessionToken` is returned.
+/// This is the common case during a healthy session.
 #[tokio::test(flavor = "current_thread")]
 async fn auth_type_session_based_with_current_returns_session_token() {
     use crate::auth::GrokAuth;
@@ -2981,11 +2915,10 @@ async fn auth_type_session_based_with_current_returns_session_token() {
     assert!(agent.auth_manager.current().is_some());
     assert_eq!(agent.auth_type(), xai_chat_state::AuthType::SessionToken,);
 }
-/// Defensive case: no `auth_method_id` selected yet (pre-`authenticate`
-/// state) and no live credential. We default to `ApiKey` so callers
-/// that key off this value (e.g. `resolve_chat_state_auth_type` for chat
-/// routing) don't accidentally route session-token-shaped traffic
-/// through cli-chat-proxy before a method has been chosen.
+/// Defensive case: no `auth_method_id` selected yet (pre-`authenticate` state) and no live credential.
+/// We default to `ApiKey`.
+/// Callers key off this value (e.g. `resolve_chat_state_auth_type` for chat routing).
+/// Any other default would route session-token-shaped traffic through cli-chat-proxy before a method has been chosen.
 #[tokio::test(flavor = "current_thread")]
 async fn auth_type_no_method_id_no_current_returns_api_key() {
     let agent = build_minimal_agent_for_tests();
@@ -2993,11 +2926,10 @@ async fn auth_type_no_method_id_no_current_returns_api_key() {
     assert!(agent.auth_manager.current().is_none());
     assert_eq!(agent.auth_type(), xai_chat_state::AuthType::ApiKey,);
 }
-/// Live credential present but `auth_method_id` is still `None`. The
-/// in-memory bearer takes precedence: this is the order observed during
-/// `initialize()` silent refresh -- a token is hot-swapped in before
-/// `authenticate()` writes the method id. Reporting `SessionToken`
-/// here matches pre-fix behavior and keeps logging stable.
+/// Live credential present but `auth_method_id` is still `None`.
+/// The in-memory bearer takes precedence: this is the order observed during `initialize()` silent refresh.
+/// A token is hot-swapped in before `authenticate()` writes the method id.
+/// Reporting `SessionToken` here matches pre-fix behavior and keeps logging stable.
 #[tokio::test(flavor = "current_thread")]
 async fn auth_type_no_method_id_with_current_returns_session_token() {
     use crate::auth::GrokAuth;
@@ -3007,8 +2939,7 @@ async fn auth_type_no_method_id_with_current_returns_session_token() {
     assert!(agent.auth_manager.current().is_some());
     assert_eq!(agent.auth_type(), xai_chat_state::AuthType::SessionToken,);
 }
-/// Minimal agent whose `grok_com_config` engages the api-key kill switch
-/// (`disable_api_key_auth = true`), mirroring a forced-IdP deployment.
+/// Minimal agent whose `grok_com_config` engages the api-key kill switch (`disable_api_key_auth = true`), mirroring a forced-IdP deployment.
 fn build_agent_with_api_key_auth_disabled() -> MvpAgent {
     use crate::agent::config::Config as AgentConfig;
     use crate::auth::{AuthManager, GrokComConfig};
@@ -3021,9 +2952,9 @@ fn build_agent_with_api_key_auth_disabled() -> MvpAgent {
     cfg.grok_com_config.disable_api_key_auth = Some(true);
     MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config")
 }
-/// Deployment-key / managed-config user: `XAI_API_KEY` resolves and the kill
-/// switch is off, so a dead `cached_token` MUST fall through to `xai.api_key`
-/// (no browser). This is the exact regression the fallthrough fixes.
+/// Deployment-key / managed-config user: `XAI_API_KEY` resolves and the kill switch is off.
+/// A dead `cached_token` MUST then fall through to `xai.api_key` (no browser).
+/// This is the exact regression the fallthrough fixes.
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial]
 async fn cached_token_fallthrough_prefers_api_key_for_deployment_key() {
@@ -3042,9 +2973,8 @@ async fn cached_token_fallthrough_prefers_api_key_for_deployment_key() {
          through to xai.api_key on a dead cached_token -- not interactive login",
     );
 }
-/// Forced-IdP deployment: even with `XAI_API_KEY` present, the admin kill
-/// switch keeps the fallthrough on interactive `grok.com` (api-key auth is
-/// neither advertised nor an eligible fallthrough).
+/// Forced-IdP deployment: even with `XAI_API_KEY` present, the admin kill switch keeps the fallthrough on interactive `grok.com`.
+/// Api-key auth is neither advertised nor an eligible fallthrough.
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial]
 async fn cached_token_fallthrough_respects_kill_switch() {
@@ -3063,8 +2993,8 @@ async fn cached_token_fallthrough_respects_kill_switch() {
          interactive grok.com so XAI_API_KEY can't bypass forced IdP login",
     );
 }
-/// No advertiseable credentials at all (no env key, no kill switch): the user
-/// genuinely needs to log in, so the fallthrough is interactive `grok.com`.
+/// No advertiseable credentials at all (no env key, no kill switch): the user genuinely needs to log in.
+/// The fallthrough is interactive `grok.com`.
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial]
 async fn cached_token_fallthrough_falls_to_grok_com_without_credentials() {
@@ -3180,10 +3110,10 @@ async fn prepare_video_gen_config_respects_feature_flag() {
         VideoGenConfig::Disabled
     ));
 }
-/// The imagine tier gate fails **open**: with no resolved auth we can't confirm
-/// a restricted personal tier, so the tools stay advertised and un-flagged (the
-/// server 429 remains the authoritative backstop). Guards against accidentally
-/// disabling a paid feature when tier info hasn't loaded.
+/// The imagine tier gate fails **open**: with no resolved auth we can't confirm a restricted personal tier.
+/// The tools stay advertised and un-flagged.
+/// The server 429 remains the authoritative backstop.
+/// Guards against accidentally disabling a paid feature when tier info hasn't loaded.
 #[tokio::test(flavor = "current_thread")]
 async fn prepare_image_gen_config_fails_open_without_auth() {
     use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
@@ -3200,10 +3130,9 @@ async fn prepare_image_gen_config_fails_open_without_auth() {
         "no resolved auth ⇒ fail open (tools not tier-restricted)"
     );
 }
-/// The imagine tools bypass cli-chat-proxy (direct API calls), so the server
-/// can only scope the coding data-retention opt-out (`/privacy opt-out`) to
-/// Build traffic via the `x-grok-client-identifier` header. If this header is
-/// dropped, opted-out users' imagine prompts are logged/retained server-side.
+/// The imagine tools bypass cli-chat-proxy (direct API calls).
+/// The server can only scope the coding data-retention opt-out (`/privacy opt-out`) to Build traffic via the `x-grok-client-identifier` header.
+/// If this header is dropped, opted-out users' imagine prompts are logged/retained server-side.
 #[tokio::test(flavor = "current_thread")]
 async fn prepare_image_gen_config_sends_client_identifier_header() {
     use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
@@ -3239,9 +3168,8 @@ async fn prepare_video_gen_config_sends_client_identifier_header() {
          applies the coding ZDR opt-out to Build traffic"
     );
 }
-/// Regression: `x.ai/auth/info` must return profile fields even when the
-/// access token is expired — profile data does not expire with the token,
-/// and hiding it made the desktop render "Signed in" with no identity.
+/// Regression: `x.ai/auth/info` must return profile fields even when the access token is expired.
+/// Profile data does not expire with the token, and hiding it made the desktop render "Signed in" with no identity.
 #[tokio::test]
 async fn auth_info_returns_profile_when_token_expired() {
     let agent = build_agent_with_auth(crate::auth::GrokAuth {
@@ -3342,8 +3270,7 @@ async fn data_collection_enabled_for_non_zdr_team_with_unrelated_blocks() {
 fn enable_product_telemetry(agent: &MvpAgent) {
     agent.cfg.borrow_mut().features.telemetry = Some(crate::agent::config::TelemetryMode::Enabled);
 }
-/// Enable trace uploads via config so only the auth-level privacy gate
-/// can disable collection in the tests below.
+/// Enable trace uploads via config so only the auth-level privacy gate can disable collection in the tests below.
 fn enable_trace_upload_config(agent: &MvpAgent) {
     let mut cfg = agent.cfg.borrow_mut();
     cfg.features.telemetry = Some(crate::agent::config::TelemetryMode::Enabled);
@@ -3380,8 +3307,7 @@ async fn product_analytics_disabled_when_telemetry_off() {
     agent.cfg.borrow_mut().features.telemetry = Some(crate::agent::config::TelemetryMode::Disabled);
     assert!(!agent.product_analytics_enabled());
 }
-/// Counting HTTP stub: any request increments the counter and gets a
-/// storage-proxy-shaped 200 so the client does not retry.
+/// Counting HTTP stub: any request increments the counter and gets a storage-proxy-shaped 200 so the client does not retry.
 async fn spawn_counting_storage_stub() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
     let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let count_clone = count.clone();
@@ -3400,9 +3326,8 @@ async fn spawn_counting_storage_stub() -> (String, std::sync::Arc<std::sync::ato
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     (format!("http://127.0.0.1:{port}"), count)
 }
-/// Regression: the auth-diagnostics uploader was gated only on the
-/// trace-upload config switch; it must also honor ZDR / retention
-/// opt-out, checked at invocation time.
+/// Regression: the auth-diagnostics uploader was gated only on the trace-upload config switch.
+/// It must also honor ZDR / retention opt-out, checked at invocation time.
 #[tokio::test]
 async fn diagnostic_upload_skipped_for_opted_out_user() {
     let (stub_url, count) = spawn_counting_storage_stub().await;
@@ -3438,9 +3363,8 @@ async fn diagnostic_upload_sent_for_normal_user() {
          normal user"
     );
 }
-/// The diagnostics privacy gate fails closed: with no credential in the
-/// `AuthManager` (e.g. a mid-session `/logout` raced the refresh failure
-/// that triggers the upload), nothing may leave the machine.
+/// The diagnostics privacy gate fails closed: with no credential in the `AuthManager`, nothing may leave the machine.
+/// The credential can be missing when a mid-session `/logout` raced the refresh failure that triggers the upload.
 #[tokio::test]
 async fn diagnostic_upload_skipped_without_credentials() {
     let (stub_url, count) = spawn_counting_storage_stub().await;
@@ -3457,9 +3381,8 @@ async fn diagnostic_upload_skipped_without_credentials() {
         "missing credentials must fail closed for diagnostics uploads"
     );
 }
-/// The diagnostics uploader is wired once (at agent construction), so it
-/// must re-check the live trace-upload mirror at invocation time: a
-/// mid-session config-level kill switch stops diagnostics uploads too.
+/// The diagnostics uploader is wired once (at agent construction), so it must re-check the live trace-upload mirror at invocation time.
+/// A mid-session config-level kill switch stops diagnostics uploads too.
 #[tokio::test]
 async fn diagnostic_upload_skipped_after_mid_session_trace_upload_kill_switch() {
     let (stub_url, count) = spawn_counting_storage_stub().await;
@@ -3531,8 +3454,7 @@ async fn search_index_honors_the_session_search_feature() {
         "the feature is on by default, so this process keeps an index"
     );
 }
-/// Reclaiming is the one irreversible half of the deferred work, and the six hour
-/// throttle then hides the run that could have honored a remote veto.
+/// Reclaiming is the one irreversible half of the deferred work, and the six hour throttle then hides the run that could have honored a remote veto.
 #[tokio::test]
 #[serial_test::serial]
 async fn auto_gc_declines_until_the_remote_answer_settles() {
@@ -3590,8 +3512,8 @@ async fn search_before_the_decision_asks_the_caller_to_retry() {
     );
     assert!(resp.results.is_empty());
 }
-/// A leader boots with no remote settings, so if the first reader resolved the
-/// feature the registered default would latch before the server could answer.
+/// A leader boots with no remote settings.
+/// If the first reader resolved the feature, the registered default would latch before the server could answer.
 #[tokio::test]
 #[serial_test::serial]
 async fn read_before_the_remote_settings_land_does_not_decide() {
@@ -3618,8 +3540,7 @@ async fn read_before_the_remote_settings_land_does_not_decide() {
         agent.search_index(),
     );
 }
-/// A host with no identity to fetch with never receives remote settings, so
-/// waiting for them would cost it an index for the whole run.
+/// A host with no identity to fetch with never receives remote settings, so waiting for them would cost it an index for the whole run.
 #[tokio::test]
 #[serial_test::serial]
 async fn exhausted_fetch_decides_on_the_local_layers() {
@@ -3654,8 +3575,7 @@ async fn exhausted_fetch_decides_on_the_local_layers() {
         "a signed out host decides on its local layers rather than keeping no index"
     );
 }
-/// Once decided, a later switch cannot take the index away: serving one that
-/// stopped absorbing writes is worse than keeping it until the next launch.
+/// Once decided, a later switch cannot take the index away: serving one that stopped absorbing writes is worse than keeping it until the next launch.
 #[tokio::test]
 #[serial_test::serial]
 async fn kill_switch_after_the_decision_leaves_the_index_up() {
@@ -3680,8 +3600,7 @@ async fn kill_switch_after_the_decision_leaves_the_index_up() {
         "a switch arriving after the decision must not tear down a live index"
     );
 }
-/// Sessions hold the decision itself, not the answer as it stood when they
-/// opened, which would otherwise be `None` for the rest of their life.
+/// Sessions hold the decision itself, not the answer as it stood when they opened, which would otherwise be `None` for the rest of their life.
 #[tokio::test]
 #[serial_test::serial]
 async fn session_opened_before_the_decision_sees_it_land() {
@@ -3702,10 +3621,9 @@ async fn session_opened_before_the_decision_sees_it_land() {
         "the session indexes as soon as the decision lands"
     );
 }
-/// The live collection gate reads a `Send` mirror of the config-level
-/// trace-upload switch; `sync_collection_config_gate` must keep that mirror
-/// current so a mid-session remote-settings flip (kill switch) stops
-/// collection without a new session.
+/// The live collection gate reads a `Send` mirror of the config-level trace-upload switch.
+/// `sync_collection_config_gate` must keep that mirror current.
+/// A mid-session remote-settings flip (kill switch) then stops collection without a new session.
 #[tokio::test]
 async fn collection_config_gate_mirror_follows_trace_upload_flip() {
     let agent = build_agent_with_auth(crate::auth::GrokAuth::test_default());
@@ -3730,8 +3648,8 @@ async fn collection_config_gate_mirror_follows_trace_upload_flip() {
         "mirror must follow a mid-session config-level trace-upload flip"
     );
 }
-/// `parse_session_kind` routes `session/load` to the gateway Chat path vs. the
-/// disk-backed Build path. Anything but an explicit `kind: "chat"` is Build.
+/// `parse_session_kind` routes `session/load` to the gateway Chat path vs. the disk-backed Build path.
+/// Anything but an explicit `kind: "chat"` is Build.
 #[test]
 fn parse_session_kind_matrix() {
     use crate::session::unified_list::SessionKind;
@@ -3844,8 +3762,8 @@ fn chat_new_session_model_state_matrix() {
         );
     }
 }
-/// valid `x.ai/local_workspace` → ExistingWorkspace only.
-/// Never reads `envId` / never emits SandboxEnvironment.
+/// A valid `x.ai/local_workspace` parses to ExistingWorkspace only.
+/// It never reads `envId` and never emits SandboxEnvironment.
 #[cfg(feature = "local-workspace")]
 #[test]
 fn parse_session_computer_sessions_local_workspace_matrix() {
@@ -3963,7 +3881,7 @@ fn resolve_local_workspace_missing_server_id_fails_closed() {
         Some("local_workspace_server_id_missing")
     );
 }
-/// Supervisor map + reap guard / shutdown_gateway_bridge tear down the entry.
+/// The supervisor map, the reap guard, and shutdown_gateway_bridge tear down the entry.
 #[cfg(all(feature = "local-workspace", unix))]
 #[test]
 fn local_workspace_reap_guard_and_shutdown_clear_map() {
@@ -3985,7 +3903,7 @@ fn local_workspace_reap_guard_and_shutdown_clear_map() {
         );
     });
 }
-/// Pre-bridge crash refresh rewrites handshake stamp from live supervisor id.
+/// A pre-bridge crash refresh rewrites the handshake stamp from the live supervisor id.
 #[cfg(all(feature = "local-workspace", unix))]
 #[test]
 fn refresh_sessions_from_supervisor_overrides_server_id() {
@@ -4019,7 +3937,7 @@ fn refresh_sessions_from_supervisor_overrides_server_id() {
         agent.shutdown_gateway_bridge(&sid);
     });
 }
-/// start_own + register stamps server_id into meta and stores the handle.
+/// start_own followed by register stamps server_id into meta and stores the handle.
 #[cfg(all(feature = "local-workspace", unix))]
 #[test]
 fn start_own_registers_and_stamps_server_id() {
@@ -4170,9 +4088,8 @@ fn chat_session_spawn_options_matches_thin_profile() {
     );
     assert!(opts.is_chat_kind);
 }
-/// `remove_session` releases the workspace binding and drains the
-/// per-session side maps. Test agents default to `workspace_ops = None`,
-/// so no other test reaches the release.
+/// `remove_session` releases the workspace binding and drains the per-session side maps.
+/// Test agents default to `workspace_ops = None`, so no other test reaches the release.
 #[tokio::test]
 async fn remove_session_releases_workspace_binding_and_side_maps() {
     let agent = build_minimal_agent_for_tests();
@@ -4220,9 +4137,8 @@ async fn remove_session_releases_workspace_binding_and_side_maps() {
         "retained per-session resources must be reclaimed on removal"
     );
 }
-/// Without a bridge, `ext_method` falls through to the unchanged local
-/// dispatch (`rewind::handle`), which reports the missing session — proving
-/// the routing hook is skipped in local mode.
+/// Without a bridge, `ext_method` falls through to the unchanged local dispatch (`rewind::handle`), which reports the missing session.
+/// That proves the routing hook is skipped in local mode.
 #[test]
 fn ext_method_rewind_uses_local_dispatch_without_bridge() {
     use acp::Agent as _;
@@ -4265,9 +4181,8 @@ fn cancel_does_not_forward_to_bridge_in_local_mode() {
         );
     });
 }
-/// Regression (post-cancel slot hang, first bad release 0.2.101; see
-/// `dispatch_lock`). SDK e2e shape:
-/// `test_cancel_ends_in_flight_turn_and_frees_slot` (grok-agent-sdk).
+/// Regression (post-cancel slot hang, first bad release 0.2.101; see `dispatch_lock`).
+/// SDK e2e shape: `test_cancel_ends_in_flight_turn_and_frees_slot` (grok-agent-sdk).
 #[test]
 fn cancel_never_overtakes_in_flight_prompt_intake() {
     use crate::session::SessionCommand;
@@ -4400,10 +4315,9 @@ fn prompt_routes_only_non_send_now_through_human_delivery_handle() {
     });
 }
 use crate::session::SessionCommand as TestSessionCommand;
-/// Build a session handle wired to a *live* command channel. Returns the
-/// handle (move into `sessions`) plus a probe `cmd_tx`/`cmd_rx` so a test
-/// can observe what the agent sends to the actor and prove the channel is
-/// live.
+/// Build a session handle wired to a *live* command channel.
+/// Returns the handle (move into `sessions`) plus a probe `cmd_tx`/`cmd_rx`.
+/// A test can observe what the agent sends to the actor and prove the channel is live.
 fn make_live_session_handle(
     sid: &acp::SessionId,
     running_prompt: Option<&str>,
@@ -4424,9 +4338,8 @@ fn make_live_session_handle(
     }
     (handle, cmd_tx, cmd_rx)
 }
-/// Spawn a minimal fake session actor on the `LocalSet` that answers
-/// `SessionCommand::IsBusy` with `busy` and forwards every other command to
-/// the returned receiver so a test can assert on them (e.g. `Shutdown`).
+/// Spawn a minimal fake session actor on the `LocalSet` that answers `SessionCommand::IsBusy` with `busy`.
+/// Every other command is forwarded to the returned receiver so a test can assert on them (e.g. `Shutdown`).
 fn spawn_fake_actor(
     mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<TestSessionCommand>,
     busy: bool,
@@ -4446,16 +4359,28 @@ fn spawn_fake_actor(
     });
     observed_rx
 }
-/// Drive `x.ai/internal/evict_sessions` through the real `ext_notification`
-/// handler path (not the internal helper) — matches how the leader server
-/// signals a client disconnect.
+/// Spawn a session actor that answers `IsBusy` from a live `active_work` counter —
+/// the same check `SessionActor::is_busy` performs — so a real `WorkGuard` drives it.
+fn spawn_active_work_actor(
+    mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<TestSessionCommand>,
+    active_work: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
+    tokio::task::spawn_local(async move {
+        while let Some(cmd) = cmd_rx.recv().await {
+            if let TestSessionCommand::IsBusy { respond_to } = cmd {
+                let _ = respond_to.send(active_work.load(std::sync::atomic::Ordering::Acquire) > 0);
+            }
+        }
+    });
+}
+/// Drive `x.ai/internal/evict_sessions` through the real `ext_notification` handler path (not the internal helper).
+/// This matches how the leader server signals a client disconnect.
 async fn drive_disconnect(agent: &MvpAgent, sid: &acp::SessionId) {
     drive_disconnect_many(agent, &[sid]).await;
 }
-/// Like `drive_disconnect`, but evicts several sessions in a single
-/// `x.ai/internal/evict_sessions` notification — the realistic shape of a
-/// real client disconnect, and the path that exercises `handle_evict_sessions`'
-/// concurrent `join_all` check pass followed by the sequential act pass.
+/// Like `drive_disconnect`, but evicts several sessions in a single `x.ai/internal/evict_sessions` notification.
+/// That is the realistic shape of a real client disconnect.
+/// It is also the path that exercises `handle_evict_sessions`' concurrent `join_all` check pass followed by the sequential act pass.
 async fn drive_disconnect_many(agent: &MvpAgent, sids: &[&acp::SessionId]) {
     use acp::Agent as _;
     let ids: Vec<&str> = sids.iter().map(|s| s.0.as_ref()).collect();
@@ -4469,9 +4394,8 @@ async fn drive_disconnect_many(agent: &MvpAgent, sids: &[&acp::SessionId]) {
         .await
         .expect("evict_sessions notification must be handled");
 }
-/// Drive `x.ai/session/close` through the real `ext_method` dispatch
-/// (`ext_method` → `handlers::session::handle` → `handle_session_close`),
-/// exercising the exact production path that finalizes the replica.
+/// Drive `x.ai/session/close` through the real `ext_method` dispatch (`ext_method`, then `handlers::session::handle`, then `handle_session_close`).
+/// This exercises the exact production path that finalizes the replica.
 async fn drive_close(agent: &MvpAgent, session_id: &str) -> Result<acp::ExtResponse, acp::Error> {
     use acp::Agent as _;
     let params = serde_json::json!({ "sessionId": session_id });
@@ -4483,9 +4407,8 @@ async fn drive_close(agent: &MvpAgent, session_id: &str) -> Result<acp::ExtRespo
         ))
         .await
 }
-/// Every method `parse_queue_edit_command` accepts must be forwarded from
-/// `ext_notification` to that session's mailbox. Parser-only coverage misses
-/// a dispatch drop.
+/// Every method `parse_queue_edit_command` accepts must be forwarded from `ext_notification` to that session's mailbox.
+/// Parser-only coverage misses a dispatch drop.
 #[tokio::test(flavor = "current_thread")]
 async fn ext_notification_forwards_each_queue_method_to_session_actor() {
     use acp::Agent as _;
@@ -4625,8 +4548,7 @@ async fn ext_notification_forwards_each_queue_method_to_session_actor() {
         "no extra SessionCommand may remain after the seven queue methods"
     );
 }
-/// Methods the parser rejects (unknown, outbound `changed`, missing id /
-/// newText) and a missing session must not send a command or panic.
+/// Methods the parser rejects (unknown, outbound `changed`, missing id / newText) and a missing session must not send a command or panic.
 #[tokio::test(flavor = "current_thread")]
 async fn ext_notification_queue_rejects_unknown_method_missing_id_and_unknown_session() {
     use acp::Agent as _;
@@ -4733,11 +4655,10 @@ async fn ext_notification_queue_edit_survives_dropped_actor_mailbox() {
         .await
         .expect("queue edit must not error when the session actor mailbox is gone");
 }
-/// No-evict keystone: a client disconnecting mid-turn must NOT destroy the
-/// session. The actor stays resident, no `Shutdown` is sent, the resident
-/// session's command channel still **delivers** commands (so a reconnecting
-/// `session/load` can keep driving the turn), and `finalize()` is NOT called
-/// on a mere disconnect.
+/// No-evict keystone: a client disconnecting mid-turn must NOT destroy the session.
+/// The actor stays resident and no `Shutdown` is sent.
+/// The resident session's command channel still **delivers** commands, so a reconnecting `session/load` can keep driving the turn.
+/// `finalize()` is NOT called on a mere disconnect.
 #[test]
 fn disconnect_keeps_live_session_resident_without_finalize() {
     run_local_for_bridge_test(|| async {
@@ -4785,9 +4706,8 @@ fn disconnect_keeps_live_session_resident_without_finalize() {
         );
     });
 }
-/// Keep-resident must hold even if the `current_prompt_id` lock is poisoned:
-/// an unknown state is treated as "busy" (never unload). Guards against a
-/// regression flipping the `unwrap_or(true)` fallback to `false`.
+/// Keep-resident must hold even if the `current_prompt_id` lock is poisoned: an unknown state is treated as "busy" (never unload).
+/// Guards against a regression flipping the `unwrap_or(true)` fallback to `false`.
 #[test]
 fn disconnect_keeps_resident_on_poisoned_lock() {
     run_local_for_bridge_test(|| async {
@@ -4821,9 +4741,9 @@ fn disconnect_keeps_resident_on_poisoned_lock() {
         );
     });
 }
-/// A wedged actor stays tracked. `remove_session` releases everything else but
-/// keeps a still-running thread, because dropping its handle would detach the
-/// thread and leave nothing for the supervisor sweep to find.
+/// A wedged actor stays tracked.
+/// `remove_session` releases everything else but keeps a still-running thread.
+/// Dropping its handle would detach the thread and leave nothing for the supervisor sweep to find.
 #[test]
 fn remove_session_keeps_a_running_thread_tracked() {
     run_local_for_bridge_test(|| async {
@@ -4861,11 +4781,10 @@ fn remove_session_keeps_a_running_thread_tracked() {
         );
     });
 }
-/// Idle-unload stub (memory bound) + supervisor interaction: a *fully idle*
-/// session is unloaded to disk on disconnect (actor `Shutdown`, handle
-/// dropped) while the `SessionThread` is **retained** for
-/// `drain_old_session_thread`. It is not finalized, and once the kept thread
-/// finishes the supervisor reaps it as a *clean* exit — never `DeadFailed`.
+/// Idle-unload stub (memory bound) and its supervisor interaction.
+/// A *fully idle* session is unloaded to disk on disconnect (actor `Shutdown`, handle dropped).
+/// The `SessionThread` is **retained** for `drain_old_session_thread`.
+/// It is not finalized, and once the kept thread finishes the supervisor reaps it as a *clean* exit, never `DeadFailed`.
 #[test]
 fn disconnect_unloads_idle_session_without_finalize() {
     run_local_for_bridge_test(|| async {
@@ -4935,11 +4854,11 @@ fn disconnect_unloads_idle_session_without_finalize() {
         );
     });
 }
-/// The `IsBusy` keep-resident path. A between-turns session
-/// (`current_prompt_id = None`) whose actor answers `IsBusy = true` (queued
-/// inputs at the turn boundary) must be kept resident — NOT unloaded — and
-/// must receive no `Shutdown`. This exercises the async round-trip that the
-/// sync fast-path tests skip.
+/// The `IsBusy` keep-resident path.
+/// A between-turns session (`current_prompt_id = None`) whose actor answers `IsBusy = true` must be kept resident.
+/// True here means inputs are queued at the turn boundary.
+/// It must NOT be unloaded and must receive no `Shutdown`.
+/// This exercises the async round-trip that the sync fast-path tests skip.
 #[test]
 fn disconnect_keeps_resident_when_actor_reports_busy() {
     run_local_for_bridge_test(|| async {
@@ -4968,11 +4887,6 @@ fn disconnect_keeps_resident_when_actor_reports_busy() {
         );
     });
 }
-/// A between-turns session whose ONLY outstanding work is a parked
-/// `PlanApproval` reverse-request (the resume re-park) must be kept resident on
-/// disconnect. The actor answers `IsBusy = false`, so the keep-resident outcome
-/// can come ONLY from the parked-approval sync fast path in `session_has_live_work`
-/// — deleting that check would let this session unload (mutation-killing).
 #[test]
 fn disconnect_keeps_resident_when_plan_approval_parked() {
     run_local_for_bridge_test(|| async {
@@ -5005,13 +4919,36 @@ fn disconnect_keeps_resident_when_plan_approval_parked() {
         );
     });
 }
-/// Mixed batch in a *single* `x.ai/internal/evict_sessions` notification —
-/// the realistic disconnect shape and the path that exercises
-/// `handle_evict_sessions`' `join_all` two-pass (concurrent `IsBusy` checks,
-/// then sequential act). One session's actor reports busy (→ kept resident,
-/// `Working`, no `Shutdown`); the other is idle (→ unloaded, `Dormant`,
-/// `Shutdown` sent). Each must get its own outcome with no cross-contamination
-/// between the concurrent check pass and the sequential act pass.
+#[test]
+fn disconnect_keeps_the_workflow_session_and_evicts_the_idle_one() {
+    run_local_for_bridge_test(|| async {
+        let agent = build_minimal_agent_for_tests();
+        let workflow_sid = acp::SessionId::new("sess-workflow");
+        let (wf_handle, _wf_tx, wf_rx) = make_live_session_handle(&workflow_sid, None);
+        let active_work = wf_handle.active_work.clone();
+        agent.insert_resident(&workflow_sid, wf_handle);
+        spawn_active_work_actor(wf_rx, active_work.clone());
+        let _workflow = crate::session::handle::WorkGuard::new(active_work.clone());
+        let idle_sid = acp::SessionId::new("sess-idle");
+        let (idle_handle, _idle_tx, idle_rx) = make_live_session_handle(&idle_sid, None);
+        let idle_work = idle_handle.active_work.clone();
+        agent.insert_resident(&idle_sid, idle_handle);
+        spawn_active_work_actor(idle_rx, idle_work);
+        drive_disconnect_many(&agent, &[&workflow_sid, &idle_sid]).await;
+        assert!(
+            agent.is_resident(&workflow_sid),
+            "a session running a workflow must survive client disconnect (GBT-6282)"
+        );
+        assert!(
+            !agent.is_resident(&idle_sid),
+            "an idle session must be evicted on client disconnect"
+        );
+    });
+}
+/// Mixed batch in a *single* `x.ai/internal/evict_sessions` notification, the realistic disconnect shape.
+/// This is the path that exercises `handle_evict_sessions`' `join_all` two-pass (concurrent `IsBusy` checks, then sequential act).
+/// One session's actor reports busy (kept resident, `Working`, no `Shutdown`); the other is idle (unloaded, `Dormant`, `Shutdown` sent).
+/// Each must get its own outcome with no cross-contamination between the concurrent check pass and the sequential act pass.
 #[test]
 fn disconnect_mixed_batch_keeps_busy_unloads_idle() {
     run_local_for_bridge_test(|| async {
@@ -5066,9 +5003,8 @@ fn disconnect_mixed_batch_keeps_busy_unloads_idle() {
         );
     });
 }
-/// The bounded `session_live_state` map does not grow without bound
-/// across repeated create/close cycles — every terminal close drops its
-/// entry, so the map size stays at the live count, not the cumulative count.
+/// The bounded `session_live_state` map does not grow without bound across repeated create/close cycles.
+/// Every terminal close drops its entry, so the map size stays at the live count, not the cumulative count.
 #[test]
 fn session_live_state_map_is_bounded_across_cycles() {
     run_local_for_bridge_test(|| async {
@@ -5091,8 +5027,7 @@ fn session_live_state_map_is_bounded_across_cycles() {
         );
     });
 }
-/// Finalize fires on a genuine terminal close, driven through the real
-/// `x.ai/session/close` dispatch rather than the internal helper.
+/// Finalize fires on a genuine terminal close, driven through the real `x.ai/session/close` dispatch rather than the internal helper.
 #[test]
 fn explicit_close_finalizes_the_replica() {
     run_local_for_bridge_test(|| async {
@@ -5164,14 +5099,12 @@ fn explicit_close_finalizes_the_replica() {
         );
     });
 }
-/// Join-handle supervisor: a *resident* actor that panics is reaped
-/// promptly — removed from `sessions`/`session_threads`, demoted to
-/// `DeadFailed` (observed via the roster delta, since the live-state entry
-/// is dropped on removal), and NOT finalized (the conversation persists).
+/// Join-handle supervisor: a *resident* actor that panics is reaped promptly.
+/// It is removed from `sessions`/`session_threads` and demoted to `DeadFailed` (seen via the roster delta; the live-state entry is dropped).
+/// It is NOT finalized (the conversation persists).
 ///
-/// Polls in real time (the panic unwinds on a real OS thread, independent of
-/// the tokio clock); the reap lands within a small number of supervisor
-/// ticks. The injected-panic backtrace on stderr is expected and harmless.
+/// Polls in real time (the panic unwinds on a real OS thread, independent of the tokio clock); the reap lands within a few supervisor ticks.
+/// The injected-panic backtrace on stderr is expected and harmless.
 #[test]
 fn supervisor_reaps_panicked_resident_actor() {
     run_local_for_bridge_test(|| async {
@@ -5220,8 +5153,7 @@ fn supervisor_reaps_panicked_resident_actor() {
         );
     });
 }
-/// Regression: writeback must self-correct once remote settings arrive
-/// (the field used to be frozen at construction).
+/// Regression: writeback must self-correct once remote settings arrive (the field used to be frozen at construction).
 #[tokio::test]
 #[serial_test::serial]
 async fn storage_mode_self_corrects_to_writeback_when_settings_arrive() {
@@ -5242,8 +5174,7 @@ async fn storage_mode_self_corrects_to_writeback_when_settings_arrive() {
     agent.on_remote_settings_changed();
     assert_eq!(agent.storage_mode(), StorageMode::Writeback);
 }
-/// `spawn_settings_reapply` coalesces: while one reapply is in flight,
-/// repeated calls (boot + rapid `/new`) do not spawn overlapping tasks.
+/// `spawn_settings_reapply` coalesces: while one reapply is in flight, repeated calls (boot plus rapid `/new`) do not spawn overlapping tasks.
 #[test]
 fn spawn_settings_reapply_coalesces_while_in_flight() {
     run_local_for_bridge_test(|| async {
@@ -5260,8 +5191,7 @@ fn spawn_settings_reapply_coalesces_while_in_flight() {
         assert!(agent.settings_reapply_in_flight.get());
     });
 }
-/// The in-flight guard clears on task completion (via the `ClearOnDrop`
-/// guard, so it also clears on panic), allowing a later reapply to re-spawn.
+/// The in-flight guard clears on task completion (via the `ClearOnDrop` guard, so it also clears on panic), allowing a later reapply to re-spawn.
 #[test]
 fn spawn_settings_reapply_clears_flag_after_completion() {
     run_local_for_bridge_test(|| async {
@@ -5289,9 +5219,8 @@ fn spawn_settings_reapply_clears_flag_after_completion() {
         );
     });
 }
-/// The post-auth fetch has its own guard, so an in-flight settings reapply
-/// cannot coalesce away a freshly authenticated identity's gate and settings
-/// resolution.
+/// The post-auth fetch has its own guard.
+/// An in-flight settings reapply cannot coalesce away a freshly authenticated identity's gate and settings resolution.
 #[test]
 fn post_auth_settings_not_coalesced_by_in_flight_reapply() {
     run_local_for_bridge_test(|| async {
@@ -5307,13 +5236,10 @@ fn post_auth_settings_not_coalesced_by_in_flight_reapply() {
         assert!(agent.post_auth_settings_in_flight.get());
     });
 }
-/// The tier re-check work is single-flight across every caller: back-to-back
-/// gated initializes run at most one live check, and an awaited
-/// authenticate-path check skips — rather than doubles or waits out — a
-/// check already wedged on a stalled subscription endpoint. Drives the exact
-/// block `initialize` runs when `tier_allowed` is false (the full
-/// `initialize` fires once-per-process GROK_HOME cleanup work that a unit
-/// test must not run against the developer's real home).
+/// The tier re-check work is single-flight across every caller: back-to-back gated initializes run at most one live check.
+/// An awaited authenticate-path check skips (rather than doubles or waits out) a check already wedged on a stalled subscription endpoint.
+/// Drives the exact block `initialize` runs when `tier_allowed` is false.
+/// The full `initialize` fires once-per-process GROK_HOME cleanup work that a unit test must not run against the developer's real home.
 #[test]
 fn gated_reconnect_tier_recheck_is_single_flight() {
     run_local_for_bridge_test(|| async {
@@ -5384,11 +5310,9 @@ fn gated_reconnect_tier_recheck_is_single_flight() {
         accept_thread.join().expect("accept loop joins");
     });
 }
-/// The check's own mint spawns a `/user` enrichment that can rewrite the
-/// in-memory user_id to the proxy-canonical value mid-check; the identity
-/// guard must read that normalization as the same account (it is the id the
-/// check's own bearer resolved to), while a live id matching neither the
-/// started nor the canonical id is a real switch and still discards.
+/// The check's own mint spawns a `/user` enrichment that can rewrite the in-memory user_id to the proxy-canonical value mid-check.
+/// The identity guard must read that normalization as the same account (it is the id the check's own bearer resolved to).
+/// A live id matching neither the started nor the canonical id is a real switch and still discards.
 #[test]
 fn tier_recheck_identity_guard_accepts_enrichment_canonical_user_id() {
     run_local_for_bridge_test(|| async {
@@ -5408,14 +5332,11 @@ fn tier_recheck_identity_guard_accepts_enrichment_canonical_user_id() {
         assert!(agent.tier_recheck_identity_changed("seeded-user", Some("")));
     });
 }
-/// The other half of the reconnect paywall flash (the wedged test above
-/// locks the "gate holds while the check is in flight" half): a re-check
-/// that confirms a qualifying tier lifts `tier_allowed`, so the flash a
-/// subscribed user can see on a gated reconnect clears. Settings stay
-/// absent (the mock 404s `/settings`), modeling the remote-fetch-failed /
-/// disabled arm where the confirmed tier is the authority for the lift;
-/// the bearer's tier claim already matches the live tier, so the
-/// post-unblock mint is skipped and no refresher is needed.
+/// The other half of the reconnect paywall flash (the wedged test above locks the "gate holds while the check is in flight" half).
+/// A re-check that confirms a qualifying tier lifts `tier_allowed`, so the flash a subscribed user can see on a gated reconnect clears.
+/// Settings stay absent (the mock 404s `/settings`).
+/// That models the remote-fetch-failed / disabled arm where the confirmed tier is the authority for the lift.
+/// The bearer's tier claim already matches the live tier, so the post-unblock mint is skipped and no refresher is needed.
 #[test]
 fn gated_reconnect_recheck_lifts_gate_clearing_paywall_flash() {
     run_local_for_bridge_test(|| async {
@@ -5552,8 +5473,7 @@ fn build_agent_with_auth_and_proxy(
     agent.cfg.borrow_mut().remote_settings = None;
     (agent, rx)
 }
-/// Drain the gateway, returning `true` if any `x.ai/settings/update`
-/// notification was emitted (and acking each so the sender doesn't warn).
+/// Drain the gateway, returning `true` if any `x.ai/settings/update` notification was emitted (and acking each so the sender doesn't warn).
 fn drained_settings_update(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpClientMessage>,
 ) -> bool {
@@ -5568,18 +5488,15 @@ fn drained_settings_update(
     }
     found
 }
-/// Re-open the process-global external-OTEL gate on drop so a closed gate
-/// never leaks into another test.
+/// Re-open the process-global external-OTEL gate on drop so a closed gate never leaks into another test.
 struct RestoreOtelGate;
 impl Drop for RestoreOtelGate {
     fn drop(&mut self) {
         xai_grok_telemetry::external::mark_external_otel_settings_resolved();
     }
 }
-/// Regression: `cfg.remote_settings` is not reset on an account switch, so the
-/// access gate must not read a previous identity's cached `allow_access`. A
-/// mismatched identity stays provisionally open (unknown), like the OTEL gate's
-/// `rearm_on_switch`.
+/// Regression: `cfg.remote_settings` is not reset on an account switch, so the access gate must not read a previous identity's cached `allow_access`.
+/// A mismatched identity stays provisionally open (unknown), like the OTEL gate's `rearm_on_switch`.
 #[tokio::test]
 async fn access_gate_does_not_leak_verdict_across_identities() {
     use crate::agent::config::AgentMode;
@@ -5614,9 +5531,8 @@ async fn access_gate_does_not_leak_verdict_across_identities() {
         "identity B must not inherit identity A's denied allow_access verdict",
     );
 }
-/// First-party xAI auth + `writeback_enabled` settings → storage upgrades to
-/// Writeback; the settings arrival also emits `x.ai/settings/update` and opens
-/// the external-OTEL gate.
+/// First-party xAI auth with `writeback_enabled` settings upgrades storage to Writeback.
+/// The settings arrival also emits `x.ai/settings/update` and opens the external-OTEL gate.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
 async fn post_auth_settings_xai_upgrades_writeback_emits_and_opens_gate() {
@@ -5660,8 +5576,7 @@ async fn post_auth_settings_xai_upgrades_writeback_emits_and_opens_gate() {
         "settings arrival must push x.ai/settings/update to clients"
     );
 }
-/// BYOK auth must not be upgraded to `Writeback` even when the server
-/// advertises it; the push and gate still fire.
+/// BYOK auth must not be upgraded to `Writeback` even when the server advertises it; the push and gate still fire.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
 async fn post_auth_settings_non_xai_keeps_local_but_still_emits() {
@@ -5727,10 +5642,9 @@ async fn post_auth_settings_failure_resolves_gate_onto_local_policy() {
         "opening the gate must not fabricate settings; none were fetched"
     );
 }
-/// A same-credential refresh must NOT re-suppress a gate already resolved for
-/// that credential; the reason `OtelGate` remembers the identity. With the
-/// gate resolved-open for this identity, a later failing (`Retry`) refresh
-/// leaves it OPEN (regressing the identity guard would re-close it forever).
+/// A same-credential refresh must NOT re-suppress a gate already resolved for that credential; the reason `OtelGate` remembers the identity.
+/// With the gate resolved-open for this identity, a later failing (`Retry`) refresh leaves it OPEN.
+/// Regressing the identity guard would re-close it forever.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
 async fn same_credential_refresh_does_not_flap_resolved_gate() {
@@ -5755,9 +5669,8 @@ async fn same_credential_refresh_does_not_flap_resolved_gate() {
         "a same-credential refresh must not flap a gate already resolved for it"
     );
 }
-/// A `/settings` 401 from a token that rotated mid-flight must self-heal:
-/// refresh once and, if the token changed, re-fetch with it. Without the
-/// re-fetch the stale 401 fails OPEN (no remote policy).
+/// A `/settings` 401 from a token that rotated mid-flight must self-heal: refresh once and, if the token changed, re-fetch with it.
+/// Without the re-fetch the stale 401 fails OPEN (no remote policy).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
 async fn settings_self_heal_refetches_after_token_rotation() {
@@ -5808,8 +5721,7 @@ async fn settings_self_heal_refetches_after_token_rotation() {
         "the re-fetched settings must be stored"
     );
 }
-/// A logout can land while the detached post-auth fetch is in flight; the
-/// result must not be cached for the logged-out identity.
+/// A logout can land while the detached post-auth fetch is in flight; the result must not be cached for the logged-out identity.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
 async fn settings_not_cached_when_identity_logs_out_during_fetch() {
@@ -5833,8 +5745,7 @@ async fn settings_not_cached_when_identity_logs_out_during_fetch() {
         "settings fetched for a logged-out identity must not be cached"
     );
 }
-/// `ensure_session_supervisor` is idempotent: calling it repeatedly spawns
-/// the sweeper loop exactly once.
+/// `ensure_session_supervisor` is idempotent: calling it repeatedly spawns the sweeper loop exactly once.
 #[test]
 fn ensure_session_supervisor_is_idempotent() {
     run_local_for_bridge_test(|| async {
@@ -5851,9 +5762,8 @@ fn ensure_session_supervisor_is_idempotent() {
         assert!(agent.supervisor_started.get());
     });
 }
-/// After a terminal removal (reap/close drops the live-state entry), a later
-/// reload of the same SessionId starts clean at `IdleResident` with no stale
-/// terminal state leaking in (ties to the bounded-map fix).
+/// After a terminal removal (reap/close drops the live-state entry), a later reload of the same SessionId starts clean at `IdleResident`.
+/// No stale terminal state leaks in (ties to the bounded-map fix).
 #[test]
 fn reload_after_terminal_removal_starts_clean() {
     run_local_for_bridge_test(|| async {
@@ -5881,9 +5791,8 @@ fn reload_after_terminal_removal_starts_clean() {
         );
     });
 }
-/// Build an agent whose gateway is wired to a live receiver, so a test can
-/// observe (and answer) agent→client reverse-requests like the dormant
-/// `x.ai/folder_trust/request` round-trip.
+/// Build an agent whose gateway is wired to a live receiver.
+/// A test can observe (and answer) agent-to-client reverse-requests like the dormant `x.ai/folder_trust/request` round-trip.
 fn build_agent_with_gateway_rx() -> (
     MvpAgent,
     tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpClientMessage>,
@@ -5899,9 +5808,8 @@ fn build_agent_with_gateway_rx() -> (
     let agent = MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config");
     (agent, rx)
 }
-/// A git repo whose only repo-local config is a project `.mcp.json` declaring
-/// `projsrv` — so it is untrusted-with-configs, and the project server should
-/// reappear after a trust grant.
+/// A git repo whose only repo-local config is a project `.mcp.json` declaring `projsrv`, so it is untrusted-with-configs.
+/// The project server should reappear after a trust grant.
 fn repo_with_project_mcp_server() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init(tmp.path()).unwrap();
@@ -5991,9 +5899,9 @@ fn subagent_spawn_context_reloads_project_definitions_after_trust_changes() {
         assert!(!revoked.subagent_personas.contains_key("probe"));
     });
 }
-/// End-to-end gate wiring: project `.grok/roles` / `personas` alone must drive
-/// real `resolve_and_record` untrusted (not a forced `record_for_test` verdict),
-/// keep project defs out of Task spawn context, then re-admit them after grant.
+/// End-to-end gate wiring: project `.grok/roles` / `personas` alone must drive the real `resolve_and_record` untrusted.
+/// No forced `record_for_test` verdict.
+/// Project defs stay out of Task spawn context, then are re-admitted after grant.
 #[test]
 #[serial_test::serial]
 fn project_roles_personas_gated_via_resolve_and_record_chain() {
@@ -6054,8 +5962,8 @@ fn project_roles_personas_gated_via_resolve_and_record_chain() {
         );
     });
 }
-/// Pull the next `x.ai/folder_trust/request` reverse-request off the gateway and
-/// answer it with `outcome`. Returns the request's decoded params.
+/// Pull the next `x.ai/folder_trust/request` reverse-request off the gateway and answer it with `outcome`.
+/// Returns the request's decoded params.
 async fn answer_folder_trust_request(
     gw_rx: &mut tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpClientMessage>,
     outcome: &str,
@@ -6332,9 +6240,8 @@ struct ReloadCmds {
     reload_hooks: bool,
     mcp_names: Vec<String>,
 }
-/// Drain a session's command channel for the post-grant reload trio
-/// (`UpdateMcpServers` + `ReloadPlugins` + `ReloadHooks`), capturing the merged
-/// MCP server names so a test can assert per-cwd reload.
+/// Drain a session's command channel for the post-grant reload trio (`UpdateMcpServers`, `ReloadPlugins`, `ReloadHooks`).
+/// Captures the merged MCP server names so a test can assert per-cwd reload.
 async fn drain_reload_commands(
     cmd_rx: &mut tokio::sync::mpsc::UnboundedReceiver<TestSessionCommand>,
 ) -> ReloadCmds {
@@ -6485,8 +6392,7 @@ fn ann(id: &str) -> xai_grok_announcements::RemoteAnnouncement {
         ..Default::default()
     }
 }
-/// `RemoteSettings` with only `announcements` set (callers add sentinel
-/// fields as needed).
+/// `RemoteSettings` with only `announcements` set (callers add sentinel fields as needed).
 fn settings_with(
     announcements: Option<Vec<xai_grok_announcements::RemoteAnnouncement>>,
 ) -> crate::util::config::RemoteSettings {
@@ -6500,9 +6406,8 @@ fn test_now() -> chrono::DateTime<chrono::Utc> {
         .unwrap()
         .with_timezone(&chrono::Utc)
 }
-/// Pushes must carry strictly increasing generations, seeded from unix-epoch
-/// seconds so a restarted leader still beats pager watermarks that survived
-/// re-election (`AppView.announcements_last_gen` is never reset).
+/// Pushes must carry strictly increasing generations, seeded from unix-epoch seconds.
+/// A restarted leader then still beats pager watermarks that survived re-election (`AppView.announcements_last_gen` is never reset).
 #[tokio::test]
 async fn announcements_gen_seeds_from_epoch_and_strictly_increases() {
     let agent = build_minimal_agent_for_tests();
@@ -6524,8 +6429,7 @@ async fn announcements_gen_seeds_from_epoch_and_strictly_increases() {
     agent.announcements_gen.set(far_ahead);
     assert_eq!(agent.next_announcements_gen(), far_ahead + 1);
 }
-/// An unchanged visible list must not produce a push (idle steady-state is
-/// silent); a changed one — including clearing to empty — must.
+/// An unchanged visible list must not produce a push (idle steady-state is silent); a changed one, including clearing to empty, must.
 #[test]
 fn announcements_push_gate_emits_only_on_change() {
     let now = test_now();
@@ -6567,9 +6471,8 @@ fn announcements_push_gate_emits_only_on_change() {
         Some(vec![])
     );
 }
-/// `seed` (per-client initialize) re-emits an unchanged non-empty list for
-/// the freshly attached client, but stays silent when there is nothing to
-/// show.
+/// `seed` (per-client initialize) re-emits an unchanged non-empty list for the freshly attached client.
+/// It stays silent when there is nothing to show.
 #[test]
 fn announcements_push_gate_seed_reemits_nonempty_only() {
     let now = test_now();
@@ -6590,9 +6493,8 @@ fn announcements_push_gate_seed_reemits_nonempty_only() {
         "seed with nothing visible must stay silent"
     );
 }
-/// `/new` forces a push even when the visible list is unchanged — including
-/// unchanged-empty — so the pager re-merges its config-layer (requirements/
-/// user/managed TOML) announcements from local mid-session edits.
+/// `/new` forces a push even when the visible list is unchanged, including unchanged-empty.
+/// The pager then re-merges its config-layer (requirements/user/managed TOML) announcements from local mid-session edits.
 #[test]
 fn announcements_push_gate_force_mode_pushes_unchanged_and_empty() {
     let now = test_now();
@@ -6613,8 +6515,7 @@ fn announcements_push_gate_force_mode_pushes_unchanged_and_empty() {
         "force must push even an unchanged empty list"
     );
 }
-/// An addition that is already expired on arrival never becomes visible, so
-/// it must not re-emit.
+/// An addition that is already expired on arrival never becomes visible, so it must not re-emit.
 #[test]
 fn announcements_push_gate_ignores_expired_only_addition() {
     let now = test_now();
@@ -6635,9 +6536,8 @@ fn announcements_push_gate_ignores_expired_only_addition() {
         "an already-expired addition must not re-emit"
     );
 }
-/// A previously emitted item that passes its `expires_at` between gate runs
-/// must emit the shrunken (here: empty) list exactly once, so live banners
-/// clear on time instead of outliving their own expiry.
+/// A previously emitted item that passes its `expires_at` between gate runs must emit the shrunken (here: empty) list exactly once.
+/// Live banners then clear on time instead of outliving their own expiry.
 #[test]
 fn announcements_push_gate_emits_on_expiry_crossing() {
     let expiring = xai_grok_announcements::RemoteAnnouncement {
@@ -6679,9 +6579,8 @@ fn announcements_push_gate_emits_on_expiry_crossing() {
         None
     );
 }
-/// A poll apply must touch ONLY `remote_settings.announcements`; every other
-/// stored field keeps its pre-poll value (full reapply stays owned by
-/// startup, auth, and `/new`).
+/// A poll apply must touch ONLY `remote_settings.announcements`.
+/// Every other stored field keeps its pre-poll value (full reapply stays owned by startup, auth, and `/new`).
 #[tokio::test]
 async fn polled_announcements_apply_touches_announcements_only() {
     let agent = build_minimal_agent_for_tests();
@@ -6717,9 +6616,8 @@ async fn polled_announcements_apply_touches_announcements_only() {
         "default_model must be untouched by a poll apply"
     );
 }
-/// A poll apply must never fabricate `remote_settings` from scratch — the
-/// `is_none()`-keyed retry/gating semantics of the full-refresh owners
-/// depend on absence staying observable.
+/// A poll apply must never fabricate `remote_settings` from scratch.
+/// The full-refresh owners key their retry and gating on `is_none()`, so absence must stay observable.
 #[tokio::test]
 async fn polled_announcements_apply_never_fabricates_settings() {
     let agent = build_minimal_agent_for_tests();
@@ -6730,9 +6628,8 @@ async fn polled_announcements_apply_never_fabricates_settings() {
         "a poll must leave absent remote_settings absent"
     );
 }
-/// A full-refresh writer landing during the poll's fetch makes the poll's
-/// result stale; the apply must skip rather than clobber the fresher store
-/// (the next tick reconciles).
+/// A full-refresh writer landing during the poll's fetch makes the poll's result stale.
+/// The apply must skip rather than clobber the fresher store (the next tick reconciles).
 #[tokio::test]
 async fn polled_announcements_apply_skips_when_writer_landed_mid_fetch() {
     let agent = build_minimal_agent_for_tests();
@@ -6750,9 +6647,8 @@ async fn polled_announcements_apply_skips_when_writer_landed_mid_fetch() {
         "the mid-fetch writer's store must win over the stale poll result"
     );
 }
-/// End-to-end through the shared gate: every emission advances the baseline
-/// and carries a strictly larger gen; unchanged state is silent unless
-/// seeding a new client.
+/// End-to-end through the shared gate: every emission advances the baseline and carries a strictly larger gen.
+/// Unchanged state is silent unless seeding a new client.
 #[tokio::test]
 async fn emit_announcements_gate_emits_updates_baseline_and_bumps_gen() {
     let (agent, mut rx) = build_agent_with_gateway_rx();
@@ -6797,9 +6693,8 @@ async fn emit_announcements_gate_emits_updates_baseline_and_bumps_gen() {
         "forced push must keep gens increasing"
     );
 }
-/// A send the gateway channel rejects must not advance the last-emitted
-/// baseline; the next gate call then re-diffs and re-pushes the same list
-/// (the poll's natural retry, no dedicated retry machinery).
+/// A send the gateway channel rejects must not advance the last-emitted baseline.
+/// The next gate call then re-diffs and re-pushes the same list (the poll's natural retry, no dedicated retry machinery).
 #[tokio::test]
 async fn emit_announcements_gate_keeps_baseline_on_failed_send_and_retries() {
     let (mut agent, rx) = build_agent_with_gateway_rx();
@@ -7025,11 +6920,9 @@ fn subagent_rate_limit_max_attempts_env_is_parsed_leniently() {
 }
 #[cfg(feature = "dhat-heap")]
 mod dhat_soak;
-/// A leader multiplexes many clients behind one `initialize`, so the answer
-/// has to travel with the session: without the session-meta read, one terminal
-/// with the row off decides for every other terminal sharing the leader.
-/// Silence means off, since the payload costs a git discovery and three round
-/// trips.
+/// A leader multiplexes many clients behind one `initialize`, so the answer has to travel with the session.
+/// Without the session-meta read, one terminal with the row off decides for every other terminal sharing the leader.
+/// Silence means off, since the payload costs a git discovery and three round trips.
 #[test]
 fn session_meta_outranks_the_client_that_started_the_process() {
     let says_nothing = || {
@@ -7097,10 +6990,9 @@ async fn an_attach_that_draws_a_row_switches_it_on_and_asks_for_a_fill() {
         "the attach never asked for a snapshot, so the transient row never fills"
     );
 }
-/// A resident session outlives the client that drew its row, and the emitter
-/// re-reads the flag on every wake, so a latch that only ever rose would keep
-/// building payloads for a row nobody paints. Driven through the real
-/// disconnect, not the setter, since the wiring is the part that can rot.
+/// A resident session outlives the client that drew its row, and the emitter re-reads the flag on every wake.
+/// A latch that only ever rose would keep building payloads for a row nobody paints.
+/// Driven through the real disconnect, not the setter, since the wiring is the part that can rot.
 #[test]
 fn a_disconnect_switches_the_row_off_and_the_next_attach_switches_it_on() {
     run_local_for_bridge_test(|| async {

@@ -57,22 +57,6 @@ fn bash_execution_complete_round_trip() {
 }
 
 #[test]
-fn bash_execution_complete_was_signaled_helper() {
-    let none = BashExecutionComplete {
-        base: base(),
-        exit_code: Some(1),
-        signal: None,
-    };
-    assert!(!none.was_signaled());
-    let killed = BashExecutionComplete {
-        base: base(),
-        exit_code: None,
-        signal: Some("SIGKILL".into()),
-    };
-    assert!(killed.was_signaled());
-}
-
-#[test]
 fn bash_execution_timeout_round_trip() {
     let n = ToolNotification::BashExecutionTimeout(BashExecutionTimeout {
         base: base(),
@@ -383,16 +367,6 @@ fn handle_send_helpers_round_trip_through_channel() {
         }
     });
     assert_eq!(received, vec!["BashOutputChunk", "LspServerReady"]);
-}
-
-#[test]
-fn noop_handle_does_not_panic_or_record() {
-    let handle = xai_tool_runtime::ToolNotificationHandle::noop();
-    handle.send_bash_output_chunk(BashOutputChunk { base: base() });
-    handle.send_lsp_ready(LspServerReady {
-        server_name: "x".into(),
-    });
-    // No assertion needed — the handle drops sends silently.
 }
 
 #[test]

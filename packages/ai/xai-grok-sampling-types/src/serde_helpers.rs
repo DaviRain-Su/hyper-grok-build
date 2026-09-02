@@ -8,8 +8,8 @@ where
     Ok(opt.filter(|s| !s.is_empty()))
 }
 
-/// Deserialize `Option<Option<T>>`: absent (`None`) leaves, `null` (`Some(None)`)
-/// clears, a value sets. Requires `#[serde(default, deserialize_with = "…")]`.
+/// Deserialize `Option<Option<T>>`: absent (`None`) leaves, `null` (`Some(None)`) clears, a value sets.
+/// Requires `#[serde(default, deserialize_with = "…")]`.
 pub fn double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     T: Deserialize<'de>,

@@ -1,6 +1,6 @@
 //! E2E: stash and restore a draft with the real chord bytes, which the unit tests cannot cover because they inject pre-parsed key events.
 //!
-//! Legacy terminals send Alt+S as `ESC s`, next to the double-Esc clear: a split decode would arm "press again to clear" and type a literal `s`.
+//! Legacy terminals send Alt+S as `ESC s`, next to the double-Esc clear: a split decode would turn on "press again to clear" and type a literal `s`.
 //!
 //! ```bash
 //! cargo test -p xai-grok-pager-pty-harness --test prompt_stash -- --ignored --nocapture
@@ -17,7 +17,7 @@ const CANARY: &str = "STASHCANARY99";
 const CTRL_CANARY: &str = "CTRLSTASHCANARY7";
 /// Top-border caption painted while a draft sits in the stash.
 const STASH_CAPTION: &str = "Stashed";
-/// Alt+S as legacy terminals encode it: ESC prefix + the letter, one write.
+/// Alt+S as legacy terminals encode it: the ESC prefix and the letter in one write.
 const ALT_S: &[u8] = b"\x1bs";
 /// Ctrl+S as every terminal encodes it in raw mode (IXON off): the XOFF byte.
 const CTRL_S: &[u8] = b"\x13";

@@ -1,7 +1,7 @@
 //! Pure policy modeling for future child website egress.
 //!
-//! These types are not selected by sandbox profiles or enforced by the current
-//! runtime. Constructing a policy does not grant or restrict network access.
+//! These types are not selected by sandbox profiles or enforced by the current runtime.
+//! Constructing a policy does not grant or restrict network access.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -48,8 +48,7 @@ pub enum WebsiteAction {
 
 /// Exact HTTP(S) origin with an IDNA ASCII hostname and effective nonzero port.
 ///
-/// Equality never includes subdomains, redirects, paths, or another scheme or
-/// port.
+/// Equality never includes subdomains, redirects, paths, or another scheme or port.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WebsiteOrigin {
     scheme: String,
@@ -313,7 +312,6 @@ pub enum WebsiteOriginError {
     PortZero,
 }
 
-/// Snapshot encoding, decoding, and version failures.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum NetworkPolicySnapshotError {

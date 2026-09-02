@@ -1,14 +1,9 @@
-//! Per-response inference latency metrics.
-//!
-//! Captures token-level timing from streaming inference responses:
-//! TTFB, TTLB, and inter-token latency (ITL) statistics.
+//! Captures token-level timing from streaming inference responses: TTFB, TTLB, and inter-token latency (ITL) statistics.
 
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-/// Compute percentiles from sorted intervals.
-///
 /// Returns (p50, p99, max, mean, sum) from a slice of sorted values.
 /// Panics if `sorted` is empty.
 pub fn compute_percentiles(sorted: &[u64]) -> (u64, u64, u64, u64, u64) {
@@ -32,27 +27,21 @@ pub fn compute_percentiles(sorted: &[u64]) -> (u64, u64, u64, u64, u64) {
 pub struct InferenceLatencyStats {
     /// Time to first content token (ms)
     pub time_to_first_token_ms: Option<u64>,
-    /// Time to last byte / stream end (ms). Measured at stream exhaustion,
-    /// not at the last content chunk, so it includes trailing metadata chunks.
+    /// Measured at stream exhaustion, not at the last content chunk, so it includes trailing metadata chunks.
     pub time_to_last_byte_ms: u64,
     /// Number of content chunks received
     pub chunk_count: u32,
     /// Inter-token latency intervals (raw data for session aggregation)
     pub itl_intervals_ms: Vec<u64>,
-    /// Inter-token latency: median (ms)
     pub itl_p50_ms: Option<u64>,
-    /// Inter-token latency: 99th percentile (ms)
     pub itl_p99_ms: Option<u64>,
-    /// Inter-token latency: maximum (ms)
     pub itl_max_ms: Option<u64>,
-    /// Inter-token latency: mean (ms)
     pub itl_mean_ms: Option<u64>,
-    /// Total request attempts (`1` = no retries); set by the retry loop on success.
+    /// Total request attempts (`1` means no retries); set by the retry loop on success.
     pub attempts: u32,
 }
 
 impl InferenceLatencyStats {
-    /// Record the computed stats as fields on a tracing span.
     pub fn record_on_span(&self, span: &tracing::Span) {
         if let Some(ttfb) = self.time_to_first_token_ms {
             span.record("ttfb_ms", ttfb);
@@ -67,13 +56,10 @@ impl InferenceLatencyStats {
         }
     }
 
-    /// Compute latency stats from chunk timestamps.
-    ///
     /// # Arguments
     /// * `stream_start` - `Instant::now()` captured before initiating the stream.
     /// * `chunk_timestamps` - `Instant` recorded on each content-bearing chunk.
-    /// * `stream_end` - `Instant::now()` captured after the stream is fully exhausted
-    ///   (after trailing metadata/`[DONE]` chunks). Used for TTLB.
+    /// * `stream_end` - `Instant::now()` captured after the stream is fully exhausted (after trailing metadata/`[DONE]` chunks). Used for TTLB.
     pub fn from_timestamps(
         stream_start: Instant,
         chunk_timestamps: &[Instant],
@@ -90,7 +76,6 @@ impl InferenceLatencyStats {
 
         let ttfb = chunk_timestamps[0].duration_since(stream_start);
 
-        // Compute inter-token intervals
         let intervals: Vec<u64> = chunk_timestamps
             .windows(2)
             .map(|w| w[1].duration_since(w[0]).as_millis() as u64)
@@ -124,7 +109,6 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    /// Helper: create an Instant offset from a base by a given duration.
     fn offset(base: Instant, ms: u64) -> Instant {
         base + Duration::from_millis(ms)
     }
@@ -156,7 +140,7 @@ mod tests {
         assert_eq!(stats.time_to_first_token_ms, Some(100));
         assert_eq!(stats.time_to_last_byte_ms, 200);
         assert_eq!(stats.chunk_count, 1);
-        // Single chunk => no intervals => no ITL stats
+        // One chunk yields no intervals, so there are no ITL stats
         assert_eq!(stats.itl_p50_ms, None);
         assert_eq!(stats.itl_p99_ms, None);
         assert_eq!(stats.itl_max_ms, None);
@@ -174,7 +158,7 @@ mod tests {
         assert_eq!(stats.time_to_first_token_ms, Some(100));
         assert_eq!(stats.time_to_last_byte_ms, 200);
         assert_eq!(stats.chunk_count, 2);
-        // One interval of 50ms => p50=p99=max=mean=50
+        // One 50ms interval between the two chunks
         assert_eq!(stats.itl_p50_ms, Some(50));
         assert_eq!(stats.itl_p99_ms, Some(50));
         assert_eq!(stats.itl_max_ms, Some(50));
@@ -188,7 +172,7 @@ mod tests {
         let chunks: Vec<Instant> = (0..11)
             .scan(100u64, |acc, i| {
                 let t = *acc;
-                *acc += (i + 1) * 10; // intervals: 10, 20, 30, ...
+                *acc += (i + 1) * 10;
                 Some(offset(start, t))
             })
             .collect();
@@ -200,30 +184,27 @@ mod tests {
         assert_eq!(stats.time_to_last_byte_ms, 1000);
         assert_eq!(stats.chunk_count, 11);
 
-        // 10 intervals: [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
-        // sorted: same
-        // p50: intervals[5] = 60
+        // p50 takes intervals[len / 2] = intervals[5]
         assert_eq!(stats.itl_p50_ms, Some(60));
-        // p99_idx: ceil(10 * 0.99) - 1 = ceil(9.9) - 1 = 10 - 1 = 9, min(9, 9) = 9
-        // intervals[9] = 100
+        // p99_idx is ceil(10 * 0.99) - 1 = 9, so p99 reads intervals[9]
         assert_eq!(stats.itl_p99_ms, Some(100));
         assert_eq!(stats.itl_max_ms, Some(100));
-        // mean: (10+20+30+40+50+60+70+80+90+100) / 10 = 550 / 10 = 55
+        // The ten intervals sum to 550
         assert_eq!(stats.itl_mean_ms, Some(55));
     }
 
     #[test]
     fn test_p99_does_not_overflow() {
         let start = Instant::now();
-        // 101 chunks => 100 intervals (indices 0..99)
+        // 101 chunks give 100 intervals (indices 0..99)
         let chunks: Vec<Instant> = (0..101).map(|i| offset(start, 100 + i * 10)).collect();
         let end = offset(start, 2000);
 
         let stats = InferenceLatencyStats::from_timestamps(start, &chunks, end);
 
         assert_eq!(stats.chunk_count, 101);
-        // 100 intervals, all 10ms
-        // p99_idx: ceil(100 * 0.99) - 1 = 100 - 1 = 99, min(99, 99) = 99 -> in bounds
+        // All 100 intervals are 10ms
+        // p99_idx is ceil(100 * 0.99) - 1 = 99, which stays in bounds
         assert_eq!(stats.itl_p99_ms, Some(10));
         assert_eq!(stats.itl_max_ms, Some(10));
         assert_eq!(stats.itl_p50_ms, Some(10));
@@ -239,7 +220,6 @@ mod tests {
 
         let stats = InferenceLatencyStats::from_timestamps(start, &chunks, end);
 
-        // TTLB should be 500 (from stream_end), not 200 (from last chunk)
         assert_eq!(stats.time_to_last_byte_ms, 500);
         assert_eq!(stats.time_to_first_token_ms, Some(100));
     }

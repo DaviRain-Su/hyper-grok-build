@@ -1,11 +1,8 @@
-//! Load environment variables from a directory's `.envrc`: `direnv export
-//! json` when available, else bash with direnv stubs.
+//! Load environment variables from a directory's `.envrc`: `direnv export json` when available, else bash with direnv stubs.
 //!
-//! Every wait `Command::output()` used to hide is bounded here — exit wait,
-//! pipe drain, buffer cap, reap — because one blocked read froze session
-//! load. The output sentinel proves a capture is complete (not that a
-//! concurrent descendant kept quiet), so timing can only cost the
-//! environment, never install a truncated one.
+//! Every wait `Command::output()` would hide is bounded here (exit wait, pipe drain, buffer cap, reap) because one blocked read froze session load.
+//! The output sentinel proves a capture is complete, not that a concurrent descendant kept quiet.
+//! So timing can only cost the environment, never install a truncated one.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -37,8 +34,7 @@ pub fn loader_budget() -> Duration {
     effective_timeout() + JOIN_SLACK
 }
 
-/// A `.envrc` evaluation in flight on a dedicated thread, never the
-/// caller's; the deadline anchors at spawn, not at the join.
+/// A `.envrc` evaluation in flight on a dedicated thread, never the caller's; the deadline anchors at spawn, not at the join.
 pub struct EnvrcLoad {
     rx: Option<tokio::sync::oneshot::Receiver<HashMap<String, String>>>,
     deadline: tokio::time::Instant,
@@ -106,8 +102,7 @@ fn timeout_from(overriding: Option<&str>) -> Duration {
     }
 }
 
-/// Stub implementations of common direnv helper functions.
-/// These are prepended to the .envrc before execution when direnv is not available.
+/// Stubs for direnv helper functions, prepended to the .envrc before it runs when direnv is not available.
 const DIRENV_STUBS: &str = r#"
 # Stub direnv helper functions
 source_up_if_exists() { :; }
@@ -146,8 +141,7 @@ fn load_envrc_with_timeout(dir: &Path, timeout: Duration) -> Option<HashMap<Stri
         tracing::info!(".envrc evaluation disabled by zero {ENVRC_TIMEOUT_ENV}");
         return None;
     }
-    // Anchored before the stat: a wedged stat eats the budget instead of
-    // granting evaluation a fresh one after the caller gave up.
+    // Anchored before the stat: a wedged stat eats the budget instead of granting evaluation a fresh one after the caller gave up
     let deadline = Instant::now() + timeout;
     let envrc_path = dir.join(".envrc");
     // Opening a FIFO for read blocks until a writer appears.
@@ -219,7 +213,7 @@ fn try_direnv_export(dir: &Path, deadline: Instant) -> DirenvExport {
     }
 
     // Parse JSON output: {"VAR": "value", ...}
-    // Note: direnv also outputs null for vars to unset, but we ignore those
+    // direnv also outputs null for vars to unset, but we ignore those
     match serde_json::from_str::<HashMap<String, serde_json::Value>>(&stdout) {
         Ok(json) => {
             let env: HashMap<String, String> = json
@@ -228,7 +222,7 @@ fn try_direnv_export(dir: &Path, deadline: Instant) -> DirenvExport {
                     if let serde_json::Value::String(s) = v {
                         Some((k, s))
                     } else {
-                        None // Skip null values (unset)
+                        None
                     }
                 })
                 .collect();
@@ -247,7 +241,6 @@ fn try_direnv_export(dir: &Path, deadline: Instant) -> DirenvExport {
     }
 }
 
-/// Load environment by running .envrc in a bash subshell.
 /// This is the fallback when direnv is not installed.
 fn load_envrc_via_bash(dir: &Path, deadline: Instant) -> Option<HashMap<String, String>> {
     if Instant::now() >= deadline {
@@ -255,10 +248,7 @@ fn load_envrc_via_bash(dir: &Path, deadline: Instant) -> Option<HashMap<String, 
     }
     let envrc_path = dir.join(".envrc");
 
-    // Build a script that:
-    // 1. Includes direnv stubs
-    // 2. Sources the .envrc
-    // 3. Outputs all env vars as KEY=VALUE pairs (null-separated for safety)
+    // Build the script: direnv stubs, source the .envrc, dump the env null-separated, then the sentinel
     let sentinel = format!("{OUTPUT_SENTINEL}{}", uuid::Uuid::new_v4().simple());
     let script = format!(
         r#"
@@ -275,15 +265,13 @@ printf '%s' '{sentinel}'
         envrc = envrc_path.display(),
     );
 
-    // Capture baseline environment (before running .envrc)
     let baseline: HashMap<String, String> = std::env::vars().collect();
 
     // Run the script and capture output
     let mut bash_cmd = Command::new("/bin/bash");
     bash_cmd.arg("-c").arg(&script).current_dir(dir);
     let output = match run_with_deadline(bash_cmd, deadline, "bash") {
-        // `truncated` is ignored here: the sentinel below is strictly
-        // stronger evidence of completeness.
+        // `truncated` is ignored here: the sentinel below is strictly stronger evidence of completeness
         RunOutcome::Completed { output, .. } if !output.status.success() => {
             tracing::warn!(?envrc_path, "Failed to execute .envrc via bash");
             return None;
@@ -296,8 +284,7 @@ printf '%s' '{sentinel}'
         }
     };
 
-    // The NUL anchor rejects a capture cut on an entry boundary; bytes after
-    // the sentinel (a descendant still writing) are ignored.
+    // The NUL anchor rejects a capture cut on an entry boundary; bytes after the sentinel (a descendant still writing) are ignored
     let mut anchored = Vec::with_capacity(sentinel.len() + 1);
     anchored.push(0);
     anchored.extend_from_slice(sentinel.as_bytes());
@@ -342,7 +329,6 @@ printf '%s' '{sentinel}'
                     // Unchanged, skip
                 }
                 _ => {
-                    // New or changed
                     result.insert(key.to_string(), value.to_string());
                 }
             }
@@ -400,7 +386,7 @@ fn run_with_deadline(mut cmd: Command, deadline: Instant, label: &str) -> RunOut
         }
         reap_with_timeout(child, label);
     };
-    // Refused registration = scope closed; don't trust its best-effort kill.
+    // A refused registration means the scope closed; don't trust its best-effort kill
     if let Some(g) = &group
         && !xai_grok_tools::util::global_process_scope().register(g)
     {
@@ -435,8 +421,7 @@ fn run_with_deadline(mut cmd: Command, deadline: Instant, label: &str) -> RunOut
         }
     };
 
-    // Drop the enrollment at reap (the PID-reuse contract); descendants
-    // deliberately survive on Unix, die with the Job Object on Windows.
+    // Drop the enrollment at reap (the PID-reuse contract); descendants deliberately survive on Unix, die with the Job Object on Windows
     drop(group);
 
     let cap = Instant::now() + PIPE_DRAIN_CAP;
@@ -452,10 +437,8 @@ fn run_with_deadline(mut cmd: Command, deadline: Instant, label: &str) -> RunOut
     }
 }
 
-/// Captures a pipe on a helper thread; output survives a pipe a descendant
-/// holds open past EOF. Unix reads are non-blocking (`done` cancels the
-/// thread); elsewhere a blocked reader detaches and the Job Object closes
-/// the pipe on drop.
+/// Captures a pipe on a helper thread; output survives a pipe a descendant holds open past EOF.
+/// Unix reads are non-blocking (`done` cancels the thread); elsewhere a blocked reader detaches and the Job Object closes the pipe on drop.
 struct PipeDrain {
     buf: Arc<Mutex<Vec<u8>>>,
     done: Arc<AtomicBool>,
@@ -554,8 +537,7 @@ impl PipeDrain {
         }
     }
 
-    /// Take what arrived by EOF, `cap`, or [`PIPE_DRAIN_GRACE`] of silence;
-    /// missing EOF alone is not truncation.
+    /// Take what arrived by EOF, `cap`, or [`PIPE_DRAIN_GRACE`] of silence; missing EOF alone is not truncation.
     fn finish(mut self, cap: Instant) -> (Vec<u8>, bool) {
         let spawned = self.reader.is_some();
         if let Some(reader) = &self.reader {
@@ -681,14 +663,12 @@ mod tests {
         assert_eq!(env.get("FOO"), Some(&"bar".to_string()));
     }
 
-    /// Descendant output after the sentinel must be ignored, not treated as
-    /// an incomplete capture.
+    /// Descendant output after the sentinel must be ignored, not treated as an incomplete capture.
     #[cfg(unix)]
     #[test]
     fn chatty_background_child_does_not_discard_env() {
         let dir = TempDir::new().unwrap();
-        // The leading sleep keeps the noise out of the race with `env -0`
-        // and the sentinel; the writes land during the drain window.
+        // The leading sleep keeps the noise out of the race with `env -0` and the sentinel; the writes land during the drain window
         fs::write(
             dir.path().join(".envrc"),
             "export FOO=bar\n( sleep 0.25; for _ in 1 2 3 4; do echo noise; sleep 0.1; done ) &\n",

@@ -1,6 +1,6 @@
-//! Applies a model switch to a session — the ungated path. `set_session_model`
-//! enforces the `allowed_models` gate before delegating here; internal callers
-//! (`new_session`, `load_session`) call `apply` directly.
+//! Applies a model switch to a session, the ungated path.
+//! `set_session_model` enforces the `allowed_models` gate before delegating here.
+//! Internal callers (`new_session`, `load_session`) call `apply` directly.
 use crate::agent::config;
 use crate::agent::mvp_agent::reasoning_effort::EffortTarget;
 use crate::agent::mvp_agent::{
@@ -10,11 +10,25 @@ use crate::session::SessionCommand;
 use agent_client_protocol::{self as acp};
 use tokio::sync::oneshot;
 use xai_grok_sampling_types::ReasoningEffort;
-/// Apply a model switch to a session (no gate — `set_session_model` gates first).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfigNotice {
+    Send,
+    Skip,
+}
+/// How a model switch resolves the session's reasoning effort.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SwitchEffort {
+    /// Keep the session's current effort, revalidated for the new model (a plain user switch).
+    Preserve,
+    /// Use this effort; `None` falls back to the new model's default (session setup and restore).
+    Set(Option<ReasoningEffort>),
+}
+/// Apply a model switch to a session (no gate; `set_session_model` gates first).
 pub(crate) async fn apply(
     agent: &MvpAgent,
     args: acp::SetSessionModelRequest,
-    effort_override: Option<ReasoningEffort>,
+    effort: SwitchEffort,
+    config_notice: ConfigNotice,
 ) -> Result<acp::SetSessionModelResponse, acp::Error> {
     tracing::info!("Received set session model request {args:?}");
     xai_grok_telemetry::unified_log::info(
@@ -32,6 +46,8 @@ pub(crate) async fn apply(
         .session_handle_waiting_for_load(&session_id)
         .await
         .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
+    let _config_guard = agent.config_mutation_lock(&session_id).lock_owned().await;
+    let handle = agent.resident_handle(&session_id).unwrap_or(handle);
     let model = agent.resolve_model_id(&model_id)?;
     let use_concise = model.info().use_concise;
     let session_default = handle
@@ -132,11 +148,19 @@ pub(crate) async fn apply(
             }
         }
     }
+    let effective_effort = match effort {
+        SwitchEffort::Set(explicit) => explicit,
+        SwitchEffort::Preserve => handle
+            .chat_state_handle
+            .get_sampling_config()
+            .await
+            .and_then(|cfg| cfg.reasoning_effort),
+    };
     let mut model_sampling =
         agent.prepare_sampling_config_for_model(&model, handle.origin_client.clone());
     agent.models_manager.apply_supported_effort(
         &mut model_sampling,
-        effort_override,
+        effective_effort,
         &session_id,
         EffortTarget::ModelSwitch,
     );
@@ -220,12 +244,15 @@ pub(crate) async fn apply(
         handle.agent_name =
             agent_name_after_model_switch(did_rebuild, &required_agent_type, &handle.agent_name);
     });
-    broadcast_model_changed(
+    notify_model_changed(
         agent,
         &session_id,
         model_id.0.as_ref(),
         applied_effort.map(|eff| eff.to_string()),
     );
+    if config_notice == ConfigNotice::Send {
+        notify_config_options(agent, &session_id).await;
+    }
     xai_grok_telemetry::session_ctx::log_event(xai_grok_telemetry::events::ModelSwitched {
         session_id: session_id.0.to_string(),
         previous_model_id: previous_model_id.to_string(),
@@ -250,10 +277,59 @@ pub(crate) async fn apply(
         .cloned(),
     ))
 }
-/// Broadcast a `ModelChanged` to every client subscribed to this session so
-/// followers mirror the new model. The originating client ignores its own echo
-/// (gated by `model_switch_pending`). Broadcast-only — no eventId, not persisted.
-fn broadcast_model_changed(
+/// Apply a reasoning-effort change to a session's current model, without a model
+/// switch (see [`SessionCommand::SetReasoningEffort`]).
+///
+/// `value_id` is the selector the client picked; it is resolved under the config lock so the
+/// level is validated against the model the effort will actually run on, and the command goes
+/// to that model's live actor even if a switch or reload landed while this request was blocked.
+pub(crate) async fn apply_reasoning_effort(
+    agent: &MvpAgent,
+    session_id: acp::SessionId,
+    value_id: &str,
+    config_notice: ConfigNotice,
+) -> Result<acp::SetSessionModelResponse, acp::Error> {
+    let handle = agent
+        .session_handle_waiting_for_load(&session_id)
+        .await
+        .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
+    let _config_guard = agent.config_mutation_lock(&session_id).lock_owned().await;
+    let handle = agent.resident_handle(&session_id).unwrap_or(handle);
+    let model_id = handle.model_id.clone();
+    let effort = agent
+        .resolve_reasoning_effort_value(&session_id, &model_id, value_id)
+        .ok_or_else(|| acp::Error::invalid_params().data("unknown reasoning_effort value"))?;
+    let (tx, rx) = oneshot::channel();
+    let _ = handle.cmd_tx.send(SessionCommand::SetReasoningEffort {
+        effort,
+        responds_to: tx,
+    });
+    rx.await
+        .map_err(|_| acp::Error::internal_error().data("failed to set reasoning effort"))??;
+    agent.with_resident_mut(&session_id, |handle| {
+        handle.reasoning_effort = Some(effort);
+    });
+    notify_model_changed(
+        agent,
+        &session_id,
+        model_id.0.as_ref(),
+        Some(effort.to_string()),
+    );
+    if config_notice == ConfigNotice::Send {
+        notify_config_options(agent, &session_id).await;
+    }
+    if agent.cfg.borrow().mode != config::AgentMode::Leader {
+        agent
+            .models_manager
+            .set_current_reasoning_effort(Some(effort));
+    }
+    Ok(acp::SetSessionModelResponse::new().meta(
+        serde_json::json!({ "model" : model_id.0.as_ref() })
+            .as_object()
+            .cloned(),
+    ))
+}
+fn notify_model_changed(
     agent: &MvpAgent,
     session_id: &acp::SessionId,
     model_id: &str,
@@ -275,4 +351,13 @@ fn broadcast_model_changed(
                 params.into(),
             ));
     }
+}
+async fn notify_config_options(agent: &MvpAgent, session_id: &acp::SessionId) {
+    let options = agent.acp_config_options_for_session(session_id).await;
+    agent
+        .gateway
+        .forward_fire_and_forget(acp::SessionNotification::new(
+            session_id.clone(),
+            acp::SessionUpdate::ConfigOptionUpdate(acp::ConfigOptionUpdate::new(options)),
+        ));
 }

@@ -1173,6 +1173,16 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "contextual_hints.export_copy" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(
+                    kind_mismatch("contextual_hints.export_copy", "Bool", &value),
+                );
+            };
+            xai_grok_shell::util::config::set_contextual_hint_export_copy(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
         "contextual_hints.ssh_wrap" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("contextual_hints.ssh_wrap", "Bool", &value));

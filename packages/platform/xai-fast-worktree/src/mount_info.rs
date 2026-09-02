@@ -427,19 +427,6 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_option_multi_lower() {
-        let opts = "rw,lowerdir=/a:/b:/c,upperdir=/d,workdir=/e";
-        let lower = extract_option(opts, "lowerdir").unwrap();
-        let first = lower.split(':').next().unwrap();
-        assert_eq!(first, "/a");
-    }
-
-    #[test]
-    fn test_unescape_mountinfo_no_escapes() {
-        assert_eq!(unescape_mountinfo("/a/b/c"), "/a/b/c");
-    }
-
-    #[test]
     fn test_unescape_mountinfo_space() {
         assert_eq!(unescape_mountinfo("/a\\040b/c"), "/a b/c");
     }
@@ -512,11 +499,6 @@ mod tests {
             mount_ns_status(Err(perm()), Err(perm())),
             MountNsStatus::Unknown
         );
-    }
-
-    #[test]
-    fn test_current_mount_ns_status_consistent() {
-        assert_eq!(current_mount_ns_status(), current_mount_ns_status());
     }
 
     #[test]

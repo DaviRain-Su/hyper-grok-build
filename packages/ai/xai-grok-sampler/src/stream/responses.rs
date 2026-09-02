@@ -161,8 +161,7 @@ fn fail_active_backend_tools(
 }
 
 /// Wire values of `incomplete_details.reason` on an `Incomplete` response.
-/// The xAI server emits the three `max_*` values; `content_filter` is OpenAI
-/// vocabulary, kept for spec compatibility.
+/// The xAI server emits the three `max_*` values; `content_filter` is OpenAI vocabulary, kept for spec compatibility.
 const INCOMPLETE_REASON_CONTENT_FILTER: &str = "content_filter";
 const INCOMPLETE_REASON_MAX_OUTPUT_TOKENS: &str = "max_output_tokens";
 /// The model's context window was exhausted mid-generation (xAI extension).
@@ -170,8 +169,7 @@ const INCOMPLETE_REASON_MAX_PROMPT_TOKENS: &str = "max_prompt_tokens";
 /// A server-side time limit cut generation short (xAI extension).
 const INCOMPLETE_REASON_MAX_TIME_LIMIT: &str = "max_time_limit";
 
-/// Returns whether a Responses API event reflects real model progress
-/// rather than a liveness-only heartbeat / status transition.
+/// Returns whether a Responses API event reflects real model progress rather than a liveness-only heartbeat or status transition.
 pub(crate) fn responses_event_has_meaningful_content(event: &rs::ResponseStreamEvent) -> bool {
     use rs::ResponseStreamEvent;
 
@@ -244,12 +242,10 @@ pub(crate) fn responses_event_may_have_output(event: &rs::ResponseStreamEvent) -
 
 /// Copy everything the Doom-loop capture needs out of a frame.
 ///
-/// This is the single observation point: it runs for every frame *before* the
-/// abort gate, so the frame a confident signal aborts on is observed exactly
-/// like any other. Two things matter — a completed item is the authoritative
-/// copy of what the deltas approximated, and any frame that names tool
-/// activity or compaction state vetoes the replay, since reasoning must never
-/// be retried without the item it is bound to.
+/// This is the single observation point: it runs for every frame *before* the abort gate.
+/// The frame a confident signal aborts on is therefore observed exactly like any other.
+/// A completed item is the authoritative copy of what the deltas approximated.
+/// Any frame that names tool activity or compaction state vetoes the replay, since reasoning must never be retried without the item it is bound to.
 fn observe_for_recovery(capture: &FailedResponseCapture, event: &rs::ResponseStreamEvent) {
     use rs::ResponseStreamEvent as Event;
     if !capture.is_armed() {
@@ -303,9 +299,8 @@ fn observe_for_recovery(capture: &FailedResponseCapture, event: &rs::ResponseStr
         Event::ResponseIncomplete(incomplete) => {
             capture.record_terminal_output(&incomplete.response.output);
         }
-        // Frames that only name in-flight tool work. The item they belong to
-        // may never complete on this attempt, so the frame itself is the
-        // notice that a call was in flight.
+        // Frames that only name in-flight tool work
+        // The item they belong to may never complete on this attempt, so the frame itself is the notice that a call was in flight
         Event::ResponseFunctionCallArgumentsDelta(_)
         | Event::ResponseFunctionCallArgumentsDone(_)
         | Event::ResponseCustomToolCallInputDelta(_)
@@ -333,14 +328,11 @@ fn observe_for_recovery(capture: &FailedResponseCapture, event: &rs::ResponseStr
     }
 }
 
-/// Transform a raw Responses API event stream into a stream of
-/// [`SamplingEvent`]s.
+/// Transform a raw Responses API event stream into a stream of [`SamplingEvent`]s.
 ///
-/// Yields exactly one terminal event ([`SamplingEvent::Completed`] or
-/// [`SamplingEvent::Failed`]) per request. Server-side `ResponseFailed`
-/// and `ResponseError` events are translated to
-/// `SamplingError::Api { status: 500, .. }` so the actor's retry loop
-/// treats them as retryable.
+/// Yields exactly one terminal event ([`SamplingEvent::Completed`] or [`SamplingEvent::Failed`]) per request.
+/// Server-side `ResponseFailed` and `ResponseError` events are translated to `SamplingError::Api { status: 500, .. }`.
+/// The 500 status makes the actor's retry loop treat them as retryable.
 ///
 /// [`ResponsesStreamItem::Heartbeat`] frames (keepalive, unknown
 /// forward-compat event types) carry no model output but prove the server is
@@ -409,9 +401,8 @@ pub(crate) fn stream_responses_tracked<'a>(
         let mut last_content_chunk_at = Instant::now();
 
         // Maps Responses API `output_index` to our tool-only `tool_index`.
-        // Populated when `ResponseOutputItemAdded` carries a `FunctionCall`;
-        // later `ResponseFunctionCallArgumentsDelta` events
-        // look up `output_index` here to find the matching `tool_index`.
+        // Populated when `ResponseOutputItemAdded` carries a `FunctionCall`
+        // Later `ResponseFunctionCallArgumentsDelta` events look up `output_index` here to find the matching `tool_index`
         let mut output_to_tool_index: BTreeMap<u32, u32> = BTreeMap::new();
         let mut next_tool_index: u32 = 0;
         // Completed output items from `response.output_item.done`. ChatGPT
@@ -484,17 +475,15 @@ pub(crate) fn stream_responses_tracked<'a>(
             }
 
             // A confident midstream signal aborts the attempt immediately.
-            // Terminal frames are processed so their complete response items
-            // remain available to the retry loop; `drive_l2` rejects the
-            // completed response before it can be accepted.
+            // Terminal frames are processed so their complete response items remain available to the retry loop
+            // `drive_l2` rejects the completed response before it can be accepted
             let is_terminal_response = matches!(
                 &event,
                 ResponseStreamEvent::ResponseCompleted(_)
                     | ResponseStreamEvent::ResponseIncomplete(_)
             );
-            // Observed before the abort gate so the aborting frame lands in
-            // the capture like any other; the attempt is discarded either
-            // way, so nothing here is surfaced downstream.
+            // Observation happens before the abort gate so the aborting frame lands in the capture like any other
+            // The attempt is discarded either way, so nothing here reaches downstream consumers
             observe_for_recovery(&failed_response, &event);
 
             if !is_terminal_response
@@ -535,8 +524,7 @@ pub(crate) fn stream_responses_tracked<'a>(
 
             let event_has_content = responses_event_has_meaningful_content(&event);
 
-            // Track whether ResponseIncomplete should break the loop
-            // after the content-aware idle check below.
+            // Track whether ResponseIncomplete should break the loop after the content-aware idle check below
             let mut should_break = false;
 
             match event {
@@ -601,8 +589,7 @@ pub(crate) fn stream_responses_tracked<'a>(
                     }
                 }
 
-                // Start of a Responses FunctionCall — emit initial id+name
-                // and remember the output_index → tool_index mapping.
+                // Start of a Responses FunctionCall: emit the initial id and name, and remember the output_index to tool_index mapping
                 ResponseStreamEvent::ResponseOutputItemAdded(added_event) => {
                     match added_event.item {
                         rs::OutputItem::FunctionCall(fc) => {
@@ -645,7 +632,7 @@ pub(crate) fn stream_responses_tracked<'a>(
                 }
 
                 // Continuation chunk for a streaming FunctionCall's args.
-                // Drop silently if no preceding OutputItemAdded mapped.
+                // The delta is dropped silently when no preceding OutputItemAdded mapped its output_index
                 ResponseStreamEvent::ResponseFunctionCallArgumentsDelta(args_event) => {
                     let delta = args_event.delta;
                     if !delta.is_empty()
@@ -746,9 +733,8 @@ pub(crate) fn stream_responses_tracked<'a>(
                 }
 
                 // ── Backend-hosted tool lifecycle events ────────────
-                // These tools are executed server-side by the agentic
-                // sampler. We emit progress events so the shell/pager
-                // can show status to the user.
+                // These tools are executed server-side by the agentic sampler
+                // We emit progress events so the shell/pager can show status to the user
 
                 // Web search
                 ResponseStreamEvent::ResponseWebSearchCallInProgress(ev) => {
@@ -787,13 +773,12 @@ pub(crate) fn stream_responses_tracked<'a>(
                     }
                 }
 
-                // Code interpreter (server-side, like web/x search). Surface it
-                // the same way x_search is: a generic backend tool call that the
-                // shell renders as a client `tool_use` + `user` `tool_result`
-                // split (grok has no HostedTool::CodeInterpreter, so these events
-                // are latent under the current hosted-tool set). The started
-                // event fires on InProgress; the full payload (code + outputs)
-                // rides ResponseOutputItemDone(CodeInterpreterCall) below.
+
+                // Code interpreter runs server-side, like web/x search
+                // It is emitted the same way x_search is: a generic backend tool call
+                // The shell renders that as a client `tool_use` and `user` `tool_result` split
+                // grok has no HostedTool::CodeInterpreter, so these events never arrive under the current hosted-tool set
+                // The started event fires on InProgress; the full payload (code and outputs) rides ResponseOutputItemDone(CodeInterpreterCall) below
                 ResponseStreamEvent::ResponseCodeInterpreterCallInProgress(ev) => {
                     if let Some(event) = start_backend_tool(
                         &mut active_backend_tools,
@@ -805,8 +790,7 @@ pub(crate) fn stream_responses_tracked<'a>(
                         yield event;
                     }
                 }
-                // Interpreting/Completed carry no payload — the result arrives
-                // via ResponseOutputItemDone(CodeInterpreterCall) below.
+                // Interpreting/Completed carry no payload; the result arrives via ResponseOutputItemDone(CodeInterpreterCall) below
                 ResponseStreamEvent::ResponseCodeInterpreterCallInterpreting(_)
                 | ResponseStreamEvent::ResponseCodeInterpreterCallCompleted(_) => {}
 
@@ -829,6 +813,7 @@ pub(crate) fn stream_responses_tracked<'a>(
                         ) {
                             yield event;
                         }
+
                     }
                     completed_output_items.push(done_event.item);
                 }
@@ -858,8 +843,7 @@ pub(crate) fn stream_responses_tracked<'a>(
                     }
                 }
 
-                // All other events (intermediate progress, annotations,
-                // image gen, file search, etc.) — no action needed.
+                // All other events (intermediate progress, annotations, image gen, file search, etc.) need no action
                 _ => {}
             }
 
@@ -985,13 +969,10 @@ pub(crate) fn stream_responses_tracked<'a>(
         // wire values — they sum across every server-side turn of the
         // agent loop and are what we bill on / log to telemetry.
         //
-        // `total_tokens` is the live context length used to drive the
-        // CLI `/context` bar, the auto-compact threshold, and
-        // `meta.totalTokens` on persisted sessions. The SSE decoder
-        // (`deserialize_response_event`) has already rewritten
-        // `u.total_tokens` to `context_details.input + output` when
-        // the backend emits it; on older deployments the wire
-        // value passes through unchanged.
+        // `total_tokens` is the live context length
+        // It drives the CLI `/context` bar, the auto-compact threshold, and `meta.totalTokens` on persisted sessions
+        // The SSE decoder (`deserialize_response_event`) has already rewritten `u.total_tokens` to `context_details.input + output`
+        // When the backend does not emit it (older deployments), the wire value passes through unchanged
         let usage = response.usage.as_ref().map(|u| TokenUsage {
             prompt_tokens: u.input_tokens,
             completion_tokens: u.output_tokens,
@@ -1008,16 +989,15 @@ pub(crate) fn stream_responses_tracked<'a>(
             .and_then(|s| s.parse::<i64>().ok());
 
         let status = response.status.clone();
-        // Wire reason for an incomplete response (the `INCOMPLETE_REASON_*`
-        // values above). Captured before `response` is consumed below.
+        // Wire reason for an incomplete response (the `INCOMPLETE_REASON_*` values above)
+        // It is captured before `response` is consumed below
         let incomplete_reason = response
             .incomplete_details
             .as_ref()
             .map(|d| d.reason.clone());
 
-        // Convert to ConversationItem(s); patch in accumulated reasoning
-        // text as a fallback when the final response lacks `content` /
-        // `summary` (the streaming deltas may have arrived out of band).
+        // Convert to ConversationItem(s); patch in accumulated reasoning text as a fallback when the final response lacks `content` or `summary`
+        // The streaming deltas may have arrived out of band
         // Splice policy lives in `inject_streaming_reasoning_fallback`.
         let mut items = xai_grok_sampling_types::response_to_conversation_items(response);
         xai_grok_sampling_types::inject_streaming_reasoning_fallback(&mut items, reasoning_acc);
@@ -1027,18 +1007,14 @@ pub(crate) fn stream_responses_tracked<'a>(
             _ => false,
         });
 
-        // The single classification of an Incomplete response: the collapsed
-        // [`StopReason`] plus the typed raw reason carried to consumers. The
-        // Responses wire strings never leave this module; the raw reason
-        // reuses the Messages wire strings so the shell speaks one vocabulary
-        // (same strings, not backend parity — the xAI Messages surface itself
-        // reports a context cut as `max_tokens`, only this mapping splits it).
+        // The single classification of an Incomplete response: the collapsed [`StopReason`] plus the typed raw reason carried to consumers
+        // The Responses wire strings never leave this module; the raw reason reuses the Messages wire strings so the shell speaks one vocabulary
+        // Only the strings match: the xAI Messages backend itself reports a context cut as `max_tokens`, and only this mapping splits it
         let incomplete_classification: Option<(StopReason, Option<messages_types::StopReason>)> =
             if matches!(status, Status::Incomplete) {
                 Some(match incomplete_reason.as_deref() {
-                    // A moderation cut ("content_filter") maps to
-                    // ContentFilter, not Length: a filter-cut response must
-                    // never be salvaged and continued by `LengthPolicy`.
+                    // A moderation cut ("content_filter") maps to ContentFilter, not Length
+                    // A filter-cut response must never be salvaged and continued by `LengthPolicy`
                     Some(INCOMPLETE_REASON_CONTENT_FILTER) => (StopReason::ContentFilter, None),
                     Some(INCOMPLETE_REASON_MAX_OUTPUT_TOKENS) => (
                         StopReason::Length,
@@ -1048,9 +1024,8 @@ pub(crate) fn stream_responses_tracked<'a>(
                         StopReason::Length,
                         Some(messages_types::StopReason::ModelContextWindowExceeded),
                     ),
-                    // A time-limit cut is a Length cut with no Messages
-                    // vocabulary word; log it because the truncation notice
-                    // the user sees says "output limit".
+                    // A time-limit cut is a Length cut with no Messages vocabulary word
+                    // Log it because the truncation notice the user sees says "output limit"
                     Some(INCOMPLETE_REASON_MAX_TIME_LIMIT) => {
                         tracing::info!(
                             request_id = %request_id,
@@ -1058,8 +1033,7 @@ pub(crate) fn stream_responses_tracked<'a>(
                         );
                         (StopReason::Length, None)
                     }
-                    // An Incomplete response without a reason is a length cut
-                    // with nothing to carry.
+                    // An Incomplete response without a reason is a length cut with nothing to carry
                     None => (StopReason::Length, None),
                     Some(other) => {
                         tracing::warn!(
@@ -1073,10 +1047,9 @@ pub(crate) fn stream_responses_tracked<'a>(
                 None
             };
 
-        // NOTE: tool calls win even over an Incomplete status — opposite
-        // precedence from the Messages backend, where Length wins so the
-        // `LengthPolicy` gate can refuse a possibly argument-truncated
-        // trailing call. Load-bearing; don't "fix" here.
+        // NOTE: tool calls win even over an Incomplete status, the opposite precedence from the Messages backend
+        // On the Messages backend Length wins, so the `LengthPolicy` gate can refuse a possibly argument-truncated trailing call
+        // The difference is deliberate; don't "fix" it here
         let (stop_reason, raw_stop_reason) = if has_tool_calls {
             if matches!(incomplete_classification, Some((StopReason::Length, _))) {
                 tracing::warn!(
@@ -1084,9 +1057,8 @@ pub(crate) fn stream_responses_tracked<'a>(
                     "tool calls mask a length-truncated response; arguments may be truncated"
                 );
             }
-            // Keep the pair coherent: a tool-bearing turn reports ToolCalls
-            // with no raw length reason (the warn above is the truncation
-            // signal), preserving the headless output's `tool_use`.
+            // Keep the pair coherent: a tool-bearing turn reports ToolCalls with no raw length reason (the warn above is the truncation signal)
+            // That preserves the headless output's `tool_use`
             (Some(StopReason::ToolCalls), None)
         } else {
             match status {
@@ -1103,8 +1075,7 @@ pub(crate) fn stream_responses_tracked<'a>(
         let metrics =
             InferenceLatencyStats::from_timestamps(stream_start, &chunk_timestamps, stream_end);
 
-        // Warn-only for now: surface the server-reported triggers once per
-        // request (raw labels only — ZDR-safe) and attach them for callers.
+        // Warn-only for now: log the server-reported triggers once per request (raw labels only, ZDR-safe) and attach them for callers
         let doom_loop_signals = doom_loop
             .as_ref()
             .map(|collector| collector.take())
@@ -1511,10 +1482,9 @@ mod tests {
         out
     }
 
-    /// A confident signal that aborts on a custom-tool input frame still
-    /// vetoes the replay: the frame is the only notice that a call was in
-    /// flight, and reasoning must never be retried without it. The same holds
-    /// for the code-interpreter code frames.
+    /// A confident signal that aborts on a custom-tool input frame still vetoes the replay.
+    /// The frame is the only notice that a call was in flight, and reasoning must never be retried without it.
+    /// The same holds for the code-interpreter code frames.
     #[tokio::test]
     async fn an_abort_on_a_tool_input_frame_vetoes_the_replay() {
         for tool_frame in [
@@ -1536,8 +1506,7 @@ mod tests {
             ),
         ] {
             let capture = FailedResponseCapture::armed();
-            // A collector that has already seen a confident trigger: the next
-            // non-terminal frame aborts the attempt.
+            // A collector that has already seen a confident trigger: the next non-terminal frame aborts the attempt
             let collector = crate::doom_loop::DoomLoopSignalCollector::new(
                 xai_grok_sampling_types::DoomLoopRecoveryPolicy::default(),
             );
@@ -1546,9 +1515,8 @@ mod tests {
                 r#"{"type":"response.doom_loop_check","doom_loop_check":{"triggers":["tail_repetition:8@thinking"]}}"#,
             );
 
-            // Reasoning already captured, so an intact replay would carry it:
-            // only the veto can empty the capture. The collector is armed
-            // before the stream runs, so the abort lands on the tool frame.
+            // Reasoning is already captured, so an intact replay would carry it: only the veto can empty the capture
+            // The collector is armed before the stream runs, so the abort lands on the tool frame
             capture.record_reasoning_delta(0, 0, "reasoning-1".into(), "looping thought");
             let raw = stream::iter(vec![Ok(tool_frame), Ok(completed_event())])
                 .map(|r: Result<rs::ResponseStreamEvent, _>| r.map(ResponsesStreamItem::Event))
@@ -1607,8 +1575,7 @@ mod tests {
         })
     }
 
-    /// (collapsed stop reason, raw wire stop reason) for an Incomplete
-    /// response ending with the given `incomplete_details.reason`.
+    /// Returns the (collapsed stop reason, raw wire stop reason) for an Incomplete response ending with the given `incomplete_details.reason`.
     async fn stop_reasons_for_incomplete(reason: &str) -> (Option<StopReason>, Option<String>) {
         let raw = raw_events(vec![Ok(text_delta_event("cut")), Ok(incomplete_event(reason))]);
         let events = collect(stream_responses(
@@ -1631,7 +1598,7 @@ mod tests {
         stop_reasons_for_incomplete(reason).await.0
     }
 
-    /// A token-budget cut maps to Length (the salvageable class)...
+    /// A token-budget cut maps to Length (the salvageable class).
     #[tokio::test]
     async fn incomplete_max_output_tokens_maps_to_length() {
         assert_eq!(
@@ -1640,9 +1607,8 @@ mod tests {
         );
     }
 
-    /// Context-window exhaustion ("max_prompt_tokens", the xAI extension)
-    /// is also a Length cut, not the unknown-reason fallback — but keeps its
-    /// wire distinction in `raw_stop_reason`, in the Messages vocabulary.
+    /// Context-window exhaustion ("max_prompt_tokens", the xAI extension) is also a Length cut, not the unknown-reason fallback.
+    /// It keeps its wire distinction in `raw_stop_reason`, in the Messages vocabulary.
     #[tokio::test]
     async fn incomplete_max_prompt_tokens_maps_to_length() {
         assert_eq!(
@@ -1654,9 +1620,8 @@ mod tests {
         );
     }
 
-    /// A server time-limit cut ("max_time_limit", the xAI extension) is a
-    /// known Length cut, not the unknown-reason fallback; it carries no raw
-    /// reason (the Messages vocabulary has no word for it).
+    /// A server time-limit cut ("max_time_limit", the xAI extension) is a known Length cut, not the unknown-reason fallback.
+    /// It carries no raw reason (the Messages vocabulary has no word for it).
     #[tokio::test]
     async fn incomplete_max_time_limit_maps_to_length() {
         assert_eq!(
@@ -1665,9 +1630,7 @@ mod tests {
         );
     }
 
-    /// ...but a moderation cut maps to ContentFilter, never Length: a
-    /// filter-cut response must not be salvaged and continued by
-    /// `LengthPolicy`.
+    /// A moderation cut maps to ContentFilter, never Length: a filter-cut response must not be salvaged and continued by `LengthPolicy`.
     #[tokio::test]
     async fn incomplete_content_filter_maps_to_content_filter() {
         assert_eq!(
@@ -1676,8 +1639,7 @@ mod tests {
         );
     }
 
-    /// A missing `incomplete_details` still maps to Length — an Incomplete
-    /// response must never look like a clean Stop.
+    /// A missing `incomplete_details` still maps to Length: an Incomplete response must never look like a clean Stop.
     #[tokio::test]
     async fn incomplete_without_details_maps_to_length() {
         let event =
@@ -1702,10 +1664,9 @@ mod tests {
         }
     }
 
-    /// Pins the tool-calls-beat-Incomplete precedence: a truncated response
-    /// that still carries a function call surfaces as ToolCalls, not Length —
-    /// and the pair stays coherent: no raw length reason rides along, so the
-    /// headless output keeps reporting `tool_use` for tool-bearing turns.
+    /// Pins the precedence where tool calls beat an Incomplete status.
+    /// A truncated response that still carries a function call reports ToolCalls, not Length.
+    /// The pair stays coherent: no raw length reason rides along, so the headless output keeps reporting `tool_use` for tool-bearing turns.
     #[tokio::test]
     async fn incomplete_with_tool_calls_maps_to_tool_calls() {
         let mut response = build_response(rs_types::Status::Incomplete);
@@ -1744,9 +1705,8 @@ mod tests {
         }
     }
 
-    /// The unknown-reason arm is the forward-compatibility story: a wire
-    /// value this client has never seen collapses to Length (salvageable,
-    /// never a parse failure) and carries no raw reason.
+    /// The unknown-reason arm is the forward-compatibility story.
+    /// A wire value this client has never seen collapses to Length (salvageable, never a parse failure) and carries no raw reason.
     #[tokio::test]
     async fn incomplete_unknown_reason_maps_to_length() {
         assert_eq!(
@@ -1818,8 +1778,7 @@ mod tests {
                 assert_eq!(error.kind, crate::events::SamplingErrorKind::Api);
                 assert_eq!(error.status_code, Some(500));
                 assert!(error.message.contains("boom"));
-                // The wire code passes through verbatim — dropping it here
-                // would disable strip recovery for coded Responses failures.
+                // The wire code passes through verbatim; dropping it here would disable strip recovery for coded Responses failures
                 assert_eq!(
                     error.error_code,
                     Some(xai_grok_sampling_types::ApiErrorCode::Other(
@@ -1831,9 +1790,8 @@ mod tests {
         }
     }
 
-    /// A coded `error` event must carry its code into the Failed info —
-    /// this is the whole mid-stream strip-recovery chain for the Responses
-    /// backend (the synthesized 500 + code classifies as an image error).
+    /// A coded `error` event must carry its code into the Failed info.
+    /// This is the whole mid-stream strip-recovery chain for the Responses backend (the synthesized 500 with its code classifies as an image error).
     #[tokio::test]
     async fn response_error_event_carries_code_into_failed() {
         let error_event = rs::ResponseStreamEvent::ResponseError(rs_types::ResponseErrorEvent {
@@ -1999,13 +1957,10 @@ mod tests {
 
     #[test]
     fn meaningful_content_classifier_basics() {
-        // Text delta with content is meaningful.
         let event = text_delta_event("foo");
         assert!(responses_event_has_meaningful_content(&event));
-        // Empty text delta is not.
         let empty = text_delta_event("");
         assert!(!responses_event_has_meaningful_content(&empty));
-        // Completed is meaningful (terminal).
         assert!(responses_event_has_meaningful_content(&completed_event()));
     }
 
@@ -2075,10 +2030,8 @@ mod tests {
         assert!(output_observed.load(Ordering::Relaxed));
     }
 
-    /// A server-side code-interpreter run surfaces as a generic backend tool
-    /// call (started on InProgress, completed on OutputItemDone) named
-    /// "code_interpreter" — the same shape as x_search — so it is no longer
-    /// silently dropped from the event stream.
+    /// A server-side code-interpreter run is emitted as a generic backend tool call named "code_interpreter", the same shape as x_search.
+    /// It starts on InProgress and completes on OutputItemDone.
     #[tokio::test]
     async fn code_interpreter_forwards_backend_tool_call() {
         let in_progress = rs::ResponseStreamEvent::ResponseCodeInterpreterCallInProgress(
@@ -2223,8 +2176,7 @@ mod tests {
 
     #[tokio::test]
     async fn function_call_args_delta_without_added_event_is_dropped() {
-        // ArgumentsDelta with no preceding OutputItemAdded has no
-        // output_index → tool_index mapping; drop silently.
+        // ArgumentsDelta with no preceding OutputItemAdded has no output_index to tool_index mapping, so it is dropped silently
         let events: Vec<Result<rs::ResponseStreamEvent, SamplingError>> = vec![
             Ok(function_call_args_delta_event(7, "{\"oops\":1}")),
             Ok(completed_event()),
@@ -2301,9 +2253,8 @@ mod tests {
         }
     }
 
-    /// An armed collector holding a confident signal aborts the attempt with
-    /// a retryable doom-loop failure; all detector labels are emitted first.
-    /// Disarmed, the same stream completes and the signals ride the response.
+    /// An armed collector holding a confident signal aborts the attempt with a retryable doom-loop failure; all detector labels are emitted first.
+    /// After `disarm_abort`, the same stream completes and the signals ride the response.
     #[tokio::test]
     async fn confident_signal_aborts_stream_unless_disarmed() {
         let confident = r#"{"type":"response.doom_loop_check","doom_loop_check":{"triggers":["tail_repetition:8@thinking","exact_repetition:42x3@thinking"]}}"#;

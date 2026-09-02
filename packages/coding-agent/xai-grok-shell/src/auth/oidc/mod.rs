@@ -1,4 +1,3 @@
-//! OIDC authentication: protocol, login, and refresh submodules.
 mod login;
 pub(crate) mod protocol;
 pub(crate) mod refresh;

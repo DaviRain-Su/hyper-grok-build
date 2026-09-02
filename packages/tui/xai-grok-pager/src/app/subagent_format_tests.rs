@@ -221,7 +221,8 @@ fn activity_label_rendered_for_each_turn_activity() {
             TurnActivity::Retrying {
                 attempt: 2,
                 max_retries: 5,
-                reason: "rate limited".into(),
+                reason: "API error (status 429 Too Many Requests): rate limit exceeded".into(),
+                error_type: None,
             },
             "Retrying (2/5)".into(),
         ),

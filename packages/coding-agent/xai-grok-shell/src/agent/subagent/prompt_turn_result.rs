@@ -1,5 +1,3 @@
-//! Canonical mapping from a completed child prompt turn to its public result.
-
 use std::sync::Arc;
 
 use crate::session::commands::{PromptCompletionKind, PromptTurnResult};
@@ -49,6 +47,9 @@ pub(super) fn reduce_prompt_turn_result(
     match turn_result {
         Ok(Ok(turn)) => match turn.completion_kind {
             PromptCompletionKind::Completed | PromptCompletionKind::StationarityEnded => {
+                // MaxTokens means the report is real but the output token limit cut it off
+                // The validated-Ok arm stays raw JSON because a note would corrupt the payload
+                let truncated = turn.stop_reason == agent_client_protocol::StopReason::MaxTokens;
                 match (mode, turn.structured_output) {
                     (
                         PromptTurnResultMode::Initial {
@@ -69,8 +70,10 @@ pub(super) fn reduce_prompt_turn_result(
                     ) => {
                         result.success = false;
                         result.cancelled = false;
-                        result.error =
-                            Some(format!("structured output validation failed: {error}"));
+                        result.error = Some(with_truncation_error(
+                            format!("structured output validation failed: {error}"),
+                            truncated,
+                        ));
                         result.output = Arc::from(final_text);
                     }
                     (
@@ -81,8 +84,10 @@ pub(super) fn reduce_prompt_turn_result(
                     ) => {
                         result.success = false;
                         result.cancelled = false;
-                        result.error =
-                            Some("structured output requested but none produced".to_string());
+                        result.error = Some(with_truncation_error(
+                            "structured output requested but none produced".to_string(),
+                            truncated,
+                        ));
                         result.output = Arc::from(final_text);
                     }
                     (
@@ -94,20 +99,27 @@ pub(super) fn reduce_prompt_turn_result(
                         result.success = true;
                         result.cancelled = false;
                         result.error = None;
-                        result.output = text_or_summary(&final_text, summaries.success);
+                        result.output = with_truncation_note(
+                            text_or_summary(&final_text, summaries.success),
+                            truncated,
+                        );
                     }
                     (PromptTurnResultMode::ParentFollowup, None) => {
                         result.success = true;
                         result.cancelled = false;
                         result.error = None;
-                        result.output = text_or_summary(&final_text, summaries.success);
+                        result.output = with_truncation_note(
+                            text_or_summary(&final_text, summaries.success),
+                            truncated,
+                        );
                     }
                     (PromptTurnResultMode::ParentFollowup, Some(_)) => {
                         result.success = false;
                         result.cancelled = false;
-                        result.error = Some(
+                        result.error = Some(with_truncation_error(
                             "Parent follow-up unexpectedly produced structured output".to_string(),
-                        );
+                            truncated,
+                        ));
                         result.output = Arc::from(final_text);
                         result.output_usage_incomplete = true;
                     }
@@ -176,6 +188,29 @@ pub(super) fn reduce_prompt_turn_result(
     PromptTurnResultOutput {
         result,
         cancellation_may_hide_usage,
+    }
+}
+
+/// Marks a truncated report so the parent cannot treat it as complete.
+fn with_truncation_note(output: Arc<str>, truncated: bool) -> Arc<str> {
+    if truncated {
+        Arc::from(format!(
+            "{output}\n\n[Note: this subagent's final report was truncated by the output \
+             token limit and may be incomplete.]"
+        ))
+    } else {
+        output
+    }
+}
+
+fn with_truncation_error(error: String, truncated: bool) -> String {
+    if truncated {
+        format!(
+            "{error}; the subagent's turn was truncated by the output token limit — the \
+             structured answer is likely incomplete"
+        )
+    } else {
+        error
     }
 }
 

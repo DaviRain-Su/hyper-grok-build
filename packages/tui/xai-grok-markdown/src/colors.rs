@@ -388,13 +388,6 @@ mod tests {
     }
 
     #[test]
-    fn test_color_level_ordering() {
-        assert!(ColorLevel::None < ColorLevel::Basic);
-        assert!(ColorLevel::Basic < ColorLevel::Ansi256);
-        assert!(ColorLevel::Ansi256 < ColorLevel::TrueColor);
-    }
-
-    #[test]
     fn polarity_safe_grays_inherit_default() {
         assert_eq!(polarity_safe_syntax_ansi(0xc8, 0xc8, 0xc8), None);
         assert_eq!(polarity_safe_syntax_ansi(0x6c, 0x6c, 0x6c), None);

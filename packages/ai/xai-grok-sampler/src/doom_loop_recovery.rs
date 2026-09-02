@@ -1,24 +1,19 @@
 //! Failed-response context retained for Doom-loop recovery retries.
 //!
-//! Only model-authored reasoning and visible text are replayed, and only from
-//! a turn that made no tool call: Responses reasoning items are bound to the
-//! function calls that follow them, so replaying a turn without its calls
-//! would send an orphaned reasoning item the API rejects. A turn that called a
-//! tool is therefore dropped whole and the retry carries the reminder alone.
+//! Only model-authored reasoning and visible text are replayed, and only from a turn that made no tool call.
+//! Responses reasoning items are bound to the function calls that follow them.
+//! Replaying a turn without its calls would send an orphaned reasoning item the API rejects.
+//! A turn that called a tool is therefore dropped whole and the retry carries the reminder alone.
 //!
-//! What the wire delivered as a completed item — the terminal `output` list,
-//! or a `response.output_item.done` when the attempt is aborted before its
-//! terminal frame — is authoritative for both content and order. Streamed
-//! deltas only stand in for an item the wire never completed, so the replay
-//! keeps `encrypted_content` and the model's own item ids instead of
-//! synthesising plaintext copies. Reading the raw items also keeps the
-//! tool-call veto honest: the conversation form the sampler hands upward is
-//! lossy (it drops MCP calls) and has already had a streaming-reasoning
-//! fallback spliced into it.
+//! What the wire delivered as a completed item is authoritative for both content and order.
+//! That means the terminal `output` list, or a `response.output_item.done` when the attempt is aborted before its terminal frame.
+//! Streamed deltas only stand in for an item the wire never completed.
+//! So the replay keeps `encrypted_content` and the model's own item ids instead of synthesising plaintext copies.
+//! Reading the raw items also keeps the tool-call veto honest.
+//! The conversation form the sampler hands upward is lossy (it drops MCP calls) and has already had a streaming-reasoning fallback spliced into it.
 //!
-//! Capture is allocated only for an attempt whose doom-loop abort is armed
-//! ([`FailedResponseCapture::armed`]); every other stream holds the default
-//! disarmed handle, whose recording methods are no-ops.
+//! Capture is allocated only for an attempt whose doom-loop abort is armed ([`FailedResponseCapture::armed`]).
+//! Every other stream holds the default disarmed handle, whose recording methods are no-ops.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -27,22 +22,18 @@ use xai_grok_sampling_types::{ConversationItem, ConversationRequest, rs};
 
 pub(crate) const RECOVERY_REMINDER: &str = "<system_reminder>Your messages have been flagged as looping. Your response has been flagged as repeating the same text pattern. Avoid excessive repetition. If you are having trouble ask the user for guidance.</system_reminder>";
 
-/// Hard caps on the bytes of one failed turn replayed into a retry. A
-/// detector can report only at the terminal frame, so the failed turn may be
-/// a full generation; every recovery attempt appends another one, and without
-/// a cap the retry prompt would grow until it overflowed the context. The
-/// reasoning and the visible answer are budgeted separately so a turn that
-/// loops in its thinking still replays the answer it did produce.
+/// Hard caps on the bytes of one failed turn replayed into a retry.
+/// A detector can report only at the terminal frame, so the failed turn may be a full generation.
+/// Every recovery attempt appends another one, and without a cap the retry prompt would grow until it overflowed the context.
+/// The reasoning and the visible answer are budgeted separately so a turn that loops in its thinking still replays the answer it did produce.
 const MAX_RECOVERY_REASONING_BYTES: usize = 8 * 1024;
 const MAX_RECOVERY_TEXT_BYTES: usize = 4 * 1024;
 
-/// Marks the point where the cap cut the failed turn, so the model (and
-/// anyone reading the request) can tell replay from a complete turn.
+/// Marks the point where the cap cut the failed turn, so the model (and anyone reading the request) can tell replay from a complete turn.
 const TRUNCATION_MARKER: &str = " […truncated]";
 
-/// Byte budget for one channel (reasoning or visible text) of one failed
-/// turn. Once the cap is reached the budget is spent: later text in that
-/// channel is dropped rather than partially interleaved.
+/// Byte budget for one channel (reasoning or visible text) of one failed turn.
+/// Once the cap is reached the budget is spent: later text in that channel is dropped rather than partially interleaved.
 struct RecoveryBudget {
     cap: usize,
     used: usize,
@@ -74,8 +65,7 @@ impl RecoveryBudget {
         }
         self.truncated = true;
         if cut == 0 && slot.is_empty() {
-            // Nothing of this text fits and the slot holds nothing to mark;
-            // a marker alone would read as retained content.
+            // Nothing of this text fits and the slot holds nothing to mark; a marker alone would read as retained content
             return;
         }
         slot.push_str(&text[..cut]);
@@ -83,8 +73,8 @@ impl RecoveryBudget {
         self.used += cut;
     }
 
-    /// Replace a slot's delta-accumulated text with the `done` value. A spent
-    /// budget keeps what it already recorded instead of dropping it.
+    /// Replace a slot's delta-accumulated text with the `done` value.
+    /// A spent budget keeps what it already recorded instead of dropping it.
     fn replace(&mut self, slot: &mut String, text: String) {
         if self.truncated {
             return;
@@ -94,9 +84,8 @@ impl RecoveryBudget {
         self.append(slot, &text);
     }
 
-    /// Charge opaque bytes (an encrypted reasoning blob) that cannot be
-    /// truncated. Returns `false` when they do not fit, in which case the
-    /// caller drops them; the budget is left for the text that can be cut.
+    /// Charge opaque bytes (an encrypted reasoning blob) that cannot be truncated.
+    /// Returns `false` when they do not fit, in which case the caller drops them; the budget is left for the text that can be cut.
     fn charge(&mut self, len: usize) -> bool {
         if self.truncated || len > self.cap.saturating_sub(self.used) {
             return false;
@@ -122,11 +111,9 @@ enum CapturedItem {
 struct CapturedTurn {
     /// Completed wire items in `output_index` order.
     typed: Vec<CapturedItem>,
-    /// Whether the turn reached its terminal frame, whose `output` list is
-    /// complete — nothing may be added to it from the deltas.
+    /// Whether the turn reached its terminal frame, whose `output` list is complete; nothing may be added to it from the deltas.
     terminal_seen: bool,
-    /// Streamed reasoning text per item id, for items the wire never
-    /// completed.
+    /// Streamed reasoning text per item id, for items the wire never completed.
     reasoning: Vec<(String, String)>,
     output: String,
     veto_replay: bool,
@@ -173,15 +160,14 @@ impl FailedResponseCapture {
         }
     }
 
-    /// Whether this capture records anything. The stream checks it before
-    /// doing per-frame work for an attempt that can never be replayed.
+    /// Whether this capture records anything.
+    /// The stream checks it before doing per-frame work for an attempt that can never be replayed.
     pub(crate) fn is_armed(&self) -> bool {
         self.inner.is_some()
     }
 
-    /// Run `f` against the capture. Returns `None` when the capture is
-    /// disarmed or its lock is poisoned — a failed capture degrades to a
-    /// reminder-only retry rather than failing the request.
+    /// Returns `None` when the capture is disarmed or its lock is poisoned.
+    /// A failed capture degrades to a reminder-only retry rather than failing the request.
     fn with<R>(&self, f: impl FnOnce(&mut CapturedResponse) -> R) -> Option<R> {
         let mut captured = self.inner.as_ref()?.lock().ok()?;
         Some(f(&mut captured))
@@ -206,8 +192,7 @@ impl FailedResponseCapture {
                 .or_default();
             captured.reasoning_budget.append(slot, delta);
             let retained = !slot.is_empty();
-            // The raw channel only wins once it actually holds text: an empty
-            // event, or one the budget dropped, must not discard the summary.
+            // The raw channel only wins once it actually holds text: an empty event, or one the budget dropped, must not discard the summary
             if retained {
                 captured.raw_reasoning_indexes.insert(output_index);
             }
@@ -325,16 +310,15 @@ impl FailedResponseCapture {
         });
     }
 
-    /// Give up on replaying this turn. A tool call binds the reasoning that
-    /// precedes it, and a compaction item is opaque state the retry cannot
-    /// carry: either way the failed turn cannot be resent piecemeal, so the
-    /// retry falls back to the reminder alone.
+    /// Give up on replaying this turn.
+    /// A tool call binds the reasoning that precedes it, and a compaction item is opaque state the retry cannot carry.
+    /// Either way the failed turn cannot be resent piecemeal, so the retry falls back to the reminder alone.
     pub(crate) fn record_unreplayable(&self) {
         self.with(|captured| captured.veto_replay = true);
     }
 
-    /// Record a *started* wire item, whose payload is not final yet: its kind
-    /// is enough to veto a replay when it is a tool call or compaction state.
+    /// Record a *started* wire item, whose payload is not final yet.
+    /// Its kind is enough to veto a replay when it is a tool call or compaction state.
     pub(crate) fn record_item_start(&self, item: &rs::OutputItem) {
         if !matches!(
             item,
@@ -344,9 +328,8 @@ impl FailedResponseCapture {
         }
     }
 
-    /// Record one completed wire item. Only messages and reasoning can be
-    /// replayed; everything else — the MCP calls the conversation form drops
-    /// and the opaque compaction checkpoint alike — vetoes the whole replay.
+    /// Record one completed wire item. Only messages and reasoning can be replayed.
+    /// Everything else (the MCP calls the conversation form drops and the opaque compaction checkpoint alike) vetoes the whole replay.
     pub(crate) fn record_output_item(&self, output_index: u32, item: &rs::OutputItem) {
         self.with(|captured| match item {
             rs::OutputItem::Reasoning(reasoning) => {
@@ -367,8 +350,7 @@ impl FailedResponseCapture {
         });
     }
 
-    /// Record the terminal `output` list, which supersedes anything recorded
-    /// item by item: it is the turn's authoritative content and order.
+    /// Record the terminal `output` list, which supersedes anything recorded item by item: it is the turn's authoritative content and order.
     pub(crate) fn record_terminal_output(&self, output: &[rs::OutputItem]) {
         if self.inner.is_none() {
             return;
@@ -393,9 +375,8 @@ impl FailedResponseCapture {
             };
         };
 
-        // The raw channel replaces the summary only where it actually holds
-        // text, so an empty or budget-dropped raw event leaves the summary as
-        // the recovery context rather than emptying it.
+        // The raw channel replaces the summary only where it actually holds text
+        // An empty or budget-dropped raw event leaves the summary as the recovery context rather than emptying it
         let raw_content: BTreeMap<(u32, String), BTreeMap<u32, String>> = captured
             .reasoning_content
             .into_iter()
@@ -426,18 +407,16 @@ impl FailedResponseCapture {
         }
     }
 
-    /// The failed turn as the retry should replay it: completed wire items
-    /// where the turn produced them, streamed deltas only for what the wire
-    /// never completed.
+    /// The failed turn as the retry should replay it.
+    /// It uses completed wire items where the turn produced them and streamed deltas only for what the wire never completed.
     pub(crate) fn take_items(&self) -> Vec<ConversationItem> {
         let captured = self.take();
         if captured.veto_replay {
             return Vec::new();
         }
 
-        // A turn that reached its terminal frame has told us everything it
-        // produced: the deltas may not add items the wire left out, not even
-        // when the terminal projection comes out empty.
+        // A turn that reached its terminal frame has told us everything it produced
+        // The deltas may not add items the wire left out, not even when the terminal projection comes out empty
         let wire_is_complete = captured.terminal_seen;
         let mut reasoning_budget = RecoveryBudget::new(MAX_RECOVERY_REASONING_BYTES);
         let mut text_budget = RecoveryBudget::new(MAX_RECOVERY_TEXT_BYTES);
@@ -468,8 +447,7 @@ impl FailedResponseCapture {
             return items;
         }
 
-        // Reasoning the wire never completed (the attempt was aborted
-        // mid-item) is replayed from the deltas, after the completed items.
+        // Reasoning the wire never completed (the attempt was aborted mid-item) is replayed from the deltas, after the completed items
         for (item_id, text) in streamed {
             let text = reasoning_budget.fit(&text);
             if text.is_empty() {
@@ -493,8 +471,7 @@ impl FailedResponseCapture {
     }
 }
 
-/// Visible text of a completed message item, refusals included: a refusal is
-/// still model-authored output the retry should see.
+/// Visible text of a completed message item, refusals included: a refusal is still model-authored output the retry should see.
 fn output_message_text(message: &rs::OutputMessage) -> String {
     message
         .content
@@ -511,10 +488,9 @@ fn take_streamed(streamed: &mut Vec<(String, String)>, item_id: &str) -> Option<
     Some(streamed.remove(at).1)
 }
 
-/// Cap a final reasoning item against the turn budget, filling empty content
-/// from the streamed text when the final item carried none. The opaque
-/// `encrypted_content` blob is charged to the same budget and dropped when it
-/// does not fit, so it cannot smuggle an unbounded turn into the retry.
+/// Cap a final reasoning item against the turn budget, filling empty content from the streamed text when the final item carried none.
+/// The opaque `encrypted_content` blob is charged to the same budget.
+/// When it does not fit it is dropped, so it cannot smuggle an unbounded turn into the retry.
 fn fit_reasoning(
     reasoning: &mut rs::ReasoningItem,
     streamed_text: Option<String>,

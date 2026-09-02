@@ -27,9 +27,8 @@ impl RateLimitWaitConfig {
     pub(crate) const DEFAULT_MAX_ATTEMPTS: u32 = 8;
     /// Hard cap on a configured value.
     pub(crate) const MAX_ATTEMPTS_CAP: u32 = 32;
-    /// Per-turn cumulative-wait budget (sum of backoffs), coupled to
-    /// [`Self::DEFAULT_MAX_ATTEMPTS`] so both exhaust together (see the coupling
-    /// test); not a user knob.
+    /// Per-turn cumulative-wait budget (sum of backoffs); not a user knob.
+    /// Coupled to [`Self::DEFAULT_MAX_ATTEMPTS`] so both exhaust together (see the coupling test).
     pub(crate) const DEFAULT_MAX_TOTAL_WAIT: Duration = Duration::from_secs(150);
 
     /// Resolved attempts (clamped to the cap) with the fixed default budget.
@@ -86,8 +85,8 @@ enum WaitOutcome {
     Unresolved,
 }
 
-/// One `process_conversation_turn`'s rate-limit budget, shared across that
-/// turn's model round-trips. Bounds cumulative pause time, not wall-clock.
+/// One `process_conversation_turn`'s rate-limit budget, shared across that turn's model round-trips.
+/// Bounds cumulative pause time, not wall-clock.
 pub(crate) struct RateLimitWaitBudget {
     state: Option<BudgetState>,
 }
@@ -163,8 +162,7 @@ impl RateLimitWaitBudget {
         Some(SubagentRateLimitWaited {
             attempts: summary.attempts,
             max_attempts: config.max_attempts,
-            // Sum of planned backoffs; on cancel (`Unresolved`) mid-wait this
-            // can overstate wall-clock by up to one backoff.
+            // Sum of planned backoffs; on cancel (`Unresolved`) mid-wait this can overstate wall-clock by up to one backoff
             waited_ms: summary.total_waited.as_millis() as u64,
             budget_ms: config.max_total_wait.as_millis() as u64,
             outcome: match summary.outcome {
@@ -197,8 +195,7 @@ impl BudgetState {
         }
         let attempt = self.attempts + 1;
         let wait = xai_grok_sampler::retry_after_or_backoff(attempt, retry_after_secs);
-        // An over-budget wait stops rather than truncating, which would
-        // resubmit before the server's window clears.
+        // An over-budget wait stops rather than truncating, which would resubmit before the server's window clears
         if self.total_waited + wait > self.config.max_total_wait {
             self.outcome = WaitOutcome::BudgetSpent;
             return RateLimitWaitDecision::BudgetSpent {
@@ -208,9 +205,8 @@ impl BudgetState {
         }
         self.attempts = attempt;
         self.total_waited += wait;
-        // A fresh wait re-opens the turn: a submit accepted earlier flipped the
-        // outcome to Recovered, but a cancel mid-this-wait is Unresolved, not
-        // Recovered.
+        // A fresh wait re-opens the turn: a submit accepted earlier flipped the outcome to Recovered
+        // A cancel during this wait is Unresolved, not Recovered
         self.outcome = WaitOutcome::Unresolved;
         RateLimitWaitDecision::Wait {
             attempt,

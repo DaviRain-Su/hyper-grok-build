@@ -2,15 +2,13 @@
 //!
 //! # Problem
 //!
-//! Ratatui's [`Terminal::draw()`] (internally `try_draw()`) unconditionally
-//! sends cursor escape sequences on every frame:
+//! Ratatui's [`Terminal::draw()`] (internally `try_draw()`) unconditionally sends cursor escape sequences on every frame:
 //!
-//! - If `frame.set_cursor_position()` was called: `Show` + `MoveTo` every frame
+//! - If `frame.set_cursor_position()` was called: `Show` and `MoveTo` every frame
 //! - If not called: `Hide` every frame
 //!
-//! Both reset the terminal's cursor blink timer (`Show` restarts the blink
-//! cycle, `MoveTo` resets the blink phase). At 30fps, the 500ms blink interval
-//! never completes, so the cursor appears solid.
+//! Both reset the terminal's cursor blink timer (`Show` restarts the blink cycle, `MoveTo` resets the blink phase).
+//! At 30fps, the 500ms blink interval never completes, so the cursor appears solid.
 //!
 //! # Solution
 //!
@@ -25,22 +23,19 @@
 //!
 //! Cursor is managed entirely by [`CursorState`] with de-duplication:
 //!
-//! - **No cell changes + same position**: zero cursor commands → blink preserved
-//! - **Cells changed + same position**: `MoveTo` to fix cursor after cell writes
-//! - **Position changed**: `MoveTo` (blink resets — expected, user just typed)
+//! - **No cell changes, same position**: zero cursor commands, so blink is preserved
+//! - **Cells changed, same position**: `MoveTo` to fix the cursor after cell writes
+//! - **Position changed**: `MoveTo` (blink resets; expected, the user just typed)
 //! - **Visibility transition**: `Show`/`Hide` (only on actual transition)
-//! - **Idle (no draw calls)**: nothing sent → blink runs undisturbed
+//! - **Idle (no draw calls)**: nothing sent, so blink runs undisturbed
 //!
-//! The "no cell changes" optimization is possible because we use
-//! [`xai_ratatui_inline::Terminal`] whose `flush()` returns `bool` indicating
-//! whether any cells were written. When animated entries are off-screen, the
-//! buffer diff is empty and we skip all cursor commands.
+//! The "no cell changes" case is detectable because [`xai_ratatui_inline::Terminal`]'s `flush()` returns whether any cells were written.
+//! When animated entries are off-screen, the buffer diff is empty and we skip all cursor commands.
 //!
 //! # Synchronized output
 //!
-//! Each frame is wrapped in `BeginSynchronizedUpdate` / `EndSynchronizedUpdate`
-//! so the terminal processes all escape sequences atomically. This prevents
-//! flicker and is critical for multiplexers like zellij and tmux.
+//! Each frame is wrapped in `BeginSynchronizedUpdate` / `EndSynchronizedUpdate` so the terminal processes all escape sequences atomically.
+//! This prevents flicker and is critical for multiplexers like zellij and tmux.
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use crossterm::{QueueableCommand, cursor};
 use ratatui::Frame;
@@ -50,9 +45,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 use xai_ratatui_inline::LinkSpan;
-/// Terminal type for the pager. Defined here (beside [`TermWriter`]) so the
-/// `render` module does not depend on `app`. Re-exported from `app` as
-/// `crate::app::PagerTerminal` for existing call sites.
+/// Defined here (beside [`TermWriter`]) so the `render` module does not depend on `app`.
+/// Re-exported from `app` as `crate::app::PagerTerminal` for existing call sites.
 pub type PagerTerminal = xai_ratatui_inline::Terminal<CrosstermBackend<TermWriter>>;
 #[derive(Debug)]
 pub enum WriterEvent {
@@ -65,12 +59,11 @@ pub enum WriterDrain {
     Drained,
     TimedOut,
 }
-/// Tracks submitted and successfully flushed presentation sequences.
+/// Tracks how many frames were queued for the writer thread and how many it has flushed.
 ///
-/// During a child handoff, input is parked before this state is drained. Since
-/// a sequence is reserved before its payload is sent, an accepted frame blocks
-/// the drain before it is visible to the writer; no queued frame can land after
-/// the child takes the tty.
+/// During a child handoff, input is parked before this state is drained.
+/// Since a sequence is reserved before its payload is sent, an accepted frame blocks the drain before it is visible to the writer.
+/// No queued frame can land after the child takes the tty.
 #[derive(Clone, Debug)]
 pub struct WriterSync {
     queued: Arc<AtomicU64>,
@@ -141,8 +134,7 @@ impl WriterSync {
     fn is_drained(&self) -> bool {
         !self.failed() && self.written() >= self.queued()
     }
-    /// Block until the writer flushes every accepted payload, output fails, or
-    /// the deadline passes.
+    /// Block until the writer flushes every accepted payload, output fails, or the deadline passes.
     pub fn wait_drained(&self, timeout: Duration) -> std::io::Result<WriterDrain> {
         let deadline = Instant::now() + timeout;
         while !self.is_drained() {
@@ -157,18 +149,8 @@ impl WriterSync {
         Ok(WriterDrain::Drained)
     }
 }
-/// A writer that buffers frame output and sends it to a background thread
-/// for non-blocking terminal I/O.
-///
-/// All escape sequences produced during a frame are collected in an internal
-/// `Vec<u8>`. When [`flush()`](Write::flush) is called, the accumulated bytes
-/// are sent through a channel to a dedicated writer thread that performs the
-/// actual (potentially blocking) `write()` to stderr / the pty fd.
-///
-/// This decouples the tokio event loop from pty back-pressure: if the
-/// terminal emulator is slow to read (e.g. Ghostty busy with another pane),
-/// only the writer thread stalls — the event loop keeps processing timers,
-/// events, and ACP messages.
+/// Buffers a frame's escape sequences and hands them to a writer thread for the blocking write to stderr / the pty fd.
+/// If the terminal emulator is slow to read, only the writer thread stalls; the event loop keeps processing timers, events, and ACP messages.
 pub struct WriterPayload {
     pub(crate) sequence: u64,
     pub(crate) data: Vec<u8>,
@@ -202,8 +184,7 @@ impl TermWriter {
     pub fn discard(&mut self) {
         self.buf.clear();
     }
-    /// Shared writer progress used by the suspend path to
-    /// [`WriterSync::wait_drained`] before a child takes the tty.
+    /// Shared writer progress used by the suspend path to [`WriterSync::wait_drained`] before a child takes the tty.
     pub fn writer_sync(&self) -> &WriterSync {
         &self.sync
     }
@@ -237,18 +218,14 @@ impl Drop for TermWriter {
         self.sync.writer_active.store(false, Ordering::Release);
     }
 }
-/// Handle for the background writer thread.
-///
-/// Joining ensures all queued frames have been written to the terminal
-/// before proceeding with teardown (e.g. `LeaveAlternateScreen`).
+/// Joining ensures all queued frames have been written to the terminal before teardown (e.g. `LeaveAlternateScreen`).
 pub struct WriterThread {
     handle: Option<std::thread::JoinHandle<std::io::Result<()>>>,
     sync: WriterSync,
 }
 impl WriterThread {
-    /// Block until the writer thread has processed all pending frames and
-    /// exited. The [`mpsc::Sender`] must be dropped *before* calling this,
-    /// otherwise the thread will never see the channel close.
+    /// Block until the writer thread has processed all pending frames and exited.
+    /// The [`mpsc::Sender`] must be dropped *before* calling this, otherwise the thread will never see the channel close.
     pub fn join(mut self) -> std::io::Result<()> {
         let Some(handle) = self.handle.take() else {
             return Ok(());
@@ -290,8 +267,7 @@ fn write_payload(
 }
 /// Spawn a background OS thread that writes frame data to stderr.
 ///
-/// Returns the frame sender, shared writer state, completion-event receiver,
-/// and the thread handle that must be joined during terminal teardown.
+/// Returns the frame sender, shared writer state, completion-event receiver, and the thread handle that must be joined during terminal teardown.
 pub fn spawn_writer_thread() -> (
     WriterSender,
     WriterSync,
@@ -354,30 +330,24 @@ pub fn spawn_writer_thread() -> (
         },
     )
 }
-/// Cursor state tracker for blink-preserving cursor management.
-///
-/// Tracks the last cursor position written to the terminal. By comparing
-/// with the desired position each frame, we emit the minimum cursor escape
-/// sequences necessary — avoiding redundant `Show`/`Hide`/`MoveTo` that
-/// would reset the terminal's blink timer.
+/// Tracks the last cursor position written to the terminal, so each frame emits only the cursor escapes it needs.
+/// Redundant `Show`/`Hide`/`MoveTo` would reset the terminal's blink timer.
 #[derive(Debug, Default)]
 pub struct CursorState {
-    /// Last cursor position written to the terminal.
-    /// `None` = cursor is hidden; `Some((x, y))` = cursor visible at (x, y).
+    /// `None` means the cursor is hidden; `Some((x, y))` means it is visible at (x, y).
     last_pos: Option<(u16, u16)>,
 }
 /// What cursor commands to emit after a frame render.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorAction {
-    /// No cursor commands needed — blink timer preserved.
+    /// No cursor commands needed, so the blink timer is preserved.
     None,
-    /// Cursor is visible and cells changed — reposition after cell writes
-    /// disturbed the terminal cursor. Resets blink (unavoidable when cells
-    /// change on screen).
+    /// Cursor is visible and cells changed: reposition after cell writes disturbed the terminal cursor.
+    /// Resets blink (unavoidable when cells change on screen).
     Reposition(u16, u16),
-    /// Cursor becoming visible at (x, y) — needs `MoveTo` + `Show`.
+    /// Cursor becoming visible at (x, y); needs `MoveTo` and `Show`.
     Show(u16, u16),
-    /// Cursor becoming hidden — needs `Hide`.
+    /// Cursor becoming hidden; needs `Hide`.
     Hide,
 }
 impl CursorState {
@@ -386,8 +356,7 @@ impl CursorState {
     }
     /// Determine what cursor action to take for this frame.
     ///
-    /// Pure function — computes the action from current state without
-    /// side effects. Call [`apply`] to execute it.
+    /// No side effects; call [`apply`] to execute the returned action.
     pub fn action(&self, cursor_pos: Option<(u16, u16)>, has_changes: bool) -> CursorAction {
         if cursor_pos == self.last_pos {
             if has_changes && let Some((x, y)) = cursor_pos {
@@ -405,9 +374,8 @@ impl CursorState {
     }
     /// Execute a cursor action by queuing escape sequences into `w`.
     ///
-    /// Uses `queue!` (buffered) instead of `execute!` (immediate flush) so
-    /// that cursor commands are batched with the rest of the frame data and
-    /// written to the terminal atomically by the writer thread.
+    /// Uses `queue!` (buffered) instead of `execute!` (immediate flush).
+    /// Cursor commands are batched with the rest of the frame data and written to the terminal atomically by the writer thread.
     pub fn apply<W: Write>(&mut self, action: CursorAction, w: &mut W) {
         match action {
             CursorAction::None => {}
@@ -429,18 +397,16 @@ impl CursorState {
 }
 /// Render a frame to the terminal with cursor blink preservation.
 ///
-/// Bypasses ratatui's `try_draw()` to avoid its unconditional cursor
-/// management. See [module docs](self) for the full rationale.
+/// Bypasses ratatui's `try_draw()` to avoid its unconditional cursor management.
+/// See [module docs](self) for the full rationale.
 ///
-/// The `render_fn` receives a [`Frame`] and a `&mut Vec<LinkSpan>` to populate
-/// with the frame's OSC 8 hyperlink regions (absolute viewport coordinates).
-/// Those spans are handed to the terminal before the diff so hyperlinks
-/// participate in the cell diff (emitted/cleared in lockstep with content) —
-/// no out-of-band post-flush repaint. It returns a tuple of:
-/// - `Option<(u16, u16)>` — cursor position (or `None` to hide cursor)
-/// - `Option<PostFlush>` — escape sequences to write after cell flush (e.g.
-///   Kitty graphics protocol image data). Written inside the synchronized
-///   update block so the image appears atomically with the cell diff.
+/// The `render_fn` receives a [`Frame`] and a `&mut Vec<LinkSpan>` to fill with the frame's OSC 8 hyperlink regions (absolute viewport coordinates).
+/// Those spans are handed to the terminal before the diff, so hyperlinks are emitted and cleared in lockstep with the cell content.
+/// There is no separate post-flush repaint.
+/// It returns a tuple of:
+/// - `Option<(u16, u16)>`: cursor position (or `None` to hide the cursor)
+/// - `Option<PostFlush>`: escape sequences written after the cell flush (e.g. Kitty graphics protocol image data).
+///   They go inside the synchronized update block so the image appears atomically with the cell diff.
 pub fn draw_frame(
     terminal: &mut PagerTerminal,
     cursor: &mut CursorState,
@@ -737,9 +703,8 @@ mod tests {
         s.apply(CursorAction::None, &mut sink);
         assert_eq!(s.last_pos, Some((3, 7)));
     }
-    /// Verify the writer thread correctly round-trips multi-byte UTF-8
-    /// through the channel. This catches encoding issues where the writer
-    /// silently corrupts Braille/emoji/CJK characters.
+    /// Verify the writer thread correctly round-trips multi-byte UTF-8 through the channel.
+    /// This catches encoding issues where the writer silently corrupts Braille/emoji/CJK characters.
     #[test]
     fn writer_thread_preserves_multibyte_utf8() {
         let test_payload = "⣀⣾⠿⠛\u{e0a0}\u{1F600}";

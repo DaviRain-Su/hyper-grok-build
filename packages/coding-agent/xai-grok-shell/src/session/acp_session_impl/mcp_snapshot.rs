@@ -1,6 +1,5 @@
-//! MCP snapshot concern for `SessionActor`: server-snapshot refresh and
-//! reminder scheduling, templated-prefix handshake waits, and tool
-//! re-registration on a rebuilt bridge.
+//! MCP snapshot handling for `SessionActor`: refreshing the server snapshot and scheduling the reminder.
+//! Also holds the wait for MCP handshakes before the templated user prefix is built, and tool re-registration on a rebuilt bridge.
 
 use super::*;
 
@@ -40,9 +39,9 @@ pub(super) async fn refresh_mcp_snapshot_and_schedule_reminder_with(
     mcp_reminder_dirty: Arc<std::sync::atomic::AtomicBool>,
     mcp_initialized: bool,
     disabled_gateway_tools: &std::collections::HashMap<String, std::collections::HashSet<String>>,
-    // External harness only: per-workspace `mcps/` descriptor root. `Some` makes
-    // this refresh also update the on-disk descriptor mirror so late-connecting
-    // servers become discoverable; `None` for other agent types (no-op).
+    // External harness only: the per-workspace `mcps/` descriptor root
+    // `Some` makes this refresh also update the on-disk descriptor mirror so servers that connect late become discoverable
+    // `None` for other agent types (no-op)
     mcps_root: Option<std::path::PathBuf>,
 ) {
     use crate::session::tool_index::{
@@ -109,9 +108,9 @@ pub(super) async fn refresh_mcp_snapshot_and_schedule_reminder_with(
                     call_id: tool.call_id.clone(),
                 },
             ));
-            // Gateway ids are the model/search contract. Display labels stay
-            // out of ToolMetadata so search_tool and permissions use stable ids:
-            // connector_id/tool_id here, connector_name/tool_name in UI only.
+            // Gateway ids are the contract for the model and search
+            // Display labels stay out of ToolMetadata so search_tool and permissions use stable ids
+            // connector_id and tool_id go here; connector_name and tool_name appear only in the UI
             mcp_tools.push(ToolMetadata {
                 qualified_name,
                 server_name: tool.connector_id.clone(),
@@ -140,9 +139,8 @@ pub(super) async fn refresh_mcp_snapshot_and_schedule_reminder_with(
         metadata
     };
 
-    // Scope the synchronous snapshot guard so it is released before the
-    // descriptor-materialization await below (a std `Mutex` guard must not
-    // cross an await point).
+    // Scope the synchronous snapshot guard so it drops before the `materialize_descriptors` awaits below
+    // A std `Mutex` guard must not cross an await point
     {
         let mut snapshot = tool_metadata_snapshot.lock().unwrap();
         snapshot.tools = mcp_tools;
@@ -159,9 +157,9 @@ pub(super) async fn refresh_mcp_snapshot_and_schedule_reminder_with(
     mcp_reminder_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
     tracing::debug!("MCP snapshot updated, reminder marked dirty");
 
-    // External harness: refresh the on-disk descriptor mirror for the current
-    // clients, so a server that connected after the first-turn prefix was built
-    // is still discoverable. Snapshot under the lock, then materialize outside.
+    // External harness: refresh the on-disk descriptor mirror for the current clients
+    // This keeps a server discoverable even when it connected after the first-turn prefix was built
+    // Snapshot under the lock, then materialize outside
     if let Some(mcps_root) = mcps_root {
         let clients: Vec<(String, Arc<crate::session::mcp_servers::McpClient>)> = {
             let state = mcp_state.lock().await;
@@ -236,14 +234,12 @@ pub(crate) async fn refresh_mcp_snapshot_for_test_with_disabled(
 }
 
 impl SessionActor {
-    /// Block the templated user prefix until MCP handshakes have finished populating
-    /// [`McpState::clients`], or until a timeout elapses.
+    /// Block the templated user prefix until MCP handshakes have finished populating [`McpState::clients`], or until a timeout elapses.
     ///
     /// [`gather_mcp_servers`](Self::gather_mcp_servers) only sees entries in `clients`.
-    /// [`McpState::finish_init`](crate::session::mcp_servers::McpState::finish_init) runs
-    /// immediately after spawning MCP processes, while tool registration and `clients`
-    /// insertion happen in a follow-on background task; [`McpState::initializing_servers`]
-    /// stays non-empty until that task completes.
+    /// [`McpState::finish_init`](crate::session::mcp_servers::McpState::finish_init) runs immediately after spawning MCP processes.
+    /// Tool registration and `clients` insertion happen in a follow-on background task.
+    /// [`McpState::initializing_servers`] stays non-empty until that task completes.
     pub(super) async fn wait_for_mcp_templated_prefix_ready(
         &self,
         template: &xai_grok_agent::prompt::user_message::UserMessageTemplate,
@@ -253,9 +249,8 @@ impl SessionActor {
             return;
         }
 
-        // Register the notification future *before* checking state so we
-        // cannot miss a signal that fires between releasing the lock and
-        // entering the wait.
+        // Register the notification future *before* checking state
+        // Otherwise a signal that fires between releasing the lock and entering the wait is missed
         let notified = self.mcp_handshakes_done.notified();
         tokio::pin!(notified);
 
@@ -296,16 +291,13 @@ impl SessionActor {
             "wait_for_mcp_templated_prefix_ready: waiting for MCP handshakes"
         );
 
-        // Wait for `mcp_handshakes_done` (signalled after
-        // `mark_all_servers_ready()` in the bg handshake task) or the
-        // timeout, whichever comes first.
+        // Wait for `mcp_handshakes_done` (signalled after `mark_all_servers_ready()` in the background handshake task) or the timeout
         let outcome = tokio::select! {
             () = &mut notified => "notified",
             () = tokio::time::sleep(TIMEOUT) => "timed_out",
         };
 
-        // Only acquire the post-wait snapshot when INFO tracing is active;
-        // in production the extra lock + string cloning is unnecessary.
+        // Only acquire the post-wait snapshot when INFO tracing is active; in production the extra lock and string cloning is unnecessary
         if tracing::enabled!(tracing::Level::INFO) {
             let s = self.mcp_state.lock().await;
             tracing::info!(
@@ -355,24 +347,11 @@ impl SessionActor {
         );
     }
 
-    /// Re-register MCP tools onto a freshly-built `ToolBridge` after a
-    /// zero-turn harness rebuild.
-    ///
-    /// Snapshots the live MCP `Client` connections from `mcp_state` and
-    /// (eventually) re-walks each client's `list_tools` to mirror its
-    /// tool registrations onto the new bridge. Best-effort: per-server
-    /// failures are logged but do not abort the rebuild.
-    ///
-    /// Re-register MCP tools from existing clients onto the rebuilt bridge.
-    ///
-    /// Iterates over all connected MCP clients, calls `list_tools` on each
-    /// to obtain tool registrations, and registers them on the new bridge.
-    /// Errors on individual servers are logged but don't abort the process.
-    /// After re-registration, refreshes the tool metadata snapshot so
-    /// `search_tool` returns accurate results.
+    /// Re-register MCP tools from the existing clients onto a freshly built `ToolBridge` after a zero-turn harness rebuild.
+    /// Per-server `list_tools` failures are logged and skipped.
+    /// Afterwards the tool metadata snapshot is refreshed so `search_tool` stays accurate.
     pub(super) async fn re_register_mcp_tools_on_rebuilt_bridge(&self) {
-        // Snapshot server names + client Arcs to avoid holding the lock
-        // across async list_tools calls.
+        // Snapshot server names and client Arcs to avoid holding the lock across async list_tools calls
         let clients: Vec<(
             String,
             std::sync::Arc<crate::session::mcp_servers::McpClient>,
@@ -434,8 +413,7 @@ impl SessionActor {
             );
         }
 
-        // Refresh the snapshot so search_tool returns accurate results
-        // against the newly-registered tools.
+        // Refresh the snapshot so search_tool returns accurate results against the newly-registered tools
         self.refresh_mcp_snapshot_and_schedule_reminder().await;
         self.emit_mcp_tools_changed_notifications(all_ui_tools);
     }

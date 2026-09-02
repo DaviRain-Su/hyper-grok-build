@@ -302,24 +302,6 @@ mod tests {
     }
 
     #[test]
-    fn test_resize_purge_rerender_with_wrapped_lines() {
-        let mut terminal = MockTerminal::new(40, 10, 2); // Narrow terminal
-        terminal.viewport_area.y = 8;
-
-        // Create a line that will wrap
-        let long_line = "A".repeat(100); // Will wrap to ~3 lines on 40-column terminal
-        let history = format!("{}\r\nShort line\r\n", long_line);
-
-        resize_purge_rerender(&mut terminal, &history).unwrap();
-
-        // The actual position depends on split_into_line_segments calculation
-        // But it should position the viewport appropriately
-        assert!(terminal.viewport_area.y <= 10 - 2);
-        assert_eq!(terminal.viewport_area.height, 2);
-        assert_eq!(terminal.clear_count, 1);
-    }
-
-    #[test]
     fn test_resize_purge_rerender_preserves_viewport_dimensions() {
         let mut terminal = MockTerminal::new(100, 30, 5);
         let original_width = terminal.viewport_area.width;

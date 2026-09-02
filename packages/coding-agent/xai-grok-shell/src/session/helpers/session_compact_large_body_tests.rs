@@ -18,7 +18,7 @@ use xai_chat_state::image_budget::{
 };
 
 const MIB: usize = 1024 * 1024;
-// Mirrors the 50 MiB ingress limit that rejected the incident request.
+// Mirrors the 50 MiB ingress limit that rejected the request during the original incident
 const TRANSPORT_LIMIT_BYTES: usize = 50 * MIB;
 const ENVELOPE_ALLOWANCE_BYTES: usize = MIB;
 const IMAGE_PAYLOAD_BYTES: usize = 9 * MIB;

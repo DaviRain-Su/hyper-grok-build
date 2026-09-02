@@ -1,4 +1,4 @@
-//! No-caller canonical attempt records.
+//! Canonical attempt records; no code calls this module yet.
 
 #[allow(dead_code, reason = "accounting is consumed by the next storage slice")]
 mod accounting;

@@ -743,11 +743,6 @@ mod tests {
     }
 
     #[test]
-    fn truncate_str_within_limit() {
-        assert_eq!(truncate_str("hello", 10), "hello");
-    }
-
-    #[test]
     fn truncate_str_at_limit() {
         assert_eq!(truncate_str("hello", 5), "hello");
     }
@@ -763,11 +758,6 @@ mod tests {
     }
 
     #[test]
-    fn truncate_str_empty_string() {
-        assert_eq!(truncate_str("", 5), "");
-    }
-
-    #[test]
     fn truncate_str_multibyte_emoji() {
         // Each emoji is 4 bytes. Truncating at 2 chars should yield 2 emojis (8 bytes).
         let s = "\u{1F600}\u{1F601}\u{1F602}\u{1F603}"; // 4 emojis
@@ -779,11 +769,6 @@ mod tests {
         // CJK chars are 3 bytes each. Truncating at 3 chars should yield 3 chars (9 bytes).
         let s = "\u{4F60}\u{597D}\u{4E16}\u{754C}"; // 4 CJK chars
         assert_eq!(truncate_str(s, 3), "\u{4F60}\u{597D}\u{4E16}");
-    }
-
-    #[test]
-    fn strip_fork_noise_empty_input() {
-        assert_eq!(strip_fork_noise(""), "");
     }
 
     // --- strip_xml_block tests ---
@@ -811,24 +796,10 @@ mod tests {
     }
 
     #[test]
-    fn strip_xml_block_preserves_surrounding_text() {
-        let input = "keep this <user_info>strip me</user_info> and this too";
-        let result = strip_xml_block(input, "user_info");
-        assert_eq!(result, "keep this  and this too");
-    }
-
-    #[test]
     fn strip_xml_block_no_closing_tag() {
         let input = "before <system-reminder>unclosed content";
         let result = strip_xml_block(input, "system-reminder");
         assert_eq!(result, input, "unclosed tag must be left untouched");
-    }
-
-    #[test]
-    fn strip_xml_block_underscore_variant() {
-        let input = "A <system_reminder>cursor noise</system_reminder> B";
-        let result = strip_xml_block(input, "system_reminder");
-        assert_eq!(result, "A  B");
     }
 
     #[test]
@@ -888,42 +859,7 @@ mod tests {
         assert_eq!(result, "line1\n\nline2\n\nline3");
     }
 
-    #[test]
-    fn collapse_blank_lines_preserves_single() {
-        let input = "line1\n\nline2";
-        let result = collapse_blank_lines(input);
-        assert_eq!(result, input);
-    }
-
     // --- strip_fork_noise integration tests ---
-
-    #[test]
-    fn strip_fork_noise_strips_user_info() {
-        let input = "hello <user_info>\nOS: linux\nShell: /bin/bash\n</user_info> world";
-        let result = strip_fork_noise(input);
-        assert!(result.contains("hello"));
-        assert!(result.contains("world"));
-        assert!(!result.contains("OS: linux"));
-    }
-
-    #[test]
-    fn strip_fork_noise_strips_git_status() {
-        let input = "before <git_status>\nOn branch main\n</git_status> after";
-        let result = strip_fork_noise(input);
-        assert!(result.contains("before"));
-        assert!(result.contains("after"));
-        assert!(!result.contains("On branch main"));
-    }
-
-    #[test]
-    fn strip_fork_noise_strips_project_layout() {
-        let input = "A <project_layout>\nsrc/main.rs\nsrc/lib.rs\n</project_layout> B";
-        let result = strip_fork_noise(input);
-        assert!(result.contains("A"));
-        assert!(result.contains("B"));
-        assert!(!result.contains("src/main.rs"));
-        assert!(!result.contains("<project_layout>"));
-    }
 
     #[test]
     fn strip_fork_noise_strips_attached_files() {

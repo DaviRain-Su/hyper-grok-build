@@ -1,5 +1,5 @@
-//! The under-lock refresh protocol: the [`RefreshStep`] machine and its
-//! per-step methods. Mutation stays in `manager.rs` (`apply_refresh_outcome`).
+//! The refresh protocol that runs under the lock: the [`RefreshStep`] machine and its per-step methods.
+//! Mutation stays in `manager.rs` (`apply_refresh_outcome`).
 
 use std::sync::Arc;
 
@@ -12,8 +12,8 @@ use super::lock::{self, LockAcquire};
 use super::sleep_gate::InFlightGuard;
 use super::{AuthManager, LOCK_TIMEOUT_WAIT, REFRESH_LOCK_TIMEOUT, TokenType};
 
-/// `Held` is the live lock, proven before the irreversible IdP call; `Adopted`
-/// is a sibling's freshly rotated token — return it without refreshing.
+/// `Held` is the live lock, proven before the irreversible IdP call.
+/// `Adopted` is a sibling's freshly rotated token; return it without refreshing.
 pub(super) enum LockOutcome {
     Held(AuthFileLock),
     Adopted(Box<GrokAuth>),
@@ -47,18 +47,15 @@ struct ActiveRefresh {
 enum RefreshDeferral {
     /// The sleep gate is raised; an exchange would straddle the suspend.
     SleepImminent { has_live_token: bool },
-    /// A dark wake could re-sleep mid-exchange; applies only while a wire-valid
-    /// token makes waiting free.
+    /// A dark wake could re-sleep mid-exchange; this applies only while a wire-valid token makes waiting free.
     DarkWake,
 }
 
 impl AuthManager {
-    /// Runs one refresh attempt; all persistence and verdict recording happen
-    /// in `apply_refresh_outcome`, the single mutation point.
+    /// Runs one refresh attempt; all persistence and verdict recording happen in `apply_refresh_outcome`, the single mutation point.
     ///
-    /// Callers that can be cancelled mid-exchange must go through
-    /// `BoundedRefresh`/`SilentRefresh` (spawn-don't-drop); a dropped exchange
-    /// loses the rotated token.
+    /// Callers that can be cancelled mid-exchange must go through `BoundedRefresh`/`SilentRefresh`, which spawn the exchange rather than drop it.
+    /// A dropped exchange loses the rotated token.
     #[tracing::instrument(skip(self), fields(?token_type, ?reason))]
     pub(crate) async fn refresh_chain(
         self: &Arc<Self>,
@@ -94,8 +91,7 @@ impl AuthManager {
         loop {
             step = match step {
                 RefreshStep::Recheck => {
-                    // A ServerRejected token counts only if it changed, since the
-                    // unchanged one still needs fresh claims.
+                    // A ServerRejected token counts only if it changed, since the unchanged one still needs fresh claims
                     if let Some(auth) = self.current()
                         && (reason != RefreshReason::ServerRejected
                             || pre_lock_key.as_deref() != Some(&auth.key))
@@ -108,8 +104,7 @@ impl AuthManager {
                         RefreshStep::AdoptBeforeLock
                     }
                 }
-                // Adopting before the flock keeps a convoy off the lock; safe only
-                // under the mutex, after the re-checks above.
+                // Adopting before the flock keeps waiters from queuing on the lock; this is safe only under the mutex, after the re-checks above
                 RefreshStep::AdoptBeforeLock => {
                     match self.try_adopt_disk_token(
                         reason,
@@ -180,8 +175,7 @@ impl AuthManager {
         } = active;
         // Never abort an in-flight exchange: the IdP may already have rotated the token.
         let outcome = {
-            // Claim the slot before re-checking the gate: a sleep either sees our slot
-            // (and waits for us) or we see its gate and back out.
+            // Claim the slot before re-checking the gate: a sleep either sees our slot (and waits for us) or we see its gate and back out
             let _in_flight = InFlightGuard::new(self);
             if self.is_sleep_gated() {
                 xai_grok_telemetry::unified_log::warn(
@@ -214,8 +208,7 @@ impl AuthManager {
             .await
     }
 
-    /// On lock timeout, adopts a sibling's fresh token or returns transient — never
-    /// proceeds unlocked.
+    /// On lock timeout, adopts a sibling's fresh token or returns transient; it never proceeds unlocked.
     pub(super) async fn acquire_refresh_lock_or_adopt(
         &self,
         reason: RefreshReason,
@@ -233,8 +226,7 @@ impl AuthManager {
         .await
     }
 
-    /// Sole owner of the refresh-path acquire outcome; refresh callers never
-    /// touch `into_guard`.
+    /// Every refresh-path `LockAcquire` resolves here; refresh callers never touch `into_guard`.
     async fn resolve_refresh_acquire(
         &self,
         acquire: LockAcquire,
@@ -265,7 +257,7 @@ impl AuthManager {
         Ok(LockOutcome::Held(file_lock))
     }
 
-    /// Wait out the holder, adopt its token, or return transient — never proceed unlocked.
+    /// Wait out the holder, adopt its token, or return transient; never proceed unlocked.
     async fn adopt_or_bail_without_lock(
         &self,
         reason: RefreshReason,
@@ -372,8 +364,7 @@ impl AuthManager {
     }
 
     // TODO: deletable with `AuthFileLock::still_live`.
-    /// Re-locks if the lock file was replaced under us; adopts a sibling's fresh
-    /// token if one landed.
+    /// Re-locks if the lock file was replaced under us; adopts a sibling's fresh token if one landed.
     pub(super) async fn revalidate_lock_or_reacquire(
         &self,
         file_lock: AuthFileLock,

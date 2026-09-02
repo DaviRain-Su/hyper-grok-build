@@ -646,6 +646,7 @@ mod tests {
         let access = AccessKind::from(&ToolInput::SendSubagentMessage(SendSubagentMessageInput {
             subagent_id: "sub-1".into(),
             text: text.into(),
+            queue: false,
         }));
         let AccessKind::AgentMessage { subagent_id } = access else {
             panic!("active agent messages must use dedicated access")

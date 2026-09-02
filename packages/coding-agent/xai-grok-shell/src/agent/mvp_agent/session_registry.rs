@@ -1,30 +1,27 @@
-//! Per-session resources and the registry that owns them. Distinct from
-//! `agent::session_registry_client`, which talks to the remote registry.
+//! Per-session resources and the registry that owns them.
+//! Distinct from `agent::session_registry_client`, which talks to the remote registry.
 use super::*;
 /// The map stays private so every caller goes through a named operation.
 #[derive(Clone, Default)]
 pub(super) struct SessionRegistry {
     sessions: Rc<RefCell<HashMap<acp::SessionId, SessionResources>>>,
 }
-/// Turn activity of a resident actor. Split from [`SessionLiveState`] so a
-/// reader cannot observe `Working` without a resident actor: that combination
-/// was representable when liveness was a parallel field.
+/// Turn activity of a resident actor.
+/// Split from [`SessionLiveState`] so a reader cannot observe `Working` without a resident actor.
+/// That combination was representable when liveness was a parallel field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Activity {
     Idle,
     Working,
 }
-/// Where a session is in its life. Each variant carries the evidence that
-/// makes it true, so a reader cannot observe a combination the type forbids.
+/// Where a session is in its life.
+/// Each variant carries the evidence that makes it true, so a reader cannot observe a combination the type forbids.
 ///
-/// A hosted actor is a handle on [`Self::Resident`] or mid-attach on
-/// [`Self::Attaching`]. [`Self::Attaching`] owns the waiter racing requests
-/// wait on and parks the previous presence in `displaced` so a failed attach
-/// can restore it. Independent `set_live` writes stay inside
-/// [`Self::Attaching`] until the attach settles. Terminal variants still carry
-/// an optional thread so `set_live` / `set_thread` cannot drop a thread the
-/// sweep still owns. `handle` is `Option` so `take_session` can drop residency
-/// without also rewriting live state (unload and close do that next).
+/// A hosted actor is a handle on [`Self::Resident`] or mid-attach on [`Self::Attaching`].
+/// [`Self::Attaching`] owns the waiter racing requests wait on and parks the previous presence in `displaced` so a failed attach can restore it.
+/// Independent `set_live` writes stay inside [`Self::Attaching`] until the attach settles.
+/// Terminal variants still carry an optional thread so `set_live` and `set_thread` cannot drop a thread the sweep still owns.
+/// `handle` is `Option` so `take_session` can drop residency without also rewriting live state (unload and close do that next).
 pub(super) enum SessionPresence {
     /// Actor running and registered. The handle is the evidence of residency.
     Resident {
@@ -32,18 +29,16 @@ pub(super) enum SessionPresence {
         thread: Option<SessionThread>,
         activity: Activity,
     },
-    /// A load/resume is building the actor. `waiter` wakes racing requests;
-    /// `displaced` is what the attach replaced and what a failed attach
-    /// restores. A handle, thread, or `settled_activity` may land here before
-    /// the attach finishes; only [`SessionRegistry::settle_attach`] retires this
-    /// variant.
+    /// A load or resume is building the actor.
+    /// `waiter` wakes racing requests; `displaced` is what the attach replaced and what a failed attach restores.
+    /// A handle, thread, or `settled_activity` may land here before the attach finishes; only [`SessionRegistry::settle_attach`] retires this variant.
     Attaching {
         waiter: tokio::sync::watch::Receiver<bool>,
         displaced: Option<Box<SessionPresence>>,
         handle: Option<SessionHandle>,
         thread: Option<SessionThread>,
-        /// Activity a mid-attach `set_live` asked to apply once the attach
-        /// settles. Independent liveness writes must not retire this variant.
+        /// Activity a mid-attach `set_live` asked to apply once the attach settles.
+        /// Independent liveness writes must not retire this variant.
         settled_activity: Option<Activity>,
     },
     /// Client gone (`release` kept a flushing actor) with no live bit.
@@ -56,16 +51,15 @@ pub(super) enum SessionPresence {
     Dead {
         thread: Option<SessionThread>,
     },
-    /// Idle-unloaded. Distinct from [`Self::Evicted`] because unload records
-    /// `Dormant` while `release` records no live bit at all.
+    /// Idle-unloaded.
+    /// Distinct from [`Self::Evicted`] because unload records `Dormant` while `release` records no live bit at all.
     Dormant {
         thread: Option<SessionThread>,
     },
 }
 impl SessionPresence {
-    /// Roster/telemetry projection. `None` on [`Self::Evicted`]: `release`
-    /// deliberately drops the live bit so a flushing thread is not reported
-    /// as Dormant or Closed.
+    /// The roster and telemetry projection.
+    /// `None` on [`Self::Evicted`]: `release` deliberately drops the live bit so a flushing thread is not reported as Dormant or Closed.
     pub(super) fn live_state(&self) -> Option<SessionLiveState> {
         match self {
             Self::Resident {
@@ -191,16 +185,14 @@ impl SessionPresence {
             | Self::Dormant { .. } => None,
         }
     }
-    /// True when this presence holds nothing `drop_if_empty` should keep: an
-    /// `Evicted` with no thread is today's `live = None, thread = None`.
+    /// True when this presence holds nothing `drop_if_empty` should keep: an `Evicted` with no thread is today's `live = None, thread = None`.
     fn is_resource_empty(&self) -> bool {
         matches!(self, Self::Evicted { thread: None })
     }
 }
-/// The per-session state this registry owns: retained, resident resources,
-/// presence (thread + liveness), unavailable model, and bridge. Load guards,
-/// rewind snapshots, local workspaces, and the handle map are owned elsewhere,
-/// so a new field belongs here only if `release` should drop it with the rest.
+/// The per-session state this registry owns: retained, resident resources, presence (thread and liveness), unavailable model, and bridge.
+/// Load guards, rewind snapshots, local workspaces, and the handle map are owned elsewhere.
+/// A new field belongs here only if `release` should drop it with the rest.
 #[derive(Default)]
 struct SessionResources {
     retained: Option<RetainedResources>,
@@ -211,8 +203,8 @@ struct SessionResources {
 }
 #[derive(Default)]
 pub(super) struct SessionCounts {
-    /// Tracked ids. The per-field counts below cannot see an entry that leaks
-    /// with only a field they do not name.
+    /// Tracked ids.
+    /// The per-field counts below cannot see an entry that leaks with only a field they do not name.
     pub(super) entries: usize,
     pub(super) retained_resources: usize,
     pub(super) resident_resources: usize,
@@ -221,6 +213,7 @@ pub(super) struct SessionCounts {
     pub(super) model_unavailable_sessions: usize,
     pub(super) dispatch_locks: usize,
     pub(super) live_orphan_heal_locks: usize,
+    pub(super) config_mutation_locks: usize,
     pub(super) session_turn_numbers: usize,
     pub(super) permission_event_receivers: usize,
     pub(super) session_index_claims: usize,
@@ -229,8 +222,8 @@ pub(super) struct SessionCounts {
 impl SessionRegistry {
     /// Releases everything a closing session leaves behind, in one drop.
     ///
-    /// A running actor thread stays: dropping its handle would detach it, and
-    /// nothing would track the memory it holds. The sweep reclaims it later.
+    /// A running actor thread stays: dropping its handle would detach it, and nothing would track the memory it holds.
+    /// The sweep reclaims it later.
     pub(super) fn release(&self, id: &acp::SessionId) {
         let mut entries = self.sessions.borrow_mut();
         let Some(mut released) = entries.remove(id) else {
@@ -269,9 +262,9 @@ impl SessionRegistry {
             tracing::warn!(session_id = %id.0, "session thread displaced while still running");
         }
     }
-    /// Drops the tracked thread. Returns nothing on purpose: handing a
-    /// `SessionThread` to a caller lets the last handle die in a local, which
-    /// detaches the thread with no record left for the sweep.
+    /// Drops the tracked thread.
+    /// Returns nothing on purpose: handing a `SessionThread` to a caller lets the last handle die in a local.
+    /// That detaches the thread with no record left for the sweep.
     pub(super) fn clear_thread(&self, id: &acp::SessionId) {
         self.clear(id, |e| {
             if let Some(presence) = &mut e.presence {
@@ -355,9 +348,8 @@ impl SessionRegistry {
             e.presence = Some(SessionPresence::from_live(state, thread, handle));
         });
     }
-    /// Hosted actor handle, if any. Mid-attach registration counts: the handle
-    /// lands before the attach finishes, and callers already treat that as
-    /// resident for lookup and sweep.
+    /// Hosted actor handle, if any.
+    /// Mid-attach registration counts: the handle lands before the attach finishes, and callers already treat that as resident for lookup and sweep.
     pub(super) fn resident_handle(&self, id: &acp::SessionId) -> Option<SessionHandle> {
         self.with(id, |e| {
             e.presence
@@ -473,9 +465,9 @@ impl SessionRegistry {
             }
         })
     }
-    /// Start an attach. Current presence becomes `displaced` so a failed
-    /// attach can restore it. An attach over a missing entry creates one,
-    /// which `settle_attach` removes.
+    /// Start an attach.
+    /// Current presence becomes `displaced` so a failed attach can restore it.
+    /// An attach over a missing entry creates one, which `settle_attach` removes.
     pub(super) fn begin_attach(
         &self,
         id: &acp::SessionId,
@@ -629,8 +621,8 @@ impl SessionRegistry {
         drop(entries);
         self.drop_if_empty(id);
     }
-    /// Drop residency only. Live state and thread stay for the caller that
-    /// owns the next transition (`set_live(Dormant)`, `release`, respawn).
+    /// Drop residency only.
+    /// Live state and thread stay for the caller that owns the next transition (`set_live(Dormant)`, `release`, respawn).
     pub(super) fn take_resident(&self, id: &acp::SessionId) -> Option<SessionHandle> {
         let handle = self
             .sessions
@@ -683,14 +675,25 @@ impl SessionRegistry {
                 .clone()
         })
     }
-    /// Per-parent heal mutex. Tray `list_running` and resume heal take this
-    /// from the registry; the session actor holds the same `Arc` on
-    /// `ToolContext` so overlapping ticks share one lock.
+    /// Per-parent heal mutex.
+    /// Tray `list_running` and resume heal take this from the registry.
+    /// The session actor holds the same `Arc` on `ToolContext` so overlapping ticks share one lock.
     pub(super) fn live_orphan_heal_lock(&self, id: &acp::SessionId) -> Arc<tokio::sync::Mutex<()>> {
         self.edit(id, |e| {
             e.retained
                 .get_or_insert_default()
                 .live_orphan_heal_lock
+                .get_or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        })
+    }
+    /// Serializes a session's model and reasoning-effort changes so they compose.
+    /// The handlers hold this for the whole change; see `handlers::model_switch`.
+    pub(super) fn config_mutation_lock(&self, id: &acp::SessionId) -> Arc<tokio::sync::Mutex<()>> {
+        self.edit(id, |e| {
+            e.retained
+                .get_or_insert_default()
+                .config_mutation_lock
                 .get_or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
         })
@@ -772,6 +775,8 @@ impl SessionRegistry {
                 counts.dispatch_locks += usize::from(retained.dispatch_lock.is_some());
                 counts.live_orphan_heal_locks +=
                     usize::from(retained.live_orphan_heal_lock.is_some());
+                counts.config_mutation_locks +=
+                    usize::from(retained.config_mutation_lock.is_some());
                 counts.session_turn_numbers += usize::from(retained.turn_number.is_some());
                 counts.permission_event_receivers +=
                     usize::from(retained.permission_event_receiver.is_some());

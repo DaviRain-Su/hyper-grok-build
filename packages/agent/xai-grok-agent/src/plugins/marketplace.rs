@@ -14,8 +14,8 @@ pub struct ResolvedMarketplace {
     pub plugin_dirs: Vec<PathBuf>,
 }
 
-/// Resolve marketplaces and their enabled plugins from `extraKnownMarketplaces`
-/// and `enabledPlugins` in `.claude/settings.json`. Local directory sources only.
+/// Resolve marketplaces and their enabled plugins from `extraKnownMarketplaces` and `enabledPlugins` in `.claude/settings.json`.
+/// Only local directory sources are supported.
 pub fn resolve(git_root: &Path) -> Vec<ResolvedMarketplace> {
     let settings_path = git_root.join(".claude").join("settings.json");
     let json: serde_json::Value = match std::fs::read_to_string(&settings_path) {
@@ -92,17 +92,14 @@ fn enabled_plugin_names(json: &serde_json::Value) -> HashSet<String> {
         .unwrap_or_default()
 }
 
-/// Parse `enabledPlugins` from a settings JSON value into enabled/disabled lists.
-///
 /// The `enabledPlugins` object has keys like `"name@marketplace"` with boolean values.
 /// Keys with `true` are returned in the first vec (enabled), `false` in the second (disabled).
-/// The `@marketplace` suffix is stripped — only the plugin name is returned.
+/// The `@marketplace` suffix is stripped; only the plugin name is returned.
 pub fn parse_enabled_disabled_plugins(json: &serde_json::Value) -> (Vec<String>, Vec<String>) {
     let Some(obj) = json.get("enabledPlugins").and_then(|v| v.as_object()) else {
         return (vec![], vec![]);
     };
-    // Deduplicate by plugin name: the same name may appear under different
-    // marketplace keys (e.g. "foo@market1": true, "foo@market2": false).
+    // Deduplicate by plugin name: the same name may appear under different marketplace keys (e.g. "foo@market1": true, "foo@market2": false).
     // If any entry for a name is `false`, the plugin is disabled (safe default).
     let mut state: HashMap<String, bool> = HashMap::new();
     for (key, val) in obj {
@@ -114,7 +111,6 @@ pub fn parse_enabled_disabled_plugins(json: &serde_json::Value) -> (Vec<String>,
             continue;
         };
         let entry = state.entry(name).or_insert(value);
-        // disabled (false) wins on conflict
         if !value {
             *entry = false;
         }
@@ -132,8 +128,6 @@ pub fn parse_enabled_disabled_plugins(json: &serde_json::Value) -> (Vec<String>,
 }
 
 /// Load and parse `enabledPlugins` from a `.claude/settings.json` file path.
-///
-/// Returns `(enabled, disabled)` plugin name lists.
 /// Returns empty vecs if the file is missing or malformed.
 pub fn load_enabled_disabled_plugins(path: &Path) -> (Vec<String>, Vec<String>) {
     let content = match std::fs::read_to_string(path) {
@@ -156,13 +150,9 @@ struct KnownMarketplaceEntry {
     install_location: PathBuf,
 }
 
-/// Resolve user-level marketplaces from `known_marketplaces.json`.
-///
-/// Returns marketplace entries with their local `installLocation` paths.
-/// Plugin dirs are filtered to names present in user-level
-/// `~/.claude/settings{.local}.json` `enabledPlugins` with any value (a
-/// `false` entry is an installed-but-disabled plugin whose state we
-/// mirror), so never-installed catalog plugins are not discovered.
+/// Resolve user-level marketplaces from `known_marketplaces.json`, with their local `installLocation` paths.
+/// Plugin dirs are filtered to names listed in `~/.claude/settings{.local}.json` `enabledPlugins`, so never-installed catalog plugins are skipped.
+/// A `false` entry there is an installed-but-disabled plugin; it is still discovered so its state can be mirrored.
 pub fn resolve_known_marketplaces() -> Vec<ResolvedMarketplace> {
     let Some(home) = xai_dirs::home_dir() else {
         return vec![];
@@ -170,8 +160,7 @@ pub fn resolve_known_marketplaces() -> Vec<ResolvedMarketplace> {
     resolve_known_marketplaces_in(&home.join(".claude"))
 }
 
-/// Like [`resolve_known_marketplaces`] but reads from an explicit `~/.claude`
-/// root, so tests stay isolated from the developer's real home dir.
+/// Like [`resolve_known_marketplaces`] but reads from an explicit `~/.claude` root, so tests stay isolated from the developer's real home dir.
 pub fn resolve_known_marketplaces_in(claude_dir: &Path) -> Vec<ResolvedMarketplace> {
     let json_path = claude_dir.join("plugins").join("known_marketplaces.json");
     let content = match std::fs::read_to_string(&json_path) {
@@ -226,9 +215,8 @@ pub fn resolve_known_marketplaces_in(claude_dir: &Path) -> Vec<ResolvedMarketpla
         .collect()
 }
 
-/// `enabledPlugins` keys from `<claude_dir>/settings.local.json` and
-/// `<claude_dir>/settings.json`, keyed by plugin name. `None` = a bare key
-/// (matches any marketplace); `Some(set)` = only those marketplaces.
+/// `enabledPlugins` keys from `<claude_dir>/settings.local.json` and `<claude_dir>/settings.json`, keyed by plugin name.
+/// `None` means a bare key that matches any marketplace; `Some(set)` matches only those marketplaces.
 /// Entries with any boolean value count; non-boolean values are skipped.
 fn installed_plugin_keys(claude_dir: &Path) -> HashMap<String, Option<HashSet<String>>> {
     let mut keys: HashMap<String, Option<HashSet<String>>> = HashMap::new();
@@ -356,9 +344,8 @@ mod tests {
         assert!(disabled.contains(&"bar".to_string()));
     }
 
-    /// Build a `~/.claude`-style dir with one known marketplace named `mp`
-    /// containing `plugins/{alpha,beta}` and `external_plugins/gamma`, plus a
-    /// `settings.json` with the given content (skipped when `None`).
+    /// Build a `~/.claude`-style dir with one known marketplace named `mp` containing `plugins/{alpha,beta}` and `external_plugins/gamma`.
+    /// A `settings.json` with the given content is also written (skipped when `None`).
     fn make_known_marketplace(
         tmp: &Path,
         settings_json: Option<&str>,
@@ -396,7 +383,7 @@ mod tests {
     #[test]
     fn known_marketplaces_filtered_to_enabled_plugins_including_false() {
         let tmp = tempfile::tempdir().unwrap();
-        // `gamma@mp: false` = installed-but-disabled: still discovered.
+        // `gamma@mp: false` is installed but disabled; it is still discovered
         // `beta` is not listed at all: a never-installed catalog entry.
         let (claude_dir, mp_dir) = make_known_marketplace(
             tmp.path(),
@@ -481,8 +468,6 @@ mod tests {
 
     #[test]
     fn parse_enabled_disabled_conflict_disabled_wins() {
-        // Same plugin name from different marketplaces with conflicting values:
-        // disabled (false) should win.
         let json = serde_json::json!({
             "enabledPlugins": {
                 "conflict@market1": true,

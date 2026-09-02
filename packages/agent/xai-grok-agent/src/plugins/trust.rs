@@ -1,14 +1,11 @@
 //! Project plugin trust management.
 //!
-//! Plugins from project directories (`.grok/plugins/`, `.claude/plugins/`)
-//! are an execution surface.  A cloned repository could contain plugins with
-//! hook scripts or MCP server commands that run arbitrary code.
+//! A cloned repository could contain plugins (`.grok/plugins/`, `.claude/plugins/`) whose hook scripts or MCP server commands run arbitrary code.
 //!
-//! **Trust granularity**: per-plugin-root (not per-worktree).  Trusting one
-//! plugin in a repo does not automatically trust other plugins in the same repo.
+//! **Trust granularity**: per-plugin-root (not per-worktree).
+//! Trusting one plugin in a repo does not automatically trust other plugins in the same repo.
 //!
-//! **Trust key**: canonical absolute path of the plugin root directory,
-//! resolved via `dunce::canonicalize()`.
+//! **Trust key**: canonical absolute path of the plugin root directory, resolved via `dunce::canonicalize()`.
 //!
 //! **Trust storage**: `~/.grok/trusted-plugins` (one canonical path per line).
 //!
@@ -23,23 +20,19 @@ use std::path::{Path, PathBuf};
 /// Name of the trust-store file under `~/.grok/`.
 const TRUST_FILE_NAME: &str = xai_grok_config::TRUSTED_PLUGINS_FILENAME;
 
-/// Manages the set of trusted plugin root directories.
 #[derive(Debug, Clone)]
 pub struct TrustStore {
     /// Canonical paths of trusted plugin roots.
     trusted: HashSet<PathBuf>,
-    /// Path to the trust-store file on disk.
     file_path: PathBuf,
 }
 
 impl TrustStore {
-    /// Load the trust store from disk.
-    ///
     /// If `~/.grok/trusted-plugins` does not exist, returns an empty store.
     /// If the file cannot be read, logs a warning and returns an empty store.
     pub fn load() -> Self {
-        // Gate on user_grok_home() so a project's `.grok/trusted-plugins` is never
-        // read as the user trust store when neither GROK_HOME nor a home dir resolves.
+        // Gate on user_grok_home() so a project's `.grok/trusted-plugins` is never read as the user trust store
+        // That happens when neither GROK_HOME nor a home dir resolves
         let Some(grok) = xai_grok_config::user_grok_home() else {
             return Self {
                 trusted: HashSet::new(),
@@ -57,10 +50,8 @@ impl TrustStore {
         Self { trusted, file_path }
     }
 
-    /// Check whether a plugin root directory is trusted.
-    ///
-    /// Canonicalizes the path before lookup.  Returns `false` if
-    /// canonicalization fails (broken symlink, permission error).
+    /// Canonicalizes the path before lookup.
+    /// Returns `false` if canonicalization fails (broken symlink, permission error).
     pub fn is_trusted(&self, plugin_root: &Path) -> bool {
         match dunce::canonicalize(plugin_root) {
             Ok(canonical) => self.trusted.contains(&canonical),
@@ -74,8 +65,6 @@ impl TrustStore {
         }
     }
 
-    /// Grant trust to a plugin root directory.
-    ///
     /// Canonicalizes the path and appends it to `~/.grok/trusted-plugins`.
     /// If the path is already trusted, this is a no-op and returns `Ok(())`.
     pub fn grant_trust(&mut self, plugin_root: &Path) -> Result<(), TrustError> {
@@ -89,7 +78,6 @@ impl TrustStore {
             return Ok(());
         }
 
-        // Ensure parent directory exists
         if let Some(parent) = self.file_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| TrustError::IoError {
                 path: parent.to_path_buf(),
@@ -116,8 +104,6 @@ impl TrustStore {
         Ok(())
     }
 
-    /// Revoke trust for a plugin root directory.
-    ///
     /// Canonicalizes the path, removes it from the in-memory set, and
     /// rewrites `~/.grok/trusted-plugins` without the revoked entry.
     /// If the path is not currently trusted, this is a no-op.
@@ -129,10 +115,9 @@ impl TrustStore {
             })?;
 
         if !self.trusted.remove(&canonical) {
-            return Ok(()); // wasn't trusted
+            return Ok(());
         }
 
-        // Rewrite the entire file without the revoked path
         self.rewrite_trust_file()
     }
 
@@ -161,8 +146,6 @@ impl TrustStore {
         Ok(())
     }
 
-    /// Check whether a config-path plugin should be auto-trusted.
-    ///
     /// A `[plugins].paths` entry is auto-trusted if its canonicalized path
     /// is under the user's home directory.  Otherwise it requires explicit
     /// trust via `~/.grok/trusted-plugins`.
@@ -234,7 +217,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let trust_file = tmp.path().join("trusted-plugins");
         let store = TrustStore::load_from(trust_file);
-        // Nothing is trusted
         assert!(!store.is_trusted(tmp.path()));
     }
 
@@ -269,7 +251,6 @@ mod tests {
         std::fs::create_dir_all(&plugin_dir).unwrap();
         let canonical = dunce::canonicalize(&plugin_dir).unwrap();
 
-        // Write file with comments and blank lines
         std::fs::write(
             &trust_file,
             format!(
@@ -283,8 +264,7 @@ mod tests {
         assert!(store.is_trusted(&plugin_dir));
     }
 
-    /// Legacy entries written under std canonicalize use the verbatim `\\?\`
-    /// form; `read_trust_file` must normalize them so lookups keep matching.
+    /// Legacy entries written under std canonicalize use the verbatim `\\?\` form; `read_trust_file` must normalize them so lookups keep matching.
     #[cfg(windows)]
     #[test]
     fn legacy_verbatim_entry_is_trusted() {
@@ -310,17 +290,8 @@ mod tests {
         let trust_file = tmp.path().join("trusted-plugins");
         let store = TrustStore::load_from(trust_file);
 
-        // Path that doesn't exist on disk
         let fake = tmp.path().join("does-not-exist");
         assert!(!store.is_trusted(&fake));
-    }
-
-    #[test]
-    fn config_path_auto_trust_under_home() {
-        // This test checks the logic but can't easily mock $HOME.
-        // We verify the function exists and returns a boolean.
-        let result = TrustStore::is_config_path_auto_trusted(Path::new("/nonexistent/path"));
-        assert!(!result); // nonexistent path can't be canonicalized
     }
 
     #[test]
@@ -339,7 +310,6 @@ mod tests {
         assert!(store.is_trusted(&plugin_a));
         assert!(store.is_trusted(&plugin_b));
 
-        // Revoke plugin_a
         store.revoke_trust(&plugin_a).unwrap();
         assert!(!store.is_trusted(&plugin_a));
         assert!(store.is_trusted(&plugin_b));
@@ -358,7 +328,6 @@ mod tests {
         std::fs::create_dir_all(&plugin).unwrap();
 
         let mut store = TrustStore::load_from(trust_file);
-        // Not trusted — revoke should be a no-op
         store.revoke_trust(&plugin).unwrap();
         assert!(!store.is_trusted(&plugin));
     }

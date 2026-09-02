@@ -1,16 +1,13 @@
 //! Single-flight guard for interactive login.
 //!
-//! At most one device-code / loopback wait runs at a time: starting a new
-//! attempt (or an explicit `x.ai/auth/cancel`) cancels the previous one, so
-//! remint/retry cannot stack device-code mints.
+//! At most one device-code or loopback wait runs at a time.
+//! Starting a new attempt (or an explicit `x.ai/auth/cancel`) cancels the previous one, so a remint or retry cannot stack device-code flows.
 //!
-//! The attempt owns **all** attempt-scoped state — the cancellation token and
-//! the code/url channels — so replacing an attempt swaps everything
-//! atomically, and a cancelled predecessor that finishes late structurally
-//! cannot touch its successor's channels. Generations guard `end()` the same
-//! way: a stale finisher must not clear a newer attempt. Client `request_seq`
-//! scopes explicit cancels so a delayed `x.ai/auth/cancel` cannot tear down a
-//! successor login.
+//! The attempt owns **all** attempt-scoped state: the cancellation token and the code/url channels.
+//! Replacing an attempt therefore swaps everything atomically.
+//! A cancelled predecessor that finishes late structurally cannot touch its successor's channels.
+//! Generations guard `end()` the same way: a stale finisher must not clear a newer attempt.
+//! Client `request_seq` scopes explicit cancels so a delayed `x.ai/auth/cancel` cannot tear down a successor login.
 
 use std::cell::{Cell, RefCell};
 use tokio_util::sync::CancellationToken;
@@ -22,9 +19,8 @@ use super::flow::AuthUrlInfo;
 pub(crate) struct AttemptChannels {
     /// Forwards pasted codes from `x.ai/auth/submit_code` to the flow.
     code_tx: tokio::sync::mpsc::Sender<String>,
-    /// Yields the auth URL to `x.ai/auth/get_url`. `Option` so
-    /// [`AuthSingleFlight::take_url_rx`] can move it out while the attempt
-    /// lives on (one-shot read).
+    /// Yields the auth URL to `x.ai/auth/get_url`.
+    /// `Option` so [`AuthSingleFlight::take_url_rx`] can move it out while the attempt lives on (one-shot read).
     url_rx: Option<tokio::sync::oneshot::Receiver<AuthUrlInfo>>,
 }
 
@@ -50,8 +46,8 @@ pub(crate) struct AuthSingleFlight {
     generation: Cell<u64>,
 }
 
-/// RAII end for a [`AuthSingleFlight::begin`] generation: calls [`AuthSingleFlight::end`]
-/// on drop so an aborted authenticate future cannot leak attempt state.
+/// RAII end for a [`AuthSingleFlight::begin`] generation.
+/// Calls [`AuthSingleFlight::end`] on drop so an aborted authenticate future cannot leak attempt state.
 pub(crate) struct AuthAttemptGuard<'a> {
     sf: &'a AuthSingleFlight,
     generation: u64,
@@ -79,13 +75,11 @@ impl Drop for AuthAttemptGuard<'_> {
 }
 
 impl AuthSingleFlight {
-    /// Start a new attempt, cancelling any prior in-flight one. Returns the
-    /// new attempt's token and an [`AuthAttemptGuard`] that ends this generation
-    /// on drop (pass no separate `end` — the guard is the only closer).
+    /// Start a new attempt, cancelling any prior in-flight one.
+    /// Returns the new attempt's token and an [`AuthAttemptGuard`] that ends this generation on drop (the guard is the only closer).
     ///
-    /// `client_seq` is the pager auth `request_seq` (when known); used by
-    /// [`Self::cancel_for_client_seq`] so a delayed cancel cannot kill a
-    /// successor attempt.
+    /// `client_seq` is the pager auth `request_seq`, when known.
+    /// [`Self::cancel_for_client_seq`] uses it so a delayed cancel cannot kill a successor attempt.
     pub(crate) fn begin(
         &self,
         channels: Option<AttemptChannels>,
@@ -112,18 +106,16 @@ impl AuthSingleFlight {
         )
     }
 
-    /// Finish an attempt: drops its token *and channels* only if `generation`
-    /// is still the active one (a stale finisher must not clear a newer
-    /// attempt's state).
+    /// Finish an attempt: drops its token *and channels* only if `generation` is still the active one.
+    /// A stale finisher must not clear a newer attempt's state.
     pub(crate) fn end(&self, generation: u64) {
         if self.generation.get() == generation {
             *self.active.borrow_mut() = None;
         }
     }
 
-    /// Cancel the active attempt, if any. Idempotent. Prefer
-    /// [`Self::cancel_for_client_seq`] when the caller has a pager `request_seq`
-    /// so a delayed cancel cannot tear down a newer login.
+    /// Cancel the active attempt, if any. Idempotent.
+    /// Prefer [`Self::cancel_for_client_seq`] when the caller has a pager `request_seq` so a delayed cancel cannot tear down a newer login.
     pub(crate) fn cancel(&self) {
         if let Some(prev) = self.active.borrow_mut().take() {
             tracing::info!("auth: interactive auth cancelled");
@@ -131,8 +123,8 @@ impl AuthSingleFlight {
         }
     }
 
-    /// Cancel only if the active attempt was started for `client_seq`. A stale
-    /// cancel (successor already began) is a no-op.
+    /// Cancel only if the active attempt was started for `client_seq`.
+    /// A stale cancel (successor already began) is a no-op.
     pub(crate) fn cancel_for_client_seq(&self, client_seq: u64) {
         let mut active = self.active.borrow_mut();
         match active.as_ref() {
@@ -177,8 +169,7 @@ impl AuthSingleFlight {
         }
     }
 
-    /// Take the active attempt's URL receiver (one-shot; subsequent calls
-    /// return `None`, as does an idle or headless attempt).
+    /// Take the active attempt's URL receiver (one-shot; subsequent calls return `None`, as does an idle or headless attempt).
     pub(crate) fn take_url_rx(&self) -> Option<tokio::sync::oneshot::Receiver<AuthUrlInfo>> {
         self.active
             .borrow_mut()
@@ -224,7 +215,7 @@ mod tests {
         let (token, _g) = sf.begin(None, None);
         sf.cancel();
         assert!(token.is_cancelled());
-        sf.cancel(); // no active attempt — must not panic
+        sf.cancel(); // no active attempt, must not panic
     }
 
     #[test]
@@ -247,12 +238,11 @@ mod tests {
         let sf = AuthSingleFlight::default();
         let (token, guard) = sf.begin(None, None);
         guard.end();
-        sf.cancel(); // nothing active — must not cancel the finished attempt
+        sf.cancel(); // nothing active, must not cancel the finished attempt
         assert!(!token.is_cancelled());
     }
 
-    /// The race the attempt object exists to prevent: a cancelled
-    /// predecessor finishing late must not drop the successor's channels.
+    /// The race the attempt object exists to prevent: a cancelled predecessor finishing late must not drop the successor's channels.
     #[test]
     fn stale_end_leaves_successor_channels_intact() {
         let sf = AuthSingleFlight::default();
@@ -322,9 +312,8 @@ mod tests {
         ));
     }
 
-    /// Headless (and interactive) authenticate `select!`s on this token —
-    /// cancel must interrupt a long wait rather than leaving it racing
-    /// (logout / unscoped cancel path).
+    /// Headless (and interactive) authenticate `select!`s on this token.
+    /// Cancel must interrupt a long wait rather than leaving it racing (the logout and unscoped cancel path).
     #[tokio::test]
     async fn cancel_interrupts_waiting_select() {
         let sf = AuthSingleFlight::default();
@@ -337,7 +326,7 @@ mod tests {
             }
         });
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        sf.cancel(); // same as handle_logout / unscoped cancel
+        sf.cancel(); // same as handle_logout or an unscoped cancel
         assert_eq!(waiter.await.expect("join"), "cancelled");
     }
 

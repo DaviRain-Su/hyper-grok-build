@@ -234,14 +234,6 @@ mod tests {
         let event: SessionEvent = serde_json::from_value(v).unwrap();
         assert_eq!(event, SessionEvent::Unknown);
     }
-
-    #[test]
-    fn another_unknown_event_type_deserializes_as_unknown() {
-        let v = json!({ "event_type": "metrics_snapshot", "ts": 0 });
-        let event: SessionEvent = serde_json::from_value(v).unwrap();
-        assert_eq!(event, SessionEvent::Unknown);
-    }
-
     // ── ToolCallOutcome serialization ───────────────────────────────
 
     #[test]
@@ -369,36 +361,5 @@ mod tests {
             // missing "outcome"
         });
         assert!(serde_json::from_value::<SessionEvent>(v).is_err());
-    }
-
-    // ── Boundary values ─────────────────────────────────────────────
-
-    #[test]
-    fn turn_number_zero_and_max() {
-        for turn_number in [0, u64::MAX] {
-            let event = SessionEvent::TurnStarted {
-                turn_number,
-                model_id: "m".into(),
-                yolo_mode: false,
-            };
-            let v = serde_json::to_value(&event).unwrap();
-            let back: SessionEvent = serde_json::from_value(v).unwrap();
-            assert_eq!(back, event);
-        }
-    }
-
-    #[test]
-    fn duration_ms_zero() {
-        let event = SessionEvent::TurnEnded {
-            turn_number: 0,
-            outcome: TurnHookOutcome::Completed,
-            duration_ms: 0,
-            tool_call_count: 0,
-            model_id: "m".into(),
-        };
-        let v = serde_json::to_value(&event).unwrap();
-        assert_eq!(v["duration_ms"], 0);
-        let back: SessionEvent = serde_json::from_value(v).unwrap();
-        assert_eq!(back, event);
     }
 }

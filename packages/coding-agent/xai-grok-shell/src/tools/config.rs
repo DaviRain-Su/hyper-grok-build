@@ -4,11 +4,9 @@ use xai_grok_sampler::SamplerConfig;
 use xai_grok_tools::implementations::grok_build;
 use xai_grok_tools::registry::types::ToolConfig;
 
-/// Production grok-build foreground command-timeout ceiling (seconds). The
-/// tool-server binary defaults to a 5-minute foreground ceiling
-/// (`DEFAULT_MAX_TIMEOUT_MS`); production opts *up* to 10h by sending this
-/// explicitly (overridable via config.toml). Bounds only foreground commands —
-/// background tasks are always unbounded.
+/// The tool-server binary defaults to a 5-minute foreground ceiling (`DEFAULT_MAX_TIMEOUT_MS`).
+/// Production opts *up* to 10h by sending this explicitly, overridable via config.toml.
+/// This bounds only foreground commands; background tasks are always unbounded.
 pub const PRODUCTION_MAX_TIMEOUT_SECS: f64 = 36_000.0; // 10 hours
 
 /// User configurable settings for the built-in bash tool (`[toolset.bash]`).
@@ -16,33 +14,25 @@ pub const PRODUCTION_MAX_TIMEOUT_SECS: f64 = 36_000.0; // 10 hours
 #[serde(default)]
 pub struct BashToolConfig {
     pub timeout_secs: Option<f64>,
-    /// Foreground ceiling for model-provided command timeouts (seconds). When
-    /// `None`, `to_bash_params_json` emits the production default
-    /// ([`PRODUCTION_MAX_TIMEOUT_SECS`], 10h), opting up from the tool-server
-    /// binary's 5-minute built-in default. Set it lower to cap foreground
-    /// commands further. Bounds foreground only; background tasks are always
-    /// unbounded. Tools run in-process so this is always honored — no server
-    /// version gate needed.
+    /// Foreground ceiling for model-provided command timeouts (seconds).
+    /// When `None`, `to_bash_params_json` emits the production default ([`PRODUCTION_MAX_TIMEOUT_SECS`], 10h).
     pub max_timeout_secs: Option<f64>,
     pub output_byte_limit: Option<usize>,
     pub cmd_prefix: Option<String>,
     /// Whether to auto-background a command when it times out (default: `true`).
     pub auto_background_on_timeout: Option<bool>,
-    /// Max FG block before auto-bg when `auto_background_on_timeout` is on
-    /// (milliseconds). `None` → server default 15s; `Some(0)` → no short budget
-    /// (auto-bg only at model/default timeout).
+    /// How long a command may block the foreground before auto-backgrounding, in milliseconds, when `auto_background_on_timeout` is on.
+    /// `None` uses the server default of 15s.
+    /// `Some(0)` disables the short budget, so auto-backgrounding happens only at the model/default timeout.
     pub foreground_block_budget_ms: Option<u64>,
-    /// Whether to allow a background `&` operator in foreground commands
-    /// (default: `true`). Resolution: config.toml (this) > remote settings > `true`.
+    /// Whether to allow a background `&` operator in foreground commands (default: `true`).
+    /// Resolution: config.toml (this) > remote settings > `true`.
     pub allow_background_operator: Option<bool>,
     pub login_shell_capture: Option<bool>,
 }
 
 impl BashToolConfig {
-    /// Build the JSON params map for the bash tool.
-    ///
-    /// `remote_auto_bg` is the remote settings fallback for `auto_background_on_timeout`
-    /// and `remote_allow_background_operator` for `allow_background_operator`.
+    /// `remote_auto_bg` is the remote settings fallback for `auto_background_on_timeout`.
     /// Resolution: local config.toml > remote fallback > `true`.
     pub(crate) fn to_bash_params_json(
         &self,
@@ -53,9 +43,7 @@ impl BashToolConfig {
         if let Some(t) = self.timeout_secs {
             map.insert("timeout_secs".into(), t.into());
         }
-        // The tool-server binary defaults the foreground ceiling to 5 min;
-        // production grok-build opts up to 10h by sending it explicitly
-        // (overridable via config.toml). Foreground-only; background stays unbounded.
+        // Production grok-build opts up to 10h by sending it explicitly (overridable via config.toml)
         let max_timeout_secs = self.max_timeout_secs.unwrap_or(PRODUCTION_MAX_TIMEOUT_SECS);
         map.insert("max_timeout_secs".into(), max_timeout_secs.into());
         if let Some(limit) = self.output_byte_limit {
@@ -81,22 +69,18 @@ impl BashToolConfig {
     }
 }
 
-/// User configurable settings for the ask_user_question tool
-/// (`[toolset.ask_user_question]`).
+/// User configurable settings for the ask_user_question tool (`[toolset.ask_user_question]`).
 ///
-/// Consumed out-of-band by
-/// `crate::util::config::resolve_ask_user_question_params_from_disk`, which
-/// reads the raw config layers so the documented precedence (requirements >
-/// env > user > managed > remote) holds — this struct exists so the keys are
-/// recognized in `config.toml` and round-trip through `AgentConfig`.
+/// Consumed by `crate::util::config::resolve_ask_user_question_params_from_disk`, which reads the raw config layers directly.
+/// That keeps the documented precedence (requirements > env > user > managed > remote).
+/// This struct exists so the keys are recognized in `config.toml` and round-trip through `AgentConfig`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AskUserQuestionToolConfig {
-    /// Whether the questionnaire timeout is armed (default: `true`).
+    /// Whether the questionnaire timeout is enabled (default: `true`).
     /// `false` waits forever for answers.
     pub timeout_enabled: Option<bool>,
-    /// Wait budget in seconds when the timer is armed (positive integer;
-    /// default: 1800 / 30 minutes).
+    /// Wait budget in seconds when the timer is enabled (positive integer; default: 1800 / 30 minutes).
     pub timeout_secs: Option<u64>,
 }
 
@@ -104,15 +88,15 @@ pub struct AskUserQuestionToolConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WebFetchToolConfig {
-    /// Egress proxy endpoint. When set, all HTTP requests are routed through
-    /// this URL. Resolution: TOML > `GROK_WEB_FETCH_PROXY` env > remote settings > None.
+    /// When set, all HTTP requests are routed through this URL.
+    /// Resolution: TOML > `GROK_WEB_FETCH_PROXY` env > remote settings > None.
     pub proxy_endpoint: Option<String>,
-    /// Domains the tool is allowed to fetch. When set, overrides the built-in
-    /// default allowlist. An explicit empty list blocks all fetches.
+    /// When set, it overrides the built-in default allowlist.
+    /// An explicit empty list blocks all fetches.
     /// Resolution: TOML > remote settings > built-in defaults.
     pub allowed_domains: Option<Vec<String>>,
-    /// Allow fetches to explicit loopback hosts only (`localhost` / `127.0.0.0/8`
-    /// / `::1`). Private and metadata ranges stay blocked. Default off.
+    /// Allow fetches to explicit loopback hosts only (`localhost` / `127.0.0.0/8` / `::1`).
+    /// Private and metadata ranges stay blocked.
     /// Resolution: TOML > `GROK_WEB_FETCH_ALLOW_LOCAL` env > false.
     pub allow_local: Option<bool>,
 }
@@ -120,9 +104,8 @@ pub struct WebFetchToolConfig {
 impl WebFetchToolConfig {
     /// Resolve `WebFetchParams` by merging TOML > env > remote settings layers.
     ///
-    /// `remote_proxy` and `remote_domains` are the remote settings fallback values
-    /// from `RemoteSettings`. `context_window` comes from the session's
-    /// SamplingConfig (model-provided).
+    /// `remote_proxy` and `remote_domains` are the remote settings fallback values from `RemoteSettings`.
+    /// `context_window` comes from the session's SamplingConfig (model-provided).
     pub(crate) fn resolve_params(
         &self,
         remote_proxy: Option<&str>,
@@ -158,27 +141,21 @@ impl WebFetchToolConfig {
     }
 }
 
-/// Top-level toolset configuration for the shell layer.
-///
-/// This is the *shell-side* config that holds sampling-level settings
-/// (e.g., web search API key from the sampling client). It is distinct
-/// from `xai_grok_tools::registry::types::ToolsetConfig` which holds
-/// tool-implementation-level config (bash limits, web search mode).
+/// This is the *shell-side* config that holds sampling-level settings (e.g., web search API key from the sampling client).
+/// It is distinct from `xai_grok_tools::registry::types::ToolsetConfig` which holds tool-implementation-level config (bash limits, web search mode).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ShellToolsetConfig {
     pub bash: BashToolConfig,
     pub web_search: SamplerConfig,
-    /// Web fetch tool parameters (`[toolset.web_fetch]`).
     #[serde(default)]
     pub web_fetch: WebFetchToolConfig,
-    /// Ask-user-question tool parameters (`[toolset.ask_user_question]`).
     #[serde(default)]
     pub ask_user_question: AskUserQuestionToolConfig,
     /// Which file-operation toolset to use: `"standard"` (default) or `"hashline"`.
     #[serde(default)]
     pub file_toolset: FileToolset,
-    /// Hashline scheme parameters. Only used when `file_toolset = "hashline"`.
+    /// Only used when `file_toolset = "hashline"`.
     #[serde(default)]
     pub hashline: HashlineSchemeConfig,
 }
@@ -189,7 +166,6 @@ impl Default for ShellToolsetConfig {
     }
 }
 
-/// Web-search-specific sampling overrides applied on top of a base `SamplerConfig`.
 pub(crate) fn web_search_sampling_config(base: SamplerConfig) -> SamplerConfig {
     let model = if base.model.is_empty() {
         models::default_web_search_model().to_string()
@@ -237,14 +213,8 @@ impl ShellToolsetConfig {
             deployment_id: None,
             user_id: None,
             origin_client: None,
-            // Default base for the in-process web-search tool config.
-            // Real `SamplerConfig`s (e.g. from `sampling_config_for_model`)
-            // overwrite this entire struct via the `..base` pattern in
-            // `web_search_sampling_config`, so leaving the callback
-            // `None` here is fine -- it is only the placeholder for the
-            // "no base provided" path. The live attribution
-            // wiring lives at the production SamplerConfig sites in
-            // agent/config.rs and acp_session.rs.
+            // Leaving the callback `None` here is fine; this base is only the placeholder for the "no base provided" path
+            // Production `SamplerConfig`s in agent/config.rs and acp_session.rs set the real attribution callback
             attribution_callback: None,
             bearer_resolver: None,
             supports_backend_search: false,
@@ -272,8 +242,7 @@ impl ShellToolsetConfig {
         toolset
     }
 
-    /// Resolve the effective file toolset. Local config takes precedence;
-    /// remote `/v1/settings` is used as fallback when local is the default.
+    /// Local config takes precedence; remote `/v1/settings` is used as fallback when local is the default.
     pub(crate) fn resolve_file_toolset(
         &self,
         remote: Option<&crate::util::config::RemoteSettings>,
@@ -294,8 +263,6 @@ impl ShellToolsetConfig {
 // File toolset selection
 // ---------------------------------------------------------------------------
 
-/// Configuration for hashline anchor scheme parameters.
-///
 /// Configurable in `config.toml` under `[toolset.hashline]`:
 /// ```toml
 /// [toolset]
@@ -328,7 +295,6 @@ impl Default for HashlineSchemeConfig {
 }
 
 impl HashlineSchemeConfig {
-    /// Validate the config. Returns an error message if invalid.
     pub fn validate(&self) -> Result<(), String> {
         match self.scheme.as_str() {
             "chunk" | "content_only" => {}
@@ -351,12 +317,6 @@ impl HashlineSchemeConfig {
     }
 }
 
-/// Which set of read/edit/search tools to use for file operations.
-///
-/// Selects between the standard `GrokBuild` toolset (`read_file`,
-/// `search_replace`, `grep`) and the anchor-based `GrokBuildHashline`
-/// toolset (`hashline_read`, `hashline_edit`, `hashline_grep`).
-/// The two are mutually exclusive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileToolset {
@@ -368,9 +328,7 @@ pub enum FileToolset {
 }
 
 impl FileToolset {
-    /// Return the `ToolConfig` entries for the read/edit/search tools
-    /// belonging to this toolset. For hashline, the scheme params are
-    /// threaded into each tool's params.
+    /// For hashline, the scheme params are copied into each tool's params.
     /// Returns an error if hashline config is invalid (upfront validation).
     pub fn tool_configs(
         self,
@@ -460,9 +418,7 @@ mod tests {
         assert!(ids.contains(&"GrokBuildHashline:hashline_grep"));
     }
 
-    /// Plan/explore omit `search_replace` by contract ("no Write/Edit/
-    /// MultiEdit"); the hashline override must not hand it back as
-    /// `hashline_edit`.
+    /// Plan/explore omit `search_replace` by contract ("no Write/Edit/MultiEdit"); the hashline override must not hand it back as `hashline_edit`.
     #[test]
     fn file_toolset_override_never_grants_edit_to_read_only_toolsets() {
         let file_tools = FileToolset::Hashline
@@ -540,7 +496,6 @@ mod tests {
             file_toolset: FileToolset::Hashline,
             ..ShellToolsetConfig::default()
         };
-        // Local says hashline — remote is irrelevant.
         assert_eq!(cfg.resolve_file_toolset(None), FileToolset::Hashline,);
     }
 
@@ -687,8 +642,7 @@ mod tests {
         );
     }
 
-    // -- max_timeout_secs: production sets the 10h foreground ceiling explicitly
-    //    (also the binary default); overridable via config.toml --
+    // -- max_timeout_secs: production sets the 10h foreground ceiling explicitly (also the binary default); overridable via config.toml --
 
     fn max_timeout(map: &serde_json::Map<String, serde_json::Value>) -> Option<f64> {
         map.get("max_timeout_secs").and_then(|v| v.as_f64())

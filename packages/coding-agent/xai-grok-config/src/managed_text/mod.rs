@@ -115,9 +115,9 @@ impl ManagedConfigPlan {
         .flatten()
     }
 
-    /// Proposed backup path shown during confirmation. Apply first tries this
-    /// exact path, then atomically retries nearby names if it was claimed in
-    /// the meantime. [`ManagedConfigOutcome::backup_path`] is authoritative.
+    /// Proposed backup path shown during confirmation.
+    /// Apply first tries this exact path, then atomically retries nearby names if it was claimed in the meantime.
+    /// [`ManagedConfigOutcome::backup_path`] is authoritative.
     pub fn backup_path_hint(&self) -> Option<&Path> {
         self.backup_path_hint.as_deref()
     }
@@ -271,9 +271,8 @@ impl ManagedConfig {
         transaction::apply(plan, &transaction::NoopObserver)
     }
 
-    /// Verify that the exact source path, parent identities, symlink target,
-    /// bytes, mode, and file identity captured by `plan` are unchanged without
-    /// publishing its proposed update.
+    /// Verify that the exact source path, parent identities, symlink target, bytes, mode, and file identity captured by `plan` are unchanged.
+    /// The proposed update is not published.
     pub fn verify_unchanged(plan: &ManagedConfigPlan) -> Result<(), ManagedConfigError> {
         source::revalidate(plan)
     }

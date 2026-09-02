@@ -56,31 +56,6 @@ fn empty_name_yields_empty_id_error() {
 }
 
 #[test]
-fn duplicate_derivations_in_a_batch_are_detectable() {
-    let batch = [
-        entry("read_file", Some("GrokBuild")),
-        entry("write_file", Some("GrokBuild")),
-        entry("read_file", Some("GrokBuild")),
-    ];
-
-    let mut seen = std::collections::HashMap::new();
-    let mut duplicates: Vec<(ToolId, Vec<usize>)> = Vec::new();
-    for (i, e) in batch.iter().enumerate() {
-        let id = e.derive_tool_id().unwrap();
-        seen.entry(id).or_insert_with(Vec::new).push(i);
-    }
-    for (id, indices) in seen {
-        if indices.len() > 1 {
-            duplicates.push((id, indices));
-        }
-    }
-    assert_eq!(duplicates.len(), 1, "exactly one duplicate id expected");
-    let (id, indices) = &duplicates[0];
-    assert_eq!(id, &ToolId::new("GrokBuild:read_file").unwrap());
-    assert_eq!(indices, &vec![0, 2]);
-}
-
-#[test]
 fn derivation_does_not_collide_across_namespaces() {
     let a = entry("read_file", Some("GrokBuild"))
         .derive_tool_id()

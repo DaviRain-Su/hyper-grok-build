@@ -13,7 +13,9 @@
 //!   and retried until `max_attempts` is hit;
 //! - a sampler error is **deterministic** (no retry) when
 //!   [`CompactionSampleError::is_deterministic`](crate::CompactionSampleError::is_deterministic)
-//!   or a context-length overflow ([`is_context_length_error`]); otherwise it is
+//!   or a context-length overflow (structured
+//!   [`ContextOverflow`](crate::CompactionSampleError::ContextOverflow) or a
+//!   size-worded message per [`is_context_length_error`]); otherwise it is
 //!   transient and retried.
 //!
 //! The loop is *content-neutral*: callers build the prompt, map the structured
@@ -140,7 +142,8 @@ where
             }
             Err(e) => {
                 let message = e.to_string();
-                let context_overflow = is_context_length_error(&message);
+                // Structured overflow from the host, or size-worded text fallback.
+                let context_overflow = e.is_context_overflow() || is_context_length_error(&message);
                 // A context overflow is deterministic for *this* input — retrying
                 // the same payload cannot help.
                 let deterministic = e.is_deterministic() || context_overflow;
@@ -163,6 +166,8 @@ where
                     });
                 }
                 if !will_retry {
+                    // Overflow implies deterministic, which returned above.
+                    debug_assert!(!context_overflow);
                     return Err(SampleRetryError::Failure {
                         message,
                         deterministic: false,
@@ -307,6 +312,41 @@ mod tests {
             MockSampler::scripted(vec![Err(CompactionSampleError::Other(anyhow::anyhow!(
                 "API error (status 400): prompt is too long for this model's context window"
             )))]);
+        let err = run(&sampler, 3).await.expect_err("should fail");
+        assert!(matches!(
+            err,
+            SampleRetryError::Failure {
+                deterministic: true,
+                context_overflow: true,
+                ..
+            }
+        ));
+        assert_eq!(sampler.call_count(), 1, "overflow must not retry");
+    }
+
+    #[tokio::test]
+    async fn structured_context_overflow_flags_without_text_match() {
+        // Must flag overflow even when the text matches no size wording.
+        let sampler = MockSampler::scripted(vec![Err(CompactionSampleError::ContextOverflow(
+            "opaque upstream rejection".into(),
+        ))]);
+        let err = run(&sampler, 3).await.expect_err("should fail");
+        assert!(matches!(
+            err,
+            SampleRetryError::Failure {
+                deterministic: true,
+                context_overflow: true,
+                ..
+            }
+        ));
+        assert_eq!(sampler.call_count(), 1, "overflow must not retry");
+    }
+
+    #[tokio::test]
+    async fn rendered_413_message_is_context_overflow() {
+        let sampler = MockSampler::scripted(vec![Err(CompactionSampleError::Other(
+            anyhow::anyhow!("API error (status 413 Payload Too Large): Request failed (HTTP 413)."),
+        ))]);
         let err = run(&sampler, 3).await.expect_err("should fail");
         assert!(matches!(
             err,

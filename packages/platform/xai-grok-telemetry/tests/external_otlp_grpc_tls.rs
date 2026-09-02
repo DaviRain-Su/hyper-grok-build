@@ -1,12 +1,9 @@
-//! HTTPS (TLS) gRPC transport coverage for the external OTEL stream —
-//! regression test for GB-4580, where `https://` collector endpoints were
-//! rejected at exporter build time and the stream silently disabled itself.
+//! HTTPS (TLS) gRPC transport coverage for the external OTEL stream.
+//! Regression test: `https://` collector endpoints were once rejected at exporter build time and the stream silently disabled itself.
 //!
-//! The collector presents a certificate signed by a freshly generated CA and
-//! the client trusts it via the standard `OTEL_EXPORTER_OTLP_CERTIFICATE`
-//! variable, so the full TLS handshake + OTLP export path is exercised.
-//! Lives in its own integration-test binary because the external telemetry
-//! registry is a process-global `OnceLock`.
+//! The collector presents a certificate signed by a freshly generated CA.
+//! The client trusts it via the standard `OTEL_EXPORTER_OTLP_CERTIFICATE` variable, so the full TLS handshake and OTLP export path is exercised.
+//! It lives in its own integration-test binary because the external telemetry registry is a process-global `OnceLock`.
 
 mod otlp_collector;
 
@@ -54,9 +51,8 @@ fn external_stream_grpc_over_tls_end_to_end() {
         "https gRPC exporters must build and activate the stream (GB-4580)"
     );
 
-    // `SessionNew` maps to the `session.count` metric; `SessionHarness` maps
-    // to the `session_start` log record — emit both so each signal's TLS
-    // export path is exercised.
+    // `SessionNew` maps to the `session.count` metric; `SessionHarness` maps to the `session_start` log record
+    // Emitting both exercises each signal's TLS export path
     xai_grok_telemetry::log_event(xai_grok_telemetry::events::SessionNew {
         session_id: "sess-grpc-tls-1".into(),
         client_identifier: None,
@@ -95,8 +91,7 @@ fn external_stream_grpc_over_tls_end_to_end() {
         "expected grok_code.session_start in {names:?}"
     );
 
-    // Metrics ride the same TLS channel config; make sure at least one
-    // periodic export lands too.
+    // Metrics ride the same TLS channel config; make sure at least one periodic export lands too
     assert!(
         col::wait_until(std::time::Duration::from_secs(10), || {
             collected.metrics_len() > 0

@@ -1,5 +1,3 @@
-//! Workspace-ops chunks (`OpsChunk`).
-
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -12,13 +10,11 @@ use crate::types::{
 
 /// Streaming chunk for an ops call.
 ///
-/// Most variants are unary (one chunk then close); the `FuzzyMatch` and
-/// `RipgrepHit` variants stream zero-or-more times. `RipgrepHit` is
-/// followed by a single explicit `RipgrepDone` terminator.
+/// Most variants are unary (one chunk then close); the `FuzzyMatch` and `RipgrepHit` variants stream zero-or-more times.
+/// `RipgrepHit` is followed by a single explicit `RipgrepDone` terminator.
 ///
-/// `Eq` is not derived because [`MemoryChunks`](Self::MemoryChunks)
-/// carries `MemoryChunk`, which has an optional `f32` score. `PartialEq`
-/// is sufficient for round-trip and equality tests.
+/// `Eq` is not derived because [`MemoryChunks`](Self::MemoryChunks) carries `MemoryChunk`, which has an optional `f32` score.
+/// `PartialEq` is sufficient for round-trip and equality tests.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum OpsChunk {
@@ -31,8 +27,8 @@ pub enum OpsChunk {
     GitDiff(GitDiff),
     /// Response to `WorkspaceOpsRequest::GitBranchInfo`.
     GitBranchInfo(GitBranchInfo),
-    /// Response to `WorkspaceOpsRequest::GitMetadata`. None if the
-    /// workspace is not a git repo.
+    /// Response to `WorkspaceOpsRequest::GitMetadata`.
+    /// None if the workspace is not a git repo.
     GitMetadata(Option<GitMetadata>),
 
     // ------------------------------------------------------------------
@@ -50,21 +46,17 @@ pub enum OpsChunk {
     Permissions(PermissionPolicy),
     /// Response to `WorkspaceOpsRequest::LoadEnvrc`.
     ///
-    /// `BTreeMap<String, String>` (rather than the doc's `HashMap`) so
-    /// the JSON serialization order is deterministic -- same rationale
-    /// as `Metadata` (see `crate::metadata`). The on-wire JSON shape
-    /// is identical (a JSON object).
+    /// `BTreeMap<String, String>` rather than `HashMap` so the JSON serialization order is deterministic; see `crate::metadata` for the rationale.
+    /// The on-wire JSON shape is identical (a JSON object).
     Envrc(BTreeMap<String, String>),
     /// Response to `WorkspaceOpsRequest::ResolveFileRefs`.
     ResolvedFiles(Vec<ResolvedFile>),
     /// Response to `WorkspaceOpsRequest::MemorySearch`.
     MemoryChunks(Vec<MemoryChunk>),
-    /// Response to `WorkspaceOpsRequest::InstallPlugin` (one plugin
-    /// metadata snapshot for the freshly-installed plugin).
+    /// Response to `WorkspaceOpsRequest::InstallPlugin` (one plugin metadata snapshot for the freshly-installed plugin).
     Plugin(PluginInfo),
 
-    /// Acknowledgement for void ops (`ActOnHunk`, `MemoryWrite`,
-    /// `RefreshPlugins` accepted, ...).
+    /// Acknowledgement for void ops (`ActOnHunk`, `MemoryWrite`, `RefreshPlugins` accepted, ...).
     Ack,
 
     // ------------------------------------------------------------------
@@ -72,11 +64,9 @@ pub enum OpsChunk {
     // ------------------------------------------------------------------
     /// One match for `WorkspaceOpsRequest::FuzzySearch` (zero or more).
     FuzzyMatch(FuzzyMatch),
-    /// One hit for `WorkspaceOpsRequest::Ripgrep` (zero or more before
-    /// `RipgrepDone`).
+    /// One hit for `WorkspaceOpsRequest::Ripgrep` (zero or more before `RipgrepDone`).
     RipgrepHit(ContentMatch),
-    /// Explicit terminator for ripgrep streams (since hits are
-    /// repeatable, we need a positive end-of-stream marker).
+    /// Explicit terminator for ripgrep streams (since hits are repeatable, we need a positive end-of-stream marker).
     RipgrepDone(RipgrepStats),
 }
 
@@ -136,14 +126,5 @@ mod tests {
     fn kind_discriminators_are_unique() {
         let kinds: HashSet<ChunkKind> = samples().iter().map(OpsChunk::kind).collect();
         assert_eq!(kinds.len(), samples().len(), "duplicate OpsChunk kind()");
-    }
-
-    #[test]
-    fn round_trips_through_json() {
-        for chunk in samples() {
-            let json = serde_json::to_string(&chunk).unwrap();
-            let back: OpsChunk = serde_json::from_str(&json).unwrap();
-            assert_eq!(chunk, back);
-        }
     }
 }

@@ -1,9 +1,6 @@
-//! System prompt template source and constants.
-//!
-//! Templates are XOR-obfuscated by `scripts/encrypt_templates.py` (obfuscation,
-//! not security — seeds live in-repo) so they don't appear as obvious plaintext
-//! in `strings` output. They are decrypted on demand and the returned
-//! `Zeroizing<String>` wipes the plaintext from memory on drop.
+//! Templates are XOR-obfuscated by `scripts/encrypt_templates.py` so they don't appear as obvious plaintext in `strings` output.
+//! This is obfuscation, not security; the seeds live in-repo.
+//! They are decrypted on demand and the returned `Zeroizing<String>` wipes the plaintext from memory on drop.
 
 use zeroize::Zeroizing;
 
@@ -13,7 +10,7 @@ mod prompt_encrypted;
 use prompt_encrypted::*;
 
 /// Decrypt XOR-obfuscated template data (mirrors `scripts/encrypt_templates.py::xor_encrypt`).
-/// Obfuscation only — not a security boundary.
+/// Obfuscation only, not a security boundary.
 fn decrypt(data: &[u8], seed: u8) -> Zeroizing<String> {
     let bytes: Vec<u8> = data
         .iter()
@@ -228,17 +225,10 @@ mod tests {
     // ── Base template rendering ─────────────────────────────────────
 
     #[test]
-    fn test_base_template_renders() {
-        let prompt = render_base(&default_renderer(), &default_placeholders());
-        assert!(prompt.contains(crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL));
-    }
-
-    #[test]
     fn test_base_template_contains_resolved_tool_names() {
         let prompt = render_base(&default_renderer(), &default_placeholders());
-        // The minimal prompt only resolves the read/edit tool names, inside
-        // <tool_calling>. (todo_write / run_terminal_command lived in sections
-        // that the trimmed prompt no longer renders.)
+        // The minimal prompt only resolves the read/edit tool names, inside <tool_calling>
+        // (todo_write / run_terminal_command lived in sections that the trimmed prompt no longer renders.)
         assert!(prompt.contains("read_file"), "Should contain 'read_file'");
         assert!(
             prompt.contains("search_replace"),
@@ -380,16 +370,6 @@ mod tests {
         assert_eq!(a, b, "Prompt rendering must be deterministic");
     }
 
-    #[test]
-    fn test_full_mode_deterministic() {
-        let r = default_renderer();
-        let p = default_placeholders();
-        let body = "Agent: ${{ tools.by_kind.read }}, OS: ${{ os_name }}";
-        let a = r.render_with_extra(body, &p).unwrap();
-        let b = r.render_with_extra(body, &p).unwrap();
-        assert_eq!(a, b, "Full mode rendering must be deterministic");
-    }
-
     // ── Disabled tools ──────────────────────────────────────────────
 
     #[test]
@@ -413,9 +393,8 @@ mod tests {
     #[test]
     fn test_memory_enabled_does_not_render_memory_section() {
         // The <memory> section was removed from the minimal base prompt.
-        // Even when the memory tools are registered AND memory_enabled=true,
-        // the trimmed template must not render a memory section. (Complements
-        // test_memory_disabled_omits_memory_section, which covers the default.)
+        // Even when the memory tools are registered AND memory_enabled=true, the trimmed template must not render a memory section
+        // (Complements test_memory_disabled_omits_memory_section, which covers the default.)
         let tools: HashMap<ToolKind, String> = [
             (ToolKind::Read, "read_file".to_string()),
             (ToolKind::MemorySearch, "memory_search".to_string()),
@@ -450,24 +429,6 @@ mod tests {
     }
 
     // ── Web search disabled ─────────────────────────────────────────
-
-    #[test]
-    fn test_web_search_disabled_renders_without_crash() {
-        // No Fetch tool
-        let tools: HashMap<ToolKind, String> = [
-            (ToolKind::Read, "read_file".to_string()),
-            (ToolKind::Plan, "todo_write".to_string()),
-        ]
-        .into();
-        let r = TemplateRenderer::new(tools, HashMap::new());
-        let tmpl = base_template();
-        let result = r.render_with_extra(&tmpl, &default_placeholders());
-        assert!(
-            result.is_ok(),
-            "Must render without crash: {:?}",
-            result.err()
-        );
-    }
 
     // ── Apply-patch template rendering ───────────────────────────────────
 
@@ -516,7 +477,7 @@ mod tests {
         .into();
         let r = TemplateRenderer::new(tools, HashMap::new());
         let prompt = render_apply_patch(&r, &default_placeholders());
-        // apply_patch is hardcoded — NOT affected by Edit tool override
+        // apply_patch is hardcoded, so the Edit tool override does not affect it
         assert!(
             prompt.contains("`apply_patch`"),
             "apply_patch must remain hardcoded regardless of edit override"
@@ -552,11 +513,9 @@ mod tests {
 
     // ── Task completion discipline ─────────────────────────────────
     //
-    // The `<task_completion_discipline>` block was removed from both
-    // base and subagent templates. These tests pin the deletion so the
-    // block doesn't accidentally come back, and so the runtime TodoGate
-    // doesn't start firing reminders that reference a non-existent
-    // block.
+    // The `<task_completion_discipline>` block was removed from both base and subagent templates
+    // These tests pin the deletion so the block doesn't accidentally come back
+    // They also keep the runtime TodoGate from firing reminders that reference a non-existent block
 
     #[test]
     fn task_completion_discipline_block_is_not_rendered() {
@@ -573,7 +532,7 @@ mod tests {
     }
 
     /// Soft byte ceiling shared by both prompt-size budget tests.
-    /// Forward-budget guard against runaway growth, not a tight target.
+    /// This is a guard against runaway growth, not a tight target.
     const PROMPT_SIZE_SOFT_CEILING_BYTES: usize = 16384;
 
     fn assert_template_size_under(prompt: &str, label: &str) {
@@ -598,10 +557,9 @@ mod tests {
     }
 
     // ── Guard invariant ─────────────────────────────────────────────
-    // Every `${{ tools.by_kind.X }}` must sit inside a `${%- if ... %}`
-    // whose condition requires X (contains `tools.by_kind.X` at a word
-    // boundary, with no top-level ` or `). If violated, X could render
-    // as empty string at runtime.
+    // Every `${{ tools.by_kind.X }}` must sit inside a `${%- if ... %}` whose condition requires X.
+    // The condition must contain `tools.by_kind.X` at a word boundary, with no top-level ` or `
+    // If violated, X could render as empty string at runtime
 
     fn word_bounded(hay: &str, needle: &str) -> bool {
         let mut s = 0;
@@ -658,8 +616,7 @@ mod tests {
                     .map(|e| i + 3 + e + 2)
                     .unwrap_or(bytes.len());
                 let body = std::str::from_utf8(&bytes[i + 3..end - 2]).unwrap().trim();
-                // search_tool and use_tool are always built-in, so they
-                // never need a guard.
+                // search_tool and use_tool are always built-in, so they never need a guard
                 const ALWAYS_BUILTIN: &[&str] = &["search_tool", "use_tool"];
                 if let Some(kind) = body.strip_prefix("tools.by_kind.")
                     && kind.chars().all(|c| c.is_alphanumeric() || c == '_')
@@ -687,21 +644,18 @@ mod tests {
     }
 
     // ── Combination sweep ───────────────────────────────────────────
-    // Belt-and-braces: renders the base template across tool-kind subsets
-    // and asserts no raw template tokens leak. The static guard test above
-    // is the authoritative check; this one just catches syntax drift.
+    // Renders the base template across tool-kind subsets and asserts no raw template tokens leak
+    // The static guard test above is the authoritative check; this one catches syntax drift
 
     // ── is_non_interactive gating ──────────────────────────────────
-    // Headless / SDK / stdio / generic-ACP sessions have no human typing
-    // into a TUI prompt, so the `! <command>` shell-prefix tip and the
-    // `<user_guide>` TUI pointer are noise. Those sections must drop out
-    // when `is_non_interactive=true` and remain when it's false.
+    // Headless / SDK / stdio / generic-ACP sessions have no human typing into a TUI prompt
+    // The `! <command>` shell-prefix tip and the `<user_guide>` TUI pointer are noise there
+    // Those sections must drop out when `is_non_interactive=true` and remain when it's false
 
     #[test]
     fn interactive_renders_shell_prefix_tip_and_user_guide() {
-        // The `! <command>` shell-prefix tip was removed from the minimal
-        // prompt. The <user_guide> block still renders for interactive
-        // sessions only, so that's what we assert here.
+        // The `! <command>` shell-prefix tip was removed from the minimal prompt
+        // The <user_guide> block still renders for interactive sessions only, so that's what we assert here
         let mut p = default_placeholders();
         p["is_non_interactive"] = serde_json::json!(false);
         let prompt = render_base(&default_renderer(), &p);

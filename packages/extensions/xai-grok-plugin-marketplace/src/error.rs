@@ -1,8 +1,5 @@
-//! Error types for the marketplace crate.
-
 use thiserror::Error;
 
-/// Errors that can occur during marketplace operations.
 #[derive(Debug, Error)]
 pub enum MarketplaceError {
     #[error("IO error at {path}: {source}")]

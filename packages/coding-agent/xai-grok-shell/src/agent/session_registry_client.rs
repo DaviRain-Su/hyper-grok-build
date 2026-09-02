@@ -1,17 +1,15 @@
 //! REST client for the session replicas registry (cli-chat-proxy).
 //!
-//! Handles registering, updating, finalizing, searching, and downloading
-//! session replicas for cross-host session replication. Write methods
-//! (register/update/finalize) are fire-and-forget safe. Read methods
-//! (search/get/download_file) return typed results.
+//! Registers, updates, finalizes, searches, and downloads session replicas for cross-host session replication.
+//! The write methods (`register`, `update`, `finalize`) are safe to call without checking the result.
+//! The read methods (`search`, `get_session`, `download_file`) return typed results.
 
 use anyhow::{Context, Result};
 use reqwest::RequestBuilder;
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
-// Request / response types (local — not in cli-chat-proxy since these
-// are only used by the agent, not consumed by other crates)
+// Request and response types. They live here rather than in cli-chat-proxy because only the agent uses them.
 // ============================================================================
 
 #[derive(Debug, Serialize)]
@@ -30,7 +28,7 @@ pub struct RegisterRequest {
     pub repo_head_at_start: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
-    /// Opaque per-machine device id (telemetry `agent_id()`) for machine disambiguation.
+    /// Opaque id for this machine (telemetry's `agent_id()`), so the server can tell machines apart.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -59,8 +57,8 @@ pub struct UpdateRequest {
     pub last_turn_number: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo_head_at_end: Option<String>,
-    /// Latest turn whose restore artifacts are confirmed durable.
-    /// Omitted from the wire when `None` — old servers ignore unknown fields.
+    /// The latest turn whose restore artifacts are confirmed durable.
+    /// Omitted from the wire when `None`; old servers ignore unknown fields.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restorable_turn_number: Option<i32>,
 }
@@ -80,8 +78,7 @@ pub struct SessionRecord {
     pub updated_at: String,
     pub last_turn_number: i32,
     /// Present on servers that have applied the restorable-turn migration.
-    /// `None` when talking to an older server — callers should fall back to
-    /// `last_turn_number` in that case.
+    /// `None` when talking to an older server; callers should fall back to `last_turn_number` then.
     #[serde(default)]
     pub restorable_turn_number: Option<i32>,
     pub cwd: String,
@@ -172,8 +169,7 @@ impl SessionRegistryClient {
         self
     }
 
-    /// Attach an `AuthManager` so the request signing and 401
-    /// recovery go through the consolidated auth path.
+    /// Attach an `AuthManager` so request signing and 401 recovery go through the shared auth path.
     pub fn with_auth(mut self, auth_manager: std::sync::Arc<crate::auth::AuthManager>) -> Self {
         let provider: std::sync::Arc<dyn xai_grok_auth::AuthCredentialProvider> =
             std::sync::Arc::new(
@@ -188,9 +184,8 @@ impl SessionRegistryClient {
         self
     }
 
-    /// Execute with auth middleware, returning the response plus the
-    /// bearer suffix the middleware stamped (for truthful 401
-    /// attribution in [`Self::check_response`]).
+    /// Execute with auth middleware, returning the response and the bearer suffix the middleware stamped.
+    /// [`Self::check_response`] uses that suffix to attribute a 401 to the token actually sent.
     async fn send_authed(
         &self,
         builder: RequestBuilder,
@@ -209,8 +204,7 @@ impl SessionRegistryClient {
             })
     }
 
-    /// Non-auth headers only -- the `Authorization` header lives in
-    /// `send_authed` so it picks up freshly-refreshed tokens.
+    /// Non-auth headers only; the `Authorization` header lives in `send_authed` so it picks up freshly refreshed tokens.
     fn add_common_headers(&self, builder: RequestBuilder) -> RequestBuilder {
         builder
     }
@@ -229,13 +223,9 @@ impl SessionRegistryClient {
         }
     }
 
-    /// Emit a single `auth 401 attribution` log entry tagged with
-    /// `consumer = "SessionRegistryClient.<op>"`. The op string is the
-    /// operation name passed to `check_response` (e.g.,
-    /// `"session register"`).
-    ///
-    /// `stamp` is what the middleware put on the wire (see
-    /// [`xai_grok_auth::StampedBearerSuffix`] for why never a re-resolution).
+    /// Emit a single `auth 401 attribution` log entry tagged with `consumer = "SessionRegistryClient.<op>"`.
+    /// The op string is the operation name passed to `check_response`, e.g. `"session register"`.
+    /// `stamp` is what the middleware put on the wire; [`xai_grok_auth::StampedBearerSuffix`] explains why it is never re-resolved.
     fn record_401_attribution(&self, op: &str, stamp: Option<&xai_grok_auth::StampedBearerSuffix>) {
         if let Some(manager) = self.credentials.auth_manager() {
             crate::auth::attribution::record_consumer_401(
@@ -320,7 +310,7 @@ impl SessionRegistryClient {
         response.json().await.context("parse session response")
     }
 
-    /// GET /v1/sessions/{id}/download — returns a signed GCS URL without downloading.
+    /// GET /v1/sessions/{id}/download; returns a signed GCS URL without downloading.
     pub(crate) async fn get_download_url(
         &self,
         session_id: &str,
@@ -339,7 +329,7 @@ impl SessionRegistryClient {
         Ok(resp.download_url)
     }
 
-    /// GET /v1/sessions/{id}/download — returns a signed URL, then streams to dest file.
+    /// GET /v1/sessions/{id}/download; returns a signed URL, then streams to the dest file.
     pub async fn download_file(
         &self,
         session_id: &str,
@@ -399,15 +389,13 @@ mod tests {
 
     // ── UpdateRequest wire shapes ────────────────────────────────────────────
     //
-    // The writer split relies on two distinct update payloads being sent at
-    // different times:
+    // The registry writer sends two distinct update payloads at different times:
     //
-    //   1. Immediate post-turn: `last_turn_number` + `repo_head_at_end`
-    //   2. Artifact-ready:      `restorable_turn_number` only
+    //   1. Immediately after a turn: `last_turn_number` and `repo_head_at_end`
+    //   2. Once restore artifacts are durable: `restorable_turn_number` only
     //
-    // These tests verify that `skip_serializing_if = "Option::is_none"` does the
-    // right thing for each shape, so old servers silently ignore the new field and
-    // clients don't accidentally overwrite unrelated fields with nulls.
+    // These tests verify `skip_serializing_if = "Option::is_none"` for each shape
+    // Old servers then silently ignore the new field and clients never overwrite unrelated fields with nulls
 
     #[test]
     fn immediate_turn_update_omits_restorable_field() {
@@ -524,8 +512,7 @@ mod tests {
     // ── SessionRecord backward compatibility ─────────────────────────────────
     //
     // Older servers do not include `restorable_turn_number` in their response.
-    // The field is `#[serde(default)]` so it must deserialize as `None` when
-    // absent, keeping new clients compatible with old servers.
+    // The field is `#[serde(default)]` so it must deserialize as `None` when absent, keeping new clients compatible with old servers
 
     #[test]
     fn session_record_without_restorable_turn_deserializes_as_none() {
@@ -572,7 +559,7 @@ mod tests {
         assert_eq!(record.restorable_turn_number, Some(6));
     }
 
-    /// Verify per-request auth resolve picks up rotated tokens.
+    /// Verifies that each request resolves auth again, so a rotated token is picked up.
     #[tokio::test]
     async fn session_registry_client_uses_active_auth_for_each_request() {
         use crate::auth::{AuthManager, AuthMode, GrokAuth, GrokComConfig};
@@ -642,9 +629,7 @@ mod tests {
         );
     }
 
-    // Verify the split-pointer invariant: last_turn_number can be ahead of
-    // restorable_turn_number (codebase best-effort means a turn may be "done"
-    // but not yet restorable if session-state upload is still in flight).
+    // last_turn_number can run ahead of restorable_turn_number: a turn can be done while the session-state upload is still in flight
     #[test]
     fn session_record_allows_last_turn_ahead_of_restorable() {
         let json = serde_json::json!({

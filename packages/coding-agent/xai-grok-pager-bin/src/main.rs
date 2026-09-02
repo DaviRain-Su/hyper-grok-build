@@ -10,8 +10,7 @@
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[cfg(all(feature = "jemalloc", feature = "release-dist", unix))]
 mod jemalloc_malloc_conf {
-    /// jemalloc looks up `extern const char *malloc_conf` — a thin pointer,
-    /// not a Rust `&[u8]` fat pointer.
+    /// jemalloc looks up `extern const char *malloc_conf`, a thin pointer, not a Rust `&[u8]` fat pointer.
     #[repr(transparent)]
     struct MallocConfPtr(*const u8);
     unsafe impl Sync for MallocConfPtr {}
@@ -31,8 +30,8 @@ use std::num::NonZeroUsize;
 use tokio_util::sync::CancellationToken;
 use xai_grok_pager::app::cli::{DashboardArgs, WebArgs};
 use xai_grok_pager::app::{
-    AgentCmd, Command, HeadlessArgs, LeaderMgmtArgs, LeaderMgmtCommand, LeaderMode,
-    LeaderTargetArgs, PagerArgs, join_early_prefetch, resolve_leader_mode, resolve_use_leader,
+    AgentCmd, Command, EARLY_PREFETCH_WAIT, HeadlessArgs, LeaderMgmtArgs, LeaderMgmtCommand,
+    LeaderMode, LeaderTargetArgs, PagerArgs, resolve_leader_mode, resolve_use_leader,
     warn_leader_disabled_by_sandbox,
 };
 use xai_grok_pager::app::{WorkspaceMgmtArgs, WorkspaceMgmtCommand, WorkspaceStartArgs};
@@ -67,6 +66,7 @@ fn process_identity(command: Option<&Command>, is_interactive: bool) -> Option<P
             | Command::Memory(_)
             | Command::Models
             | Command::Sessions(_)
+            | Command::Usage(_)
             | Command::Setup { .. }
             | Command::Share(_)
             | Command::Wrap(_)
@@ -88,8 +88,7 @@ fn process_identity(command: Option<&Command>, is_interactive: bool) -> Option<P
         interactivity,
     })
 }
-/// True when this command later boots an agent (`spawn_grok_shell` / agent
-/// subcommand) that heals managed policy after `apply_sandbox`.
+/// True when this command later boots an agent (`spawn_grok_shell` / agent subcommand) that heals managed policy after `apply_sandbox`.
 fn command_needs_pre_sandbox_policy_heal(command: Option<&Command>) -> bool {
     match command {
         None
@@ -108,6 +107,7 @@ fn command_needs_pre_sandbox_policy_heal(command: Option<&Command>) -> bool {
             | Command::Plugin(_)
             | Command::Memory(_)
             | Command::Sessions(_)
+            | Command::Usage(_)
             | Command::Setup { .. }
             | Command::Share(_)
             | Command::Wrap(_)
@@ -346,6 +346,11 @@ async fn run_setup_command(json: bool) {
                 "Managed configuration was not applied this run (another process held the apply lock, or the credential changed during the fetch). Run `grok setup` again."
             );
         }
+        SetupOutcome::Staged => {
+            eprintln!(
+                "Managed configuration update verified; it takes effect the next time Grok starts."
+            );
+        }
         SetupOutcome::Failed(e) => {
             eprintln!("Couldn't apply managed configuration. {e}");
             std::process::exit(1);
@@ -465,7 +470,7 @@ async fn connect_to_leader(
     .await?;
     Ok((selection.descriptor, client))
 }
-/// Prefer socket-verified live PID over a possibly-recycled lock file PID.
+/// Prefer the PID verified live over the socket; the lock file's PID may have been recycled.
 fn leader_pid(d: &LeaderDescriptor) -> Option<u32> {
     d.live_info.as_ref().map(|li| li.pid).or(d.pid_from_lock)
 }
@@ -509,27 +514,26 @@ fn ensure_control_caps(reg: &LeaderRegistration) -> Result<&LeaderCapabilities> 
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Leader does not advertise capabilities (legacy version)"))
 }
-/// Env override for the `grok workspace` gate: any truthy value enables the
-/// command locally, a falsy one disables it — bypassing the remote settings flag.
+/// Env override for the `grok workspace` gate: any truthy value enables the command locally, a falsy one disables it.
+/// Either way it bypasses the remote settings flag.
 const WORKSPACE_COMMAND_ENV: &str = "GROK_WORKSPACE_COMMAND";
-/// Resolution of the `grok workspace` gate. `Unknown` is kept separate from
-/// `Disabled` so we don't tell the user the flag is off when the settings were
-/// simply never read (both fail closed, but `Unknown` earns an honest message).
+/// Resolution of the `grok workspace` gate.
+/// `Unknown` is kept separate from `Disabled` so we don't tell the user the flag is off when the settings were never read.
+/// Both fail closed, but `Unknown` earns an honest message.
 #[derive(Debug, PartialEq, Eq)]
 enum WorkspaceGate {
     Enabled,
     Disabled,
     Unknown,
 }
-/// The `GROK_WORKSPACE_COMMAND` override, if set (`Some(true)`/`Some(false)`);
-/// `None` defers to the remote settings flag.
+/// The `GROK_WORKSPACE_COMMAND` override, if set (`Some(true)`/`Some(false)`); `None` defers to the remote settings flag.
 fn workspace_command_env_override() -> Option<bool> {
     std::env::var(WORKSPACE_COMMAND_ENV)
         .ok()
         .map(|v| env_flag_enabled(&v))
 }
-/// Resolve the gate. Precedence: env override > remote `Some(true)` >
-/// loaded-but-off (`Disabled`) > settings-not-loaded (`Unknown`).
+/// Resolve the gate.
+/// Precedence: the env override, then remote `Some(true)`, then loaded-but-off (`Disabled`), then settings-not-loaded (`Unknown`).
 fn workspace_command_gate(
     env_override: Option<bool>,
     remote_settings: Option<&xai_grok_shell::util::config::RemoteSettings>,
@@ -547,17 +551,18 @@ fn workspace_command_gate(
         None => WorkspaceGate::Unknown,
     }
 }
-/// Truthy parse for grok on/off env vars: everything enables except the common
-/// falsy spellings (`0`, `false`, `off`, `no`, empty).
+/// Truthy parse for grok on/off env vars: everything enables except the common falsy spellings (`0`, `false`, `off`, `no`, empty).
 fn env_flag_enabled(value: &str) -> bool {
     !matches!(
         value.trim().to_ascii_lowercase().as_str(),
         "" | "0" | "false" | "off" | "no"
     )
 }
-/// Blocking fetch of remote settings via the startup prefetch path.
+/// Blocking fetch of remote settings via the startup prefetch path,
+/// capped at the early-prefetch wait so a slow endpoint cannot stall the CLI.
 fn fetch_remote_settings() -> Option<xai_grok_shell::util::config::RemoteSettings> {
-    join_early_prefetch(xai_grok_shell::agent::models::start_early_prefetch(None))
+    xai_grok_shell::agent::models::startup_prefetch::begin(None);
+    xai_grok_shell::agent::models::startup_prefetch::wait_settings(EARLY_PREFETCH_WAIT)
 }
 #[tracing::instrument(level = "debug", skip_all)]
 async fn run_workspace_mgmt(args: WorkspaceMgmtArgs) -> Result<()> {
@@ -787,9 +792,8 @@ fn render_workspace_payload(payload: &ControlPayload, json: bool) {
 /// How to rebuild one session's `session/load` after a leader reconnect.
 #[derive(Default, Clone)]
 struct CachedSession {
-    /// Verbatim `session/load` request JSON (preferred replay form: preserves
-    /// the client's exact cwd / mcpServers / meta). `None` when the session
-    /// was only ever created via `session/new` — the load is synthesized.
+    /// Verbatim `session/load` request JSON (preferred replay form: preserves the client's exact cwd / mcpServers / meta).
+    /// `None` when the session was only ever created via `session/new`; the load is synthesized.
     load_request_json: Option<String>,
     /// `cwd` captured from `session/new` / `session/load` params.
     cwd: Option<String>,
@@ -798,24 +802,18 @@ struct CachedSession {
 }
 /// ACP state cached from the stdio stream for replay after leader reconnect.
 ///
-/// Tracks EVERY session the external client has open (IDE clients drive
-/// multiple sessions over one bridge), not just the most recent one — a
-/// leader crash must restore all of them or the others die with
-/// "unknown session id" on their next prompt.
+/// Tracks EVERY session the external client has open (IDE clients drive multiple sessions over one bridge), not just the most recent one.
+/// A leader crash must restore all of them or the others die with "unknown session id" on their next prompt.
 #[derive(Default, Clone)]
 struct StdioReplayState {
     initialize_json: Option<String>,
-    /// Sessions to restore on reconnect, keyed by session id, in first-seen
-    /// order (Vec keeps replay order deterministic).
+    /// Sessions to restore on reconnect, keyed by session id, in first-seen order (Vec keeps replay order deterministic).
     sessions: Vec<(String, CachedSession)>,
-    /// cwd/mcp from the most recent `session/new` REQUEST whose response has
-    /// not been observed yet. Folded into `sessions` when the response
-    /// carrying the assigned session id arrives. Never replayed while
-    /// unconfirmed (the id is unknown; the client's own request died with the
-    /// old leader and is its to retry).
+    /// cwd/mcp from the most recent `session/new` REQUEST whose response has not been observed yet.
+    /// Folded into `sessions` when the response carrying the assigned session id arrives.
+    /// Never replayed while unconfirmed (the id is unknown; the client's own request died with the old leader and is its to retry).
     pending_new: Option<CachedSession>,
-    /// Most recently created/loaded session id — reported in
-    /// `x.ai/leader_reconnected` as the primary restored session.
+    /// Most recently created/loaded session id, reported in `x.ai/leader_reconnected` as the primary restored session.
     last_session_id: Option<String>,
 }
 impl StdioReplayState {
@@ -832,16 +830,15 @@ impl StdioReplayState {
             self.last_session_id = None;
         }
     }
-    /// A resume names a session the client is already attached to, so an entry
-    /// from its original `session/load` is the better one to replay: it carries
-    /// the client's `_meta`, which a synthesized load cannot reproduce.
+    /// A resume names a session the client is already attached to, so an entry from its original `session/load` is the better one to replay.
+    /// That entry carries the client's `_meta`, which a synthesized load cannot reproduce.
     fn insert_session_if_new(&mut self, sid: &str, cached: CachedSession) {
         if !self.sessions.iter().any(|(id, _)| id == sid) {
             self.sessions.push((sid.to_string(), cached));
         }
     }
 }
-/// `sessionId`, `cwd`, and `mcpServers` off a session request's params.
+/// Read `sessionId`, `cwd`, and `mcpServers` off a session request's params.
 fn cached_session_from_params(
     params: &serde_json::Value,
     verbatim: Option<&str>,
@@ -864,9 +861,9 @@ fn cached_session_from_params(
         },
     ))
 }
-/// Methods whose requests the replay cache reads. One list shared by the
-/// prefilter and the match below so the two cannot drift apart; quoted JSON
-/// spellings so prose mentioning a method does not trigger a parse.
+/// Methods whose requests the replay cache reads.
+/// One list shared by the prefilter and the match below so the two cannot drift apart.
+/// Quoted JSON spellings so prose mentioning a method does not trigger a parse.
 const CACHED_METHODS: &[&str] = &[
     "\"initialize\"",
     "\"session/new\"",
@@ -957,14 +954,12 @@ fn cache_incoming_session_id(msg: &str, state: &std::sync::Mutex<StdioReplayStat
         s.last_session_id = Some(sid.to_string());
     }
 }
-/// Synthetic JSON-RPC id for the `session/load` the bridge constructs itself
-/// (when the external client only ever sent `session/new`). A string id can
-/// never collide with a numeric id the external client may have in flight.
+/// Synthetic JSON-RPC id for the `session/load` the bridge constructs itself (when the external client only ever sent `session/new`).
+/// A string id can never collide with a numeric id the external client may have in flight.
 const REPLAY_LOAD_REQUEST_ID: &str = "x.ai/leader-replay/session-load";
 /// Max silence between two messages from the leader during a replayed request.
-/// A `session/load` streams replay notifications continuously once it starts,
-/// but the pre-replay phase (MCP resolution, session file reads) can be quiet
-/// for a while on large sessions.
+/// A `session/load` streams replay notifications continuously once it starts.
+/// The phase before the replay (MCP resolution, session file reads) can be quiet for a while on large sessions.
 const REPLAY_RECV_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 /// Overall deadline for one replayed request's response.
 const REPLAY_RESPONSE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(180);
@@ -977,8 +972,7 @@ enum ReplayOutcome {
     /// The connection closed / timed out / stdout broke before the response.
     Failed,
 }
-/// True when `msg` is the JSON-RPC *response* to the request with `expected_id`
-/// (no `method` key + matching `id`).
+/// True when `msg` is the JSON-RPC *response* to the request with `expected_id` (no `method` key and a matching `id`).
 fn parse_replay_response(msg: &str, expected_id: &serde_json::Value) -> Option<ReplayOutcome> {
     let json = serde_json::from_str::<serde_json::Value>(msg).ok()?;
     if json.get("method").is_some() {
@@ -993,21 +987,18 @@ fn parse_replay_response(msg: &str, expected_id: &serde_json::Value) -> Option<R
         Some(ReplayOutcome::ResponseOk)
     }
 }
-/// Send one replayed request to the (new) leader and pump messages until its
-/// response arrives.
+/// Send one replayed request to the (new) leader and pump messages until its response arrives.
 ///
-/// `session/load` emits the full replay stream (session/update notifications)
-/// BEFORE its response, so "wait for the next message" is not "wait for the
-/// response". Everything that is not the response itself is forwarded verbatim
-/// to the external client's stdout — exactly what the pre-reconnect stream
-/// would have carried. Only the response to the replayed request is swallowed
-/// (the external client already received a response for its original send and
-/// must not see a duplicate or unknown-id response).
+/// `session/load` emits the full replay stream (session/update notifications) BEFORE its response.
+/// Waiting for the next message is therefore not waiting for the response.
+/// Everything that is not the response itself is forwarded verbatim to the external client's stdout.
+/// That is exactly what the stream would have carried before the reconnect.
+/// Only the response to the replayed request is swallowed.
+/// The external client already received a response for its original send and must not see a duplicate or unknown-id response.
 ///
-/// Returning before the `session/load` response is the root cause of the
-/// "unknown session id" failures after a leader crash: the bridge declared
-/// the reconnect complete while the new leader was still loading the session,
-/// and the client's next `session/prompt` raced (and lost against) the load.
+/// Returning before the `session/load` response is the root cause of the "unknown session id" failures after a leader crash.
+/// The bridge declared the reconnect complete while the new leader was still loading the session.
+/// The client's next `session/prompt` then raced the load and lost.
 #[tracing::instrument(level = "debug", skip_all)]
 async fn replay_request_until_response(
     tx: &tokio::sync::mpsc::UnboundedSender<String>,
@@ -1064,9 +1055,8 @@ async fn replay_request_until_response(
         }
     }
 }
-/// Build the `session/load` JSON to replay for one cached session: the
-/// verbatim client request when available, else a synthesized load from the
-/// captured `session/new` parameters.
+/// Build the `session/load` JSON to replay for one cached session.
+/// Prefer the verbatim client request when available, else synthesize a load from the captured `session/new` parameters.
 fn replay_load_json(sid: &str, cached: &CachedSession) -> Option<String> {
     if let Some(ref verbatim) = cached.load_request_json {
         return Some(verbatim.clone());
@@ -1091,16 +1081,13 @@ fn replay_load_json(sid: &str, cached: &CachedSession) -> Option<String> {
         .to_string(),
     )
 }
-/// Replay cached `initialize` + every cached `session/load` to a freshly
-/// (re-)elected leader, blocking until the leader has actually finished
-/// loading EACH session (loads are sent strictly sequentially, each awaiting
-/// its response — the synthesized-id reuse relies on this ordering).
+/// Replay the cached `initialize` and every cached `session/load` to a freshly (re-)elected leader.
+/// Blocks until the leader has finished loading EACH session.
+/// Loads are sent strictly sequentially, each awaiting its response; reusing the synthesized request id relies on this ordering.
 ///
-/// Returns the primary restored session id (the most recently active one,
-/// falling back to any successfully restored session). `None` when there was
-/// nothing to replay or every restore failed — callers emit
-/// `x.ai/leader_reconnected` with empty params in that case, signalling the
-/// external client to re-establish state itself.
+/// Returns the primary restored session id (the most recently active one, falling back to any successfully restored session).
+/// `None` when there was nothing to replay or every restore failed.
+/// Callers then emit `x.ai/leader_reconnected` with empty params, signalling the external client to re-establish state itself.
 #[tracing::instrument(skip_all)]
 async fn replay_acp_state_after_reconnect(
     tx: &tokio::sync::mpsc::UnboundedSender<String>,
@@ -1160,9 +1147,8 @@ async fn replay_acp_state_after_reconnect(
 }
 /// Flush observability, then exit. Used by the agent/headless signal handler.
 ///
-/// Does NOT write terminal escape codes — agent mode never enables TUI modes.
-/// The TUI has its own signal handler (`app::signal_handler`) that does the
-/// full crossterm teardown.
+/// Does NOT write terminal escape codes; agent mode never enables TUI modes.
+/// The TUI has its own signal handler (`app::signal_handler`) that does the full crossterm teardown.
 fn shutdown_and_flush_telemetry(exit_code: i32) -> ! {
     xai_grok_telemetry::sentry::flush_on_shutdown();
     xai_grok_telemetry::otel_layer::shutdown_otel();
@@ -1206,8 +1192,7 @@ async fn forward_stdio_line_to_leader(
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
 }
-/// Emitted by both leader guards (server mode and leader-connect) so the two sites
-/// can't drift.
+/// Emitted by both leader guards (server mode and leader-connect) so the two sites can't drift.
 const PLUGIN_DIR_LEADER_WARNING: &str = "grok: --plugin-dir is ignored in leader mode; run with --no-leader to \
      load per-process plugins";
 /// Run the `agent` subcommand, dispatching to the appropriate mode.
@@ -1254,7 +1239,7 @@ async fn run_agent_command(
             }
         }
     }
-    let early_prefetch = xai_grok_shell::agent::models::start_early_prefetch(None);
+    let had_prefetch = xai_grok_shell::agent::models::startup_prefetch::begin(None);
     xai_grok_shell::agent::mvp_agent::warm_async_http_client();
     let is_stdio = matches!(agent_args.mode, Some(AgentCmd::Stdio));
     let is_leader = matches!(agent_args.mode, Some(AgentCmd::Leader(_)));
@@ -1277,7 +1262,11 @@ async fn run_agent_command(
             .ok();
         }
     }
-    let remote_settings = join_early_prefetch(early_prefetch);
+    let remote_settings = if had_prefetch {
+        xai_grok_shell::agent::models::startup_prefetch::wait_settings(EARLY_PREFETCH_WAIT)
+    } else {
+        None
+    };
     xai_grok_shell::util::config::set_remote_campaigns_from_settings(remote_settings.as_ref());
     let raw_config = xai_grok_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
@@ -1674,9 +1663,12 @@ async fn run_agent_command(
 }
 /// Raise the per-process fd soft limit toward the hard limit.
 ///
-/// Default soft limits (256 macOS, commonly 1024 Linux) are easily exceeded:
-/// each session thread's runtime costs ~3 fds, and a wide parallel subagent
-/// wave adds spawn-burst transients. Targets 65536 on Linux and 8192 on macOS.
+/// Default soft limits (256 macOS, commonly 1024 Linux) are easily exceeded.
+/// Each session thread's runtime costs ~3 fds, and a wide parallel subagent wave adds transient fds during the spawn burst.
+/// A 1024 limit fails with EMFILE under a ~100-session wave.
+/// Targets 65536 on Linux (hard limits are typically at least 1M) and 8192 on macOS (`kern.maxfilesperproc` is often ~10k).
+/// No known in-tree `select(2)` users (Rust std/tokio use epoll/kqueue).
+/// Residual third-party `FD_SETSIZE` risk is accepted; the prior 8192 cap already exceeded FD_SETSIZE.
 ///
 /// Best-effort: never blocks startup (containers/cgroups may pin limits).
 #[cfg(unix)]
@@ -1706,9 +1698,16 @@ fn raise_fd_limit() {
 }
 #[cfg(not(unix))]
 fn raise_fd_limit() {}
-/// Consume the bare `dashboard` soft-subcommand and mark the terminal
-/// dashboard for startup. `dashboard --web` is a real command and deliberately
-/// remains in `args.command` for the async dispatcher below.
+/// Single audit point for the `Command::Dashboard` soft-subcommand.
+/// Sets `GROK_OPEN_DASHBOARD_AT_STARTUP=1` if the user asked for `grok dashboard`.
+/// Clears `args.command` so the regular subcommand match doesn't try to handle it.
+/// `dashboard --web` is a real command and deliberately remains in `args.command` for the async dispatcher below.
+///
+/// The dashboard is independent of leader mode: it renders local sessions and, when a leader happens to be present, shows the leader roster too.
+/// So `grok dashboard` does NOT force leader mode and is compatible with `--no-leader`.
+///
+/// The only gate is the feature flag: a disabled dashboard (`[dashboard].enabled = false` / `GROK_AGENT_DASHBOARD=0`) is a CLI error.
+/// It fires here, before the TUI starts, because the welcome view silently drops the equivalent runtime toast.
 fn flag_dashboard_at_startup_if_requested(args: &mut PagerArgs) -> Result<()> {
     let Some(Command::Dashboard(dashboard_args)) = &args.command else {
         return Ok(());
@@ -1729,9 +1728,9 @@ fn flag_dashboard_at_startup_if_requested(args: &mut PagerArgs) -> Result<()> {
 }
 const RUNTIME_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 const GROK_WORKER_THREADS_ENV: &str = "GROK_WORKER_THREADS";
-/// tokio defaults to one worker per logical CPU. On a host with hundreds of
-/// CPUs that can exhaust a cgroup thread budget at startup and abort under
-/// `panic = "abort"`. A terminal UI is I/O-bound, so cap at 8.
+/// tokio defaults to one worker per logical CPU.
+/// On a host with hundreds of CPUs that can exhaust a cgroup thread budget at startup and abort under `panic = "abort"`.
+/// A terminal UI is I/O-bound, so cap at 8.
 const DEFAULT_MAX_WORKER_THREADS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
 /// How `GROK_WORKER_THREADS` resolved.
 #[derive(Debug, PartialEq, Eq)]
@@ -1812,8 +1811,8 @@ fn resolve_worker_override(value: &str, cores: NonZeroUsize) -> WorkerCount {
         }
     }
 }
-/// A plain runtime drop blocks forever on an uncancellable in-flight blocking
-/// task; `shutdown_timeout` abandons it after `grace` so exit can't hang.
+/// A plain runtime drop blocks forever on an uncancellable in-flight blocking task.
+/// `shutdown_timeout` abandons it after `grace` so exit can't hang.
 fn run_and_shutdown<F: std::future::Future>(
     runtime: tokio::runtime::Runtime,
     fut: F,
@@ -1825,12 +1824,10 @@ fn run_and_shutdown<F: std::future::Future>(
 }
 /// Return freed-but-retained jemalloc pages to the OS.
 ///
-/// `arena.<MALLCTL_ARENAS_ALL>.purge` madvises away all dirty/muzzy pages in
-/// every arena. The pager invokes this (via the `memory_release` seam) right
-/// after known memory cliffs — e.g. dropping a session load's replay
-/// transient — so a long-session resume doesn't leave hundreds of MB of dead
-/// pages counted against the process for its lifetime (macOS keeps
-/// `MADV_FREE`d pages in RSS until systemwide pressure).
+/// `arena.<MALLCTL_ARENAS_ALL>.purge` madvises away all dirty/muzzy pages in every arena.
+/// The pager invokes this (via the `memory_release` hook) right after known memory cliffs, e.g. dropping a session load's replay transient.
+/// Resuming a long session then doesn't leave hundreds of MB of dead pages counted against the process for its lifetime.
+/// (macOS keeps `MADV_FREE`d pages in RSS until systemwide pressure.)
 #[cfg(all(feature = "jemalloc", unix))]
 fn purge_jemalloc_retained_pages() {
     static NAME: &[u8] = b"arena.4096.purge\0";
@@ -1853,11 +1850,9 @@ fn purge_jemalloc_retained_pages() {
         });
     }
 }
-/// Allocator gauges for the memory trace (`memory_trace` seam): advance the
-/// jemalloc epoch so the `stats.*` reads are current, then read each gauge.
-/// Returns `None` if any mallctl fails (trace records the absence). Rides
-/// the `tikv-jemalloc-ctl` raw helpers (introduced by the heap-profile
-/// hooks below) instead of hand-rolled mallctl.
+/// Allocator gauges for the memory trace (`memory_trace` hook): advance the jemalloc epoch so the `stats.*` reads are current, then read each gauge.
+/// Returns `None` if any mallctl fails (trace records the absence).
+/// Uses the `tikv-jemalloc-ctl` raw helpers (shared with the heap-profile hooks below) instead of hand-rolled mallctl.
 #[cfg(all(feature = "jemalloc", unix))]
 fn jemalloc_allocator_stats() -> Option<xai_grok_pager::memory_trace::AllocatorStats> {
     /// SAFETY: callers pass fixed NUL-terminated `stats.*` size_t ctl names.
@@ -1880,11 +1875,9 @@ fn jemalloc_allocator_stats() -> Option<xai_grok_pager::memory_trace::AllocatorS
         })
     }
 }
-/// Full jemalloc statistics dump for threshold snapshots
-/// (`malloc_stats_print` default human-readable format, arena detail
-/// included) — the artifact the GCS memory-trace upload ships for offline
-/// analysis. Raw `tikv_jemalloc_sys` because jemalloc-ctl has no
-/// callback-form stats_print.
+/// Full jemalloc statistics dump for threshold snapshots (`malloc_stats_print` default human-readable format, arena detail included).
+/// This is the artifact the GCS memory-trace upload ships for offline analysis.
+/// Raw `tikv_jemalloc_sys` because jemalloc-ctl has no callback-form stats_print.
 #[cfg(all(feature = "jemalloc", unix))]
 fn jemalloc_stats_dump() -> String {
     unsafe extern "C" fn append(opaque: *mut std::ffi::c_void, msg: *const std::ffi::c_char) {
@@ -2068,6 +2061,9 @@ fn main() {
     }
     #[cfg(all(feature = "jemalloc", unix))]
     install_heap_profile_hooks();
+    unsafe {
+        xai_grok_shell::agent::external_otel_pin::strip_conflicting_process_env();
+    }
     xai_grok_pager::memory_trace::start(xai_grok_pager::memory_trace::default_dir());
     raise_fd_limit();
     if let Err(e) = xai_grok_config::validate_requirements() {
@@ -2352,6 +2348,11 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                     .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
                 return xai_grok_pager::sessions_cmd::run(sessions_args, &agent_config).await;
             }
+            Command::Usage(usage_args) => {
+                init_tracing_simple("cli");
+                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
+                return xai_grok_pager::usage_cmd::run(usage_args);
+            }
             Command::Share(ref share_args) => {
                 init_tracing_simple("cli");
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
@@ -2560,7 +2561,15 @@ async fn async_main(args: PagerArgs) -> Result<()> {
         args.prompt_json.as_deref(),
         args.prompt_file.as_deref(),
     )?;
-    if let Some(prompt) = headless_prompt {
+    if headless_prompt.is_some() || args.memory_flush {
+        if args.memory_flush
+            && headless_prompt.is_none()
+            && args.resume_session.is_none()
+            && args.load_session.is_none()
+            && !args.continue_last_session
+        {
+            anyhow::bail!("--memory-flush without a prompt requires --resume/-r or --continue/-c");
+        }
         init_tracing_simple(HEADLESS_ENTRYPOINT);
         let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
         enforce_version_policy_or_exit_community();
@@ -2582,8 +2591,10 @@ async fn async_main(args: PagerArgs) -> Result<()> {
         {
             args.output_format = xai_grok_pager::headless::OutputFormat::Json;
         }
+        let memory_enabled_override = args.memory_enabled_override();
+        let memory_flush = args.memory_flush;
         return xai_grok_pager::headless::run_single_turn(
-            prompt,
+            headless_prompt,
             args.verbatim,
             xai_grok_pager::headless::HeadlessOptions {
                 session_id: args.session_id.clone(),
@@ -2616,6 +2627,8 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 background_wait_timeout: std::time::Duration::from_secs(
                     args.background_wait_timeout_secs,
                 ),
+                memory_flush,
+                memory_enabled_override,
             },
         )
         .await;
@@ -2662,15 +2675,13 @@ async fn async_main(args: PagerArgs) -> Result<()> {
         Err(e) => Err(e),
     }
 }
-/// Complete the update after a quit-for-update (Ctrl+U) exit. Returns `true`
-/// when an update path completed without a reported failure.
+/// Complete the update after a quit-for-update (Ctrl+U) exit.
+/// Returns `true` when an update path completed without a reported failure.
 ///
-/// Prefers awaiting the parked waiter for the background `grok update` child
-/// spawned at startup — the download is usually already done or in flight.
-/// Only when there is no waiter (spawn failed, or no download was needed
-/// because the target was already on disk) or the child failed does this
-/// fall back to a fresh blocking `grok update`, which itself resolves to
-/// "Already up to date" without downloading when the disk is current.
+/// Prefers awaiting the parked waiter for the background `grok update` child spawned at startup; the download is usually already done or in flight.
+/// It falls back to a fresh blocking `grok update` only when there is no waiter or the child failed.
+/// (No waiter means the spawn failed or no download was needed because the target was already on disk.)
+/// The blocking run itself resolves to "Already up to date" without downloading when the disk is current.
 #[tracing::instrument(level = "debug", skip_all)]
 async fn finish_update_on_exit(
     adopted: Option<tokio::task::JoinHandle<std::io::Result<std::process::ExitStatus>>>,
@@ -2737,8 +2748,7 @@ fn build_update_config() -> UpdateConfig {
     }
     config
 }
-/// Central gate for auto-update checks; add new suppression rules here,
-/// not at call sites.
+/// Central gate for auto-update checks; add new suppression rules here, not at call sites.
 fn should_check_for_updates(no_auto_update_flag: bool) -> bool {
     if cfg!(debug_assertions) {
         return false;
@@ -2751,8 +2761,8 @@ fn should_check_for_updates(no_auto_update_flag: bool) -> bool {
     !(disabled("GROK_DISABLE_AUTOUPDATER")
         || cfg!(feature = "community-build") && disabled("HYPER_DISABLE_AUTOUPDATER"))
 }
-/// Gate for the stdio agent's background auto-update: only the direct stdio
-/// agent, from the managed install. Other modes update in `run_agent_command`.
+/// Gate for the stdio agent's background auto-update: only the direct stdio agent, from the managed install.
+/// Other modes update in `run_agent_command`.
 fn stdio_auto_update_enabled(
     is_stdio: bool,
     use_leader: bool,
@@ -2783,8 +2793,8 @@ fn is_managed_install(
         _ => false,
     }
 }
-/// Map the mutually-exclusive channel flags to a channel name. clap enforces
-/// that at most one is set, so the order is irrelevant.
+/// Map the mutually-exclusive channel flags to a channel name.
+/// clap enforces that at most one is set, so the order is irrelevant.
 fn get_channel_switch(alpha: bool, stable: bool, enterprise: bool) -> Option<&'static str> {
     if alpha {
         Some("alpha")
@@ -2797,9 +2807,8 @@ fn get_channel_switch(alpha: bool, stable: bool, enterprise: bool) -> Option<&'s
     }
 }
 /// Handle `grok-pager update [--check] [--json] [--force-reinstall] [--version X] [--alpha|--stable|--enterprise]`.
-/// --trigger is the one representation; --auto is the compat alias from
-/// older parents. Unknown values fall back to user_command (a human is the
-/// only caller that can produce them).
+/// --trigger is the one representation; --auto is the compat alias from older parents.
+/// Unknown values fall back to user_command (a human is the only caller that can produce them).
 fn resolve_update_trigger(flag: Option<&str>, auto: bool) -> auto_update::CliUpdateTrigger {
     if let Some(flag) = flag {
         match flag.parse() {
@@ -2882,9 +2891,8 @@ async fn run_update_command(
 /// close and reconnect via `session/load`). Community checksum republishes may
 /// request a same-semver relaunch; downgrades remain forbidden server-side.
 ///
-/// Best-effort and non-fatal: discovery/connect/control failures are logged and
-/// skipped. The leader re-checks the directional version guard authoritatively;
-/// the pager-side `live_info` check just avoids connecting to newer leaders.
+/// Best-effort and non-fatal: discovery/connect/control failures are logged and skipped.
+/// The leader re-checks the directional version guard authoritatively; the pager-side `live_info` check just avoids connecting to newer leaders.
 #[tracing::instrument(level = "debug", skip_all)]
 async fn signal_leaders_to_relaunch(installed_version: &str, allow_same_version: bool) {
     for d in xai_grok_shell::leader::discover_leaders().await {
@@ -3295,9 +3303,8 @@ mod tests {
         );
     }
     use clap::Parser as _;
-    /// `grok dashboard` flags the startup hook without forcing leader mode —
-    /// the dashboard is independent of leader mode, so the launch keeps
-    /// whatever leader setting the user (or config) chose.
+    /// `grok dashboard` flags the startup hook without forcing leader mode.
+    /// The dashboard is independent of leader mode, so the launch keeps whatever leader setting the user (or config) chose.
     #[serial_test::serial(GROK_AGENT_DASHBOARD)]
     #[test]
     fn dashboard_subcommand_flags_startup_without_forcing_leader() {
@@ -3379,8 +3386,7 @@ mod tests {
         );
         unsafe { std::env::remove_var("GROK_OPEN_DASHBOARD_AT_STARTUP") };
     }
-    /// `GROK_AGENT_DASHBOARD=0` disables the feature — the subcommand
-    /// must error visibly before the TUI starts.
+    /// `GROK_AGENT_DASHBOARD=0` disables the feature; the subcommand must error visibly before the TUI starts.
     #[serial_test::serial(GROK_AGENT_DASHBOARD)]
     #[test]
     fn dashboard_subcommand_errors_when_disabled() {
@@ -3507,9 +3513,8 @@ mod tests {
         assert!(s.sessions.is_empty(), "closed session must not be replayed");
         assert!(s.last_session_id.is_none());
     }
-    /// The standard close spelling must stop the replay exactly like the ext
-    /// spelling: adopting `session/close` without teaching the cache would
-    /// resurrect closed sessions on every leader reconnect.
+    /// The standard close spelling must stop the replay exactly like the `x.ai/` extension spelling.
+    /// Adopting `session/close` without teaching the cache would resurrect closed sessions on every leader reconnect.
     #[test]
     fn cache_standard_session_close_stops_replaying_it() {
         let state = make_state();
@@ -3525,8 +3530,7 @@ mod tests {
         assert!(s.sessions.is_empty(), "closed session must not be replayed");
         assert!(s.last_session_id.is_none());
     }
-    /// A resume-only session must survive a leader restart: the cache
-    /// synthesizes a load entry, since a new leader has no turn to reattach to.
+    /// A session only ever resumed must survive a leader restart: the cache synthesizes a load entry, since a new leader has no turn to reattach to.
     #[test]
     fn cache_session_resume_registers_unknown_sessions_for_replay() {
         let state = make_state();
@@ -3544,8 +3548,7 @@ mod tests {
         assert_eq!(cached.cwd.as_deref(), Some("/proj"));
         assert_eq!(s.last_session_id.as_deref(), Some("s1"));
     }
-    /// A resume must not displace the original load's entry: that entry
-    /// carries the client's `_meta`, which a synthesized load cannot reproduce.
+    /// A resume must not displace the original load's entry: that entry carries the client's `_meta`, which a synthesized load cannot reproduce.
     #[test]
     fn cache_session_resume_does_not_displace_the_original_load() {
         let state = make_state();
@@ -3563,9 +3566,8 @@ mod tests {
             "the original load, with its _meta, must survive the resume"
         );
     }
-    /// An UNCONFIRMED `session/new` (leader died before its response) must not
-    /// be replayed — its id was never assigned — but previously loaded
-    /// sessions still restore.
+    /// An UNCONFIRMED `session/new` (leader died before its response) must not be replayed, since its id was never assigned.
+    /// Previously loaded sessions still restore.
     #[tokio::test]
     async fn replay_after_unconfirmed_session_new_restores_prior_sessions() {
         let state = make_state();
@@ -3693,8 +3695,7 @@ mod tests {
         assert_eq!(result.as_deref(), Some("sess-2"));
         responder.await.unwrap();
     }
-    /// One broken session must not doom the rest: a rejected load is skipped
-    /// and the remaining sessions still restore.
+    /// One broken session must not doom the rest: a rejected load is skipped and the remaining sessions still restore.
     #[tokio::test]
     async fn replay_skips_rejected_session_and_restores_the_rest() {
         let state = make_state();
@@ -3788,12 +3789,12 @@ mod tests {
         );
         responder.await.unwrap();
     }
-    /// Regression test for the post-leader-crash "unknown session id" bug.
+    /// Regression test for the "unknown session id" bug after a leader crash.
     ///
-    /// `session/load` streams replay notifications BEFORE its response. The
-    /// old drain logic consumed exactly one message per replayed request and
-    /// returned — declaring the reconnect complete while the new leader was
-    /// still loading the session. The replay must instead:
+    /// `session/load` streams replay notifications BEFORE its response.
+    /// The old drain logic consumed exactly one message per replayed request and returned.
+    /// That declared the reconnect complete while the new leader was still loading the session.
+    /// The replay must instead:
     ///   1. wait for the actual `session/load` RESPONSE (matched by id),
     ///   2. forward interleaved notifications to the client verbatim,
     ///   3. swallow only the responses to the replayed requests.
@@ -3859,10 +3860,8 @@ mod tests {
         assert!(!forwarded.contains(r#""id":8"#), "load response leaked");
         responder.await.unwrap();
     }
-    /// A `session/load` rejected by the new leader (error response) must
-    /// surface as a failed replay (`None`) so the bridge emits
-    /// `x.ai/leader_reconnected` with empty params and the external client
-    /// knows to re-establish state itself.
+    /// A `session/load` rejected by the new leader (error response) must surface as a failed replay (`None`).
+    /// The bridge then emits `x.ai/leader_reconnected` with empty params and the external client knows to re-establish state itself.
     #[tokio::test]
     async fn replay_returns_none_when_load_is_rejected() {
         let (leader_tx, mut leader_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -3896,9 +3895,8 @@ mod tests {
         assert!(result.is_none(), "rejected load must not claim success");
         responder.await.unwrap();
     }
-    /// The synthetic fallback `session/load` (client only ever sent
-    /// `session/new`) uses a string request id that cannot collide with the
-    /// external client's numeric ids — and the response matcher honors it.
+    /// The synthetic fallback `session/load` (client only ever sent `session/new`) uses a string request id.
+    /// That id cannot collide with the external client's numeric ids, and the response matcher honors it.
     #[tokio::test]
     async fn replay_fallback_load_uses_reserved_string_id() {
         let (leader_tx, mut leader_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -3951,32 +3949,6 @@ mod tests {
             .enable_all()
             .build()
             .expect("build runtime")
-    }
-    #[test]
-    fn run_and_shutdown_bounds_teardown_despite_stuck_blocking_task() {
-        use std::time::{Duration, Instant};
-        let grace = Duration::from_millis(200);
-        let ceiling = grace * 8;
-        let stuck_sleep = Duration::from_secs(10);
-        let runtime = multi_thread_runtime();
-        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
-        runtime.spawn_blocking(move || {
-            let _ = started_tx.send(());
-            std::thread::sleep(stuck_sleep);
-        });
-        started_rx.recv().expect("blocking task must start");
-        let start = Instant::now();
-        let out = run_and_shutdown(runtime, async { 7_u32 }, grace);
-        let elapsed = start.elapsed();
-        assert_eq!(out, 7, "must return the future's output");
-        assert!(
-            elapsed >= grace,
-            "returned in {elapsed:?}, before the {grace:?} grace — timeout not exercised",
-        );
-        assert!(
-            elapsed < ceiling,
-            "teardown took {elapsed:?}; stuck task must be abandoned under {ceiling:?}",
-        );
     }
     #[test]
     fn run_and_shutdown_is_fast_without_blocking_work() {

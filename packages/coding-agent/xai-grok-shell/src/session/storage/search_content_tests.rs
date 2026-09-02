@@ -73,8 +73,7 @@ fn test_single_pass_extracts_tool_metadata() {
 
 #[test]
 fn test_single_pass_extracts_text_with_json_escapes() {
-    // Escaped JSON strings cannot be borrowed as &str; a regression to
-    // borrowed peek fields silently drops these messages from the index.
+    // Escaped JSON strings cannot be borrowed as &str; a regression to borrowed peek fields silently drops these messages from the index
     let lines = vec![
         acp_update(
             r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"fix the bug\nin main.rs"}}"#,
@@ -156,8 +155,6 @@ fn test_single_pass_handles_rewind() {
 
 #[test]
 fn test_single_pass_thought_chunk_does_not_flush_assistant() {
-    // agent_thought_chunk interleaved between agent_message_chunk should
-    // NOT break the assistant text into separate entries.
     let lines = vec![
         acp_update(
             r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"}}"#,
@@ -175,7 +172,6 @@ fn test_single_pass_thought_chunk_does_not_flush_assistant() {
     ];
     let f = write_updates_jsonl(&lines);
     let (content, _bytes) = collect_all_indexable_content_single_pass(f.path()).unwrap();
-    // "hello" and "world" should be in the same assistant turn (not split)
     assert!(
         content.contains("hello world"),
         "thought chunk should not flush assistant text: got {content:?}"
@@ -200,8 +196,7 @@ fn test_single_pass_nonexistent_file() {
 
 #[test]
 fn test_single_pass_assistant_text_cap() {
-    // Two 60K chunks in the same turn — the 100K assistant cap should
-    // truncate the second chunk.  Total assistant text ≤ 100K.
+    // Two 60K chunks in the same turn: the 100K assistant cap should truncate the second chunk
     let big_text = "x".repeat(60_000);
     let lines = vec![
         acp_update(&format!(
@@ -217,18 +212,16 @@ fn test_single_pass_assistant_text_cap() {
     ];
     let f = write_updates_jsonl(&lines);
     let (content, _bytes) = collect_all_indexable_content_single_pass(f.path()).unwrap();
-    // Count 'x' chars — the assistant section is the only source of 'x'
+    // The assistant section is the only source of 'x'
     let x_count = content.chars().filter(|&c| c == 'x').count();
     assert!(
         x_count <= 100_000,
         "assistant text should be capped at 100K chars, got {x_count}"
     );
-    // Must have truncated the second chunk (60K + 60K > 100K)
     assert!(
         x_count < 120_001,
         "without the cap this would be 120K, got {x_count}"
     );
-    // Verify we actually collected substantial text (not accidentally empty)
     assert!(
         x_count > 50_000,
         "should have collected at least the first 60K chunk, got {x_count}"
@@ -237,7 +230,7 @@ fn test_single_pass_assistant_text_cap() {
 
 #[test]
 fn test_single_pass_tool_call_count_cap() {
-    // Generate 250 tool calls — only the first 200 should be indexed
+    // Generate 250 tool calls; only the first 200 should be indexed
     let lines: Vec<String> = (0..250)
         .map(|i| {
             acp_update(&format!(
@@ -247,7 +240,6 @@ fn test_single_pass_tool_call_count_cap() {
         .collect();
     let f = write_updates_jsonl(&lines);
     let (content, _bytes) = collect_all_indexable_content_single_pass(f.path()).unwrap();
-    // tool_200 through tool_249 should NOT appear
     assert!(
         !content.contains("tool_200"),
         "tool calls beyond 200 should be ignored"
@@ -256,7 +248,6 @@ fn test_single_pass_tool_call_count_cap() {
         !content.contains("tool_249"),
         "tool calls beyond 200 should be ignored"
     );
-    // tool_0 and tool_199 should appear
     assert!(content.contains("tool_0"), "first tool should be indexed");
     assert!(
         content.contains("tool_199"),
@@ -277,13 +268,11 @@ fn test_single_pass_tool_chars_cap() {
         .collect();
     let f = write_updates_jsonl(&lines);
     let (content, _bytes) = collect_all_indexable_content_single_pass(f.path()).unwrap();
-    // 10 * 20K = 200K, but cap is 100K, so 'a' count should be ≤ 100K
     let a_count = content.chars().filter(|&c| c == 'a').count();
     assert!(
         a_count <= 100_000,
         "tool metadata should be capped at 100K chars, got {a_count}"
     );
-    // Should have at least some tool metadata
     assert!(
         a_count > 19_000,
         "should have collected at least one tool title, got {a_count}"

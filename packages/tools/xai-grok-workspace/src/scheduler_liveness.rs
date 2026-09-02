@@ -1,5 +1,5 @@
-//! Keeps the sandbox awake while a `/loop` is alive: polls each session's scheduler and
-//! feeds [`crate::activity::ActivityTracker::record_scheduler_poll`].
+//! Keeps the sandbox awake while a `/loop` is alive.
+//! It polls each session's scheduler and feeds [`crate::activity::ActivityTracker::record_scheduler_poll`].
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -17,7 +17,6 @@ const POLL_INTERVAL: Duration = Duration::from_secs(30);
 /// How long one scheduler gets to answer a `List` before the poll moves on.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// One scheduler's answer to a poll.
 #[derive(Debug, PartialEq)]
 enum SchedulerAnswer {
     /// The scheduler replied; `Some(ms)` is its earliest coming run, `None` means nothing is left to run.
@@ -37,8 +36,9 @@ enum PollUpdate {
     KeepLast,
 }
 
-/// Start the poll task, once per workspace. Reconnects call this again and return early, and a
-/// zero keep-awake window turns the whole subsystem off. The task exits when the workspace drops.
+/// Start the poll task, once per workspace.
+/// Reconnects call this again and return early, and a zero keep-awake window turns the whole subsystem off.
+/// The task exits when the workspace drops.
 pub(crate) fn spawn_scheduler_liveness_poll(shared: &Arc<WorkspaceShared>) {
     if shared.status_config.scheduled_task_keep_awake.is_zero() {
         return;
@@ -81,8 +81,8 @@ async fn poll_schedulers_once(shared: &Arc<WorkspaceShared>) -> PollUpdate {
     poll_update(answers)
 }
 
-/// Combine per-scheduler answers. A found run always records; silence with no found run keeps the last result,
-/// so a scheduler that is busy firing cannot lose the hold to one slow reply.
+/// A found run always records.
+/// Silence with no found run keeps the last result, so a scheduler that is busy firing cannot lose the hold to one slow reply.
 fn poll_update(answers: impl IntoIterator<Item = SchedulerAnswer>) -> PollUpdate {
     let mut earliest: Option<u64> = None;
     let mut unanswered = false;
@@ -245,7 +245,6 @@ mod tests {
             )
             .expect("create session");
 
-        // Alive with no tasks: the poll records a clear.
         assert_eq!(
             poll_schedulers_once(&handle.shared).await,
             PollUpdate::Record(None),

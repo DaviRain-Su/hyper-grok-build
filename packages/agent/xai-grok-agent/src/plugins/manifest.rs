@@ -1,25 +1,20 @@
-//! Plugin manifest parsing and validation.
-//!
 //! The canonical manifest location is `plugin.json` at the plugin root.
 //! Fallback locations (checked in order when the root manifest is absent):
 //! 1. `.grok-plugin/plugin.json`
 //! 2. `.claude-plugin/plugin.json`
 //!
-//! If no manifest is found at all, the plugin can still function via
-//! convention-based discovery (skills/, agents/, .mcp.json, hooks/hooks.json),
-//! with the plugin name derived from the directory name.
+//! If no manifest is found, the plugin can still function via convention-based discovery (skills/, agents/, .mcp.json, hooks/hooks.json).
+//! The plugin name is then derived from the directory name.
 //!
-//! The parser is forward-compatible: unknown fields are silently ignored
-//! so that manifests authored for newer upstream versions still load.
+//! The parser is forward-compatible: unknown fields are silently ignored so that manifests authored for newer upstream versions still load.
 
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-/// Maximum length of a plugin name (kebab-case identifier).
 const MAX_PLUGIN_NAME_LEN: usize = 64;
 
-/// Regex pattern for valid plugin names: lowercase alphanumeric + hyphens.
+/// Regex pattern for valid plugin names: lowercase alphanumeric and hyphens.
 fn is_valid_plugin_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= MAX_PLUGIN_NAME_LEN
@@ -30,7 +25,6 @@ fn is_valid_plugin_name(name: &str) -> bool {
         && !name.ends_with('-')
 }
 
-/// Author metadata from a plugin manifest.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Author {
     #[serde(default)]
@@ -41,7 +35,6 @@ pub struct Author {
     pub url: Option<String>,
 }
 
-/// A path reference that can be either a single path or multiple paths.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum PathOrPaths {
@@ -50,10 +43,7 @@ pub enum PathOrPaths {
 }
 
 impl PathOrPaths {
-    /// Resolve all contained paths relative to a plugin root.
-    ///
-    /// Paths that escape the plugin root (via `..` components) are rejected
-    /// with a warning and excluded from the result.
+    /// Paths that escape the plugin root (via `..` components) are rejected with a warning and excluded from the result.
     pub fn resolve(&self, plugin_root: &Path) -> Vec<PathBuf> {
         let paths = match self {
             PathOrPaths::Single(p) => vec![plugin_root.join(p)],
@@ -77,15 +67,13 @@ impl PathOrPaths {
     }
 }
 
-/// Check whether a resolved path stays within the plugin root.
-///
 /// Canonicalizes both sides (resolving symlinks and `..`) before the prefix check.
 fn is_path_contained(resolved: &Path, plugin_root: &Path) -> bool {
     let canonical_root =
         dunce::canonicalize(plugin_root).unwrap_or_else(|_| plugin_root.to_path_buf());
     let canonical_resolved =
         dunce::canonicalize(resolved).unwrap_or_else(|_| resolved.to_path_buf());
-    // Fail-closed >MAX_PATH caveat: see workspace clippy.toml.
+    // dunce keeps the verbatim form for over-260-char paths, so this containment check fails closed; see crates/codegen/clippy.toml
     canonical_resolved.starts_with(&canonical_root)
 }
 
@@ -121,7 +109,6 @@ fn resolve_component_path(
     }
 }
 
-/// A value that can be either a file path (string) or an inline JSON object.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum PathOrInline {
@@ -129,10 +116,7 @@ pub enum PathOrInline {
     Inline(serde_json::Value),
 }
 
-/// Parsed plugin manifest from `plugin.json`.
-///
-/// Forward-compatible: unknown fields are silently ignored via
-/// `#[serde(deny_unknown_fields)]` NOT being set.
+/// Forward-compatible: unknown fields are silently ignored because `#[serde(deny_unknown_fields)]` is not set.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginManifest {
@@ -174,7 +158,6 @@ pub struct PluginManifest {
 }
 
 impl PluginManifest {
-    /// Validate the parsed manifest.
     pub fn validate(&self) -> Result<(), ManifestError> {
         if !is_valid_plugin_name(&self.name) {
             return Err(ManifestError::InvalidName {
@@ -200,7 +183,6 @@ impl PluginManifest {
         resolve_dirs(&self.agents, plugin_root, "agents")
     }
 
-    /// Resolve the hooks path from the manifest.
     /// Returns the manifest-specified path or the default `hooks/hooks.json`.
     pub fn hooks_path(&self, plugin_root: &Path) -> Option<PathBuf> {
         resolve_component_path(&self.hooks, plugin_root, "hooks/hooks.json", "hooks")
@@ -214,11 +196,7 @@ impl PluginManifest {
         resolve_component_path(&self.mcp_servers, plugin_root, ".mcp.json", "MCP config")
     }
 
-    /// Get inline hooks JSON value, if the manifest uses inline hooks.
-    ///
-    /// Inline hooks are fully supported — the runtime parses and executes them
-    /// via `parse_plugin_hooks_from_value()`. This accessor is used during
-    /// `LoadedPlugin` construction and by the hooks adapter.
+    /// The runtime parses and executes inline hooks via `parse_plugin_hooks_from_value()`.
     pub fn inline_hooks(&self) -> Option<&serde_json::Value> {
         match &self.hooks {
             Some(PathOrInline::Inline(v)) => Some(v),
@@ -226,11 +204,7 @@ impl PluginManifest {
         }
     }
 
-    /// Get inline MCP servers JSON value, if the manifest uses inline MCP.
-    ///
-    /// Inline MCP servers are fully supported — the runtime parses and starts
-    /// them via `load_plugin_mcp_servers_from_value()`. This accessor is used
-    /// during `LoadedPlugin` construction and by the MCP merger.
+    /// The runtime parses and starts inline MCP servers via `load_plugin_mcp_servers_from_value()`.
     pub fn inline_mcp_servers(&self) -> Option<&serde_json::Value> {
         match &self.mcp_servers {
             Some(PathOrInline::Inline(v)) => Some(v),
@@ -315,8 +289,7 @@ impl PluginManifest {
 
     /// Log informational messages about manifest features.
     ///
-    /// Called during discovery. Inline hooks and MCP servers are now
-    /// fully supported; this method logs when they are detected.
+    /// Called during discovery; logs when inline hooks, MCP servers, or LSP servers are detected.
     pub fn warn_unsupported_features(&self, plugin_name: &str) {
         if self.inline_hooks().is_some() {
             tracing::info!(plugin = plugin_name, "plugin uses inline hooks in manifest");
@@ -336,7 +309,6 @@ impl PluginManifest {
     }
 }
 
-/// Resolve directories from a manifest field or fall back to a default subdirectory.
 fn resolve_dirs(
     field: &Option<PathOrPaths>,
     plugin_root: &Path,
@@ -364,20 +336,14 @@ const MANIFEST_PATHS: &[&str] = &[
     ".claude-plugin/plugin.json",
 ];
 
-/// Result of attempting to load a manifest from a plugin directory.
 #[derive(Debug)]
 pub enum ManifestLoadResult {
-    /// Manifest found and parsed successfully.
     Found(Box<PluginManifest>),
-    /// No manifest file found — plugin uses convention-based discovery.
+    /// No manifest file found; the plugin uses convention-based discovery.
     NotFound,
 }
 
-/// Load a plugin manifest from the given plugin root directory.
-///
 /// Tries manifest files in priority order (see [`MANIFEST_PATHS`]).
-/// If no manifest is found, returns `ManifestLoadResult::NotFound`.
-/// The caller can still create a convention-based plugin from the directory.
 pub fn load_manifest(plugin_root: &Path) -> Result<ManifestLoadResult, ManifestError> {
     for rel_path in MANIFEST_PATHS {
         let manifest_path = plugin_root.join(rel_path);
@@ -400,10 +366,7 @@ pub fn load_manifest(plugin_root: &Path) -> Result<ManifestLoadResult, ManifestE
     Ok(ManifestLoadResult::NotFound)
 }
 
-/// Derive a plugin name from a directory name.
-///
-/// Sanitizes the directory name to match the kebab-case constraint:
-/// lowercase, alphanumeric + hyphens, no leading/trailing hyphens.
+/// Sanitizes the directory name to match the kebab-case constraint: lowercase, alphanumeric and hyphens, no leading/trailing hyphens.
 pub fn name_from_dirname(dir: &Path) -> Option<String> {
     let dirname = dir.file_name()?.to_str()?;
     let sanitized: String = dirname
@@ -424,13 +387,8 @@ pub fn name_from_dirname(dir: &Path) -> Option<String> {
     Some(trimmed)
 }
 
-/// Perform plugin-token substitution in a string.
-///
-/// Replaces `${GROK_PLUGIN_ROOT}`, `${CLAUDE_PLUGIN_ROOT}`,
-/// `${GROK_PLUGIN_DATA}`, and `${CLAUDE_PLUGIN_DATA}` with the provided values.
-///
-/// Delegates to [`xai_grok_tools::util::substitute_plugin_tokens`], the single
-/// source of truth shared with plugin skill/command body substitution.
+/// Replaces `${GROK_PLUGIN_ROOT}`, `${CLAUDE_PLUGIN_ROOT}`, `${GROK_PLUGIN_DATA}`, and `${CLAUDE_PLUGIN_DATA}` with the provided values.
+/// Delegates to [`xai_grok_tools::util::substitute_plugin_tokens`], which plugin skill and command bodies also use.
 pub fn substitute_env_vars(s: &str, plugin_root: &str, plugin_data: &str) -> String {
     xai_grok_tools::util::substitute_plugin_tokens(s, Some(plugin_root), Some(plugin_data))
 }
@@ -637,7 +595,6 @@ mod tests {
         let plugin_root = tmp.path().join("fallback-plugin");
         std::fs::create_dir_all(plugin_root.join(".grok-plugin")).unwrap();
 
-        // Write manifest in .grok-plugin/ fallback location
         std::fs::write(
             plugin_root.join(".grok-plugin/plugin.json"),
             r#"{"name": "fallback-plugin"}"#,

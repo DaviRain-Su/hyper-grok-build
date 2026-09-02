@@ -432,6 +432,8 @@ settings.contextual_hints.word_select.label: "Selección de palabra"
 settings.contextual_hints.word_select.description: "Tras hacer doble clic en texto de conversación mientras Selección de texto es plegar/navegar, te recuerda que Selección de palabra está en Ajustes."
 settings.contextual_hints.ssh_wrap.label: "Envoltura SSH"
 settings.contextual_hints.ssh_wrap.description: "Al cargar una sesión por SSH, recomienda `grok wrap ssh` para reenvío de portapapeles y restauración de terminal."
+settings.contextual_hints.export_copy.label: "Copiar y exportar"
+settings.contextual_hints.export_copy.description: "Tras tres copias por arrastre cercanas de texto de conversación, te recuerda que existen /copy y /export."
 settings.fork_secondary_model.label: "Modelo secundario de bifurcación"
 settings.fork_secondary_model.description: "Modelo usado para el agente secundario al bifurcar. Elige `(sin anulación)` para borrar."
 

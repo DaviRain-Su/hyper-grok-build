@@ -8,8 +8,9 @@
 //! - grok-build full-replace ([`crate::code_compaction`] assemble's
 //!   `system_reminder`)
 //!
-//! **What lives here:** pure formatting of the three **common** active-agent
-//! sections — Running Background Tasks, TODO List, Running Subagents — plus
+//! **What lives here:** pure formatting of the **common** active-agent
+//! sections — Running Background Tasks (bash/monitor, scheduled loops,
+//! live workflows), TODO List, and Running Subagents — plus
 //! `<system-reminder>` wrapping and summary append.
 //!
 //! **What stays in the product host:** snapshotting, tool-name resolution, and harness-only
@@ -88,18 +89,49 @@ pub struct RunningSubagent<'a> {
     pub elapsed_secs: u64,
 }
 
+/// Still-registered scheduled loop (`/loop` / scheduler). `task_id` is rendered
+/// verbatim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScheduledLoop<'a> {
+    pub task_id: &'a str,
+    pub interval: &'a str,
+    pub next_fire_at: &'a str,
+    pub prompt: &'a str,
+    pub recurring: bool,
+    pub durable: bool,
+    pub foreground: bool,
+}
+
+/// Still-live workflow run. `run_id` is rendered verbatim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorkflowRun<'a> {
+    pub name: &'a str,
+    pub run_id: &'a str,
+    pub status: &'a str,
+    pub objective: Option<&'a str>,
+    pub current_phase: Option<&'a str>,
+    pub agents_used: u64,
+    pub agent_budget: Option<u64>,
+    pub elapsed_secs: u64,
+}
+
 /// Borrowed active-agent state for reminder rendering.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ActiveAgentReminderState<'a> {
     pub running_commands: &'a [BackgroundTask<'a>],
     pub todos: &'a [TodoItem<'a>],
     pub running_subagents: &'a [RunningSubagent<'a>],
+    pub scheduled_loops: &'a [ScheduledLoop<'a>],
+    pub workflows: &'a [WorkflowRun<'a>],
+    pub workflow_tool: Option<&'a str>,
 }
 
 impl ActiveAgentReminderState<'_> {
     pub fn is_empty(&self) -> bool {
         self.running_commands.is_empty()
             && self.running_subagents.is_empty()
+            && self.scheduled_loops.is_empty()
+            && self.workflows.is_empty()
             && !self.has_actionable_todos()
     }
 
@@ -112,25 +144,48 @@ impl ActiveAgentReminderState<'_> {
 // Section formatters
 // ---------------------------------------------------------------------------
 
-/// `## Running Background Tasks`, or `None` when empty.
+/// `## Running Background Tasks` for bash/monitor commands only, or `None`
+/// when empty. Prefer [`section_running_background`] when loops / workflows
+/// should share this heading. Subagents stay on [`section_running_subagents`].
 pub fn section_background_tasks(tasks: &[BackgroundTask<'_>]) -> Option<String> {
-    if tasks.is_empty() {
+    section_running_background(
+        &ActiveAgentReminderState {
+            running_commands: tasks,
+            ..Default::default()
+        },
+        None,
+    )
+}
+
+fn format_background_task_line(t: &BackgroundTask<'_>) -> String {
+    match t.tool_name {
+        Some(tool) => format!(
+            "- \"{}\": `{}` ({}, {})",
+            t.task_id, t.command, t.status, tool
+        ),
+        None => format!("- \"{}\": `{}` ({})", t.task_id, t.command, t.status),
+    }
+}
+
+/// One `## Running Background Tasks` block for bash/monitor commands and
+/// scheduled loops. Workflows stay on [`section_workflows`].
+pub fn section_running_background(
+    state: &ActiveAgentReminderState<'_>,
+    _subagent_tools: Option<&SubagentToolNames<'_>>,
+) -> Option<String> {
+    let mut lines: Vec<String> = state
+        .running_commands
+        .iter()
+        .map(format_background_task_line)
+        .collect();
+    lines.extend(state.scheduled_loops.iter().map(format_scheduled_loop_line));
+    if lines.is_empty() {
         return None;
     }
-    let lines = tasks
-        .iter()
-        .map(|t| match t.tool_name {
-            Some(tool) => format!(
-                "- \"{}\": `{}` ({}, {})",
-                t.task_id, t.command, t.status, tool
-            ),
-            None => format!("- \"{}\": `{}` ({})", t.task_id, t.command, t.status),
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
     Some(format!(
         "## Running Background Tasks\n\
-         These tasks are still running:\n{lines}"
+         These tasks are still running:\n{}",
+        lines.join("\n")
     ))
 }
 
@@ -192,28 +247,112 @@ pub fn section_running_subagents(
 }
 
 fn format_subagent_line(s: &RunningSubagent<'_>) -> String {
-    let mut head = format!("subagent_id: `{}`", s.subagent_id);
-    if let Some(ty) = s.subagent_type {
-        head.push_str(", type: `");
-        head.push_str(ty);
-        head.push('`');
-    }
-    if let Some(desc) = s.description {
-        head.push_str(", task: \"");
-        head.push_str(desc);
-        head.push('"');
-    }
-    format!("- {head} (running for {}s)", s.elapsed_secs)
+    // Same shape as bash/monitor/loops: `- "id": `text` (status, kind)`.
+    let command = collapsed_ws(
+        s.description
+            .unwrap_or(s.subagent_type.unwrap_or("subagent")),
+    );
+    let kind = s.subagent_type.unwrap_or("subagent");
+    format!(
+        "- \"{}\": `{}` (running for {}s, {})",
+        s.subagent_id, command, s.elapsed_secs, kind
+    )
 }
 
-/// Common sections in order: Background Tasks → TODO → Subagents.
+/// `## Scheduled Loops` is no longer a standalone section; loops render under
+/// [`section_running_background`]. Kept so downstream mirrors that still call
+/// this name compile until they switch.
+pub fn section_scheduled_loops(loops: &[ScheduledLoop<'_>]) -> Option<String> {
+    section_running_background(
+        &ActiveAgentReminderState {
+            scheduled_loops: loops,
+            ..Default::default()
+        },
+        None,
+    )
+}
+
+fn format_scheduled_loop_line(loop_task: &ScheduledLoop<'_>) -> String {
+    // Same shape as bash/monitor: `- "id": `command` (status, kind)`.
+    let prompt = collapsed_ws(loop_task.prompt);
+    let status = if loop_task.recurring {
+        format!("scheduler runs {}", loop_task.interval)
+    } else {
+        "scheduler one-shot".to_string()
+    };
+    format!(
+        "- \"{}\": `{}` ({}, next {})",
+        loop_task.task_id, prompt, status, loop_task.next_fire_at
+    )
+}
+
+/// `## Running Workflows`, or `None` when empty.
+pub fn section_workflows(
+    workflows: &[WorkflowRun<'_>],
+    workflow_tool: Option<&str>,
+) -> Option<String> {
+    if workflows.is_empty() {
+        return None;
+    }
+    let mut lines: Vec<String> = workflows.iter().map(format_workflow_line).collect();
+    match workflow_tool {
+        Some(tool) => lines.push(format!(
+            "  Use `{tool}` to inspect or resume a paused run. Keep run ids internal."
+        )),
+        None => lines.push(
+            "  Keep workflow run ids internal — the user knows runs by display name.".to_string(),
+        ),
+    }
+    Some(format!(
+        "## Running Workflows\n\
+         These workflows are currently running:\n{}",
+        lines.join("\n")
+    ))
+}
+
+fn format_workflow_line(run: &WorkflowRun<'_>) -> String {
+    let mut head = format!(
+        "- Workflow '{}' (run id `{}`) — status: {}",
+        run.name, run.run_id, run.status
+    );
+    if let Some(phase) = run.current_phase {
+        head.push_str(", phase: ");
+        head.push_str(phase);
+    }
+    head.push_str(&format!(" (running for {}s)", run.elapsed_secs));
+    let mut lines = vec![head];
+    if let Some(objective) = run.objective.filter(|o| !o.is_empty()) {
+        lines.push(format!("  Objective: {}", collapsed_ws(objective)));
+    }
+    match run.agent_budget {
+        Some(budget) => lines.push(format!(
+            "  Agents: {} of {} budget",
+            run.agents_used, budget
+        )),
+        None if run.agents_used > 0 => {
+            lines.push(format!("  Agents: {}", run.agents_used));
+        }
+        None => {}
+    }
+    lines.join("\n")
+}
+
+fn collapsed_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Common sections: Running Background Tasks (commands, loops, workflows)
+/// → TODO → Running Subagents.
 /// Empty kinds omitted; subagents also omitted when `subagent_tools` is `None`.
 pub fn format_active_agent_sections(
     state: &ActiveAgentReminderState<'_>,
     subagent_tools: Option<&SubagentToolNames<'_>>,
 ) -> Vec<String> {
     let mut sections = Vec::with_capacity(3);
-    if let Some(s) = section_background_tasks(state.running_commands) {
+    if let Some(s) = section_running_background(state, subagent_tools) {
+        sections.push(s);
+    }
+    if let Some(s) = section_workflows(state.workflows, state.workflow_tool) {
         sections.push(s);
     }
     if let Some(s) = section_todo_list(state.todos) {
@@ -323,7 +462,7 @@ mod tests {
         };
         let out = format_active_agent_reminder(&state, None).expect("reminder");
         assert!(out.contains("## Running Background Tasks"));
-        assert!(!out.contains("## Running Subagents"));
+        assert!(!out.contains("subagent_id:"));
     }
 
     #[test]
@@ -349,11 +488,11 @@ mod tests {
         let out = format_active_agent_reminder(&state, Some(&tools_native())).expect("reminder");
         assert!(out.starts_with("<system-reminder>"));
         assert!(out.ends_with("</system-reminder>"));
-        assert!(out.contains("subagent_id: `019ea7f0-cb66-7aa2-9a09-488a3a795795`"));
-        assert!(out.contains("task: \"deploy staging\" (running for 42s)"));
-        assert!(out.contains("subagent_id: `sa-2` (running for 5s)"));
+        assert!(out.contains(
+            "- \"019ea7f0-cb66-7aa2-9a09-488a3a795795\": `deploy staging` (running for 42s, subagent)"
+        ));
+        assert!(out.contains("- \"sa-2\": `subagent` (running for 5s, subagent)"));
         assert!(!out.contains("task-019ea7f0"));
-        assert!(!out.contains("type:"));
     }
 
     #[test]
@@ -369,9 +508,7 @@ mod tests {
             ..Default::default()
         };
         let out = format_active_agent_reminder(&state, Some(&tools_renamed())).expect("reminder");
-        assert!(out.contains(
-            "- subagent_id: `sub-1`, type: `explore`, task: \"find files\" (running for 5s)"
-        ));
+        assert!(out.contains("- \"sub-1\": `find files` (running for 5s, explore)"));
     }
 
     #[test]
@@ -463,12 +600,31 @@ mod tests {
     }
 
     #[test]
-    fn section_order_background_todo_subagent() {
+    fn section_order_background_loops_workflows_todo_subagent() {
         let cmds = [BackgroundTask {
             task_id: "t1",
             command: "npm run dev",
             status: "running",
             tool_name: None,
+        }];
+        let loops = [ScheduledLoop {
+            task_id: "loop1",
+            interval: "every 20 minutes",
+            next_fire_at: "in 12m",
+            prompt: "monitor job",
+            recurring: true,
+            durable: true,
+            foreground: false,
+        }];
+        let workflows = [WorkflowRun {
+            name: "review-changes",
+            run_id: "wf-1",
+            status: "active",
+            objective: Some("review the PR"),
+            current_phase: Some("Smoke"),
+            agents_used: 3,
+            agent_budget: Some(128),
+            elapsed_secs: 12,
         }];
         let todos = [TodoItem {
             id: "2",
@@ -485,12 +641,65 @@ mod tests {
             running_commands: &cmds,
             todos: &todos,
             running_subagents: &agents,
+            scheduled_loops: &loops,
+            workflows: &workflows,
+            workflow_tool: Some("workflow"),
         };
         let out = format_active_agent_reminder(&state, Some(&tools_native())).expect("reminder");
         let bg = out.find("## Running Background Tasks").expect("bg");
         let todo = out.find("## TODO List").expect("todo");
         let sub = out.find("## Running Subagents").expect("sub");
         assert!(bg < todo && todo < sub, "order wrong:\n{out}");
+        assert!(!out.contains("## Scheduled Loops"), "{out}");
+        assert!(!out.contains("## Active Workflows"), "{out}");
+        assert!(out.contains("## Running Workflows"), "{out}");
+        assert!(
+            out.contains("01a046ad3877") || out.contains("loop1"),
+            "{out}"
+        );
+        assert!(out.contains("review-changes"), "{out}");
+        assert!(out.contains("- \"sa-1\":"), "{out}");
+    }
+
+    #[test]
+    fn renders_scheduled_loops_and_workflows_verbatim() {
+        let loops = [ScheduledLoop {
+            task_id: "01a046ad3877",
+            interval: "every 20 minutes",
+            next_fire_at: "in 12m",
+            prompt: "monitor job\nand report",
+            recurring: true,
+            durable: true,
+            foreground: false,
+        }];
+        let workflows = [WorkflowRun {
+            name: "review-changes",
+            run_id: "wf-1",
+            status: "user_paused",
+            objective: Some("review the PR"),
+            current_phase: Some("Diff"),
+            agents_used: 2,
+            agent_budget: Some(16),
+            elapsed_secs: 90,
+        }];
+        let state = ActiveAgentReminderState {
+            scheduled_loops: &loops,
+            workflows: &workflows,
+            workflow_tool: Some("workflow"),
+            ..Default::default()
+        };
+        let out = format_active_agent_reminder(&state, None).expect("reminder");
+        assert!(out.contains(
+            "- \"01a046ad3877\": `monitor job and report` (scheduler runs every 20 minutes, next in 12m)"
+        ));
+        assert!(out.contains(
+            "- Workflow 'review-changes' (run id `wf-1`) — status: user_paused, phase: Diff (running for 90s)"
+        ));
+        assert!(out.contains("Objective: review the PR"));
+        assert!(out.contains("Agents: 2 of 16 budget"));
+        assert!(out.contains("## Running Workflows"));
+        assert!(out.contains("These workflows are currently running:"));
+        assert!(out.contains("Use `workflow` to inspect or resume a paused run"));
     }
 
     #[test]

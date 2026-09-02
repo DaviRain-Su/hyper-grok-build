@@ -1,11 +1,9 @@
-//! Media-gen per-batch cap: Pending ToolCall + Failed update + tool_result pairing.
+//! Media-gen per-batch cap: a rejected call gets a Pending ToolCall, a Failed update, and a paired tool_result.
 //!
-//! Regression for the reject path that previously shipped orphan ToolCallUpdates
-//! and broke streaming-messages-json reducers (GBT-5790 council rounds).
+//! Regression test for the reject path that previously shipped orphan ToolCallUpdates and broke streaming-messages-json reducers.
 //!
-//! `send_update` enqueues on the actor's `event_tx` (SessionEvent::Notification);
-//! the session run loop fans those out to the gateway. Actor-level tests assert
-//! on `event_rx`, not the gateway channel.
+//! `send_update` enqueues on the actor's `event_tx` (SessionEvent::Notification); the session run loop fans those out to the gateway.
+//! Actor-level tests assert on `event_rx`, not the gateway channel.
 
 use super::support::*;
 use super::*;
@@ -91,7 +89,7 @@ async fn first_k_tail_rejects_get_pending_then_failed() {
                 tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let (mut actor, mut event_rx) =
                 create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
-            // max_image=0 → first-K admits none, so ImageGen never runs.
+            // With max_image at 0 the first-K gate admits no image_gen calls, so ImageGen never runs
             std::sync::Arc::get_mut(&mut actor.rebuild_spec)
                 .expect("test rebuild_spec is uniquely owned")
                 .media_gen_batch_limits

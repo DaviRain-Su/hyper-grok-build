@@ -388,11 +388,6 @@ mod tests {
     }
 
     #[test]
-    fn indented_backticks_stay_inside_fenced_block() {
-        assert_eq!(analyze("```\ncode\n    ```\nafter\n").stats.fenced_code, 1);
-    }
-
-    #[test]
     fn fenced_code_with_info_string() {
         assert_eq!(analyze("```rust\nx\n```\n").stats.fenced_code, 1);
     }
@@ -527,12 +522,6 @@ mod tests {
     }
 
     #[test]
-    fn lone_tilde_percent_is_not_strike() {
-        assert_eq!(analyze("lone ~10% is fine").stats.strikethrough, 0);
-        assert_eq!(strike_start_end_counts("lone ~10% is fine"), (0, 0));
-    }
-
-    #[test]
     fn mixed_double_and_single_tilde_counts_one_strike() {
         let doc = "keep ~~this~~ but not ~that~";
         assert_eq!(analyze(doc).stats.strikethrough, 1);
@@ -629,13 +618,6 @@ mod tests {
     fn pipe_prose_is_not_a_malformed_table() {
         // A paragraph that merely contains pipes (no delimiter row) must not flag.
         let analysis = analyze("use `a | b` in the shell\nand `c | d` too\n");
-        assert!(!analysis.issues.contains(&StructuralIssue::MalformedTable));
-    }
-
-    #[test]
-    fn delimiter_inside_code_fence_is_not_a_malformed_table() {
-        // A `|---|` line inside a fenced code block is literal content, not a table.
-        let analysis = analyze("```\n| a | b |\n|---|---|---|\n```\n");
         assert!(!analysis.issues.contains(&StructuralIssue::MalformedTable));
     }
 

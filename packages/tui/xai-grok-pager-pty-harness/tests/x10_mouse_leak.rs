@@ -1,5 +1,4 @@
-//! Relay-mangled X10 mouse reports must not type into the composer, and
-//! refocus must re-assert mouse capture.
+//! Relay-mangled X10 mouse reports must not type into the composer, and refocus must re-assert mouse capture.
 //!
 //! ```bash
 //! cargo test -p xai-grok-pager-pty-harness --test x10_mouse_leak -- --ignored --nocapture

@@ -14,8 +14,8 @@ fn git_stdout(args: &[&str]) -> Option<String> {
 fn main() {
     println!("cargo:rerun-if-env-changed=GROK_VERSION");
 
-    // Watch the git files that change on commit/checkout so the version stamp refreshes. Never
-    // emit a missing path: cargo treats it as always dirty and rebuilds this crate every build.
+    // Watch the git files that change on commit/checkout so the version stamp refreshes
+    // Never emit a missing path: cargo treats it as always dirty and rebuilds this crate every build
     let mut watch_paths = Vec::new();
     watch_paths.extend(git_stdout(&["rev-parse", "--git-path", "HEAD"]));
     watch_paths.extend(git_stdout(&["rev-parse", "--git-path", "logs/HEAD"]));

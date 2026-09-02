@@ -1,13 +1,8 @@
 #![allow(dead_code)] // Functions consumed by handle.rs event forwarder wiring
-//! FsNotify adapter functions bridging [`xai_fsnotify`] events to
-//! workspace subsystems (hunk tracker, codebase graph, workspace
-//! event broadcast).
+//! FsNotify adapters that forward [`xai_fsnotify`] events to workspace subsystems (hunk tracker, codebase graph, workspace event broadcast).
 //!
-//! Codebase graph forwarding: FsNotify file-change
-//! events are converted via [`fs_event_to_codebase_graph_event`] and
-//! sent to the [`IndexManagerHandle`](xai_codebase_graph::IndexManagerHandle).
-//! The [`refresh_codebase_graph_after_head_change`] helper handles
-//! git HEAD changes by diffing `ORIG_HEAD..HEAD`.
+//! [`fs_event_to_codebase_graph_event`] converts FsNotify file-change events for the [`IndexManagerHandle`](xai_codebase_graph::IndexManagerHandle).
+//! The [`refresh_codebase_graph_after_head_change`] helper handles git HEAD changes by diffing `ORIG_HEAD..HEAD`.
 
 use std::path::{Path, PathBuf};
 
@@ -16,10 +11,8 @@ use xai_hunk_tracker::HunkTrackerHandle;
 
 /// True if `path` lies under a hidden component below `cwd`.
 ///
-/// The `cwd` prefix is stripped first, so a `cwd` like
-/// `/home/u/.config/foo` does not flag paths inside that directory as
-/// hidden. Only components below `cwd` that start with `.` (and are
-/// longer than a bare `.`) are considered hidden.
+/// The `cwd` prefix is stripped first, so a `cwd` like `/home/u/.config/foo` does not flag paths inside that directory as hidden.
+/// Only components below `cwd` that start with `.` (and are longer than a bare `.`) are considered hidden.
 pub(crate) fn is_under_hidden_dir(path: &Path, cwd: &Path) -> bool {
     let rel = path.strip_prefix(cwd).unwrap_or(path);
     rel.components().any(|c| {
@@ -29,8 +22,8 @@ pub(crate) fn is_under_hidden_dir(path: &Path, cwd: &Path) -> bool {
     })
 }
 
-/// Hidden-dir filter against the longest matching materialized root.
-/// Multi-repo events under `/workspace/lib` must not use `/workspace/app` cwd.
+/// Hidden-dir filter against the longest matching root.
+/// Multi-repo events under `/workspace/lib` must not use `/workspace/app` as cwd.
 pub(crate) fn is_under_hidden_dir_any(path: &Path, roots: &[PathBuf]) -> bool {
     let Some(root) = roots
         .iter()
@@ -42,9 +35,8 @@ pub(crate) fn is_under_hidden_dir_any(path: &Path, roots: &[PathBuf]) -> bool {
     is_under_hidden_dir(path, root)
 }
 
-/// Forward an fs event to the hunk tracker. Hidden-directory paths
-/// (relative to `cwd`) are filtered out so the hunk tracker never
-/// sees `.git/`, `.grok/`, etc.
+/// Forward an fs event to the hunk tracker.
+/// Hidden-directory paths (relative to `cwd`) are filtered out so the hunk tracker never sees `.git/`, `.grok/`, etc.
 pub(crate) fn forward_to_hunk_tracker(
     paths: &[PathBuf],
     kind: FsEventKind,
@@ -98,12 +90,9 @@ pub(crate) fn fs_event_to_codebase_graph_event(
     FileEvent::new(paths.to_vec(), graph_kind)
 }
 
-/// Convert [`xai_fsnotify::FsEventKind`] to the wire-type
-/// [`xai_grok_workspace_types::FsEventKind`].
-///
-/// Identity mapping today; kept explicit so all known variants are
-/// consciously mapped. Unknown future variants fall back to
-/// `Modified` via the `#[non_exhaustive]` wildcard arm.
+/// Convert [`xai_fsnotify::FsEventKind`] to the wire-type [`xai_grok_workspace_types::FsEventKind`].
+/// Identity mapping today; kept explicit so all known variants are consciously mapped.
+/// Unknown future variants fall back to `Modified` via the `#[non_exhaustive]` wildcard arm.
 pub(crate) fn to_workspace_event_kind(kind: FsEventKind) -> xai_grok_workspace_types::FsEventKind {
     match kind {
         FsEventKind::Created => xai_grok_workspace_types::FsEventKind::Created,
@@ -115,15 +104,11 @@ pub(crate) fn to_workspace_event_kind(kind: FsEventKind) -> xai_grok_workspace_t
     }
 }
 
-/// Spawn a background task that reads [`FsEvent`]s from a broadcast
-/// receiver, forwards `FilesChanged` to the hunk tracker, and
-/// re-broadcasts each affected path as
-/// [`WorkspaceEvent::FsChanged`](xai_grok_workspace_types::WorkspaceEvent::FsChanged)
-/// on the workspace event bus.
+/// Spawn a background task that reads [`FsEvent`]s from a broadcast receiver and forwards `FilesChanged` to the hunk tracker.
+/// Each affected path is re-broadcast as [`WorkspaceEvent::FsChanged`](xai_grok_workspace_types::WorkspaceEvent::FsChanged) on the event bus.
 ///
 /// The task exits when:
-/// - the broadcast sender drops (all `FsEventSource`s for this
-///   receiver are gone), or
+/// - the broadcast sender drops (all `FsEventSource`s for this receiver are gone), or
 /// - `cancel` is cancelled.
 pub(crate) fn spawn_fs_event_forwarder(
     rx: tokio::sync::broadcast::Receiver<FsEvent>,
@@ -159,11 +144,8 @@ pub(crate) fn spawn_fs_event_forwarder_roots(
                 result = rx.recv() => {
                     match result {
                         Ok(FsEvent::FilesChanged { ref paths, kind }) => {
-                            // Forward to hunk tracker (hidden-dir filtered per mount).
                             forward_to_hunk_tracker_roots(paths, kind, &hunk_tracker, &roots);
-                            // Forward to codebase graph for incremental
-                            // index updates (hidden-dir paths are indexed
-                            // -- the graph's own ignore logic handles them).
+                            // Hidden-dir paths are forwarded to the codebase graph; its own ignore logic handles them
                             if let Some(ref idx) = codebase_index {
                                 let graph_event = fs_event_to_codebase_graph_event(paths, kind);
                                 if let Err(e) = idx.send_event(graph_event) {
@@ -185,8 +167,7 @@ pub(crate) fn spawn_fs_event_forwarder_roots(
                             }
                         }
                         Ok(other) => {
-                            // Git meta / operation events -- not yet bridged
-                            // to WorkspaceEvent::GitHeadChanged etc.
+                            // Git meta and operation events are not yet bridged to WorkspaceEvent::GitHeadChanged etc
                             tracing::trace!(?other, "fs event forwarder: unhandled event variant");
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -229,14 +210,11 @@ fn parse_diff_name_status_line(
     }
 }
 
-/// After a HEAD change, diff `ORIG_HEAD..HEAD` and send targeted
-/// events to the codebase graph. Falls back to full rebuild if too
-/// many files changed.
+/// After a HEAD change, diff `ORIG_HEAD..HEAD` and send targeted events to the codebase graph.
+/// Falls back to full rebuild if too many files changed.
 ///
-/// Emits [`WorkspaceEvent::CodebaseIndexUpdated`] on the provided
-/// `events_tx` after the index has been updated (either via targeted
-/// events or a full rebuild). Skips the event if the index actor
-/// channel is closed (i.e. the actor has been dropped).
+/// Emits [`WorkspaceEvent::CodebaseIndexUpdated`] on `events_tx` after the index has been updated (via targeted events or a full rebuild).
+/// Skips the event if the index actor channel is closed (i.e. the actor has been dropped).
 pub(crate) async fn refresh_codebase_graph_after_head_change(
     idx: &xai_codebase_graph::IndexManagerHandle,
     repo_root: &Path,
@@ -251,8 +229,7 @@ pub(crate) async fn refresh_codebase_graph_after_head_change(
     diff_cmd.envs(xai_grok_tools::util::pager_env());
     let diff_output = diff_cmd.output().await;
 
-    // `None` means the update failed entirely (channel closed) --
-    // skip the event so subscribers are not misled.
+    // `None` means the update failed entirely (channel closed); skip the event so subscribers are not misled
     let files_updated: Option<u64>;
 
     match diff_output {

@@ -40,7 +40,8 @@ struct LinkRef {
 }
 
 struct LastNamedOsc8 {
-    source_id: u32,
+    /// `None` groups consecutive unnamed same-URL wrap fragments.
+    source_id: Option<u32>,
     url: Arc<str>,
     osc8_id: u32,
 }
@@ -79,25 +80,25 @@ fn write_osc8_close<W: Write>(w: &mut W) -> io::Result<()> {
 }
 
 /// Markdown ids restart per document; OSC 8 `id=` is terminal-global.
-/// Consecutive wrap segments of the same source id+URL reuse the last emitted id.
+///
+/// Full-screen apps must set `id=` so wrap fragments group as one hyperlink
+/// (Windows Terminal hover / Ctrl+click). Consecutive spans that share a
+/// source id and URL reuse the reminted id; unnamed consecutive same-URL
+/// spans (soft-wrap of a scanned URL) do too.
 fn next_osc8_id(
     span: &LinkSpan,
     last_named: &mut Option<LastNamedOsc8>,
     next: &mut u32,
 ) -> Option<u32> {
-    let Some(source_id) = span.id else {
-        *last_named = None;
-        return None;
-    };
     if let Some(last) = last_named.as_ref()
-        && last.source_id == source_id
+        && last.source_id == span.id
         && last.url.as_ref() == span.url.as_ref()
     {
         return Some(last.osc8_id);
     }
     *next = next.saturating_add(1);
     *last_named = Some(LastNamedOsc8 {
-        source_id,
+        source_id: span.id,
         url: Arc::clone(&span.url),
         osc8_id: *next,
     });
@@ -359,7 +360,8 @@ where
     /// (so links from the previous frame are diffed away).
     ///
     /// [`LinkSpan::id`] is a source grouping key. Consecutive spans with the
-    /// same id and URL share one reminted OSC 8 `id=` starting at 1.
+    /// same id and URL share one reminted OSC 8 `id=` starting at 1. Unnamed
+    /// consecutive same-URL spans (scanned wrap fragments) share an id too.
     ///
     /// [`flush_with_links`]: Self::flush_with_links
     pub fn set_frame_links(&mut self, spans: &[LinkSpan]) {

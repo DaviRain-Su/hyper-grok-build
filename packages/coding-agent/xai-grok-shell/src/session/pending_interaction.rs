@@ -1,18 +1,10 @@
-//! Per-session pending-interaction registry.
+//! Permissions, `ask_user_question`, and plan approval are **blocking ACP reverse-requests**.
+//! The agent parks a tool-loop future on an in-memory oneshot and waits for the driver to answer.
+//! While such a request is open we record it here, keyed by `tool_call_id` (stable, lives in the transcript, so it survives reconnect).
+//! This registry is the single source of truth for "what is pending right now".
+//! The roster reads it to report [`crate::agent::roster::RosterActivity::NeedsInput`].
 //!
-//! Permissions, `ask_user_question`, and plan approval are **blocking ACP
-//! reverse-requests**: the agent parks a tool-loop future on an in-memory
-//! oneshot and waits for the driver to answer. While such a request is open we
-//! record it here, keyed by `tool_call_id` (stable, lives in the transcript →
-//! survives reconnect). This registry is the single source of truth for "what
-//! is pending right now" and is read by the roster to surface
-//! [`crate::agent::roster::RosterActivity::NeedsInput`].
-//!
-//! Pending interactions are **requests, not notifications** — they are never
-//! persisted. We broadcast `pending_interaction` / `interaction_resolved`
-//! **fire-and-forget** via the gateway (same idiom as
-//! [`crate::session::summary`]); the routing layer fans them to every
-//! subscriber because they carry a `sessionId`.
+//! Pending interactions are **requests, not notifications**: they are never persisted.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -24,13 +16,10 @@ use crate::extensions::notification::{SessionNotification, SessionUpdate as XaiS
 
 /// Shared per-session map of open reverse-requests, keyed by `tool_call_id`.
 ///
-/// Mirrors the `current_prompt_id` signal on
-/// [`crate::session::handle::SessionHandle`]: the same `Arc` is shared between
-/// the session actor (which mutates it) and the handle (which the roster reads
-/// synchronously).
+/// Mirrors the `current_prompt_id` signal on [`crate::session::handle::SessionHandle`].
+/// The same `Arc` is shared between the session actor (which mutates it) and the handle (which the roster reads synchronously).
 pub(crate) type PendingInteractions = Arc<Mutex<HashMap<String, PendingKind>>>;
 
-/// Which kind of blocking reverse-request is pending.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PendingKind {
@@ -43,16 +32,6 @@ pub enum PendingKind {
     McpElicitation,
 }
 
-/// Whether a blocking plan-approval reverse-request is parked in `pending`.
-///
-/// The resume re-park issues `x.ai/exit_plan_mode` from a detached task
-/// with no running turn, making it the one parked interaction that also carries a
-/// persisted gate (`awaiting_plan_approval`). `session_has_live_work` consults
-/// this to keep such a session resident until the decision is answered or a real
-/// disconnect `Err`s the reverse-request — otherwise an idle-unload drops the
-/// parked future and its guard clears the on-disk gate. Permission/question parks
-/// carry no persisted gate, so they are intentionally not counted here. Poisoned
-/// lock → recover the map (module idiom) and read it.
 pub(crate) fn has_parked_plan_approval(pending: &PendingInteractions) -> bool {
     pending
         .lock()
@@ -61,8 +40,8 @@ pub(crate) fn has_parked_plan_approval(pending: &PendingInteractions) -> bool {
         .any(|k| *k == PendingKind::PlanApproval)
 }
 
-/// Fire-and-forget broadcast of a session notification carrying a `sessionId`
-/// (so the routing layer fans it out to every subscriber). Never persisted.
+/// Fire-and-forget broadcast of a session notification carrying a `sessionId` (so the routing layer fans it out to every subscriber).
+/// Never persisted.
 fn broadcast(gateway: &GatewaySender, session_id: &acp::SessionId, update: XaiSessionUpdate) {
     let notification = SessionNotification {
         session_id: session_id.clone(),
@@ -77,15 +56,9 @@ fn broadcast(gateway: &GatewaySender, session_id: &acp::SessionId, update: XaiSe
     }
 }
 
-/// RAII guard registering an open reverse-request for the lifetime of the
-/// parked oneshot.
+/// RAII guard registering an open reverse-request for the lifetime of the parked oneshot.
 ///
-/// On construction it inserts `(tool_call_id, kind)` into the registry and
-/// broadcasts `pending_interaction`. On drop — which happens whether the await
-/// returns normally, is cancelled, or errors — it removes the entry and (if it
-/// actually removed one) broadcasts `interaction_resolved`. The
-/// remove-or-no-op makes resolution **idempotent / first-answer-wins**: a
-/// second drop / already-removed key is silent.
+/// Drop runs whether the await returns normally, is cancelled, or errors.
 pub(crate) struct PendingInteractionGuard {
     pending: PendingInteractions,
     gateway: GatewaySender,
@@ -129,8 +102,7 @@ impl Drop for PendingInteractionGuard {
             let mut map = self.pending.lock().unwrap_or_else(|e| e.into_inner());
             map.remove(&self.tool_call_id).is_some()
         };
-        // First-answer-wins: only announce resolution if this guard actually
-        // owned the live entry. An already-resolved id is a silent no-op.
+        // First-answer-wins: only announce resolution if this guard actually owned the live entry
         if removed {
             broadcast(
                 &self.gateway,
@@ -154,8 +126,7 @@ mod tests {
     #[test]
     fn guard_inserts_then_removes() {
         let reg = new_registry();
-        // No gateway round-trip is exercised here (broadcast is best-effort and
-        // a dead sender simply drops). We only assert the registry mutation.
+        // No gateway round-trip is exercised here (broadcast is best-effort and a dead sender drops)
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let gateway = GatewaySender::new(tx);
         {
@@ -175,9 +146,6 @@ mod tests {
         assert!(reg.lock().unwrap().is_empty());
     }
 
-    /// `has_parked_plan_approval` counts ONLY a parked plan-approval; other
-    /// kinds (permission / question) carry no persisted gate and must not, by
-    /// themselves, report the session live.
     #[test]
     fn has_parked_plan_approval_only_counts_plan_approval() {
         let reg = new_registry();
@@ -203,8 +171,6 @@ mod tests {
         assert!(!has_parked_plan_approval(&reg));
     }
 
-    /// A poisoned registry lock must not panic the predicate: it recovers the
-    /// inner map (module idiom) and reports the parked approval truthfully.
     #[test]
     fn has_parked_plan_approval_recovers_poisoned_lock() {
         let reg = new_registry();

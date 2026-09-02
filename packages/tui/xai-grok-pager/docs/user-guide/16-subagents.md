@@ -220,6 +220,13 @@ The main agent calls the `spawn_subagent` tool. Its parameters:
 
 When you run a subagent in the background, retrieve its result later with `get_command_or_subagent_output`.
 
+### Sending messages to active subagents
+
+The `send_subagent_message` tool is currently available only to the root session and can target only an active subagent owned by that session. Its optional `queue` parameter controls delivery:
+
+- Omitted or `false` uses **Steer**. If the subagent is idle, the message becomes one protected queued turn. If it is running, the message is delivered into the current turn at the next safe point.
+- `true` uses **Queue**, preserving the queued-turn behavior: the message waits as a protected turn instead of entering the active turn.
+
 ---
 
 ## Capability Modes

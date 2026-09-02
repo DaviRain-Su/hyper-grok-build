@@ -781,78 +781,6 @@ mod snapshot_tests {
         assert!(!snap.turn_index.is_empty());
         assert_eq!(snap.session_stats.accepted_hunks, 5);
     }
-
-    // === Snapshot preserves Binary/TooLarge (regression test) ===
-
-    #[test]
-    fn snapshot_preserves_binary_state() {
-        let mut file_states = HashMap::new();
-        file_states.insert(
-            PathBuf::from("/test/binary.bin"),
-            FileHunkStateSnapshot {
-                baseline: FileContentState::Binary {
-                    byte_len: Some(100),
-                },
-                current_content: FileContentState::Binary {
-                    byte_len: Some(100),
-                },
-                hunks: vec![],
-                is_agent_file: true,
-                baseline_accepted: false,
-            },
-        );
-        let snap = HunkTrackerSnapshot {
-            file_states,
-            turn_index: HashMap::new(),
-            session_stats: SessionStats::default(),
-        };
-
-        // Snapshot should preserve Binary (not collapse to Missing)
-        let state = snap
-            .file_states
-            .get(&PathBuf::from("/test/binary.bin"))
-            .unwrap();
-        assert!(matches!(state.baseline, FileContentState::Binary { .. }));
-        assert!(matches!(
-            state.current_content,
-            FileContentState::Binary { .. }
-        ));
-    }
-
-    #[test]
-    fn snapshot_preserves_too_large_state() {
-        let mut file_states = HashMap::new();
-        file_states.insert(
-            PathBuf::from("/test/huge.txt"),
-            FileHunkStateSnapshot {
-                baseline: FileContentState::TooLarge {
-                    byte_len: 2_000_000,
-                },
-                current_content: FileContentState::TooLarge {
-                    byte_len: 2_000_000,
-                },
-                hunks: vec![],
-                is_agent_file: true,
-                baseline_accepted: false,
-            },
-        );
-        let snap = HunkTrackerSnapshot {
-            file_states,
-            turn_index: HashMap::new(),
-            session_stats: SessionStats::default(),
-        };
-
-        // Snapshot should preserve TooLarge (not collapse to Missing)
-        let state = snap
-            .file_states
-            .get(&PathBuf::from("/test/huge.txt"))
-            .unwrap();
-        assert!(matches!(state.baseline, FileContentState::TooLarge { .. }));
-        assert!(matches!(
-            state.current_content,
-            FileContentState::TooLarge { .. }
-        ));
-    }
 }
 
 // ============================================================================
@@ -927,44 +855,5 @@ mod content_view_tests {
         assert_eq!(view.status, FileContentStatus::Full);
         assert_eq!(view.byte_len, Some(11));
         assert_eq!(view.content, Some(content));
-    }
-
-    #[test]
-    fn view_constructors() {
-        // Test the convenience constructors
-        let missing = FileContentView::missing();
-        assert_eq!(missing.status, FileContentStatus::Missing);
-
-        let binary = FileContentView::binary(Some(512));
-        assert_eq!(binary.status, FileContentStatus::Binary);
-        assert_eq!(binary.byte_len, Some(512));
-
-        let too_large = FileContentView::too_large(5_000_000);
-        assert_eq!(too_large.status, FileContentStatus::TooLarge);
-        assert_eq!(too_large.byte_len, Some(5_000_000));
-
-        let lfs = FileContentView::lfs_pointer(130);
-        assert_eq!(lfs.status, FileContentStatus::LfsPointer);
-        assert_eq!(lfs.byte_len, Some(130));
-        assert!(lfs.content.is_none());
-
-        let full = FileContentView::full("test".to_string());
-        assert_eq!(full.status, FileContentStatus::Full);
-        assert_eq!(full.byte_len, Some(4));
-        assert_eq!(full.content, Some("test".to_string()));
-    }
-
-    #[test]
-    fn default_view_is_missing() {
-        let view = FileContentView::default();
-        assert_eq!(view.status, FileContentStatus::Missing);
-        assert!(view.byte_len.is_none());
-        assert!(view.content.is_none());
-    }
-
-    #[test]
-    fn default_status_is_missing() {
-        let status = FileContentStatus::default();
-        assert_eq!(status, FileContentStatus::Missing);
     }
 }

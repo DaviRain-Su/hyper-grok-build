@@ -69,6 +69,18 @@ impl<E> EventQueue<E> {
         std::mem::take(&mut *self.lock())
     }
 
+    /// Splice `events` back in ahead of everything currently queued, preserving their
+    /// order. For cancel-safety: a reader whose async processing was aborted mid-drain
+    /// restores the unprocessed remainder, which arrived before anything pushed since.
+    pub fn restore_front(&self, events: Vec<E>) {
+        if events.is_empty() {
+            return;
+        }
+        let mut q = self.lock();
+        let tail = std::mem::replace(&mut *q, events);
+        q.extend(tail);
+    }
+
     /// Discard all events.
     pub fn clear(&self) {
         self.lock().clear();
@@ -158,6 +170,17 @@ mod tests {
         q.push(2);
         assert_eq!(q.drain_all(), vec![1, 2]);
         assert!(q.is_empty());
+    }
+
+    #[test]
+    fn restore_front_reinserts_ahead_of_later_pushes() {
+        let q: EventQueue<u32> = EventQueue::new();
+        q.push(1);
+        q.push(2);
+        let drained = q.drain_all();
+        q.push(3);
+        q.restore_front(drained);
+        assert_eq!(q.drain_all(), vec![1, 2, 3]);
     }
 
     #[test]

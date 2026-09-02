@@ -1114,19 +1114,3 @@ fn dry_run_counts_per_kind_cutoffs() {
     assert_eq!(dry0.expired_removed, 2);
     assert!(dry0.never_expiring >= 1);
 }
-
-#[test]
-fn db_stats_serde_round_trip() {
-    let stats = crate::db::DbStats {
-        total_records: 10,
-        alive_count: 7,
-        dead_count: 3,
-        db_file_bytes: 4096,
-    };
-    let json = serde_json::to_string(&stats).unwrap();
-    let deser: crate::db::DbStats = serde_json::from_str(&json).unwrap();
-    assert_eq!(deser.total_records, 10);
-    assert_eq!(deser.alive_count, 7);
-    assert_eq!(deser.dead_count, 3);
-    assert_eq!(deser.db_file_bytes, 4096);
-}

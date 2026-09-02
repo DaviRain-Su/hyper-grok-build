@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
 name = "xai-grok-shell"
-version = "1.0.12-r2"
+version = "1.0.16"
 edition.workspace = true
 
 [features]
@@ -123,6 +123,7 @@ image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
 moka = { workspace = true, features = ["future"] }
 dhat = { workspace = true, optional = true }
 base64 = { workspace = true }
+hmac = { workspace = true }
 # Use `aws_lc_rs` (not `rust_crypto`) so feature unification with gcloud-storage
 # (which enables jsonwebtoken's `aws_lc_rs` via gcloud-auth `jwt-aws-lc-rs`)
 # leaves exactly one crypto feature active. With both `rust_crypto` and
@@ -217,7 +218,7 @@ siphasher = { workspace = true }
 windows = { workspace = true }
 
 [dev-dependencies]
-# The fixture that builds a `[ui.status_line]` section field by field.
+xai-dirs = { workspace = true }
 xai-grok-status-line = { workspace = true, features = ["test-support"] }
 criterion = { workspace = true }
 # Pre-main unified-log redirect (`test_support::redirect_unified_log_for_tests`).
@@ -268,28 +269,28 @@ harness = false
 name = "child_replay_lookup"
 harness = false
 
+# Ordinary integration tests live in `tests/all.rs` (`mod suite`) so cargo
+# links one binary. The test name is `xai-grok-shell-all` (Bazel `//pkg:all`
+# is the package wildcard). Process-isolated suites stay as implicit
+# `tests/*.rs` binaries.
 [[test]]
-name = "test_leader_soak"
+name = "test_startup_prefetch_fallback"
 required-features = ["test-support"]
 
 [[test]]
-name = "test_session_load_memory"
+name = "test_startup_prefetch_overlap"
 required-features = ["test-support"]
 
 [[test]]
-name = "test_fork_copy_memory"
+name = "test_startup_prefetch_policy"
 required-features = ["test-support"]
 
 [[test]]
-name = "session_fork_replay_memory"
+name = "test_startup_prefetch_repair_skip"
 required-features = ["test-support"]
 
 [[test]]
-name = "session_load_perf"
-required-features = ["test-support"]
-
-[[test]]
-name = "testkit_synth_roundtrip"
+name = "test_startup_prefetch_shared"
 required-features = ["test-support"]
 
 [lints]

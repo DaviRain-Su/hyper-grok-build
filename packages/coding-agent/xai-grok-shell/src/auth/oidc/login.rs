@@ -1,8 +1,6 @@
-//! Interactive login orchestration: callback HTTP server, browser
-//! handoff, stdin paste fallback, race between the two.
+//! Interactive login: the callback HTTP server, opening the browser, the stdin paste fallback, and the race between the two input paths.
 //!
-//! Cross-references [`super::protocol`] for OIDC mechanics and
-//! [`super::super::AuthManager`] for credential persistence.
+//! See [`super::protocol`] for OIDC mechanics and [`super::super::AuthManager`] for credential persistence.
 
 use std::collections::HashMap;
 use std::io::IsTerminal;
@@ -344,7 +342,7 @@ async fn race_callback_and_stdin(
     result.map_err(|e| anyhow::Error::new(OidcError::CallbackAuthFailed(e)))
 }
 
-/// Run the full OIDC login flow: discovery → PKCE → browser → callback → token exchange → persist.
+/// Run the full OIDC login flow: discovery, PKCE, browser, callback, token exchange, persist.
 pub async fn run_login_flow(
     config: &GrokComConfig,
     auth_manager: &Arc<AuthManager>,
@@ -363,12 +361,10 @@ pub async fn run_login_flow(
 ///
 /// The flow races two input paths:
 ///   - **Path A**: A loopback HTTP server on `127.0.0.1` that receives the IdP redirect.
-///   - **Path B**: Stdin paste — the user manually pastes the callback URL or bare auth code.
+///   - **Path B**: Stdin paste: the user manually pastes the callback URL or bare auth code.
 ///
-/// Path B is essential for remote VMs where the browser runs on a different machine
-/// and the `127.0.0.1` redirect cannot reach the CLI process.
-/// * `channels` — `Some`: pushes the auth URL to the TUI and receives pasted codes.
-///   `None`: prints to stderr / reads stdin (CLI mode).
+/// Path B is essential for remote VMs where the browser runs on a different machine and the `127.0.0.1` redirect cannot reach the CLI process.
+/// * `channels`: with `Some`, the auth URL goes to the TUI and pasted codes come back; with `None`, print to stderr and read stdin (CLI mode).
 pub async fn run_login_flow_with_config(
     oidc: &OidcAuthConfig,
     auth_manager: &Arc<AuthManager>,
@@ -387,9 +383,8 @@ pub async fn run_login_flow_with_config(
     let state = uuid::Uuid::now_v7().to_string();
     let nonce = uuid::Uuid::now_v7().to_string();
 
-    // In local-dev mode, use a fixed callback port so the redirect_uri is stable
-    // and can be pre-registered with the local OAuth2 provider. In production the
-    // OS picks a random available port.
+    // In local-dev mode, use a fixed callback port so the redirect_uri is stable and can be pre-registered with the local OAuth2 provider
+    // In production the OS picks a random available port
     let callback_port: u16 = if super::super::config::use_local_auth() {
         56121
     } else {
@@ -424,7 +419,7 @@ pub async fn run_login_flow_with_config(
             tracing::debug!(error = %e, "OIDC: failed to open browser");
         }
     } else {
-        // No client UI — print to stderr.
+        // No client UI: print to stderr
         eprintln!();
         let provider_label = if oidc.issuer == super::super::config::XAI_OAUTH2_ISSUER {
             "Grok".to_owned()
@@ -486,10 +481,9 @@ pub async fn run_login_flow_with_config(
 
     // Resolve the actual principal chosen on the consent screen.
     //
-    // The shell's config may not have principal_type set (personal login),
-    // but the user might pick "Team" on the consent screen. The server
-    // encodes the chosen principal in the access token JWT. If the config
-    // doesn't specify a principal, peek at the token to discover it.
+    // The shell's config may not have principal_type set (personal login), but the user might pick "Team" on the consent screen
+    // The server encodes the chosen principal in the access token JWT
+    // If the config doesn't specify a principal, peek at the token to discover it
     let token_principal = peek_access_token_principal(&tokens.access_token);
 
     // The authorize URL only pre-selects; verify the token's principal here.
@@ -557,8 +551,8 @@ mod tests {
     use super::super::test_helpers::*;
     use super::*;
 
-    /// End-to-end test: mock IdP + full login flow with code arriving via loopback.
-    /// Exercises discovery → PKCE → race_callback_and_stdin → token exchange → user info → persist.
+    /// End-to-end test: a mock IdP and the full login flow, with the code arriving via loopback.
+    /// Exercises discovery, PKCE, race_callback_and_stdin, token exchange, user info, and persistence.
     #[tokio::test]
     async fn full_login_flow_via_race() {
         ensure_crypto_provider();
@@ -660,7 +654,7 @@ mod tests {
     /// Each case is one bug class:
     ///   - full URL: regression in URL extraction
     ///   - bare code: paste-friendly fallback
-    ///   - error URL: surfaces IdP error to user
+    ///   - error URL: reports the IdP error to the user
     ///   - empty: input validation
     #[test]
     fn parse_pasted_input_matrix() {

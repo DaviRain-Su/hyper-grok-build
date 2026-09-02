@@ -451,6 +451,72 @@
     }
 
     #[test]
+    fn wake_terminal_drains_parked_follow_up() {
+        use crate::app::actions::Effect;
+
+        let mut app = make_app_with_agent("sess-wake");
+        let _ = handle(
+            make_viewer_chunk_with_turn_start("sess-wake", "task-completed-bg1", 5_000),
+            &mut app,
+        );
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .enqueue_prompt("follow-up after wake".into());
+
+        let _ = handle_ext_notification(
+            &xai_wake_turn_completed_notif("sess-wake", "task-completed-bg1", None),
+            &mut app,
+        );
+        assert!(
+            app.pending_effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendPrompt { text, .. } if text == "follow-up after wake")),
+            "wake terminal must drain the parked follow-up; effects = {:?}",
+            app.pending_effects
+        );
+        assert!(
+            app.agents[&AgentId(0)].session.pending_prompts.is_empty(),
+            "the parked row must leave the local queue"
+        );
+    }
+
+    #[test]
+    fn wake_terminal_does_not_drain_while_reconnect_pending() {
+        use crate::app::actions::Effect;
+
+        let mut app = make_app_with_agent("sess-wake");
+        let _ = handle(
+            make_viewer_chunk_with_turn_start("sess-wake", "task-completed-bg1", 5_000),
+            &mut app,
+        );
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .enqueue_prompt("follow-up after wake".into());
+        app.reconnect_pending = true;
+
+        let _ = handle_ext_notification(
+            &xai_wake_turn_completed_notif("sess-wake", "task-completed-bg1", None),
+            &mut app,
+        );
+        assert!(
+            !app.pending_effects
+                .iter()
+                .any(|e| matches!(e, Effect::SendPrompt { .. })),
+            "reconnect must hold the parked follow-up; effects = {:?}",
+            app.pending_effects
+        );
+        assert_eq!(
+            app.agents[&AgentId(0)].session.pending_prompts.len(),
+            1,
+            "the parked row must stay queued until reconnect drains"
+        );
+    }
+
+    #[test]
     fn wake_terminal_finishes_in_flight_streamed_entry() {
         // The terminal is a wake's ONLY flush site (wakes skip PromptResponse).
         let mut app = make_app_with_agent("sess-wake");

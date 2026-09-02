@@ -5,8 +5,8 @@ use agent_client_protocol::{self as acp};
 use super::super::mvp_agent::MvpAgent;
 use crate::session::ExtMethodResult;
 
-/// Model state, after a bounded wait for the first catalog. Process chat
-/// mode serves the chat catalog, as `initialize` does.
+/// Returns the model state after a bounded wait for the first catalog.
+/// Process chat mode serves the chat catalog, as `initialize` does.
 pub(crate) async fn handle(
     agent: &MvpAgent,
     _args: &acp::ExtRequest,

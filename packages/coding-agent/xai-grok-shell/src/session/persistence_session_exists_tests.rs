@@ -38,7 +38,6 @@ fn returns_false_when_session_id_is_a_file_not_a_dir() {
     let root = tmp.path().join("sessions");
     let cwd_dir = root.join("some_cwd_dir");
     fs::create_dir_all(&cwd_dir).unwrap();
-    // Create a file instead of a directory with the session id name
     fs::write(cwd_dir.join("my-session-id"), b"").unwrap();
 
     assert!(!session_exists_in_root("my-session-id", &root));

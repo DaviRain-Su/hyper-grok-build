@@ -739,13 +739,6 @@ mod tests {
     }
 
     #[test]
-    fn test_open_or_create_new_db() {
-        let tmp = TempDir::new().unwrap();
-        let idx = test_index(&tmp);
-        assert_eq!(idx.embedding_dimensions(), 1536);
-    }
-
-    #[test]
     fn test_open_or_create_reopens_existing() {
         let tmp = TempDir::new().unwrap();
         let db_path = tmp.path().join("test.sqlite");

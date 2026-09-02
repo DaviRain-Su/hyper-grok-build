@@ -4,13 +4,12 @@ use toml::Value as TomlValue;
 /// Env override for the full crash-handler install gate.
 pub(crate) const ENV_CRASH_HANDLER: &str = "GROK_CRASH_HANDLER";
 
-/// Extract `[diagnostics] crash_handler` from one TOML layer.
 fn crash_handler_from_toml(v: Option<&TomlValue>) -> Option<bool> {
     v?.get("diagnostics")?.get("crash_handler")?.as_bool()
 }
 
-/// Precedence core shared by the typed resolver and the disk reader so they
-/// can't drift: requirement > env > config > managed > remote > default `false`.
+/// Precedence core shared by the typed resolver and the disk reader so they can't drift.
+/// Order: requirement > env > config > managed > remote > default `false`.
 fn resolve_crash_handler_enabled_layers(
     requirement: Option<bool>,
     config: Option<bool>,
@@ -26,10 +25,8 @@ fn resolve_crash_handler_enabled_layers(
         .resolve()
 }
 
-/// Resolve whether the full crash handler should be installed.
-/// Precedence: requirements > env (`GROK_CRASH_HANDLER`) >
-/// user `[diagnostics] crash_handler` > managed > remote settings
-/// `crash_handler_enabled` > default `false`.
+/// Precedence: requirements > env (`GROK_CRASH_HANDLER`) > user `[diagnostics] crash_handler` > managed > remote settings `crash_handler_enabled`.
+/// Defaults to `false`.
 pub fn resolve_crash_handler_enabled(
     requirements: Option<&TomlValue>,
     user: Option<&TomlValue>,
@@ -44,12 +41,11 @@ pub fn resolve_crash_handler_enabled(
     )
 }
 
-/// Process-global cache of the remote tier, read by
-/// [`load_crash_handler_enabled_sync`] at pre-Tokio install (no live
-/// `RemoteSettings` there). Fail-safe to `None` on lock poisoning.
+/// Process-global cache of the remote tier, read by [`load_crash_handler_enabled_sync`] before Tokio starts, when no live `RemoteSettings` exists.
+/// Fail-safe to `None` on lock poisoning.
 static REMOTE_CRASH_HANDLER_ENABLED: std::sync::RwLock<Option<bool>> = std::sync::RwLock::new(None);
 
-/// Record the remote settings value; called when the agent applies `RemoteSettings`.
+/// Called when the agent applies `RemoteSettings`.
 pub(crate) fn cache_remote_crash_handler_enabled(value: Option<bool>) {
     if let Ok(mut guard) = REMOTE_CRASH_HANDLER_ENABLED.write() {
         *guard = value;
@@ -60,8 +56,7 @@ fn cached_remote_crash_handler_enabled() -> Option<bool> {
     REMOTE_CRASH_HANDLER_ENABLED.read().ok().and_then(|g| *g)
 }
 
-/// Merge system-managed policy (`/etc/grok`) under home `managed_config.toml`
-/// so MDM/system layers still reach the managed BoolFlag tier.
+/// Merge system-managed policy (`/etc/grok`) under home `managed_config.toml` so MDM/system layers still reach the managed BoolFlag tier.
 fn load_managed_toml_layers() -> Option<TomlValue> {
     let system = crate::config::load_system_managed_config().ok();
     let managed = crate::config::load_managed_config().ok();
@@ -76,10 +71,8 @@ fn load_managed_toml_layers() -> Option<TomlValue> {
     }
 }
 
-/// Free-function form of [`resolve_crash_handler_enabled`] for the pager-bin
-/// install path (no live `RemoteSettings`): env + requirements + user +
-/// system/home managed from disk plus the cached remote tier. Defaults
-/// `false`.
+/// Free-function form of [`resolve_crash_handler_enabled`] for the pager-bin install path, which has no live `RemoteSettings`.
+/// Defaults to `false`.
 pub fn load_crash_handler_enabled_sync() -> bool {
     let requirements = crate::config::load_merged_requirements();
     let user = crate::config::load_from_disk().ok();
@@ -98,8 +91,8 @@ mod crash_handler_gate_tests {
     use super::*;
     use crate::agent::config::ConfigSource;
 
-    // `GROK_CRASH_HANDLER` is process-global; serialize and force it unset at
-    // the top of each test so a developer's shell value can't make these flaky.
+    // `GROK_CRASH_HANDLER` is process-global
+    // Serialize and force it unset at the top of each test so a developer's shell value can't make these flaky
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     fn guard() -> std::sync::MutexGuard<'static, ()> {
         let g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());

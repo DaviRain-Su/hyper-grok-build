@@ -1,5 +1,3 @@
-//! Shared helpers for xai-grok-shell integration tests.
-
 use xai_grok_shell::sampling::{ApiBackend, Client, SamplerConfig};
 
 #[cfg(unix)]
@@ -110,8 +108,7 @@ pub mod leader {
         let cleanup = close_clients(clients).await;
         let mut cleanup_error = cleanup.error;
         if !cleanup.all_closed {
-            // This error-only path requests hard kills, then intentionally
-            // leaks concrete owners so panic unwind cannot run blocking Drop.
+            // This error-only path requests hard kills, then intentionally leaks concrete owners so panic unwind cannot run blocking Drop
             // The leak is bounded by the lifetime of the test process.
             for client in clients.iter_mut() {
                 client.contain_failed_cleanup_for_unwind();
@@ -133,10 +130,9 @@ pub mod leader {
         cleanup_error
     }
 
-    /// Run a leader test body, then close only directly-owned stdio clients and
-    /// the concrete initial fixture leader. Detached replacement leaders are
-    /// intentionally outside cleanup ownership; tests that create one remain
-    /// ignored/manual until OS containment or a test-only leader binary exists.
+    /// Run a leader test body, then close only directly-owned stdio clients and the concrete initial fixture leader.
+    /// Detached replacement leaders are intentionally outside cleanup ownership.
+    /// Tests that create one remain ignored/manual until OS containment or a test-only leader binary exists.
     #[allow(dead_code)]
     pub async fn run_with_cleanup<F>(
         fixture: &LeaderFixture,
@@ -292,16 +288,74 @@ pub mod leader {
     }
 }
 
-/// Create a sampling client configured for a mock server. Shared by the
-/// integration tests so the ~30-field `SamplerConfig` literal lives in one
-/// place (`SamplerConfig` has no `Default`).
+#[allow(dead_code)]
+pub fn isolated_home() -> tempfile::TempDir {
+    let home = tempfile::TempDir::new().expect("grok home tempdir");
+    // SAFETY: single-test binary; no other thread reads or writes the environment.
+    unsafe { xai_grok_test_support::isolate_grok_env(home.path()) };
+    home
+}
+
+#[allow(dead_code)]
+pub fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build runtime")
+        .block_on(fut)
+}
+
+#[allow(dead_code)]
+pub async fn start_seeded_mock(
+    home: &std::path::Path,
+) -> xai_grok_test_support::MockInferenceServer {
+    let server = xai_grok_test_support::MockInferenceServer::start()
+        .await
+        .expect("start mock server");
+    std::fs::write(home.join("agent_id"), "test-agent-id").expect("seed agent_id");
+    let scope = xai_grok_shell::auth::GrokComConfig::default().auth_scope();
+    let auth = serde_json::json!({
+        scope: {
+            "key": "test-session-token",
+            "auth_mode": "oidc",
+            "oidc_issuer": xai_grok_shell::auth::xai_oauth2_issuer(),
+            "create_time": "2026-01-01T00:00:00Z",
+            "expires_at": "2099-01-01T00:00:00Z",
+            "user_id": "test-user",
+        }
+    });
+    std::fs::write(home.join("auth.json"), auth.to_string()).expect("write auth.json");
+    std::fs::write(
+        home.join("config.toml"),
+        format!(
+            "[endpoints]\ncli_chat_proxy_base_url = \"{}\"\n",
+            server.url()
+        ),
+    )
+    .expect("write config.toml");
+    server
+}
+
+#[allow(dead_code)]
+pub async fn run_bootstrap() -> Result<xai_grok_shell::agent::config::Config, String> {
+    tokio::task::spawn_blocking(|| {
+        let cfg = xai_grok_shell::agent::config::Config::default();
+        let auth_manager = std::sync::Arc::new(cfg.create_auth_manager());
+        xai_grok_shell::agent::init::bootstrap(&cfg, &auth_manager, None)
+            .map(|(resolved, _models_manager)| resolved)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .expect("bootstrap worker")
+}
+
+/// Shared by the integration tests so the ~30-field `SamplerConfig` literal lives in one place (`SamplerConfig` has no `Default`).
 #[allow(dead_code)]
 pub fn create_test_client(base_url: &str, api_backend: ApiBackend) -> Client {
     create_test_client_with_extra_headers(base_url, api_backend, &[])
 }
 
-/// Like [`create_test_client`] but seeds `SamplerConfig::extra_headers`, so a
-/// test can assert that session-injected headers reach the wire.
+/// Like [`create_test_client`] but seeds `SamplerConfig::extra_headers`, so a test can assert that session-injected headers reach the wire.
 #[allow(dead_code)]
 pub fn create_test_client_with_extra_headers(
     base_url: &str,
@@ -311,17 +365,15 @@ pub fn create_test_client_with_extra_headers(
     Client::new(test_sampler_config(base_url, api_backend, extra_headers)).unwrap()
 }
 
-/// The shared mock-server `SamplerConfig`; tests needing a non-default field
-/// (e.g. `doom_loop_recovery`) mutate the returned value before building the
-/// client themselves.
+/// The shared mock-server `SamplerConfig`.
+/// Tests needing a non-default field (e.g. `doom_loop_recovery`) mutate the returned value before building the client themselves.
 #[allow(dead_code)]
 pub fn test_sampler_config(
     base_url: &str,
     api_backend: ApiBackend,
     extra_headers: &[(&str, &str)],
 ) -> SamplerConfig {
-    // Shell `Client` is `xai_grok_sampler::SamplingClient`, which takes a
-    // `SamplerConfig` directly. Construct one inline here.
+    // Shell `Client` is `xai_grok_sampler::SamplingClient`, which takes a `SamplerConfig` directly
     SamplerConfig {
         api_key: Some("test-api-key".to_string()),
         base_url: base_url.to_string(),

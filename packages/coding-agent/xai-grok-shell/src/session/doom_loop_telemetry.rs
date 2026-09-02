@@ -5,8 +5,7 @@ use std::collections::{HashMap, HashSet};
 const MAX_TRIGGER_LABELS: usize = 64;
 const MAX_TRIGGER_LABEL_BYTES: usize = 256;
 
-/// Fold `new` trigger labels into `current`, keeping the tightest
-/// (lowest-threshold) raw label overall.
+/// Fold `new` trigger labels into `current`, keeping the tightest (lowest-threshold) raw label overall.
 pub(crate) fn merge_tightest_trigger(current: Option<String>, new: &[String]) -> Option<String> {
     xai_grok_sampling_types::doom_loop::DoomLoopSignal::tightest(
         current
@@ -67,7 +66,7 @@ pub(crate) fn reconcile_request_metadata(
 }
 
 impl DoomLoopTurnTally {
-    /// Fold raw detector labels into the turn-level incidence set.
+    /// Fold raw detector labels into this turn's `triggers` list.
     pub(crate) fn merge_all_triggers(&mut self, triggers: &[String]) {
         for trigger in triggers {
             if self.triggers.len() >= MAX_TRIGGER_LABELS {
@@ -79,8 +78,7 @@ impl DoomLoopTurnTally {
         }
     }
 
-    /// Fold recovery-action labels into both incidence and the legacy tightest
-    /// trigger used by recovery telemetry.
+    /// Fold recovery-action labels into both `triggers` and the legacy tightest `top_trigger` used by recovery telemetry.
     pub(crate) fn merge_recovery_triggers(&mut self, triggers: &[String]) {
         self.merge_all_triggers(triggers);
         let current = self.top_trigger.take();

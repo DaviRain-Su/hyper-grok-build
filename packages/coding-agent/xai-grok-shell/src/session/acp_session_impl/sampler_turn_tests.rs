@@ -11,8 +11,8 @@ fn x_cut(to: &str) -> XSearchOptions {
     }
 }
 
-/// A prompt whose every sample ends Length-with-tools salvages up to the
-/// cap (reminder only on the first) and then fails the turn.
+/// When every sample ends with finish reason Length while tools are active, the turn salvages up to the cap and then fails.
+/// The reminder is injected only on the first salvage.
 #[test]
 fn length_salvage_streak_proceeds_to_the_cap_then_exhausts() {
     let mut streak = LengthSalvageStreak::default();
@@ -34,8 +34,7 @@ fn length_salvage_streak_proceeds_to_the_cap_then_exhausts() {
     ));
 }
 
-/// A non-Length (or tool-less) sample resets the streak: a later salvage
-/// starts a fresh streak and re-injects the reminder.
+/// A non-Length (or tool-less) sample resets the streak: a later salvage starts a fresh streak and re-injects the reminder.
 #[test]
 fn length_salvage_streak_resets_on_non_length_sample() {
     let mut streak = LengthSalvageStreak::default();

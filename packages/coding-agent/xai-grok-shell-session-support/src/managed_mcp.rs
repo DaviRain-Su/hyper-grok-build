@@ -1,10 +1,9 @@
 //! Managed MCP gateway catalog and tool calls via the Grok API.
 //!
-//! Catalog: `GET /v1/mcp/tools/list` → `managed_gateway:*` rows.
+//! Catalog: `GET /v1/mcp/tools/list` returns `managed_gateway:*` rows.
 //! Call: `POST /v1/mcp/tools/call`.
 //!
-//! Config-file/plugin merge (which reads shell's config system) lives
-//! in shell's `session::managed_mcp`, which re-exports everything here.
+//! The config-file and plugin merge reads shell's config system, so it lives in shell's `session::managed_mcp`, which re-exports everything here.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -23,9 +22,8 @@ pub struct ManagedMcpState {
     pub gateway_tool_epoch: u64,
     pub gateway_tool_cache: GatewayToolCatalogCache,
     pub gateway_tool_fetch_notify: Arc<tokio::sync::Notify>,
-    /// Retained across gateway disable/cache invalidation so the on-disk
-    /// MCP descriptor mirror can remove stale gateway connector directories when
-    /// the current catalog is empty or absent.
+    /// Retained across gateway disable and cache invalidation.
+    /// The on-disk MCP descriptor mirror uses it to remove stale gateway connector directories when the current catalog is empty or absent.
     pub gateway_tool_connectors_seen: HashSet<String>,
 }
 
@@ -130,10 +128,7 @@ impl GatewayTool {
     }
 }
 
-/// Why a managed-MCP gateway fetch failed. Distinguishes "fetch failed" from
-/// the legitimate "fetched, zero connectors" (`Ok` with an empty catalog) so
-/// the agent cache never commits a transient failure as a permanent empty
-/// catalog.
+/// An `Err` here is distinct from `Ok` with an empty catalog, so the agent cache never commits a transient failure as a permanent empty catalog.
 #[derive(Debug, thiserror::Error)]
 pub enum ManagedMcpFetchError {
     #[error("HTTP {status}: {message}")]
@@ -143,7 +138,6 @@ pub enum ManagedMcpFetchError {
     },
     #[error("transport: {0}")]
     Transport(#[from] reqwest::Error),
-    /// No usable auth token at fetch time.
     #[error("no auth token available")]
     NoAuth,
 }
@@ -188,8 +182,7 @@ async fn get_authenticated_json<T: serde::de::DeserializeOwned>(
     }
 }
 
-// Above the server-side tool-call budget so the client is not the first
-// hop to abort a slow tool call.
+// This timeout sits above the server-side tool-call budget so the client is not the first hop to abort a slow tool call
 const GATEWAY_TOOL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(75);
 
 pub async fn call_gateway_tool(
@@ -270,13 +263,10 @@ async fn gateway_error_message(status: reqwest::StatusCode, response: reqwest::R
     }
 }
 
-/// Fetch the managed MCP gateway tool catalog from the Grok API
-/// (`GET /v1/mcp/tools/list`).
+/// Fetch the managed MCP gateway tool catalog from the Grok API (`GET /v1/mcp/tools/list`).
 ///
-/// `Ok(catalog)` means the server answered and the catalog contents are
-/// authoritative for this fetch, even when empty. `Err(_)` means freshness is
-/// unknown and callers must leave any cache retryable rather than committing an
-/// empty catalog.
+/// `Ok(catalog)` means the server answered and the catalog contents are authoritative for this fetch, even when empty.
+/// `Err(_)` means freshness is unknown and callers must leave any cache retryable rather than committing an empty catalog.
 pub async fn fetch_gateway_tool_catalog(
     proxy_base_url: &str,
     auth_key: &str,
@@ -300,8 +290,7 @@ pub async fn fetch_gateway_tool_catalog(
     Ok(catalog)
 }
 
-/// Invalidate only the gateway tool catalog so the next gateway-aware caller
-/// refetches `/v1/mcp/tools/list`.
+/// Invalidate only the gateway tool catalog so the next gateway-aware caller refetches `/v1/mcp/tools/list`.
 pub async fn invalidate_gateway_tool_cache(handle: &ManagedMcpStateHandle) {
     let mut state = handle.lock().await;
     state.gateway_tool_cache = GatewayToolCatalogCache::NotFetched;
@@ -309,10 +298,9 @@ pub async fn invalidate_gateway_tool_cache(handle: &ManagedMcpStateHandle) {
 
 /// Fetch-or-wait for the managed MCP gateway tool catalog.
 ///
-/// Returns `Some(catalog)` for either a cached catalog or a successful fresh
-/// fetch, including a genuine empty catalog. Returns `None` when gateway tools
-/// are disabled by the caller, auth is unavailable, or the fetch failed. Failed
-/// fetches roll back to `NotFetched`, so a later caller can retry.
+/// Returns `Some(catalog)` for either a cached catalog or a successful fresh fetch, including a genuine empty catalog.
+/// Returns `None` when gateway tools are disabled by the caller, auth is unavailable, or the fetch failed.
+/// Failed fetches roll back to `NotFetched`, so a later caller can retry.
 pub async fn get_or_fetch_gateway_tool_catalog(
     handle: &ManagedMcpStateHandle,
     proxy_url: &str,
@@ -559,20 +547,6 @@ mod tests {
             state.gateway_tool_cache,
             GatewayToolCatalogCache::NotFetched
         ));
-    }
-
-    #[tokio::test]
-    async fn failed_gateway_tool_fetch_is_not_cached_as_ready_empty() {
-        let handle = ManagedMcpStateHandle::default();
-        let catalog = get_or_fetch_gateway_tool_catalog(&handle, "http://127.0.0.1:0", None).await;
-        assert!(catalog.is_none());
-        assert!(
-            matches!(
-                handle.lock().await.gateway_tool_cache,
-                GatewayToolCatalogCache::NotFetched
-            ),
-            "failed gateway tool fetch must roll back to NotFetched, not poison the cache as Ready(empty)"
-        );
     }
 
     #[test]

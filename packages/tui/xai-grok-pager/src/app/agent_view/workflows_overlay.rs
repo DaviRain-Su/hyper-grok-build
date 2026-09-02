@@ -201,12 +201,9 @@ impl AgentView {
 
                 let result = match outcome {
                     ModalWindowOutcome::CloseRequested => {
-                        if in_detail && runs.len() > 1 {
-                            view.detail_run_id = None;
-                            view.phase_pinned = false;
-                        } else {
-                            self.show_workflows = false;
-                        }
+                        // [✗] and click-outside dismiss the overlay. Back to
+                        // the run list is Left / Tab / the Runs shortcut.
+                        self.show_workflows = false;
                         InputOutcome::Changed
                     }
                     ModalWindowOutcome::ShortcutActivated(shortcut_ids::OPEN) => {
@@ -708,5 +705,41 @@ mod workflows_overlay_key_tests {
         assert!(matches!(out, InputOutcome::Changed));
         assert!(agent.show_workflows);
         assert_eq!(agent.workflows_view.detail_run_id, None);
+    }
+
+    #[test]
+    fn click_close_from_detail_dismisses_overlay() {
+        let mut agent = workflows_agent(&["wf_old", "wf_new"]);
+        agent.workflows_view.detail_run_id = Some("wf_new".to_string());
+        agent.workflows_view.window.close_button_rect = Some(rect(70, 1, 3, 1));
+        agent.workflows_view.window.popup_area = Some(rect(0, 0, 80, 24));
+        let reg = ActionRegistry::defaults();
+
+        let out = agent.handle_input(&mouse_down(71, 1), &reg);
+        assert!(matches!(out, InputOutcome::Changed));
+        assert!(
+            !agent.show_workflows,
+            "[✗] must dismiss the overlay immediately, not return to the run list"
+        );
+        assert_eq!(
+            agent.workflows_view.detail_run_id.as_deref(),
+            Some("wf_new"),
+            "dismiss leaves the last detail selection in place"
+        );
+    }
+
+    #[test]
+    fn click_outside_from_detail_dismisses_overlay() {
+        let mut agent = workflows_agent(&["wf_old", "wf_new"]);
+        agent.workflows_view.detail_run_id = Some("wf_new".to_string());
+        agent.workflows_view.window.popup_area = Some(rect(10, 4, 60, 16));
+        let reg = ActionRegistry::defaults();
+
+        let out = agent.handle_input(&mouse_down(1, 1), &reg);
+        assert!(matches!(out, InputOutcome::Changed));
+        assert!(
+            !agent.show_workflows,
+            "click-outside must dismiss the overlay immediately"
+        );
     }
 }

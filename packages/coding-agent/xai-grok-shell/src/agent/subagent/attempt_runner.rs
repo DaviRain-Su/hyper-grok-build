@@ -2,7 +2,6 @@
 use super::*;
 use crate::session::commands::PromptTurnResult as SubagentPromptTurnResult;
 use std::future::Future;
-/// Outcome of the bounded wait for an initial child prompt to become running.
 #[derive(Debug)]
 pub(super) enum InitialChildPromptReadiness<T> {
     Cancelled,
@@ -11,8 +10,7 @@ pub(super) enum InitialChildPromptReadiness<T> {
     TimedOut,
 }
 impl<T> InitialChildPromptReadiness<T> {
-    /// Tear-down taxonomy for an unpromoted child. Only the admission
-    /// deadline is a timeout; cancel and a failed `started` promotion stay cancelled.
+    /// Only the admission deadline is a timeout; cancel and a failed `started` promotion stay cancelled.
     pub(super) fn unpromoted_disposition(&self) -> UnpromotedChildDisposition {
         match self {
             Self::TimedOut => UnpromotedChildDisposition::AdmissionTimedOut,
@@ -22,8 +20,7 @@ impl<T> InitialChildPromptReadiness<T> {
         }
     }
 }
-/// Deterministic precedence: cancellation, then a successful readiness ack,
-/// then the attempt result, then the admission deadline.
+/// Deterministic precedence: cancellation, then a successful readiness ack, then the attempt result, then the admission deadline.
 pub(super) async fn wait_initial_child_prompt_readiness<Fut, T>(
     cancelled: impl Future<Output = ()>,
     readiness: oneshot::Receiver<()>,
@@ -130,7 +127,10 @@ pub(super) async fn run_one_turn_attempt(
     let duration_ms = input.child_run_started_at.elapsed().as_millis() as u64;
     let (result, cancellation_may_hide_usage) = match wait_outcome {
         SubagentWaitOutcome::Cancelled => {
-            let (tool_calls, turns) = signals_snapshot_counts(input.child_handle).await;
+            let counts = signals_snapshot_counts(input.child_handle).await;
+            let may_hide_usage =
+                counts.is_none_or(|(tool_calls, turns)| turns > 0 || tool_calls > 0);
+            let (tool_calls, turns) = counts.unwrap_or((0, 0));
             (
                 SubagentResult {
                     success: false,
@@ -144,7 +144,7 @@ pub(super) async fn run_one_turn_attempt(
                         duration_ms,
                     )
                 },
-                turns > 0 || tool_calls > 0,
+                may_hide_usage,
             )
         }
         SubagentWaitOutcome::TurnResult(turn_result) => {
@@ -164,19 +164,26 @@ pub(super) async fn run_one_turn_attempt(
                         snapshot.current.turn_count,
                     )
                 }
-                _ => signals_snapshot_counts(input.child_handle).await,
+                _ => signals_snapshot_counts(input.child_handle)
+                    .await
+                    .unwrap_or((0, 0)),
             };
-            let final_text = input
-                .child_handle
-                .chat_state_handle
-                .get_last_assistant_text_in_turn()
-                .await
-                .unwrap_or_default();
-            let result_tokens = input
-                .child_handle
-                .chat_state_handle
-                .get_total_tokens()
-                .await;
+            let final_text = super::handle_request::child_actor_query(
+                "trailing_assistant_report",
+                input
+                    .child_handle
+                    .chat_state_handle
+                    .get_trailing_assistant_report(),
+                None,
+            )
+            .await
+            .unwrap_or_default();
+            let result_tokens = super::handle_request::child_actor_query(
+                "total_tokens",
+                input.child_handle.chat_state_handle.get_total_tokens(),
+                0,
+            )
+            .await;
             let success_summary = || {
                 format!(
                     "Subagent '{}' ({}) completed successfully. {tool_calls} tool calls, \
@@ -275,7 +282,10 @@ pub(super) async fn record_subagent_usage(
             {
                 return false;
             }
-            ack.await.is_ok()
+            match tokio::time::timeout(super::handle_request::PARENT_ACK_TIMEOUT, ack).await {
+                Ok(acked) => acked.is_ok(),
+                Err(_) => false,
+            }
         }
     }
 }
@@ -283,26 +293,28 @@ pub(super) async fn capture_and_fold_one_turn_usage(
     result: &mut SubagentResult,
     input: OneTurnUsageInput<'_>,
 ) -> bool {
-    let (by_model, incomplete, output_tokens, total_tokens) = match input
-        .child_handle
-        .chat_state_handle
-        .try_get_session_usage()
+    let (by_model, incomplete, output_tokens, total_tokens) =
+        match super::handle_request::child_actor_query(
+            "session_usage",
+            input.child_handle.chat_state_handle.try_get_session_usage(),
+            Err(()),
+        )
         .await
-    {
-        Ok(usage) => {
-            let output_tokens = usage.totals.output_tokens;
-            let total_tokens = canonical_total_tokens(&usage.totals);
-            let incomplete =
-                usage_is_incomplete(usage.incomplete, input.cancellation_may_hide_usage);
-            (
-                Some(usage.by_model.into_iter().collect::<Vec<_>>()),
-                incomplete,
-                (!incomplete).then_some(output_tokens),
-                Some(total_tokens),
-            )
-        }
-        Err(()) => (None, true, None, None),
-    };
+        {
+            Ok(usage) => {
+                let output_tokens = usage.totals.output_tokens;
+                let total_tokens = canonical_total_tokens(&usage.totals);
+                let incomplete =
+                    usage_is_incomplete(usage.incomplete, input.cancellation_may_hide_usage);
+                (
+                    Some(usage.by_model.into_iter().collect::<Vec<_>>()),
+                    incomplete,
+                    (!incomplete).then_some(output_tokens),
+                    Some(total_tokens),
+                )
+            }
+            Err(()) => (None, true, None, None),
+        };
     result.total_tokens_used = total_tokens.unwrap_or(0);
     if let Some((task_spent, task_incomplete)) = input.task_budget_usage {
         result.output_tokens_used = output_tokens.unwrap_or(task_spent);

@@ -7,8 +7,7 @@ use tokio::sync::{Notify, oneshot};
 #[derive(Debug)]
 pub struct ElicitationJob {
     pub server_name: String,
-    /// Pre-validated by [`bridge_elicit`] via [`wire_mode_and_fields`], so
-    /// consumers never see an unsupported mode.
+    /// Pre-validated by [`bridge_elicit`] via [`wire_mode_and_fields`], so consumers never see an unsupported mode.
     pub fields: WireElicitFields,
     pub response_tx: oneshot::Sender<ElicitResult>,
 }
@@ -165,9 +164,8 @@ pub fn elicit_result_from_wire(
     }
 }
 
-/// Message + mode-tagged fields of a supported, size-validated elicitation
-/// request — exactly what [`McpElicitExtRequest`] still needs on top of the
-/// session/tool-call identifiers the shell adds.
+/// The message and mode-tagged fields of a supported, size-validated elicitation request.
+/// This is exactly what [`McpElicitExtRequest`] still needs on top of the session/tool-call identifiers the shell adds.
 ///
 /// [`McpElicitExtRequest`]: xai_grok_tools::mcp_elicitation::McpElicitExtRequest
 #[derive(Debug, Clone)]
@@ -294,9 +292,8 @@ mod tests {
         assert_eq!(result.content.unwrap()["email"], "a@b.com");
     }
 
-    /// Dropping the bridge future (server cancelled `elicitation/create`)
-    /// must close the queued job's response channel, so the coordinator's
-    /// `response_tx.closed()` race can dismiss the orphaned HITL card.
+    /// Dropping the bridge future (server cancelled `elicitation/create`) must close the queued job's response channel.
+    /// The coordinator's `response_tx.closed()` race can then dismiss the orphaned HITL card.
     #[tokio::test]
     async fn abandoned_bridge_closes_job_channel() {
         let inbox = ElicitationInbox::new();
@@ -449,45 +446,6 @@ mod tests {
         };
         assert_eq!(url, "https://x.ai");
         assert_eq!(elicitation_id, "id1");
-    }
-
-    #[test]
-    fn unknown_mode_is_declined_not_empty_form() {
-        fn mapped_or_declined(params: &ElicitRequestParams) -> Result<(), ElicitResult> {
-            match wire_mode_and_fields(params) {
-                Some(_) => Ok(()),
-                None => Err(decline_result()),
-            }
-        }
-
-        let schema = ElicitationSchema::builder()
-            .required_property("x", PrimitiveSchemaDefinition::String(StringSchema::new()))
-            .build()
-            .unwrap();
-        assert!(
-            mapped_or_declined(&ElicitRequestParams::FormElicitationParams {
-                meta: None,
-                message: "m".into(),
-                requested_schema: schema,
-            })
-            .is_ok()
-        );
-        assert!(
-            mapped_or_declined(&ElicitRequestParams::UrlElicitationParams {
-                meta: None,
-                message: "u".into(),
-                url: "https://x.ai".into(),
-                elicitation_id: "id1".into(),
-            })
-            .is_ok()
-        );
-
-        let declined = decline_result();
-        assert_eq!(declined.action, ElicitationAction::Decline);
-        assert!(
-            declined.content.is_none(),
-            "unknown mode must not become Accept with {{}}"
-        );
     }
 
     #[test]

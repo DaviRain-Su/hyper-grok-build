@@ -1,4 +1,4 @@
-//! Keeps the plan-agent first-user verification workflow together.
+//! The browser-verification rule the plan agent injects into the first user message.
 
 use crate::prompt::user_message::RuleEntry;
 

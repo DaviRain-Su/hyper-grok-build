@@ -5,9 +5,8 @@
 //!   firehose to `~/.grok/debug/<session_id>.txt` (one file per session), with a
 //!   `<role>-<pid>.txt` catch-all for events fired outside any session span, and
 //!   a `latest.txt` symlink pointing at the most-recently-opened session file.
-//! - SingleFile (explicit path via `GROK_LOG_FILE` or `GROK_DEBUG_LOG=<path>`):
-//!   one flat `fmt` file, routing bypassed. Disk IO stays off the tracing hot
-//!   path via `tracing_appender`'s non-blocking writer in both modes.
+//! - SingleFile (explicit path via `GROK_LOG_FILE` or `GROK_DEBUG_LOG=<path>`): one flat `fmt` file, routing bypassed.
+//!   Disk IO stays off the tracing hot path via `tracing_appender`'s non-blocking writer in both modes.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -41,45 +40,40 @@ impl DebugSource {
     }
 }
 
-/// Target for the pager's always-on compact ACP update summary line
-/// (kind, ids, status, payload sizes).
+/// Target for the pager's always-on compact ACP update summary line (kind, ids, status, payload sizes).
 ///
-/// Lives here (not in `xai-grok-pager`) so the firehose directives below and
-/// the pager's own filter are built from the same constants — a rename can't
-/// silently desync them into a no-op directive.
+/// Lives here (not in `xai-grok-pager`) so the firehose directives below and the pager's own filter are built from the same constants.
+/// A rename can't silently turn the directive into a no-op.
 pub const ACP_UPDATE_TARGET: &str = "acp_update";
 
 /// Target for the pager's full ACP update payload dump (plain JSON).
 ///
-/// Off in the pager's release filter; the firehose is the always-available
-/// subscriber for full payloads, and it writes to disk, where the volume is
-/// safe. See `xai-grok-pager/src/tracing.rs` for the consumer side.
+/// Off in the pager's release filter.
+/// The firehose is the always-available subscriber for full payloads, and it writes to disk, where the volume is safe.
+/// See `xai-grok-pager/src/tracing.rs` for the consumer side.
 pub const ACP_UPDATE_PAYLOAD_TARGET: &str = "acp_update_payload";
 
-/// Module path of rmcp 2.1's per-reconnect SSE warn (`sse stream error: ...`),
-/// which subscribers demote to `error` to drop the flood. Re-check on rmcp bump.
+/// Module path of rmcp 2.1's per-reconnect SSE warn (`sse stream error: ...`), which subscribers demote to `error` to drop the flood.
+/// Re-check on rmcp bump.
 pub const RMCP_SSE_NOISE_TARGET: &str = "rmcp::transport::common::client_side_sse";
 
-// Broad firehose filter for the routing/GROK_DEBUG_LOG sources: capture our
-// crates at debug regardless of a narrowing RUST_LOG, with deps at info so they
-// don't flood. Curated first-party allowlist: new grok crates default to `info`
-// until added here.
+// Broad firehose filter for the routing and GROK_DEBUG_LOG sources
+// Capture our crates at debug regardless of a narrowing RUST_LOG, with deps at info so they don't flood
+// Curated first-party allowlist: new grok crates default to `info` until added here
 const FIREHOSE_BASE_DIRECTIVES: &str = "info,xai_grok_pager=debug,xai_grok_shell=debug,xai_grok_tools=debug,xai_grok_telemetry=debug,xai_grok_agent=debug,xai_grok_mcp=debug,xai_grok_session_search=debug,xai_acp_lib=debug,sampling_log=off";
 
-// Full firehose directives: the curated crate list plus the pager's ACP
-// update target (built from the constant above, not a literal).
+// Full firehose directives: the curated crate list plus the pager's ACP update target (built from the constant above, not a literal)
 fn firehose_directives() -> String {
     format!("{FIREHOSE_BASE_DIRECTIVES},{ACP_UPDATE_TARGET}=debug")
 }
 
-// The broad firehose filter, used by both the routing layer and the
-// GROK_DEBUG_LOG single-file source (mirrors `default_file_filter`).
+// The broad firehose filter, used by both the routing layer and the GROK_DEBUG_LOG single-file source (mirrors `default_file_filter`)
 fn firehose_filter() -> EnvFilter {
     EnvFilter::new(firehose_directives())
 }
 
-// RUST_LOG-respecting filter for the GROK_LOG_FILE source: DEBUG default, honor
-// RUST_LOG, silence sampling_log (preserves GROK_LOG_FILE back-compat).
+// RUST_LOG-respecting filter for the GROK_LOG_FILE source: DEBUG default, honor RUST_LOG, silence sampling_log
+// This preserves GROK_LOG_FILE back-compat
 fn default_file_filter() -> EnvFilter {
     EnvFilter::builder()
         .with_default_directive(LevelFilter::DEBUG.into())
@@ -107,16 +101,15 @@ where
 
 // ── Per-session routing layer ───────────────────────────────────────────────
 
-/// Filesystem-safe session key. Sanitized once at capture (`on_new_span`) and
-/// stashed in the span's tracing extensions, so events fired anywhere under the
-/// span route to the right file without re-sanitizing on the hot path.
+/// Filesystem-safe session key.
+/// Sanitized once at capture (`on_new_span`) and stashed in the span's tracing extensions.
+/// Events fired anywhere under the span route to the right file without re-sanitizing on the hot path.
 #[derive(Clone)]
 struct SessionId(String);
 
-/// Visits span attributes to pull out the `session_id` field. Production records
-/// it via `%` (Display → `record_debug`, no quotes); like `EventVisitor`, the
-/// single `record_debug` impl captures every field type (the other recorders
-/// default to it).
+/// Visits span attributes to pull out the `session_id` field.
+/// Production records it via `%` (Display goes through `record_debug`, no quotes).
+/// Like `EventVisitor`, the single `record_debug` impl captures every field type (the other recorders default to it).
 #[derive(Default)]
 struct SessionIdVisitor(Option<String>);
 
@@ -128,9 +121,8 @@ impl Visit for SessionIdVisitor {
     }
 }
 
-/// Renders an event's message + remaining fields into plain strings. All field
-/// types funnel through `record_debug` (the trait's other recorders default to
-/// it), so this one impl captures everything.
+/// Renders an event's message and remaining fields into plain strings.
+/// All field types funnel through `record_debug` (the trait's other recorders default to it), so this one impl captures everything.
 #[derive(Default)]
 struct EventVisitor {
     message: String,
@@ -148,10 +140,10 @@ impl Visit for EventVisitor {
     }
 }
 
-// Format one compact, ANSI-free firehose line. Intentionally NOT byte-identical
-// to `fmt::Layer`: its `FormatEvent` can't be reused from another layer and a
-// `MakeWriter` can't see span context, so we render here. Span context is
-// omitted on purpose — the file name already carries the session id.
+// Format one compact, ANSI-free firehose line
+// The output is intentionally not byte-identical to `fmt::Layer`
+// Its `FormatEvent` can't be reused from another layer and a `MakeWriter` can't see span context, so we render here
+// Span context is omitted on purpose; the file name already carries the session id
 fn format_event(event: &tracing::Event<'_>) -> String {
     let meta = event.metadata();
     let mut visitor = EventVisitor::default();
@@ -159,9 +151,8 @@ fn format_event(event: &tracing::Event<'_>) -> String {
     let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
     let level = meta.level();
     let target = meta.target();
-    // Skip the message gap when there's no `message` field so a field-only event
-    // renders "target: k=v" (each field already carries a leading space), not
-    // "target:  k=v" with a dangling double space.
+    // Skip the message gap when there's no `message` field; each field already carries a leading space
+    // A field-only event then renders "target: k=v" rather than "target:  k=v" with a dangling double space
     if visitor.message.is_empty() {
         format!("{ts} {level} {target}:{}\n", visitor.fields)
     } else {
@@ -172,8 +163,8 @@ fn format_event(event: &tracing::Event<'_>) -> String {
     }
 }
 
-// Keep per-session file names filesystem-safe. A session id is normally a UUID,
-// but never let an unexpected value (path separators, `..`) escape the dir.
+// Keep per-session file names filesystem-safe
+// A session id is normally a UUID, but never let an unexpected value (path separators, `..`) escape the dir
 fn sanitize_key(id: &str) -> String {
     let safe: String = id
         .chars()
@@ -185,35 +176,31 @@ fn sanitize_key(id: &str) -> String {
             }
         })
         .collect();
-    // Map empty / dot-only keys ("", ".", "..", "...") to a constant: those are
-    // filesystem-special, and relying on the `.txt` suffix to neutralize them is
-    // incidental. Make the safety explicit instead.
+    // Map empty or dot-only keys ("", ".", "..", "...") to a constant: those are filesystem-special
+    // Relying on the `.txt` suffix to neutralize them is incidental; make the safety explicit instead
     if safe.is_empty() || safe.bytes().all(|b| b == b'.') {
         return "_".to_owned();
     }
     safe
 }
 
-// `latest.txt` link + swap-temp name parts, shared by `update_latest_symlink`
-// (create/rename) and `prune_old_logs` (spare rule + orphan cleanup) so the
-// sites can never drift. Tests pin the literals on purpose: orphans created by
-// already-shipped binaries must stay reapable across a rename of these consts.
+// `latest.txt` link and swap-temp name parts
+// Both `update_latest_symlink` (create/rename) and `prune_old_logs` (spare rule and orphan cleanup) use them, so the sites can never drift
+// Tests pin the literals on purpose: orphans created by already-shipped binaries must stay reapable across a rename of these consts
 const LATEST_LINK_NAME: &str = "latest.txt";
 const LATEST_TMP_PREFIX: &str = ".latest.";
 const LATEST_TMP_SUFFIX: &str = ".tmp";
 
-/// Repoint `<dir>/latest.txt` at `target` (a sibling session file) for
-/// `tail -f`. Best-effort and Unix-only; the relative target keeps the link
-/// valid regardless of the dir's absolute path.
+/// Repoint `<dir>/latest.txt` at `target` (a sibling session file) for `tail -f`.
+/// Best-effort and Unix-only; the relative target keeps the link valid regardless of the dir's absolute path.
 #[cfg(unix)]
 fn update_latest_symlink(dir: &Path, target: &Path) {
     let Some(name) = target.file_name() else {
         return;
     };
-    // Atomic swap: symlink a unique temp then rename it over latest.txt (rename
-    // is atomic on POSIX), so a racing `tail -f` never sees latest.txt missing.
-    // The temp name is keyed by the target file so concurrent opens of different
-    // sessions don't collide on it.
+    // Atomic swap: symlink a unique temp then rename it over latest.txt (rename is atomic on POSIX)
+    // A racing `tail -f` thus never sees latest.txt missing
+    // The temp name is keyed by the target file so concurrent opens of different sessions don't collide on it
     let tmp = dir.join(format!(
         "{LATEST_TMP_PREFIX}{}{LATEST_TMP_SUFFIX}",
         name.to_string_lossy()
@@ -222,8 +209,7 @@ fn update_latest_symlink(dir: &Path, target: &Path) {
     if std::os::unix::fs::symlink(name, &tmp).is_ok()
         && std::fs::rename(&tmp, dir.join(LATEST_LINK_NAME)).is_err()
     {
-        // Rename failed: remove the temp symlink now rather than leaving an
-        // orphan for prune to reap only after LOG_RETENTION.
+        // Rename failed: remove the temp symlink now rather than leaving an orphan for prune to reap only after LOG_RETENTION
         let _ = std::fs::remove_file(&tmp);
     }
 }
@@ -231,29 +217,24 @@ fn update_latest_symlink(dir: &Path, target: &Path) {
 #[cfg(not(unix))]
 fn update_latest_symlink(_dir: &Path, _target: &Path) {}
 
-/// Per-session sinks plus a single fallback sink, all behind the routing layer's
-/// mutex. There is no cap or eviction: each distinct session id opens one file +
-/// non-blocking worker + parked guard that persist for the process lifetime
-/// (reclaimed only when the process/leader restarts). That is acceptable for an
-/// opt-in, debug-only firehose; a long-lived `--debug` leader holds one fd per
-/// session it logs. The central guard parking (`appender`) is what lets
-/// `flush()` drain these at exit, so we do not reclaim per session.
+/// Per-session sinks plus a single fallback sink, all behind the routing layer's mutex.
+/// No cap or eviction: each session id opens one file, worker, and parked guard for the process lifetime.
+/// That is fine for an opt-in, debug-only firehose.
+/// The central guard parking (`appender`) lets `flush()` drain these at exit, so we do not reclaim per session.
 #[derive(Default)]
 struct SinkMap {
     sessions: HashMap<String, NonBlocking>,
     fallback: Option<NonBlocking>,
 }
 
-/// Routes the firehose per session: events under a `session` span go to
-/// `<dir>/<session_id>.txt`; everything else to `<dir>/<role>-<pid>.txt`.
+/// Routes the firehose per session: events under a `session` span go to `<dir>/<session_id>.txt`; everything else to `<dir>/<role>-<pid>.txt`.
 struct RoutingLayer {
     dir: PathBuf,
     role: String,
     pid: u32,
-    // The lock is scoped to map access ONLY — file opens (fs + a worker-thread
-    // spawn + the appender's own mutex) run OUTSIDE it, so a tracing event
-    // emitted on the open path can't re-enter and deadlock this non-reentrant
-    // Mutex. Lock-on-write is otherwise fine: the firehose is opt-in/debug-only.
+    // The lock is scoped to map access only; file opens (fs, a worker-thread spawn, the appender's own mutex) run outside it
+    // A tracing event emitted on the open path thus can't re-enter and deadlock this non-reentrant Mutex
+    // Lock-on-write is otherwise fine: the firehose is opt-in and debug-only
     sinks: Mutex<SinkMap>,
 }
 
@@ -271,12 +252,10 @@ impl RoutingLayer {
         self.sinks.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    // Append `line` to the session's file. `key` is already sanitized. Opens (and
-    // points `latest.txt` at) the file on first use; open failures degrade to a
-    // no-op for that file.
+    // Append `line` to the session's file. `key` is already sanitized.
+    // Opens (and points `latest.txt` at) the file on first use; open failures degrade to a no-op for that file
     fn write_session(&self, key: &str, line: &[u8]) {
-        // Fast path: writer already open. Hold the lock only for the lookup + the
-        // (non-blocking, channel-only) write.
+        // Fast path: writer already open. Hold the lock only for the lookup and the (non-blocking, channel-only) write.
         {
             let mut map = self.lock();
             if let Some(writer) = map.sessions.get_mut(key) {
@@ -292,8 +271,7 @@ impl RoutingLayer {
         update_latest_symlink(&self.dir, &path);
         let _ = writer.write_all(line);
         let mut map = self.lock();
-        // If a concurrent event opened it first, keep that one and drop ours (the
-        // line we wrote already reached the file via our worker).
+        // If a concurrent event opened it first, keep that one and drop ours (the line we wrote already reached the file via our worker)
         map.sessions.entry(key.to_owned()).or_insert(writer);
     }
 
@@ -333,15 +311,14 @@ where
         if let Some(sid) = visitor.0
             && let Some(span) = ctx.span(id)
         {
-            // Sanitize once at capture so the stored key is always filesystem-safe
-            // and `on_event` never re-sanitizes on the hot path.
+            // Sanitize once at capture so the stored key is always filesystem-safe and `on_event` never re-sanitizes on the hot path
             span.extensions_mut().insert(SessionId(sanitize_key(&sid)));
         }
     }
 
     fn on_event(&self, event: &tracing::Event<'_>, ctx: Context<'_, S>) {
-        // Nearest enclosing span (leaf→root) carrying a session id wins. The key
-        // is already sanitized (stored at `on_new_span`).
+        // The nearest enclosing span (searched leaf to root) carrying a session id wins
+        // The key is already sanitized (stored at `on_new_span`)
         let session_key = ctx.event_scope(event).and_then(|scope| {
             scope
                 .into_iter()
@@ -357,14 +334,12 @@ where
 
 // ── Install + lifecycle ──────────────────────────────────────────────────────
 
-/// Resolve the requested debug target and install the matching firehose layer on
-/// `registry`, then init the subscriber.
+/// Resolve the requested debug target and install the matching firehose layer on `registry`, then init the subscriber.
 ///
-/// PerSession installs the routing layer (firehose filter, RUST_LOG-immune) and
-/// prunes old session logs; SingleFile installs a flat `fmt` file picking the
-/// filter by source (GROK_LOG_FILE respects RUST_LOG). Open failures warn AFTER
-/// init in the single-file case; routing open failures are per-file at write
-/// time and degrade gracefully. `role` names the per-pid fallback file.
+/// PerSession installs the routing layer (firehose filter, RUST_LOG-immune) and prunes old session logs.
+/// SingleFile installs a flat `fmt` file picking the filter by source (GROK_LOG_FILE respects RUST_LOG).
+/// Open failures warn after init in the single-file case; routing open failures are per-file at write time and degrade gracefully.
+/// `role` names the per-pid fallback file.
 pub fn install_firehose<S>(registry: S, role: &str)
 where
     S: Subscriber + for<'span> LookupSpan<'span> + Send + Sync + 'static,
@@ -407,7 +382,7 @@ pub fn flush() {
 pub(crate) enum DebugTarget {
     /// `GROK_DEBUG_LOG=1` → route per session into `<dir>` (`~/.grok/debug`).
     PerSession { dir: PathBuf },
-    /// An explicit path → one flat `fmt` file, routing bypassed.
+    /// An explicit path writes one flat `fmt` file, routing bypassed.
     SingleFile { path: PathBuf, src: DebugSource },
 }
 
@@ -426,14 +401,13 @@ pub(crate) fn resolve_debug_target() -> Option<DebugTarget> {
     )
 }
 
-// Empty / whitespace (when valid UTF-8) counts as unset; a non-UTF-8 value is
-// never blank.
+// Empty or whitespace (when valid UTF-8) counts as unset; a non-UTF-8 value is never blank
 fn is_blank(v: &OsStr) -> bool {
     v.to_str().is_some_and(|s| s.trim().is_empty())
 }
 
-// Build a path from an env value: trim surrounding whitespace when it is valid
-// UTF-8, and preserve the raw bytes otherwise (non-UTF-8 paths must survive).
+// Build a path from an env value: trim surrounding whitespace when it is valid UTF-8, and preserve the raw bytes otherwise
+// Non-UTF-8 paths must survive
 fn os_path(v: &OsStr) -> PathBuf {
     match v.to_str() {
         Some(s) => PathBuf::from(s.trim()),
@@ -441,11 +415,10 @@ fn os_path(v: &OsStr) -> PathBuf {
     }
 }
 
-// Env-free precedence core so the resolution rules are unit-testable. The role
-// and pid are no longer part of resolution: the routing layer owns fallback
-// naming, so resolution only decides routing-dir vs single-file-path. Takes
-// `OsStr` so non-UTF-8 paths round-trip; only the bool-vs-path discrimination
-// needs UTF-8 (a non-UTF-8 value can't be a bool keyword, so it's a path).
+// Env-free precedence core so the resolution rules are unit-testable
+// The routing layer owns fallback naming, so resolution only decides between a routing dir and a single-file path
+// Takes `OsStr` so non-UTF-8 paths round-trip
+// Only the bool-vs-path discrimination needs UTF-8 (a non-UTF-8 value can't be a bool keyword, so it's a path)
 fn resolve_debug_target_inner(
     grok_log_file: Option<&OsStr>,
     grok_debug_log: Option<&OsStr>,
@@ -478,17 +451,15 @@ const LOG_RETENTION: std::time::Duration = std::time::Duration::from_secs(7 * 24
 
 /// Prune `*.txt` firehose files (and orphaned `latest.txt` swap temps) under
 /// `~/.grok/debug` older than [`LOG_RETENTION`] so the dir doesn't grow
-/// unbounded. Age-based (not count-based) so a still-open log from a concurrent
-/// process is never unlinked mid-write; best-effort, ignore errors.
+/// unbounded. Age-based (not count-based) so a still-open log from a concurrent process is never unlinked mid-write; best-effort, ignore errors.
 pub(crate) fn sweep_old_logs() {
     prune_old_logs(&grok_home().join("debug"), LOG_RETENTION);
 }
 
-// Pure prune core: remove `*.txt` files and orphaned `latest.txt` swap temps in
-// `dir` older than `max_age`. Age-based so a recently-written (active) log is
-// never deleted; spares the `latest.txt` symlink (a stale link is harmless and
-// never an active file); best-effort so cleanup never fails logging setup;
-// testable against a tempdir.
+// Pure prune core: remove `*.txt` files and orphaned `latest.txt` swap temps in `dir` older than `max_age`
+// Age-based so a recently-written (active) log is never deleted
+// Spares the `latest.txt` symlink (a stale link is harmless and never an active file)
+// Best-effort so cleanup never fails logging setup; testable against a tempdir
 fn prune_old_logs(dir: &Path, max_age: std::time::Duration) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -500,15 +471,13 @@ fn prune_old_logs(dir: &Path, max_age: std::time::Duration) {
             continue;
         };
         let is_log = name.ends_with(".txt") && name != LATEST_LINK_NAME;
-        // Swap temps matching this shape that survive the age gate below are
-        // orphans of a crash between `update_latest_symlink`'s create and rename.
+        // Swap temps matching this shape that survive the age gate below are orphans of a crash between `update_latest_symlink`'s create and rename
         let is_latest_swap_tmp =
             name.starts_with(LATEST_TMP_PREFIX) && name.ends_with(LATEST_TMP_SUFFIX);
         if !is_log && !is_latest_swap_tmp {
             continue;
         }
-        // `DirEntry::metadata` does not follow symlinks, so a dangling orphaned
-        // temp still yields its own mtime here.
+        // `DirEntry::metadata` does not follow symlinks, so a dangling orphaned temp still yields its own mtime here
         let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
             continue;
         };
@@ -522,10 +491,9 @@ fn prune_old_logs(dir: &Path, max_age: std::time::Duration) {
 mod tests {
     use super::*;
 
-    // Routing tests drive real non-blocking writers whose worker guards are
-    // parked in a process-lifetime static; flushing drains ALL of them. Serialize
-    // such tests so a concurrent `cargo test` thread can't clear another's guards
-    // before it reads. (nextest already isolates each test in its own process.)
+    // Routing tests drive real non-blocking writers whose worker guards are parked in a process-lifetime static; flushing drains all of them
+    // Serialize such tests so a concurrent `cargo test` thread can't clear another's guards before it reads
+    // (nextest already isolates each test in its own process.)
     fn flush_test_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: Mutex<()> = Mutex::new(());
         LOCK.lock().unwrap_or_else(|p| p.into_inner())
@@ -620,7 +588,7 @@ mod tests {
 
     #[test]
     fn resolve_target_empty_log_file_falls_through_to_debug_log() {
-        // Empty / whitespace GROK_LOG_FILE is treated as unset (mirrors GROK_DEBUG_LOG).
+        // Empty or whitespace GROK_LOG_FILE is treated as unset (mirrors GROK_DEBUG_LOG)
         for blank in ["", "   "] {
             let target = resolve_debug_target_inner(
                 Some(OsStr::new(blank)),
@@ -645,8 +613,7 @@ mod tests {
     fn resolve_target_non_utf8_debug_log_path_is_single_file() {
         use std::os::unix::ffi::OsStrExt;
 
-        // A non-UTF-8 GROK_DEBUG_LOG value is a path, not a bool keyword, and its
-        // bytes must round-trip (not be silently dropped).
+        // A non-UTF-8 GROK_DEBUG_LOG value is a path, not a bool keyword, and its bytes must round-trip (not be silently dropped)
         let raw = OsStr::from_bytes(b"/tmp/\xff/fire.txt");
         let target = resolve_debug_target_inner(None, Some(raw), Path::new("/debug")).unwrap();
         match target {
@@ -679,7 +646,7 @@ mod tests {
         assert_eq!(sanitize_key("01923-abcd-EF"), "01923-abcd-EF");
         assert_eq!(sanitize_key("../escape"), ".._escape");
         assert_eq!(sanitize_key("a/b\\c"), "a_b_c");
-        // Dot-only / empty keys collapse to a safe constant.
+        // Dot-only and empty keys collapse to a safe constant
         for dotty in ["", ".", "..", "..."] {
             assert_eq!(sanitize_key(dotty), "_", "expected '_' for {dotty:?}");
         }
@@ -725,9 +692,8 @@ mod tests {
         let _lock = flush_test_lock();
         let dir = tempfile::tempdir().unwrap();
         // Exactly the production wrapper: routing layer behind FIREHOSE_DIRECTIVES.
-        // Pins the linchpin invariant — the `session` span (INFO, target
-        // `xai_grok_telemetry::session_ctx`) survives the real filter so
-        // `event_scope` still finds it — at the unit level.
+        // Pins at the unit level that the `session` span (INFO, target `xai_grok_telemetry::session_ctx`) survives the real filter
+        // `event_scope` can only find the session id if the filter keeps that span
         let layer = RoutingLayer::new(dir.path().to_path_buf(), "agent".to_owned(), 7)
             .with_filter(firehose_filter());
         let subscriber = tracing_subscriber::registry().with(layer);
@@ -749,7 +715,6 @@ mod tests {
             session_file.contains("filtered routing works"),
             "session file under real filter: {session_file:?}"
         );
-        // Must route to the session file, NOT silently fall back to per-pid.
         assert!(
             !dir.path().join("agent-7.txt").exists(),
             "event must route to the session file, not the fallback"
@@ -825,14 +790,13 @@ mod tests {
         other
             .set_modified(now - Duration::from_secs(30 * 24 * 60 * 60))
             .unwrap();
-        // An old `latest.txt` must be spared (harmless stale link / sentinel).
+        // An old `latest.txt` must be spared (a harmless stale link or sentinel)
         let latest = std::fs::File::create(dir.path().join("latest.txt")).unwrap();
         latest
             .set_modified(now - Duration::from_secs(30 * 24 * 60 * 60))
             .unwrap();
-        // Orphaned `latest.txt` swap temps follow the same age rule: old reaped,
-        // recent spared. Regular files here so mtimes are settable cross-platform;
-        // the symlink-specific path is covered by the Unix-gated test below.
+        // Orphaned `latest.txt` swap temps follow the same age rule: old reaped, recent spared
+        // Regular files here so mtimes are settable cross-platform; the symlink-specific path is covered by the Unix-gated test below
         let old_tmp =
             std::fs::File::create(dir.path().join(".latest.old-session.txt.tmp")).unwrap();
         old_tmp
@@ -857,15 +821,12 @@ mod tests {
     fn prune_old_logs_reaps_dangling_orphaned_latest_tmp_symlink() {
         use std::time::{Duration, SystemTime};
 
-        // Models the real orphan: a crash between `update_latest_symlink`'s
-        // create and rename leaves the temp symlink, and its target session file
-        // may itself be pruned later — so the link is dangling. Literal name (not
-        // the consts) so renaming the scheme can't silently strand orphans
-        // created by already-shipped binaries.
+        // Models the real orphan: a crash between `update_latest_symlink`'s create and rename leaves the temp symlink
+        // Its target session file may itself be pruned later, so the link is dangling
+        // Literal name (not the consts) so renaming the scheme can't silently strand orphans created by already-shipped binaries
         let dir = tempfile::tempdir().unwrap();
         let max_age = Duration::from_secs(7 * 24 * 60 * 60);
-        // `filetime` ages the link itself; std's `set_modified` follows it (and a
-        // dangling link can't even be opened).
+        // `filetime` ages the link itself; std's `set_modified` follows it (and a dangling link can't even be opened)
         let old = filetime::FileTime::from_system_time(
             SystemTime::now() - Duration::from_secs(8 * 24 * 60 * 60),
         );
@@ -883,8 +844,7 @@ mod tests {
 
         prune_old_logs(dir.path(), max_age);
 
-        // `Path::exists` follows symlinks (false for dangling links either way),
-        // so assert on the links themselves via `symlink_metadata`.
+        // `Path::exists` follows symlinks (false for dangling links either way), so assert on the links themselves via `symlink_metadata`
         assert!(
             std::fs::symlink_metadata(&tmp).is_err(),
             "old orphaned dangling temp symlink must be pruned"
@@ -902,15 +862,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn update_latest_symlink_failed_rename_removes_temp() {
-        // Sanity: prove the temp symlink is creatable here, so the helper's
-        // symlink step must succeed and the post-call absence below can only
-        // come from the rename-failure cleanup branch.
+        // Sanity: prove the temp symlink is creatable here, so the helper's symlink step must succeed
+        // The post-call absence below can then only come from the rename-failure cleanup branch
         let dir = tempfile::tempdir().unwrap();
         let tmp = dir.path().join(".latest.sess.txt.tmp");
         std::os::unix::fs::symlink("sess.txt", &tmp).unwrap();
         std::fs::remove_file(&tmp).unwrap();
-        // Force the rename to fail: a non-empty directory at `latest.txt` makes
-        // rename(2) of a non-directory over it error (EISDIR/ENOTEMPTY).
+        // Force the rename to fail: a non-empty directory at `latest.txt` makes rename(2) of a non-directory over it error (EISDIR/ENOTEMPTY)
         let blocker = dir.path().join("latest.txt");
         std::fs::create_dir(&blocker).unwrap();
         std::fs::File::create(blocker.join("occupant.txt")).unwrap();
@@ -931,8 +889,7 @@ mod tests {
     fn prune_old_logs_spares_active_logs_regardless_of_count() {
         use std::time::{Duration, SystemTime};
 
-        // Guards the reported bug: a concurrent process's still-open (recently
-        // written) log must never be unlinked, however many newer logs exist.
+        // A concurrent process's still-open (recently written) log must never be unlinked, however many newer logs exist
         let dir = tempfile::tempdir().unwrap();
         let now = SystemTime::now();
         for i in 0..25 {

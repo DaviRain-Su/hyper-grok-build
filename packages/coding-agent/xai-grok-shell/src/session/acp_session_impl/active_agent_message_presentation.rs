@@ -1,4 +1,4 @@
-//! Content-free presentation for active-agent message tool calls.
+//! Tool-call display for active-agent messages; it never includes the message content.
 
 use agent_client_protocol as acp;
 use xai_grok_tools::implementations::grok_build::send_subagent_message::SendSubagentMessageInput;

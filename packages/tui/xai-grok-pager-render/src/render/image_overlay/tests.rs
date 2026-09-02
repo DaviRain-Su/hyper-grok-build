@@ -134,6 +134,55 @@ fn paint_pixels_with_path_returns_footer_and_exact_transmission() {
 }
 
 #[test]
+fn paint_pixels_iterm2_emits_osc1337_and_restores_cursor() {
+    let _guard = set_protocol_for_test(GraphicsProtocol::ITerm2);
+    crate::terminal::overlay::reset_owner();
+    let image = sample_image(Some("/tmp/logo.png"), true);
+    let (render, text) = render_to_string(&image, Rect::new(10, 5, 60, 20));
+    let render = render.unwrap();
+    let placement = render.image_placement.unwrap();
+    let esc = render.escapes.unwrap().into_string();
+    assert!(text.contains("Image #1"));
+    assert!(esc.starts_with("\x1b7"), "must save the cursor: {esc:?}");
+    assert!(esc.ends_with("\x1b8"), "must restore the cursor: {esc:?}");
+    assert!(
+        esc.contains(&format!("\x1b[{};{}H", placement.y + 1, placement.x + 1)),
+        "must CUP to the placement cell: {esc:?}"
+    );
+    assert!(esc.contains("\x1b]1337;File="));
+    assert!(esc.contains(&format!(
+        "width={}cells;height={}cells",
+        placement.cols, placement.rows
+    )));
+}
+
+#[test]
+fn iterm2_clear_releases_ownership_so_reopen_repaints() {
+    let _guard = set_protocol_for_test(GraphicsProtocol::ITerm2);
+    crate::terminal::overlay::reset_owner();
+    let image = sample_image(None, true);
+    let area = Rect::new(0, 0, 60, 20);
+
+    let (first, _) = render_to_string(&image, area);
+    let first = first.unwrap().escapes.unwrap();
+    assert!(first.as_str().contains("1337"));
+    let _ = first.commit();
+
+    // Same frame geometry while the preview stays open: keep, no payload.
+    let (kept, _) = render_to_string(&image, area);
+    assert!(kept.unwrap().escapes.unwrap().as_str().is_empty());
+
+    // Closing the preview repaints its cells (that's what erases iTerm2 pixels); clear() carries the ownership release
+    let clear = crate::terminal::overlay::clear().expect("iTerm2 clear must release ownership");
+    assert!(clear.as_str().is_empty(), "iTerm2 has no clear escape");
+    let _ = clear.commit();
+
+    // Reopening the identical preview must re-emit the image, not keep a placement whose pixels are gone
+    let (reopened, _) = render_to_string(&image, area);
+    assert!(reopened.unwrap().escapes.unwrap().as_str().contains("1337"));
+}
+
+#[test]
 fn paint_pixels_without_path_has_no_footer() {
     let _guard = set_protocol_for_test(GraphicsProtocol::Kitty);
     let (render, text) = render_to_string(&sample_image(None, true), Rect::new(0, 0, 60, 20));

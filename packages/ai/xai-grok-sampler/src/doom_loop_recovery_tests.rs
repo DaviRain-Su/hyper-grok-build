@@ -5,8 +5,7 @@ fn armed() -> FailedResponseCapture {
     FailedResponseCapture::armed()
 }
 
-/// A capture that has seen a terminal `output` list, the way the Responses
-/// stream records one.
+/// A capture that has seen a terminal `output` list, the way the Responses stream records one.
 fn armed_with_terminal(output: Vec<rs::OutputItem>) -> FailedResponseCapture {
     let capture = armed();
     capture.record_terminal_output(&output);
@@ -93,8 +92,7 @@ fn summary_is_used_when_raw_reasoning_is_absent() {
     assert_eq!(reasoning.content.as_ref().unwrap()[0].text, "full summary");
 }
 
-/// A raw reasoning event that carries no text must not displace the summary:
-/// the retry would otherwise lose the thought it exists to replay.
+/// A raw reasoning event that carries no text must not displace the summary: the retry would otherwise lose the thought it exists to replay.
 #[test]
 fn an_empty_raw_reasoning_event_keeps_the_summary() {
     let capture = armed();
@@ -109,8 +107,7 @@ fn an_empty_raw_reasoning_event_keeps_the_summary() {
     assert_eq!(reasoning.content.as_ref().unwrap()[0].text, "the summary");
 }
 
-/// Same when the summary already spent the reasoning budget: the raw event
-/// records nothing, so the summary stays the recovery context.
+/// Same when the summary already spent the reasoning budget: the raw event records nothing, so the summary stays the recovery context.
 #[test]
 fn a_budget_spent_raw_event_keeps_the_summary() {
     let capture = armed();
@@ -134,10 +131,8 @@ fn a_budget_spent_raw_event_keeps_the_summary() {
     assert!(text.ends_with(TRUNCATION_MARKER));
 }
 
-/// The exact-cap edge: a summary that lands precisely on the budget leaves no
-/// room for a later raw delta, which must record nothing at all — not a bare
-/// truncation marker that would read as retained raw text and displace the
-/// summary.
+/// The exact-cap edge: a summary that lands precisely on the budget leaves no room for a later raw delta.
+/// The delta must record nothing at all, not even a bare truncation marker that would read as retained raw text and displace the summary.
 #[test]
 fn a_raw_delta_with_no_room_left_records_nothing() {
     let capture = armed();
@@ -153,8 +148,7 @@ fn a_raw_delta_with_no_room_left_records_nothing() {
     assert_eq!(reasoning.content.as_ref().unwrap()[0].text, summary);
 }
 
-/// A disarmed capture (every stream that is not an armed recovery attempt)
-/// records nothing at all.
+/// A disarmed capture (every stream that is not an armed recovery attempt) records nothing at all.
 #[test]
 fn disarmed_capture_records_nothing() {
     let capture = FailedResponseCapture::default();
@@ -184,8 +178,7 @@ fn terminal_recovery_keeps_a_tool_free_turn() {
     assert_eq!(assistant.content.as_ref(), "failed output");
 }
 
-/// A turn that called a tool is dropped whole: replaying its reasoning
-/// without the call would send an orphaned reasoning item.
+/// A turn that called a tool is dropped whole: replaying its reasoning without the call would send an orphaned reasoning item.
 #[test]
 fn terminal_recovery_drops_a_turn_that_called_a_tool() {
     let capture = armed_with_terminal(vec![
@@ -201,8 +194,7 @@ fn terminal_recovery_drops_a_turn_that_called_a_tool() {
     assert!(capture.take_items().is_empty());
 }
 
-/// The veto reads the raw wire items, so it also catches the tool calls the
-/// conversation form drops on the floor — an MCP call among them.
+/// The veto reads the raw wire items, so it also catches the tool calls the conversation form drops on the floor, an MCP call among them.
 #[test]
 fn terminal_recovery_drops_a_turn_that_called_an_mcp_tool() {
     let capture = armed_with_terminal(vec![
@@ -229,8 +221,7 @@ fn terminal_recovery_drops_a_turn_that_called_an_mcp_tool() {
     );
 }
 
-/// The same rule applies mid-stream: a captured turn that started a function
-/// call replays nothing.
+/// The same rule applies mid-stream: a captured turn that started a function call replays nothing.
 #[test]
 fn streamed_recovery_drops_a_turn_that_started_a_tool_call() {
     let capture = armed();
@@ -245,8 +236,7 @@ fn streamed_recovery_drops_a_turn_that_started_a_tool_call() {
     assert!(capture.take_items().is_empty());
 }
 
-/// Streamed raw reasoning fills a final item that carried no content, without
-/// discarding the item's `encrypted_content` or its unstreamed siblings.
+/// Streamed raw reasoning fills a final item that carried no content, without discarding the item's `encrypted_content` or its unstreamed siblings.
 #[test]
 fn terminal_recovery_merges_streamed_reasoning_into_the_final_item() {
     let capture = armed();
@@ -274,8 +264,8 @@ fn terminal_recovery_merges_streamed_reasoning_into_the_final_item() {
     assert_eq!(sibling.content.as_ref().unwrap()[0].text, "unstreamed");
 }
 
-/// The opaque encrypted blob is charged to the replay budget: one that does
-/// not fit is dropped rather than smuggling an unbounded turn into the retry.
+/// The opaque encrypted blob is charged to the replay budget.
+/// One that does not fit is dropped rather than smuggling an unbounded turn into the retry.
 #[test]
 fn an_oversized_encrypted_blob_is_dropped() {
     let mut small = reasoning_item("reasoning-1", Some("short thought"), None);
@@ -306,8 +296,7 @@ fn an_oversized_encrypted_blob_is_dropped() {
     );
 }
 
-/// Streamed reasoning the terminal response omitted is dropped: the response
-/// fixes the item order, and an omitted item has no position to occupy.
+/// Streamed reasoning the terminal response omitted is dropped: the response fixes the item order, and an omitted item has no position to occupy.
 #[test]
 fn streamed_reasoning_the_wire_never_completed_replays_last() {
     let capture = armed();
@@ -334,9 +323,8 @@ fn streamed_reasoning_the_wire_never_completed_replays_last() {
     assert_eq!(cut.id, "reasoning-late");
 }
 
-/// A compaction item is opaque Responses state the retry cannot carry, so a
-/// turn containing one is dropped whole rather than replayed against input
-/// that no longer has the checkpoint its later items depend on.
+/// A compaction item is opaque Responses state the retry cannot carry.
+/// A turn containing one is dropped whole rather than replayed against input that no longer has the checkpoint its later items depend on.
 #[test]
 fn terminal_recovery_drops_a_turn_carrying_compaction_state() {
     let capture = armed_with_terminal(vec![
@@ -355,9 +343,8 @@ fn terminal_recovery_drops_a_turn_carrying_compaction_state() {
     );
 }
 
-/// Terminal authority does not depend on the projection keeping anything: an
-/// empty terminal `output` still means the wire said everything, so stale
-/// deltas are not resurrected behind it.
+/// Terminal authority does not depend on the projection keeping anything.
+/// An empty terminal `output` still means the wire said everything, so stale deltas are not resurrected behind it.
 #[test]
 fn an_empty_terminal_response_replays_nothing() {
     let capture = armed();
@@ -371,8 +358,7 @@ fn an_empty_terminal_response_replays_nothing() {
     );
 }
 
-/// A turn that reached its terminal frame has told us everything it
-/// produced, so streamed reasoning the wire left out is not replayed.
+/// A turn that reached its terminal frame has told us everything it produced, so streamed reasoning the wire left out is not replayed.
 #[test]
 fn a_terminal_turn_does_not_gain_items_from_the_deltas() {
     let capture = armed();
@@ -390,8 +376,7 @@ fn a_terminal_turn_does_not_gain_items_from_the_deltas() {
     assert_eq!(reasoning.id, "reasoning-final");
 }
 
-/// A final item that carried its own content keeps it: the capture only fills
-/// gaps, it never overwrites the authoritative turn.
+/// A final item that carried its own content keeps it: the capture only fills gaps, it never overwrites the authoritative turn.
 #[test]
 fn terminal_content_wins_over_streamed_text() {
     let capture = armed();
@@ -412,9 +397,8 @@ fn terminal_content_wins_over_streamed_text() {
     );
 }
 
-/// A runaway thought is capped and marked, so repeated recovery attempts
-/// cannot inflate the retry prompt without bound — and the separate text
-/// budget keeps the answer the turn did produce.
+/// A runaway thought is capped and marked, so repeated recovery attempts cannot inflate the retry prompt without bound.
+/// The separate text budget keeps the answer the turn did produce.
 #[test]
 fn a_runaway_thought_is_capped_without_eliding_the_answer() {
     let capture = armed();
@@ -455,8 +439,7 @@ fn a_runaway_answer_is_capped_and_marked() {
     assert!(assistant.content.len() <= MAX_RECOVERY_TEXT_BYTES + TRUNCATION_MARKER.len());
 }
 
-/// The terminal path caps each channel the same way, across all of the
-/// turn's items.
+/// The terminal path caps each channel the same way, across all of the turn's items.
 #[test]
 fn a_runaway_terminal_turn_is_capped_per_channel() {
     let flood = "loop ".repeat(MAX_RECOVERY_REASONING_BYTES);

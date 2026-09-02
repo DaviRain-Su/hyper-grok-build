@@ -1,20 +1,6 @@
-//! Background task registry for tracking long-running commands.
-//!
-//! This module provides a per-session registry for background tasks that allows
-//! the model to query task status and output after launching commands with
-//! `is_background: true`.
-//!
-//! ## Architecture
-//!
-//! The registry works alongside the existing terminal infrastructure:
-//! - `StreamingLocalTerminalRunner` handles process spawning and output streaming
-//! - `BackgroundTaskRegistry` provides model-facing queries by task_id
-//!
-//! ## Output Storage
-//!
-//! Output is stored in two places:
-//! 1. **In memory (`output` field)**: May be truncated if > output_byte_limit
-//! 2. **On disk (`output_file`)**: Full output written incrementally
+//! Per-session registry the model queries for the status and output of commands launched with `is_background: true`.
+//! `StreamingLocalTerminalRunner` does the spawning and streaming; this registry answers queries by task_id.
+//! The in-memory `output` is truncated past `output_byte_limit`; `output_file` holds the full output on disk.
 
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -25,33 +11,23 @@ use tokio::sync::{Mutex, Notify, RwLock};
 /// Task identifier (UUID string)
 pub type TaskId = String;
 
-/// Snapshot of a background task's current state.
-///
-/// This is a clone-able view of the task that can be returned to callers
-/// without holding locks.
+/// A cloneable view of a task that can be returned to callers without holding locks.
 #[derive(Debug, Clone)]
 pub struct TaskSnapshot {
     /// Unique task ID (UUID) given to the model
     pub task_id: TaskId,
     /// Internal tool_call_id for terminal registry lookup
     pub tool_call_id: String,
-    /// The command that was executed
     pub command: String,
-    /// Working directory where command was run
     pub cwd: String,
-    /// Wall-clock start time
     pub start_time: DateTime<Utc>,
-    /// Wall-clock end time (set when task completes)
     pub end_time: Option<DateTime<Utc>>,
-    /// In-memory output (may be truncated if > output_byte_limit)
+    /// In-memory output, truncated when it exceeds output_byte_limit
     pub output: String,
     /// Path to full output file on disk
     pub output_file: PathBuf,
-    /// Whether in-memory output was truncated
     pub truncated: bool,
-    /// Exit code if completed
     pub exit_code: Option<i32>,
-    /// Signal name if terminated by signal
     pub signal: Option<String>,
     /// Whether task has completed (exited or was killed)
     pub completed: bool,
@@ -62,39 +38,24 @@ pub struct TaskSnapshot {
 }
 
 impl TaskSnapshot {
-    /// Calculate duration in seconds.
-    ///
-    /// If task is still running, returns time since start.
-    /// If task completed, returns total runtime.
+    /// Returns seconds since start while the task runs, or total runtime once it completes.
     pub fn duration_secs(&self) -> f64 {
         let end = self.end_time.unwrap_or_else(Utc::now);
         (end - self.start_time).num_milliseconds() as f64 / 1000.0
     }
 }
 
-/// Internal entry storing task data and completion notification
 struct TaskEntry {
-    /// The task snapshot (protected by RwLock for concurrent reads)
     snapshot: RwLock<TaskSnapshot>,
-    /// Notifier for waiters when task completes
     exit_notify: Arc<Notify>,
 }
 
-/// Per-session registry for background tasks.
-///
-/// Each session has its own instance via `ToolContext.background_tasks`.
-/// This ensures:
-/// - Task IDs only need to be unique within a session
-/// - Session cleanup automatically cleans up tasks
-/// - No global state pollution between agents
+/// Per-session registry for background tasks; each session has its own instance via `ToolContext.background_tasks`.
 pub struct BackgroundTaskRegistry {
-    /// Map from task_id -> entry
     tasks: Mutex<HashMap<TaskId, Arc<TaskEntry>>>,
-    /// Maximum number of concurrent tasks
     max_tasks: usize,
 }
 
-/// Default maximum number of concurrent background tasks per session
 const DEFAULT_MAX_BACKGROUND_TASKS: usize = 10;
 
 impl Default for BackgroundTaskRegistry {
@@ -104,7 +65,6 @@ impl Default for BackgroundTaskRegistry {
 }
 
 impl BackgroundTaskRegistry {
-    /// Create a new registry with default max tasks limit.
     pub fn new() -> Self {
         Self {
             tasks: Mutex::new(HashMap::new()),
@@ -120,8 +80,6 @@ impl BackgroundTaskRegistry {
         }
     }
 
-    /// Register a new background task.
-    ///
     /// If at capacity, completed tasks are cleaned up first.
     /// Returns error if still at capacity after cleanup.
     pub async fn register(&self, snapshot: TaskSnapshot) -> Result<(), String> {
@@ -155,9 +113,6 @@ impl BackgroundTaskRegistry {
         Ok(())
     }
 
-    /// Get current snapshot of a task.
-    ///
-    /// Returns `None` if task_id is not found.
     pub async fn get(&self, task_id: &str) -> Option<TaskSnapshot> {
         let tasks = self.tasks.lock().await;
         let entry = tasks.get(task_id)?;
@@ -174,9 +129,6 @@ impl BackgroundTaskRegistry {
         }
     }
 
-    /// Mark task as completed.
-    ///
-    /// This sets the end_time, exit_code/signal, and notifies any waiters.
     pub async fn mark_completed(
         &self,
         task_id: &str,
@@ -192,13 +144,10 @@ impl BackgroundTaskRegistry {
                 snapshot.signal = signal;
                 snapshot.end_time = Some(Utc::now());
             }
-            // Notify all waiters that task has completed
             entry.exit_notify.notify_waiters();
         }
     }
 
-    /// Wait for task completion with optional timeout.
-    ///
     /// Returns the task snapshot after completion or timeout.
     /// Returns `None` if task_id is not found.
     pub async fn wait_for_completion(
@@ -212,10 +161,8 @@ impl BackgroundTaskRegistry {
             tasks.get(task_id)?.clone()
         };
 
-        // Register notification interest BEFORE checking completion to avoid a
-        // race where mark_completed fires between the check and the wait,
-        // causing notify_waiters() to wake zero futures and the notification
-        // to be permanently lost.
+        // Register notification interest BEFORE checking completion
+        // If mark_completed fires between the check and the wait, notify_waiters() wakes zero futures and the notification is permanently lost
         let notified = entry.exit_notify.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
@@ -236,7 +183,6 @@ impl BackgroundTaskRegistry {
         Some(entry.snapshot.read().await.clone())
     }
 
-    /// List all tasks in the registry.
     pub async fn list(&self) -> Vec<TaskSnapshot> {
         let tasks = self.tasks.lock().await;
         let mut result = Vec::with_capacity(tasks.len());
@@ -246,7 +192,6 @@ impl BackgroundTaskRegistry {
         result
     }
 
-    /// Get number of active (non-completed) tasks.
     pub async fn active_count(&self) -> usize {
         let tasks = self.tasks.lock().await;
         let mut count = 0;
@@ -327,8 +272,7 @@ fn get_task_output_path_in(
 
 const MANIFEST_FILENAME: &str = "background_tasks_manifest.json";
 
-/// Minimal snapshot of a running background task, persisted on session exit
-/// so that a resumed session can inform the model about orphaned tasks.
+/// Minimal snapshot of a running background task, persisted on session exit so that a resumed session can inform the model about orphaned tasks.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BackgroundTaskManifestEntry {
     pub task_id: String,
@@ -342,10 +286,8 @@ pub struct BackgroundTaskManifestEntry {
     pub kind: xai_grok_tools::computer::types::TaskKind,
 }
 
-/// Persist a manifest of running background tasks to the session directory.
-///
-/// Only writes a file when `entries` is non-empty. Called during session
-/// shutdown when background tasks are intentionally left alive.
+/// Only writes a file when `entries` is non-empty.
+/// Session shutdown calls this when background tasks are intentionally left alive.
 pub fn persist_manifest(session_dir: &Path, entries: Vec<BackgroundTaskManifestEntry>) {
     if entries.is_empty() {
         return;
@@ -363,8 +305,6 @@ pub fn persist_manifest(session_dir: &Path, entries: Vec<BackgroundTaskManifestE
     }
 }
 
-/// Load the background task manifest from the session directory and delete it.
-///
 /// Returns an empty vec if the manifest doesn't exist or can't be parsed.
 pub fn load_and_clear_manifest(session_dir: &Path) -> Vec<BackgroundTaskManifestEntry> {
     let path = session_dir.join(MANIFEST_FILENAME);
@@ -372,13 +312,12 @@ pub fn load_and_clear_manifest(session_dir: &Path) -> Vec<BackgroundTaskManifest
         Ok(d) => d,
         Err(_) => return Vec::new(),
     };
-    // Delete regardless of parse success — stale manifests should not accumulate.
+    // Delete regardless of parse success; stale manifests should not accumulate
     let _ = std::fs::remove_file(&path);
     serde_json::from_slice(&data).unwrap_or_default()
 }
 
-/// Format a system-reminder about background tasks that were running when the
-/// session was last active.
+/// Format a system-reminder about background tasks that were running when the session was last active.
 pub fn format_resumed_tasks_reminder(entries: &[BackgroundTaskManifestEntry]) -> String {
     use std::fmt::Write;
 
@@ -533,7 +472,6 @@ mod tests {
             .unwrap();
         registry.mark_completed("test-1", Some(0), None).await;
 
-        // Should return immediately since already completed
         let got = registry
             .wait_for_completion("test-1", Some(Duration::from_millis(100)))
             .await
@@ -549,13 +487,11 @@ mod tests {
             .await
             .unwrap();
 
-        // Start waiting with short timeout
         let got = registry
             .wait_for_completion("test-1", Some(Duration::from_millis(50)))
             .await
             .unwrap();
 
-        // Should return with incomplete status (timed out)
         assert!(!got.completed);
     }
 
@@ -569,7 +505,6 @@ mod tests {
 
         let registry_clone = registry.clone();
 
-        // Spawn task to complete after short delay
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
             registry_clone
@@ -577,7 +512,6 @@ mod tests {
                 .await;
         });
 
-        // Wait for completion
         let got = registry
             .wait_for_completion("test-1", Some(Duration::from_secs(5)))
             .await
@@ -601,7 +535,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Third should fail
         let result = registry.register(make_test_snapshot("task-3")).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Maximum background tasks"));
@@ -620,16 +553,13 @@ mod tests {
             .await
             .unwrap();
 
-        // Mark first as completed
         registry.mark_completed("task-1", Some(0), None).await;
 
-        // Now third should succeed (completed task cleaned up)
         registry
             .register(make_test_snapshot("task-3"))
             .await
             .unwrap();
 
-        // Verify task-1 was cleaned up
         assert!(registry.get("task-1").await.is_none());
         assert!(registry.get("task-3").await.is_some());
     }

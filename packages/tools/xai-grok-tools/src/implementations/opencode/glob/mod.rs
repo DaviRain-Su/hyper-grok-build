@@ -171,7 +171,7 @@ impl xai_tool_runtime::Tool for GlobTool {
 
         // ── Build ripgrep command ───────────────────────────────
         //   rg --files --glob='!.git/*' --hidden --glob=<pattern> <search_dir>
-        let rg_exec = rg_path();
+        let rg_exec = rg_path()?;
         let mut cmd = Command::new(rg_exec);
         cmd.arg("--files")
             .arg("--glob=!.git/*")

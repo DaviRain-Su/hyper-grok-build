@@ -1,12 +1,7 @@
-//! Server-proxied workspace utilities.
+//! Helper functions for consuming server tool streams and extracting typed notifications from server notification frames.
+//! These are used by both the workspace crate (hub_server) and the shell crate (proxy-mode session actors) to interact with the server.
 //!
-//! Helper functions for consuming server tool streams and extracting typed
-//! notifications from server notification frames. These are used by both
-//! the workspace crate (hub_server) and the shell crate (proxy-mode
-//! session actors) to interact with the server.
-//!
-//! The `HubWorkspaceChannel` struct that previously lived here has been
-//! removed. Sessions now call the server harness directly via `ToolContext`.
+//! Despite the name, no channel type lives here; sessions call the server harness directly through `ToolContext`.
 
 use xai_grok_tools::notification::types::ToolNotification;
 use xai_grok_workspace_types::WorkspaceEvent;

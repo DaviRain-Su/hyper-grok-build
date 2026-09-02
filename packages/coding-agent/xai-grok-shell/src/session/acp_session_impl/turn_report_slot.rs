@@ -1,11 +1,12 @@
-//! The two things a turn may only do once: report its end, and announce its abort. Both need
-//! guarding because the stop gate runs on the turn task while a cancel runs on the command loop.
+//! The two things a turn may only do once: report its end, and announce its abort.
+//! Both need guarding because the stop gate runs on the turn task while a cancel runs on the command loop.
 
 use std::cell::RefCell;
 
-/// Bumped when a turn is promoted. A report carrying an older epoch is refused.
+/// Bumped when a turn is promoted.
+/// A report carrying an older epoch is refused.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) struct TurnEpoch(u64);
+pub(crate) struct TurnEpoch(u64);
 
 /// Only a gate claim is held across an await, so only a gate claim can be released by an abort.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,8 +33,8 @@ pub(super) enum CommitOutcome {
     LostToAnotherReporter,
 }
 
-/// Which turn may still report its end, and who holds the right to. No borrow of `inner` outlives
-/// a statement, so none can outlive an await.
+/// Which turn may still report its end, and who holds the right to.
+/// No borrow of `inner` outlives a statement, so none can outlive an await.
 #[derive(Debug, Default)]
 pub(crate) struct TurnReportSlot {
     inner: RefCell<Inner>,
@@ -77,7 +78,7 @@ impl TurnReportSlot {
         self.inner.borrow().epoch
     }
 
-    /// Held across the user's hooks, and so across awaits.
+    /// The claim is held across the user's hooks, and so across awaits.
     pub(super) fn claim_for_gate(&self) -> Option<TurnReportClaim<'_>> {
         self.try_claim(self.epoch(), ClaimKind::Gate)
     }
@@ -117,7 +118,7 @@ impl TurnReportSlot {
         }
     }
 
-    pub(super) fn start_next_turn(&self) {
+    pub(super) fn start_next_turn(&self) -> TurnEpoch {
         let mut inner = self.inner.borrow_mut();
         if matches!(inner.state, TurnReportState::Held { .. }) {
             let held = "a turn started while the previous turn's report claim was still held";
@@ -126,6 +127,7 @@ impl TurnReportSlot {
         }
         inner.epoch.0 += 1;
         inner.state = TurnReportState::Free;
+        inner.epoch
     }
 
     #[cfg(test)]
@@ -143,8 +145,8 @@ impl TurnReportSlot {
     }
 }
 
-/// Announces a turn's abort once. A high-water mark rather than a match, because a cancel that
-/// finishes after a newer turn started must not repeat its own nor consume the successor's.
+/// Announces a turn's abort once, tracked as a high-water mark rather than an exact epoch match.
+/// A cancel that finishes after a newer turn started must not repeat its own announcement nor consume the successor's.
 #[derive(Debug, Default)]
 pub(crate) struct AbortAnnouncement {
     announced: RefCell<Option<TurnEpoch>>,

@@ -2,10 +2,7 @@ use super::{find_local_child_for_remote_in_root, session_exists_for_cwd_in_root}
 use std::fs;
 use tempfile::TempDir;
 
-// resolve_local_session delegates to the same _in_root helpers tested above,
-// so we test the composition logic via the public function indirectly by
-// setting up the on-disk structures under a fake grok home.
-// For unit isolation, we test the equivalent logic via the inner helpers.
+// resolve_local_session reads grok_home(), so these tests exercise the _in_root helpers it delegates to
 
 fn setup_session(root: &std::path::Path, cwd: &str, session_id: &str) {
     let encoded = crate::util::grok_home::encode_cwd_dirname(cwd);
@@ -31,12 +28,8 @@ fn exact_match_returns_original_id() {
 
     setup_session(&root, cwd, sid);
 
-    // Exact match: session_exists_for_cwd → true
     assert!(session_exists_for_cwd_in_root(sid, cwd, &root));
-    // The composed function should return the original id.
-    // (We can't call resolve_local_session directly because it uses grok_home(),
-    //  but the logic is: if session_exists → Some(session_id.to_string()),
-    //  else find_local_child → child_id. Tested via inner helpers.)
+    // We can't call resolve_local_session directly because it uses grok_home(), so the assert below mirrors its logic
     assert_eq!(
         Some(sid.to_string()),
         if session_exists_for_cwd_in_root(sid, cwd, &root) {
@@ -89,6 +82,5 @@ fn exact_match_takes_priority_over_child() {
     setup_session(&root, cwd, sid);
     setup_child_session(&root, cwd, "local-child-from-same", sid);
 
-    // Exact match should take priority.
     assert!(session_exists_for_cwd_in_root(sid, cwd, &root));
 }

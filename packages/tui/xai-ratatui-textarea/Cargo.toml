@@ -16,7 +16,6 @@ unicode-width = { workspace = true }
 
 [dev-dependencies]
 arboard = { workspace = true }
-chrono = { workspace = true }
 fuzzy-matcher = { workspace = true }
 ignore = { workspace = true }
 itertools = { workspace = true }

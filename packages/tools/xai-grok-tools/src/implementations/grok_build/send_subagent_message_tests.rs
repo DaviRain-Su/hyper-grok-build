@@ -72,10 +72,11 @@ fn resources_with_backend(backend: ChannelBackend) -> Resources {
     resources
 }
 
-async fn run(
+async fn run_with_queue(
     resources: SharedResources,
     subagent_id: &str,
     text: String,
+    queue: bool,
 ) -> SendSubagentMessageOutput {
     completes(xai_tool_runtime::Tool::run(
         &SendSubagentMessageTool,
@@ -83,10 +84,19 @@ async fn run(
         SendSubagentMessageInput {
             subagent_id: subagent_id.to_owned(),
             text,
+            queue,
         },
     ))
     .await
     .unwrap()
+}
+
+async fn run(
+    resources: SharedResources,
+    subagent_id: &str,
+    text: String,
+) -> SendSubagentMessageOutput {
+    run_with_queue(resources, subagent_id, text, false).await
 }
 
 async fn run_backend_outcome(outcome: ActiveAgentMessageOutcome) -> SendSubagentMessageOutput {
@@ -116,6 +126,7 @@ fn required_input_keys_are_semantically_pinned() {
         .collect::<Vec<_>>();
     required.sort_unstable();
     assert_eq!(required, ["subagent_id", "text"]);
+    assert_eq!(schema["properties"]["queue"]["default"], false);
 }
 
 #[test]
@@ -143,6 +154,10 @@ async fn accepted_roundtrip_uses_backend_bound_parent_and_preserves_request() {
         assert_eq!(ingress.request.parent_session_id, "trusted-parent");
         assert_eq!(ingress.request.request.subagent_id(), "sub-1");
         assert_eq!(ingress.request.request.text().as_ref(), "follow up");
+        assert_eq!(
+            ingress.request.request.operation(),
+            crate::implementations::grok_build::task::types::ActiveAgentMessageOperation::Steer
+        );
         ingress
             .request
             .respond_to
@@ -158,6 +173,38 @@ async fn accepted_roundtrip_uses_backend_bound_parent_and_preserves_request() {
             message_id: "message-1".to_owned()
         }
     );
+}
+
+#[tokio::test]
+async fn queue_true_preserves_legacy_queue_operation() {
+    let (backend, mut receiver) = coordinator_backend();
+    let send = run_with_queue(
+        resources_with_backend(backend).into_shared(),
+        "sub-1",
+        "follow up".to_owned(),
+        true,
+    );
+    let respond = async move {
+        let ingress = completes(receiver.active_messages.recv())
+            .await
+            .expect("expected active-message ingress");
+        assert_eq!(
+            ingress.request.request.operation(),
+            crate::implementations::grok_build::task::types::ActiveAgentMessageOperation::Queue
+        );
+        ingress
+            .request
+            .respond_to
+            .send(ActiveAgentMessageOutcome::Accepted {
+                message_id: "message-1".to_owned(),
+            })
+            .unwrap();
+    };
+
+    assert!(matches!(
+        completes(async { tokio::join!(send, respond) }).await.0,
+        SendSubagentMessageOutput::Accepted { .. }
+    ));
 }
 
 #[tokio::test]

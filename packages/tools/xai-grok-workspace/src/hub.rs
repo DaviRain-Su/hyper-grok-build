@@ -1,36 +1,26 @@
-//! Server integration for the workspace.
+//! Server integration for the workspace, over a single [`ToolServer`] connection.
 //!
-//! Provides server integration via a single [`ToolServer`] connection:
+//! **Provider direction:** The workspace exposes its session tools to the server via [`ToolServer`] and [`WorkspaceToolHandler`].
+//! When the server receives a `tool_call_request` it routes to the workspace's handler.
+//! The handler dispatches to the workspace session matching the `session_id`.
+//! Sessions are created on demand via `session.bind`; there is no privileged "main" session.
 //!
-//! **Provider direction:** The workspace exposes its session tools to
-//! the server via [`ToolServer`] + [`WorkspaceToolHandler`]. When the server
-//! receives a `tool_call_request` it routes to the workspace's handler,
-//! which dispatches to the workspace session matching the
-//! `session_id`. Sessions are created on demand via
-//! `session.bind` — there is no privileged "main" session.
+//! **Session multiplexing:** Multiple sessions can be bound to the same workspace server concurrently.
+//! Each gets its own workspace session (isolated CWD, shell state, toolset).
+//! Sessions are created when the server sends a `session.bind` notification, and cleaned up on disconnect or explicit unbind.
 //!
-//! **Session multiplexing:** Multiple sessions can be bound to the
-//! same workspace server concurrently. Each gets its own workspace
-//! session (isolated CWD, shell state, toolset). Sessions are created
-//! when the server sends a `session.bind` notification, and
-//! cleaned up on disconnect or explicit unbind.
+//! **Notifications:** The same `ToolServer` connection is used for subscribing to notifications (tool changes).
+//! It also sends workspace events / tool notifications back to the server.
 //!
-//! **Notifications:** The same `ToolServer` connection is used for
-//! subscribing to notifications (tool changes) and sending
-//! workspace events / tool notifications back to the server.
-//!
-//! The [`HubConnectionPool`] and auth credential are shared, so
-//! everything multiplexes over one WebSocket per `(url, principal)`.
+//! The [`HubConnectionPool`] and auth credential are shared, so everything multiplexes over one WebSocket per `(url, principal)`.
 //!
 //! # Security considerations
 //!
-//! - **Provider direction** returns full `result.prompt_text` to the
-//!   remote server. This may contain sensitive workspace data (file
-//!   contents, env vars). Callers must ensure the server endpoint is
-//!   trusted.
-//! - **Consumer direction** remote tools are merged with `kind: None` and
-//!   are only visible under `CapabilityMode::All`. They are dropped in
-//!   subagent sessions with restricted capability modes.
+//! - **Provider direction** returns full `result.prompt_text` to the remote server.
+//!   This may contain sensitive workspace data (file contents, env vars).
+//!   Callers must ensure the server endpoint is trusted.
+//! - **Consumer direction** remote tools are merged with `kind: None` and are only visible under `CapabilityMode::All`.
+//!   They are dropped in subagent sessions with restricted capability modes.
 use crate::error::{WorkspaceError, WorkspaceResult};
 use crate::handle::WorkspaceHandle;
 use async_trait::async_trait;
@@ -53,29 +43,25 @@ use xai_tool_types::ToolDescription;
 /// Configuration for connecting to a server instance.
 ///
 /// Passed via [`WorkspaceConfig::hub_config`](crate::config::WorkspaceConfig::hub_config).
-/// When `Some`, the workspace can connect to the server after construction
-/// via [`WorkspaceHandle::connect_hub`](crate::handle::WorkspaceHandle::connect_hub).
+/// When `Some`, the workspace can connect after construction via [`WorkspaceHandle::connect_hub`](crate::handle::WorkspaceHandle::connect_hub).
 #[derive(Clone)]
 pub struct HubConfig {
     /// Server WebSocket URL (`ws://` or `wss://`).
     pub url: Url,
     pub auth: Arc<dyn AuthProvider>,
-    /// Activity tracker to poke on reconnect so the status publisher
-    /// sends an immediate heartbeat (prevents status reverting to null).
+    /// Activity tracker to poke on reconnect so the status publisher sends an immediate heartbeat (prevents status reverting to null).
     pub activity_tracker: Option<Arc<crate::activity::ActivityTracker>>,
-    /// Stable server ID for `register_server` / `servers.list` /
-    /// `server.bind`. When `None`, the SDK default (`"workspace-server"`)
-    /// is used. Set to the sandbox `session_id` in production so each
-    /// workspace server has a unique, predictable identity.
+    /// Stable server ID for `register_server` / `servers.list` / `server.bind`.
+    /// When `None`, the SDK default (`"workspace-server"`) is used.
+    /// Set to the sandbox `session_id` in production so each workspace server has a unique, predictable identity.
     pub server_id: Option<String>,
-    /// Optional extra access key attached on the server connection when the
-    /// non-production feature set is enabled. `None` on prod / local-dev.
+    /// Optional extra access key attached on the server connection when the non-production feature set is enabled.
+    /// `None` on prod / local-dev.
     pub alpha_test_key: Option<String>,
     /// Permit a plaintext `ws://` server on a non-loopback host (mesh-secured).
     pub allow_insecure_ws: bool,
-    /// Diagnostics-server state handle driving the `/ready` state from the
-    /// connection lifecycle. `None` = no diagnostics server (embedded/local
-    /// use).
+    /// Diagnostics-server state handle that drives the `/ready` state from connection events.
+    /// `None` means no diagnostics server (embedded/local use).
     pub diag: Option<DiagHandle>,
 }
 impl std::fmt::Debug for HubConfig {
@@ -87,44 +73,37 @@ impl std::fmt::Debug for HubConfig {
             .finish()
     }
 }
-/// Live handle to a server connection, tool server, and notification
-/// listener.
+/// Live handle to a server connection, tool server, and notification listener.
 ///
-/// Stored on [`WorkspaceShared`](crate::session::WorkspaceShared) as
-/// `Option<HubHandle>`. Created by
-/// [`WorkspaceHandle::connect_hub`](crate::handle::WorkspaceHandle::connect_hub).
+/// Stored on [`WorkspaceShared`](crate::session::WorkspaceShared) as `Option<HubHandle>`.
+/// Created by [`WorkspaceHandle::connect_hub`](crate::handle::WorkspaceHandle::connect_hub).
 pub(crate) struct HubHandle {
     /// The tool server exposing workspace tools to the server (provider direction).
     /// Also used for subscribing to and sending notifications.
     pub(crate) server: ToolServer,
     /// Kept alive so the underlying WebSocket connection is not dropped.
     /// Dropping this last reference tears down the connection.
-    /// Not directly accessed — its lifetime keeps connections alive.
     #[allow(dead_code)]
     pub(crate) pool: Arc<HubConnectionPool>,
     /// Background tool server run loop task handle.
     server_task: Option<JoinHandle<()>>,
     /// Background notification listener task handle.
     notification_task: Option<JoinHandle<()>>,
-    /// Background task that forwards `WorkspaceEvent`s as `tool.notify`
-    /// custom frames through the server.
+    /// Background task that forwards `WorkspaceEvent`s as `tool.notify` custom frames through the server.
     event_publisher_task: Option<JoinHandle<()>>,
-    /// Background drain feeding the `ActivityTracker` from the session
-    /// tool-notification stream (see `run_activity_feed`).
+    /// Background drain feeding the `ActivityTracker` from the session tool-notification stream (see `run_activity_feed`).
     activity_feed_task: Option<JoinHandle<()>>,
     /// Background task that publishes `tool_server.status` to the server.
     status_publisher_task: Option<JoinHandle<()>>,
-    /// Background task that listens for `session.bind` and
-    /// creates workspace sessions.
+    /// Background task that listens for `session.bind` and creates workspace sessions.
     session_bind_task: Option<JoinHandle<()>>,
-    /// Background codebase-index event forwarder. Tracked so shutdown aborts it
-    /// (it holds the `events` sender and cannot self-terminate).
+    /// Background codebase-index event forwarder.
+    /// Tracked so shutdown aborts it (it holds the `events` sender and cannot self-terminate).
     codebase_index_forwarder_task: Option<JoinHandle<()>>,
     /// Background client ext-notification forwarder.
     client_ext_forwarder_task: Option<JoinHandle<()>>,
-    /// Background tool-definitions event forwarder. Tracked so shutdown aborts
-    /// it — otherwise a reconnect would stack a second subscriber processing
-    /// every workspace event for the rest of the process.
+    /// Background tool-definitions event forwarder.
+    /// Tracked so shutdown aborts it; otherwise a reconnect would stack a second subscriber processing every workspace event.
     tool_defs_forwarder_task: Option<JoinHandle<()>>,
 }
 impl std::fmt::Debug for HubHandle {
@@ -217,17 +196,16 @@ impl HubWsTiming {
 impl HubHandle {
     /// Build server connection pool, tool server, and return a handle.
     ///
-    /// The tool server starts with zero sessions — all sessions are
-    /// bound dynamically via `session.bind` at runtime.
-    /// The tool server run loop and notification listener are NOT
-    /// started here — call [`Self::set_server_task`] and
-    /// [`Self::set_notification_task`] after spawning.
+    /// The tool server starts with zero sessions; all sessions are bound dynamically via `session.bind` at runtime.
+    /// The tool server run loop and notification listener are NOT started here.
+    /// Call [`Self::set_server_task`] and [`Self::set_notification_task`] after spawning.
     pub(crate) async fn connect(
         config: &HubConfig,
         ws: HubWsTiming,
         tool_handlers: Vec<std::sync::Arc<dyn ToolServerHandler>>,
         server_metadata: Option<serde_json::Value>,
         session_handler_resolver: Option<xai_computer_hub_sdk::SessionHandlerResolver>,
+        on_session_unbound: Option<std::sync::Arc<xai_computer_hub_sdk::SessionUnboundCallback>>,
     ) -> Result<Self, ClientError> {
         let pool = HubConnectionPool::new();
         let server_url = config.url.clone();
@@ -282,6 +260,9 @@ impl HubHandle {
         if let Some(resolver) = session_handler_resolver {
             server_builder = server_builder.session_handler_resolver(resolver);
         }
+        if let Some(cb) = on_session_unbound {
+            server_builder = server_builder.on_session_unbound(move |sid| cb(sid));
+        }
         let server = server_builder.build().await?;
         Ok(Self {
             server,
@@ -334,8 +315,7 @@ impl HubHandle {
     /// 1. Shuts down the tool server (unregisters tools + sessions).
     /// 2. Aborts background tasks.
     ///
-    /// The shutdown call is guarded by a 5-second timeout to prevent
-    /// blocking indefinitely if the server is unreachable.
+    /// The shutdown call is guarded by a 5-second timeout to prevent blocking indefinitely if the server is unreachable.
     pub(crate) async fn shutdown(self) {
         const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
         match tokio::time::timeout(SHUTDOWN_TIMEOUT, self.server.shutdown()).await {
@@ -381,17 +361,14 @@ impl HubHandle {
         }
     }
 }
-/// [`ToolServerHandler`] for an individual tool, dispatched to the
-/// workspace session matching the `session_id`.
+/// [`ToolServerHandler`] for an individual tool, dispatched to the workspace session matching the `session_id`.
 ///
-/// One instance is created per tool discovered from the workspace's
-/// `default_tool_config`. The server sees individual tools (bash,
-/// read_file, etc.) and routes `tool_call_request` frames directly by
-/// `tool_id`. No meta-wrapper, no envelope — the server has full per-tool
-/// visibility for routing, listing, and per-session binding.
+/// One instance is created per tool discovered from the workspace's `default_tool_config`.
+/// The server sees individual tools (bash, read_file, etc.) and routes `tool_call_request` frames directly by `tool_id`.
+/// No meta-wrapper, no envelope: the server has full per-tool visibility for routing, listing, and per-session binding.
 ///
-/// Sessions must be bound via `session.bind` before tool calls
-/// are accepted. There is no implicit default session.
+/// Sessions must be bound via `session.bind` before tool calls are accepted.
+/// There is no implicit default session.
 pub(crate) struct SessionRoutedToolHandler {
     tool_id: ToolId,
     desc: ToolDescription,
@@ -424,13 +401,10 @@ impl SessionRoutedToolHandler {
 }
 /// RAII guard that brackets a tool call's activity-tracker accounting.
 ///
-/// [`SessionRoutedToolHandler::handle_call`] calls
-/// [`ActivityTracker::tool_call_started`](crate::activity::ActivityTracker::tool_call_started)
-/// at stream construction and moves this guard into the returned stream. Its
-/// [`Drop`] calls
-/// [`tool_call_completed`](crate::activity::ActivityTracker::tool_call_completed),
-/// so completion bookkeeping fires whether the stream reaches its terminal
-/// item *or* the consumer drops the stream early (e.g. harness disconnect).
+/// [`SessionRoutedToolHandler::handle_call`] moves this guard into the stream it returns.
+/// [`ActivityTracker::tool_call_started`](crate::activity::ActivityTracker::tool_call_started) fires at stream construction.
+/// The guard's [`Drop`] calls [`tool_call_completed`](crate::activity::ActivityTracker::tool_call_completed).
+/// Completion bookkeeping fires whether the stream reaches its terminal item *or* the consumer drops the stream early (e.g. harness disconnect).
 struct CallCompletedGuard {
     tracker: Arc<crate::activity::ActivityTracker>,
     call_id: String,
@@ -622,8 +596,6 @@ impl ToolServerHandler for SessionRoutedToolHandler {
         })
     }
 }
-/// Convert a set of remote [`ToolId`]s into workspace [`ToolConfig`]s.
-///
 /// Each remote tool gets a `ToolConfig` with:
 /// - `id` prefixed with `hub:` to avoid collisions with baseline/MCP tools
 /// - `kind: None` (remote tools have unknown capability kind)
@@ -631,10 +603,9 @@ impl ToolServerHandler for SessionRoutedToolHandler {
 ///
 /// # Capability mode filtering
 ///
-/// Remote-origin `kind: None` tools are dropped under non-`All` capability
-/// modes (e.g. `ReadWrite`, `ReadOnly` in subagent sessions), matching
-/// MCP-origin tool behavior. They are only visible in the main session
-/// which uses `CapabilityMode::All`.
+/// Remote-origin `kind: None` tools are dropped under non-`All` capability modes (e.g. `ReadWrite`, `ReadOnly` in subagent sessions).
+/// This matches MCP-origin tool behavior.
+/// They are only visible in the main session which uses `CapabilityMode::All`.
 pub(crate) fn hub_tool_ids_to_tool_configs(tool_ids: &[ToolId]) -> Vec<ToolConfig> {
     if !tool_ids.is_empty() {
         tracing::info!(
@@ -655,8 +626,7 @@ pub(crate) fn hub_tool_ids_to_tool_configs(tool_ids: &[ToolId]) -> Vec<ToolConfi
 }
 /// Apply a `ToolsChanged` notification to the current remote tools snapshot.
 ///
-/// Returns the new snapshot. Extracted as a named function for
-/// testability.
+/// Returns the new snapshot.
 pub(crate) fn apply_tools_changed(
     current: &[ToolConfig],
     added: &[ToolId],

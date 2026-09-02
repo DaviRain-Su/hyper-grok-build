@@ -1,6 +1,5 @@
-//! Generates the file-tree based on how we are using it during training
-//! This gives the model an overview of the project and helps it navigate and understand
-//! the repository better, cold-starting the exploration
+//! Generates the file tree in the format used during training.
+//! It gives the model a project overview and a starting point for exploring the repository.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -11,18 +10,15 @@ use ignore::{WalkBuilder, WalkState};
 
 use crate::file_system::FsError;
 
-/// Number of threads for parallel directory walking
 const NUM_WALK_THREADS: usize = 8;
 
-/// Configuration for limiting file tree traversal to prevent runaway I/O
-/// on very large or deeply nested directories.
+/// Configuration for limiting file tree traversal to prevent runaway I/O on very large or deeply nested directories.
 #[derive(Debug, Clone, Copy)]
 pub struct ListContentsLimits {
     /// Maximum number of characters in the output
     pub max_characters: usize,
-    /// Maximum depth to traverse (0 = root only)
+    /// Maximum depth to traverse (0 means root only)
     pub max_depth: usize,
-    /// Maximum number of directories to visit during traversal
     pub max_dirs_visited: usize,
 }
 
@@ -96,8 +92,7 @@ struct DirContents {
     dirs: Vec<String>,
 }
 
-/// Performs a single parallel walk and collects all directory contents into a map.
-/// Returns a map from directory path -> (files, subdirs) in that directory.
+/// One parallel walk collects every directory's files and subdirectories into a map keyed by directory path.
 fn collect_all_contents(
     root: &Path,
     max_depth: usize,
@@ -110,7 +105,6 @@ fn collect_all_contents(
     let dirs_count = std::sync::atomic::AtomicUsize::new(0);
     let entries_visited = std::sync::atomic::AtomicUsize::new(0);
 
-    // Initialize root entry
     contents_map.insert(
         root.to_path_buf(),
         DirContents {
@@ -149,7 +143,6 @@ fn collect_all_contents(
             Box::new(move |entry| {
                 entries_visited.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                // Stop early if we've collected enough directories
                 if dirs_count.load(std::sync::atomic::Ordering::Relaxed) >= max_dirs {
                     return WalkState::Quit;
                 }
@@ -209,7 +202,7 @@ fn collect_all_contents(
     }
 
     let _entries_total = entries_visited.load(std::sync::atomic::Ordering::Relaxed);
-    // (instrumentation_timer.with_field calls removed — dev-only, not part of Phase 1 move)
+    // instrumentation_timer.with_field calls removed (dev-only)
 
     let mut contents_map: HashMap<PathBuf, DirContents> = {
         let _timer = (); // instrumentation_timer noop (dev infra)
@@ -337,8 +330,8 @@ impl DirectoryNode {
     }
 }
 
-/// Project overview across every provisioned mount. One walk per root so a
-/// multi-repo workspace prompt is not primary-only. Empty `roots` → empty string.
+/// Builds the project overview across every provisioned mount, one walk per root, so a multi-repo workspace prompt covers every repo.
+/// Empty `roots` returns an empty string.
 pub async fn list_contents_multi(
     roots: &[PathBuf],
     limits: ListContentsLimits,
@@ -429,7 +422,6 @@ pub async fn list_contents(
         let mut q: VecDeque<&mut DirectoryNode> = VecDeque::new();
         q.push_back(&mut root_node);
         while let Some(node) = q.pop_front() {
-            // Check if we've hit the max directories limit
             if dirs_visited >= limits.max_dirs_visited {
                 dirs_limit_hit = true;
                 to_fit_files = false;

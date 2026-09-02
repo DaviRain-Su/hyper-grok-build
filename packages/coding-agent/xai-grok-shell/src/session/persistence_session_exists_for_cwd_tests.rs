@@ -34,14 +34,9 @@ fn returns_false_when_session_absent_under_cwd() {
 
 /// Regression test for the cross-cwd false-positive.
 ///
-/// Before the fix, `restore_if_not_local` used `session_exists_by_id` which
-/// scanned ALL cwd directories.  A session present only under cwd-A would cause
-/// it to skip remote restore when the user resumed from cwd-B — then the
-/// `LoadSession` call would fail because the session directory did not exist
-/// under cwd-B.
-///
-/// The cwd-specific check (`session_exists_for_cwd`) must return `false` for
-/// cwd-B even when the global scan returns `true` (because it finds cwd-A).
+/// Before the fix, `restore_if_not_local` used `session_exists_by_id` which scanned ALL cwd directories.
+/// A session present only under cwd-A would cause it to skip remote restore when the user resumed from cwd-B.
+/// Then the `LoadSession` call would fail because the session directory did not exist under cwd-B.
 #[test]
 fn session_under_different_cwd_is_not_considered_present() {
     let tmp = TempDir::new().unwrap();
@@ -54,26 +49,23 @@ fn session_under_different_cwd_is_not_considered_present() {
     fs::create_dir_all(&dir_a).unwrap();
     fs::write(dir_a.join("summary.json"), b"{}").unwrap();
 
-    // Global scan (old behaviour) finds it — this is the incorrect check
+    // Global scan (old behaviour) finds it; this is the incorrect check
     assert!(
         session_exists_in_root(session_id, &root),
         "global scan must find the session under cwd-A"
     );
 
-    // Cwd-specific check must return false for cwd-B
     assert!(
         !session_exists_for_cwd_in_root(session_id, "/project/beta", &root),
         "cwd-specific check must return false for cwd-B; remote restore must not be skipped"
     );
 
-    // And true for cwd-A (sanity)
     assert!(
         session_exists_for_cwd_in_root(session_id, "/project/alpha", &root),
         "cwd-specific check must return true for the matching cwd-A"
     );
 }
 
-/// An `images/`-only stub (no `summary.json`) is not a resumable session.
 #[test]
 fn images_only_stub_is_not_a_session() {
     let tmp = TempDir::new().unwrap();
@@ -92,7 +84,6 @@ fn images_only_stub_is_not_a_session() {
     );
 }
 
-/// The all-cwd scan skips a stub and returns the real session's cwd.
 #[test]
 fn resolve_local_session_any_cwd_skips_stub_and_finds_real() {
     let tmp = TempDir::new().unwrap();

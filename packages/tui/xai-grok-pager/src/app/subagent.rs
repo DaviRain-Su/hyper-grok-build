@@ -933,7 +933,11 @@ pub(crate) fn format_activity_label(activity: &crate::acp::tracker::TurnActivity
             attempt,
             max_retries,
             ..
-        } => format!("Retrying ({attempt}/{max_retries})"),
+        } => crate::app::error_display::retry_clause(
+            *attempt,
+            *max_retries,
+            crate::app::error_display::RetryLabelStyle::Compact,
+        ),
         TurnActivity::WritingToolCall(writing) => writing.label(),
         TurnActivity::Waiting(reason) => reason.label(),
     }

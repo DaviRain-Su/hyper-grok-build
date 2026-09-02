@@ -1,4 +1,4 @@
-//! Push → pull round-trip smoke test against the live backend.
+//! Round-trip test against the live backend: pushes one session, then pulls it back.
 //!
 //! Run with: `cargo test -p xai-grok-shell -- pull_smoke --ignored --nocapture`
 
@@ -18,9 +18,9 @@ mod tests {
         crate::auth::lookup_auth(&store, &scope)
     }
 
-    /// Full round-trip using the real RemoteSync production code path:
-    /// create RemoteSync → queue ACP notifications → flush → verify on
-    /// backend → pull back → verify local hydration + storage adapter load.
+    /// Full round trip through the real production `RemoteSync` path.
+    /// Creates a `RemoteSync`, queues ACP notifications, flushes, and verifies the backend row.
+    /// Then pulls the session back and verifies local hydration and the storage adapter load.
     #[tokio::test]
     #[ignore]
     async fn smoke_push_pull_round_trip() {

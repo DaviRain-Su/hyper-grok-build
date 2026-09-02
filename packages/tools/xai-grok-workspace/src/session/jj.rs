@@ -1,8 +1,7 @@
 //! Jujutsu (jj) operations for colocated repos.
 //!
 //! Mirrors the git operations in [`super::git`] but uses the `jj` CLI.
-//! All read-only calls use `--ignore-working-copy`; mutating calls use
-//! [`super::git::jj_cli_mut`].
+//! All read-only calls use `--ignore-working-copy`; mutating calls use [`super::git::jj_cli_mut`].
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -37,7 +36,7 @@ pub async fn info(cwd: &Path) -> Result<GitInfoData> {
     let root = jj_cli(cwd, &["workspace", "root"]).await?;
     let current_branch = bookmarks_at(cwd, "@-").await;
 
-    // Remote URLs via colocated git
+    // The remote URLs come from the colocated git repo
     let remotes = git_cli(cwd, &["remote", "-v"])
         .await
         .unwrap_or_default()
@@ -59,7 +58,7 @@ pub async fn info(cwd: &Path) -> Result<GitInfoData> {
     })
 }
 
-/// Status mapped to `GitStatusData` (all changes in `unstaged` — jj has no index).
+/// Status mapped to `GitStatusData` (all changes in `unstaged`; jj has no index).
 pub async fn status(cwd: &Path) -> Result<GitStatusData> {
     let root = jj_cli(cwd, &["workspace", "root"]).await.ok();
     let commit = jj_cli(
@@ -127,13 +126,9 @@ pub async fn status(cwd: &Path) -> Result<GitStatusData> {
     })
 }
 
-/// Current commit id: the working-copy commit (`@`), matching the `commit`
-/// field reported by [`status`].
-///
-/// In a colocated repo, git HEAD points at `@-` (the parent of the working-copy
-/// commit), so reading git HEAD would return a different revision than jj's
-/// current commit. Returns `Ok(None)` if the id can't be determined, mirroring
-/// the lenient behavior of `git::get_current_commit`.
+/// Current commit id: the working-copy commit (`@`), matching the `commit` field reported by [`status`].
+/// In a colocated repo, git HEAD points at `@-` (the parent of the working-copy commit), so reading it would return a different revision.
+/// Returns `Ok(None)` if the id can't be determined, mirroring the lenient behavior of `git::get_current_commit`.
 pub async fn current_commit(cwd: &Path) -> Result<Option<String>> {
     let commit = jj_cli(cwd, &["log", "--no-graph", "-r", "@", "-T", "commit_id"])
         .await

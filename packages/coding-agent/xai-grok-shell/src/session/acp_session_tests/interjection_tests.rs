@@ -2,10 +2,8 @@
 use super::support::*;
 use super::*;
 
-/// Draining a mid-turn interjection pushes a standalone synthetic user
-/// message tagged [`SyntheticReason::Interjection`] — even when the
-/// conversation tail is a `ToolResult`. The tool result content must be
-/// left untouched (interjections are never appended to tool results).
+/// Draining a mid-turn interjection pushes a standalone synthetic user message tagged [`SyntheticReason::Interjection`].
+/// Even when the conversation tail is a `ToolResult`, the interjection is never appended to it; the tool result content stays untouched.
 #[tokio::test]
 async fn drain_interjections_pushes_synthetic_user_message_after_tool_result() {
     let local = tokio::task::LocalSet::new();
@@ -33,7 +31,7 @@ async fn drain_interjections_pushes_synthetic_user_message_after_tool_result() {
 
             let conversation = actor.chat_state_handle.get_conversation().await;
 
-            // The tool result is untouched — no interjection text bundled in.
+            // The tool result is untouched; no interjection text was bundled into it
             let tool_result = conversation
                 .iter()
                 .find_map(|item| match item {
@@ -47,8 +45,7 @@ async fn drain_interjections_pushes_synthetic_user_message_after_tool_result() {
                 "tool result content must not be mutated by an interjection"
             );
 
-            // The interjection landed as a standalone synthetic user message
-            // after the tool result.
+            // The interjection landed as a standalone synthetic user message after the tool result
             let user_item = match conversation.last() {
                 Some(ConversationItem::User(u)) => u,
                 other => panic!("conversation tail must be a user item, got: {other:?}"),
@@ -70,15 +67,18 @@ async fn drain_interjections_pushes_synthetic_user_message_after_tool_result() {
         .await;
 }
 
-/// Multiple buffered interjections drain as one standalone synthetic user
-/// message EACH, in FIFO order (Ctrl+Enter twice = two tagged user rows).
+/// Each buffered interjection drains as its own standalone synthetic user message, in FIFO order: Ctrl+Enter twice yields two tagged user rows.
 /// None of them may touch the tool result at the conversation tail.
 #[tokio::test]
 async fn drain_multiple_interjections_pushes_one_user_message_each_in_order() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (actor, _gateway_rx) = build_actor().await;
+            let (gateway_tx, _gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, mut persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
 
             const TOOL_RESULT_CONTENT: &str = "tool output";
             actor
@@ -142,12 +142,36 @@ async fn drain_multiple_interjections_pushes_one_user_message_each_in_order() {
                     "interjection rows must keep FIFO order; expected {expected:?} in {text:?}"
                 );
             }
+
+            let persisted_texts = std::iter::from_fn(|| persistence_rx.try_recv().ok())
+                .filter_map(|message| match message {
+                    PersistenceMsg::Update(SessionUpdate::Acp(notification)) => {
+                        match &notification.update {
+                            acp::SessionUpdate::UserMessageChunk(chunk) => match &chunk.content {
+                                acp::ContentBlock::Text(text) => Some(text.text.clone()),
+                                _ => None,
+                            },
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                persisted_texts,
+                [
+                    format_interjection("first steer".to_string()),
+                    format_interjection("second steer".to_string()),
+                    format_interjection("third steer".to_string()),
+                ],
+                "the drain must preserve replay formatting and FIFO order"
+            );
         })
         .await;
 }
 
-/// Draining with an empty buffer reports false and leaves the conversation
-/// untouched. The turn loop's checkpoint gates rely on this.
+/// Draining with an empty buffer reports false and leaves the conversation untouched.
+/// The turn loop's checkpoints depend on this.
 #[tokio::test]
 async fn drain_with_empty_buffer_is_a_noop() {
     let local = tokio::task::LocalSet::new();
@@ -158,6 +182,30 @@ async fn drain_with_empty_buffer_is_a_noop() {
             assert!(!actor.drain_pending_interjections().await);
             let after = actor.chat_state_handle.get_conversation().await.len();
             assert_eq!(before, after, "empty drain must not touch the conversation");
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn drain_with_closed_chat_mailbox_does_not_report_model_delivery() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            actor.chat_state_handle = xai_chat_state::ChatStateHandle::noop();
+            actor.pending_interjections.push(PendingInterjection {
+                text: "please also add tests".to_string(),
+                attachments: vec![],
+            });
+
+            assert!(
+                !actor.drain_pending_interjections().await,
+                "a closed chat mailbox must not report delivery to the model"
+            );
         })
         .await;
 }
@@ -194,11 +242,8 @@ mod interjection_broadcast_tests {
     use super::support::create_test_actor;
     use super::*;
 
-    /// Multi-client fix: a mid-turn interjection must be broadcast to every
-    /// attached client (not just the originator) so all panes viewing the same
-    /// session render it. This locks the wire contract the pager's
-    /// `handle_interjection` depends on: method `x.ai/session/interjection`
-    /// carrying `sessionId` + `text`.
+    /// A mid-turn interjection must be broadcast to every attached client, not just the originator, so all panes viewing the same session render it.
+    /// This locks the wire contract the pager's `handle_interjection` depends on: method `x.ai/session/interjection` carrying `sessionId` and `text`.
     #[tokio::test]
     async fn broadcast_interjection_emits_sessionid_and_text() {
         let local = tokio::task::LocalSet::new();

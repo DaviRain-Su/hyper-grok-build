@@ -71,12 +71,16 @@ fn registered_settings() {
                 "active_agent_messages",
                 ("GROK_ACTIVE_AGENT_MESSAGES", false),
             ),
+            (
+                "repo_status_in_system_prompt",
+                ("GROK_REPO_STATUS_IN_SYSTEM_PROMPT", true),
+            ),
+            ("dock", ("GROK_DOCK", false)),
         ]),
     );
 }
 
-/// A row wired to a neighbour's field type-checks, so each case sets one field
-/// and a wrong projection reads nothing.
+/// A row wired to a neighbour's field type-checks, so each case sets one field and a wrong projection reads nothing.
 #[test]
 fn every_registered_feature_reads_its_own_remote_setting() {
     for spec in FEATURES {
@@ -101,8 +105,11 @@ fn every_registered_feature_reads_its_own_remote_setting() {
                 settings.subagent_worktree_snapshot_enabled = Some(value)
             }
             Feature::ActiveAgentMessages => settings.active_agent_messages_enabled = Some(value),
-            // The one row with no remote tier, stated as such rather than as a
-            // projection that reads nothing.
+            Feature::RepoStatusInSystemPrompt => {
+                settings.repo_status_in_system_prompt = Some(value)
+            }
+            Feature::Dock => settings.dock_enabled = Some(value),
+            // The one row with no remote tier, stated as such rather than as a projection that reads nothing
             Feature::BackendTools => {
                 assert!(spec.remote.is_none(), "{} grew a remote tier", spec.key);
                 continue;

@@ -3,9 +3,8 @@ use super::*;
 use crate::session::mcp_servers::McpOauthDiscovery;
 use xai_grok_telemetry::instrument_task;
 use xai_grok_telemetry::region::Parent;
-/// Wire the session's elicitation inbox into a freshly built client so its
-/// `elicitation/create` requests reach the coordinator. Takes the
-/// already-locked `McpState` so each caller keeps its own lock scope.
+/// Wire the session's elicitation inbox into a freshly built client so its `elicitation/create` requests reach the coordinator.
+/// Takes the already-locked `McpState` so each caller keeps its own lock scope.
 fn attach_elicitation_tx(
     state: &crate::session::mcp_servers::McpState,
     client: &crate::session::mcp_servers::McpClient,
@@ -15,8 +14,7 @@ fn attach_elicitation_tx(
     }
 }
 impl SessionActor {
-    /// Wait for MCP tools to be initialized.
-    /// If initialization is in progress by another task, this will poll until complete.
+    /// If initialization is in progress by another task, this polls until complete.
     pub(super) async fn wait_for_mcp_initialized(&self) {
         loop {
             {
@@ -34,8 +32,8 @@ impl SessionActor {
     }
     /// Register tools from shared (inherited) MCP clients on this session's ToolBridge.
     ///
-    /// Shared clients are already connected (Arc-shared from parent), so
-    /// `get_tool_registrations` reuses the existing transport — no new handshakes.
+    /// Shared clients are already connected (Arc-shared from parent).
+    /// `get_tool_registrations` reuses the existing transport with no new handshake.
     async fn register_shared_client_tools(&self) {
         let shared_clients: Vec<(
             String,
@@ -171,12 +169,8 @@ impl SessionActor {
     }
     /// Emit per-server `x.ai/mcp/tools_changed` notifications.
     ///
-    /// Each emission carries the owning
-    /// `sessionId` so the pager can route via `find_session_match`
-    /// instead of falling back to `app.active_view`. Without that
-    /// field, a background-agent push would silently land on the
-    /// foregrounded agent's modal — the exact multi-agent bug this
-    /// routing is meant to close.
+    /// Each emission carries the owning `sessionId` so the pager can route via `find_session_match` instead of falling back to `app.active_view`.
+    /// Without that field, a background agent's push would silently land on the foregrounded agent's modal.
     pub(super) fn emit_mcp_tools_changed_notifications(
         &self,
         ui_tools_by_server: std::collections::HashMap<
@@ -203,10 +197,13 @@ impl SessionActor {
     }
     /// Handle explicit auth trigger from the client (x.ai/mcp/auth_trigger).
     ///
-    /// Runs force_reauth (browser flow), then re-initializes the server
-    /// and registers its tools.
+    /// Runs force_reauth (browser flow), then re-initializes the server and registers its tools.
     pub(super) async fn handle_mcp_auth_trigger(&self, server_name: &str) -> Result<(), String> {
-        let client = match self.mcp_state.lock().await.get_client(server_name).cloned() {
+        let existing_client = {
+            let state = self.mcp_state.lock().await;
+            state.get_client(server_name).cloned()
+        };
+        let client = match existing_client {
             Some(c) if c.has_auth() => c,
             _ => {
                 self.rebuild_http_client_with_oauth(server_name, McpOauthDiscovery::Network)
@@ -419,10 +416,9 @@ impl SessionActor {
             self.emit_mcp_tools_changed_notifications(all_ui_tools);
         }
     }
-    /// The OAuth config map every spawn path must use: config-file BYO
-    /// settings merged with plugin-provided OAuth (client IDs, callbacks) for
-    /// plugin MCP servers. Shared by initial init and the unreachable
-    /// respawn so a recovered plugin server keeps its OAuth identity.
+    /// The OAuth config map every spawn path must use.
+    /// It merges the config file's own OAuth settings with plugin-provided OAuth (client IDs, callbacks) for plugin MCP servers.
+    /// Both initial init and the unreachable respawn share it, so a recovered plugin server keeps its OAuth identity.
     pub(super) fn spawn_oauth_config_map(
         &self,
         cwd: &std::path::Path,
@@ -441,19 +437,15 @@ impl SessionActor {
         );
         oauth_config_map
     }
-    /// Attempt to respawn MCP servers whose last spawn failed as unreachable
-    /// ([`xai_grok_mcp::servers::McpError::Unreachable`]): a transient
-    /// connectivity loss during one startup probe must not strip the session
-    /// of the server's tools for its remaining lifetime (init runs once per
-    /// config generation, so nothing else ever re-attempts the spawn).
+    /// Attempt to respawn MCP servers whose last spawn failed as unreachable ([`xai_grok_mcp::servers::McpError::Unreachable`]).
+    /// A transient connectivity loss during one startup probe must not strip the session of the server's tools for its remaining lifetime.
+    /// Init runs once per config generation, so nothing else ever re-attempts the spawn.
     ///
-    /// Runs on MCP-surface tool batches, `x.ai/mcp/list` refreshes, and the
-    /// explicit retry command. Concurrency and staleness are governed by the
-    /// attempt-token protocol in `McpState`: `take_unreachable_retry_candidates`
-    /// hands each due server to exactly one attempt (in-flight servers are not
-    /// candidates), every settle requires the token, and config teardown
-    /// invalidates it — so parallel triggers cannot double-spawn and a stale
-    /// attempt cannot overwrite a newer client or re-pollute cleaned records.
+    /// Runs on MCP-surface tool batches, `x.ai/mcp/list` refreshes, and the explicit retry command.
+    /// Concurrency and staleness are governed by the attempt-token protocol in `McpState`.
+    /// `take_unreachable_retry_candidates` hands each due server to exactly one attempt; in-flight servers are not candidates.
+    /// Every settle requires the token, and config teardown invalidates it.
+    /// Parallel triggers therefore cannot double-spawn, and a stale attempt cannot overwrite a newer client or re-pollute cleaned records.
     /// The next cooldown starts when an attempt settles as failed.
     pub(super) async fn retry_unreachable_servers(&self) {
         let (attempts, meta_config_map, configs) = {
@@ -615,14 +607,11 @@ impl SessionActor {
         }
     }
     /// Settle a failed respawn attempt by error class:
-    /// - auth rejection → hand off to the auth-required flow, keeping the
-    ///   fresh client (when one exists) for its recovery paths;
-    /// - transient connectivity failures (typed `Unreachable` / `Timeout`, or
-    ///   a transport-level handshake error like connection refused/reset) →
-    ///   stay on the cooldown-gated retry schedule;
-    /// - anything else (protocol rejection, malformed `tools/list`, redirect
-    ///   loops, …) → terminal init failure: recorded as `Unavailable`, no
-    ///   more automatic respawns.
+    /// - An auth rejection hands off to the auth-required flow, keeping the fresh client (when one exists) for its recovery paths.
+    /// - A transient connectivity failure stays on the cooldown-gated retry schedule.
+    ///   These are typed `Unreachable` / `Timeout`, or a transport-level handshake error like connection refused or reset.
+    /// - Anything else (protocol rejection, malformed `tools/list`, redirect loops) is a terminal init failure.
+    ///   It is recorded as `Unavailable` and never automatically respawned again.
     ///
     /// Every transition is token-gated: a stale attempt records nothing.
     async fn settle_failed_unreachable_attempt(
@@ -656,10 +645,9 @@ impl SessionActor {
     /// Refresh the MCP tool/search snapshot from current tool bridge state.
     /// Called after MCP init and after auth_trigger/retry recovers new servers.
     ///
-    /// This updates the model-visible MCP snapshot and marks reminder emission
-    /// dirty so `maybe_inject_mcp_reminder` can inject the next
-    /// `<system-reminder>` at a turn boundary. The `search_tool` description
-    /// itself stays static (cacheable).
+    /// This updates the model-visible MCP snapshot and marks reminder emission dirty.
+    /// `maybe_inject_mcp_reminder` can then inject the next `<system-reminder>` at a turn boundary.
+    /// The `search_tool` description itself stays static (cacheable).
     pub(super) async fn refresh_mcp_snapshot_and_schedule_reminder(&self) {
         let disabled_gateway_tools = crate::util::config::get_all_mcp_disabled_tools(
             std::path::Path::new(&self.session_info.cwd),
@@ -687,15 +675,13 @@ impl SessionActor {
         )
         .await;
     }
-    /// `None` twin: descriptor materialization is unavailable in this build.
+    /// This build never writes descriptor files, so this is always `None`.
     fn cursor_mcps_root(&self) -> Option<std::path::PathBuf> {
         None
     }
-    /// Snapshot both MCP and skill announcement tracking state and send it
-    /// to the persistence channel for atomic write to `announcement_state.json`.
+    /// Snapshot both MCP and skill announcement tracking state and send it to the persistence channel for atomic write to `announcement_state.json`.
     ///
-    /// Called after MCP fingerprint changes, skill update effects, and
-    /// compaction so that resumed sessions start with accurate tracking state.
+    /// Called after MCP fingerprint changes, skill update effects, and compaction so that resumed sessions start with accurate tracking state.
     pub(super) async fn persist_announcement_state(&self) {
         let skill_names = self.tool_bridge_handle().get_announced_skill_names().await;
         let (mcp_server_fingerprints, announced_failed) = {
@@ -717,22 +703,18 @@ impl SessionActor {
             .persistence_tx
             .send(PersistenceMsg::AnnouncementState(state));
     }
-    /// Inject an MCP server system-reminder if the set changed since the
-    /// last announcement. Skips if not dirty; clears the dirty flag up
-    /// front so a cancelled run degrades to a missed (re-triggerable)
-    /// injection, never an in-session duplicate. (A cancel landing between
-    /// the push and the trailing persist can still yield one duplicate
-    /// after a crash-resume — the benign direction of that tradeoff.)
+    /// Inject an MCP server system-reminder if the set changed since the last announcement.
+    /// Skips if not dirty.
+    /// The dirty flag is cleared up front so a cancelled run degrades to a missed (re-triggerable) injection, never an in-session duplicate.
+    /// A cancel between the push and the trailing persist can still yield one duplicate after a crash-resume, the benign direction of the tradeoff.
     ///
-    /// Connected servers are deduped by fingerprint, failed servers by
-    /// episode (see [`crate::session::announcement_state::McpAnnounced`]).
+    /// Connected servers are deduped by fingerprint, failed servers by episode (see [`crate::session::announcement_state::McpAnnounced`]).
     ///
-    /// Called at turn-start (`handle_prompt`) and inside the agentic loop
-    /// (before `build_request`) so that mid-turn MCP connections (Progressive
-    /// mode) are announced before the model's next inference call.
+    /// Called at turn-start (`handle_prompt`) and inside the agentic loop (before `build_request`).
+    /// Mid-turn MCP connections (Progressive mode) are thus announced before the model's next inference call.
     ///
-    /// Suppressed when the active template manages MCP context elsewhere. The
-    /// dirty flag is still cleared.
+    /// Suppressed when the active template manages MCP context elsewhere.
+    /// The dirty flag is still cleared.
     pub(super) async fn maybe_inject_mcp_reminder(&self) {
         if !self
             .mcp_reminder_dirty
@@ -773,14 +755,12 @@ impl SessionActor {
             self.persist_announcement_state().await;
         }
     }
-    /// Latch fingerprints and failure episodes under one lock (so a
-    /// concurrent persist cannot snapshot half an update) and push the
-    /// resulting reminder, if any. Returns whether the announced state
-    /// changed (the caller persists on change).
+    /// Latch fingerprints and failure episodes under one lock and push the resulting reminder, if any.
+    /// The single lock scope means a concurrent persist cannot snapshot half an update.
+    /// Returns whether the announced state changed (the caller persists on change).
     ///
-    /// Deliberately sync: a latched episode announces exactly once, so no
-    /// await point may separate the latch from the push — a future dropped
-    /// there by a turn cancel would swallow the announcement for good.
+    /// Deliberately sync: a latched episode announces exactly once, so no await point may separate the latch from the push.
+    /// A future dropped there by a turn cancel would swallow the announcement for good.
     fn latch_and_push_mcp_reminder(
         &self,
         server_summaries: &[xai_grok_tools::types::tool_index::ServerSummary],
@@ -844,48 +824,41 @@ impl SessionActor {
         }
         announcements_changed
     }
-    /// Re-arm failure announcements after an event that dropped reminders
-    /// from context (compaction, rewind): clear the announced episodes and
-    /// mark the reminder dirty so the next injection re-announces servers
-    /// that are still down. Persists the cleared tracking so a resume
-    /// starts from it.
+    /// Re-arm failure announcements after an event that dropped reminders from context (compaction, rewind).
+    /// Clears the announced episodes and marks the reminder dirty so the next injection re-announces servers that are still down.
+    /// Persists the cleared tracking so a resume starts from it.
     ///
-    /// Connected fingerprints stay latched: compaction carries the listing
-    /// in its context, a rewind's kept prefix usually retains the initial
-    /// listing (clearing would inject a duplicate), and connected tools
-    /// remain visible in the tool definitions regardless.
+    /// Connected fingerprints stay latched.
+    /// Compaction carries the listing in its context.
+    /// A rewind's kept prefix usually retains the initial listing, so clearing would inject a duplicate.
+    /// Connected tools remain visible in the tool definitions regardless.
     pub(crate) async fn rearm_failed_server_announcements(&self) {
         self.mcp_announcements.lock().rearm_failed();
         self.mcp_reminder_dirty
             .store(true, std::sync::atomic::Ordering::Relaxed);
         self.persist_announcement_state().await;
     }
-    /// Returns `true` iff `server` has a `Stdio` entry in
-    /// [`McpState::configs`] and is not on the per-cwd disabled list
-    /// (`util::config::disabled_mcp_server_names`). Used by the
-    /// auto-restart task to gate on the live configuration each
-    /// backoff iteration — the user may have toggled the server off
+    /// Returns `true` iff `server` has a `Stdio` entry in [`McpState::configs`] and is not on the per-cwd disabled list.
+    /// The disabled list comes from `util::config::disabled_mcp_server_names`.
+    ///
+    /// The auto-restart task uses this to gate on the live configuration each backoff iteration: the user may have toggled the server off
     /// or removed it from `~/.grok/config.toml` while we were
     /// sleeping.
     ///
-    /// HTTP / HttpAuth entries always return `false` here, which is
-    /// what the auto-restart task wants: HTTP recovery is via
-    /// `reset_transport`, not respawn.
+    /// HTTP / HttpAuth entries always return `false` here, which is what the auto-restart task wants.
+    /// HTTP recovery is via `reset_transport`, not respawn.
     ///
     /// ## Cost
     ///
-    /// Performs one synchronous read of the per-cwd disabled-MCP
-    /// list (`crate::util::config::disabled_mcp_server_names`,
+    /// Performs one synchronous read of the per-cwd disabled-MCP list (`crate::util::config::disabled_mcp_server_names`,
     /// which parses `~/.grok/config.toml` + the project
-    /// `.grok/config.toml`) on every call. The auto-restart task
-    /// calls this at most:
+    /// `.grok/config.toml`) on every call.
+    /// The auto-restart task calls this at most:
     ///   - once at schedule time (`maybe_schedule_restart`), and
-    ///   - once per backoff iteration (≤3 per restart window).
+    ///   - once per backoff iteration (at most 3 per restart window).
     ///
-    /// Worst case ~4 disk reads per crashed server, bounded by the
-    /// 21 s window. Acceptable here; cache invalidation
-    /// is tracked as a follow-up if this ever moves into a hotter
-    /// path.
+    /// Worst case is about 4 disk reads per crashed server, bounded by the 21 s window.
+    /// Acceptable here; caching is a follow-up if this ever moves into a hotter path.
     pub(crate) async fn is_stdio_server_configured(&self, server: &str) -> bool {
         let mcp_state = self.mcp_state.lock().await;
         let is_stdio_in_configs = mcp_state
@@ -902,8 +875,7 @@ impl SessionActor {
         let disabled = crate::util::config::disabled_mcp_server_names(cwd);
         !disabled.contains(server)
     }
-    /// HTTP analog of [`Self::is_stdio_server_configured`]: `true` iff
-    /// `server` has an enabled `Http` / `Sse` config entry.
+    /// HTTP analog of [`Self::is_stdio_server_configured`]: `true` iff `server` has an enabled `Http` / `Sse` config entry.
     /// Gates [`crate::session::mcp_restart::maybe_schedule_http_recovery`].
     pub(crate) async fn is_http_server_configured(&self, server: &str) -> bool {
         let mcp_state = self.mcp_state.lock().await;
@@ -924,18 +896,14 @@ impl SessionActor {
         let disabled = crate::util::config::disabled_mcp_server_names(cwd);
         !disabled.contains(server)
     }
-    /// Recover a dead HTTP client in place via
-    /// [`McpClient::recover`] (reset + re-handshake + re-arm liveness).
-    /// Unlike [`Self::respawn_stdio`] the existing `Arc<McpClient>` is kept, so
-    /// its tools stay valid; `ensure_initialized` emits the status, so this
-    /// emits none.
+    /// Recover a dead HTTP client in place via [`McpClient::recover`] (reset, re-handshake, restart the liveness watcher).
+    /// Unlike [`Self::respawn_stdio`] the existing `Arc<McpClient>` is kept, so its tools stay valid.
+    /// `ensure_initialized` emits the status, so this emits none.
     ///
-    /// Post-handshake TOCTOU re-check: `ensure_initialized` can take
-    /// several seconds, during which a `ConfigRemoved` / toggle-off can
-    /// evict or replace this client (the dispatcher evicts HTTP clients on
-    /// `ConfigRemoved`). If the looked-up client is no longer the live,
-    /// enabled entry, tear down the watcher we just re-armed and report the
-    /// race instead of a false success on a detached client.
+    /// Post-handshake TOCTOU re-check: `ensure_initialized` can take several seconds.
+    /// During that window a `ConfigRemoved` / toggle-off can evict or replace this client (the dispatcher evicts HTTP clients on `ConfigRemoved`).
+    /// If the looked-up client is no longer the live, enabled entry, tear down the watcher we just restarted.
+    /// Report the race instead of a false success on a detached client.
     pub(crate) async fn reset_http_client(&self, server: &str) -> Result<(), String> {
         let client = {
             let mcp_state = self.mcp_state.lock().await;
@@ -962,8 +930,7 @@ impl SessionActor {
         }
         Ok(())
     }
-    /// Unregister `server`'s tools from the bridge after stdio restart
-    /// exhaustion, so the model stops calling a now-absent client.
+    /// Unregister `server`'s tools from the bridge after stdio restart exhaustion, so the model stops calling a now-absent client.
     pub(crate) fn unregister_server_tools(&self, server: &str) {
         let prefix = format!(
             "{}{}",
@@ -983,81 +950,52 @@ impl SessionActor {
             );
         }
     }
-    /// Re-run [`crate::session::mcp_servers::start_mcp_server`]
-    /// against the current config entry for `server`, drive the
-    /// handshake, arm the liveness watcher, and atomically install
-    /// the resulting `Arc<McpClient>` into
-    /// [`McpState::owned_clients`].
+    /// Re-run [`crate::session::mcp_servers::start_mcp_server`] against the current config entry for `server`.
+    /// Drives the handshake, starts the liveness watcher, and atomically installs the resulting `Arc<McpClient>` into [`McpState::owned_clients`].
     ///
-    /// **Stdio-only.** Callers must gate on
-    /// [`Self::is_stdio_server_configured`] first — this function
-    /// returns `Err` for HTTP / HttpAuth or unknown servers.
+    /// **Stdio-only.** Callers must gate on [`Self::is_stdio_server_configured`] first.
+    /// This function returns `Err` for HTTP / HttpAuth or unknown servers.
     ///
     /// Failure modes (returned as a stringified, sanitized `Err`):
-    /// - No matching stdio entry in `McpState::configs` (the entry
-    ///   was removed mid-restart).
-    /// - `start_mcp_server` failed (spawn / OAuth-discovery /
-    ///   transport-build failure).
+    /// - No matching stdio entry in `McpState::configs` (the entry was removed mid-restart).
+    /// - `start_mcp_server` failed (spawn / OAuth-discovery / transport-build failure).
     /// - `ensure_initialized` returned `Err` (handshake failure).
     ///
-    /// On success: the new `Arc<McpClient>` is in
-    /// `mcp_state.owned_clients[server]` with `ClientState::Ready`,
-    /// the dispatcher's `notify_tx` is wired to its
-    /// `GrokClientHandler`, and the liveness watcher is armed —
-    /// matching the post-handshake state produced by
-    /// [`Self::ensure_mcp_tools_initialized`] for a fresh server.
+    /// On success the new `Arc<McpClient>` is in `mcp_state.owned_clients[server]` with `ClientState::Ready`.
+    /// The dispatcher's `notify_tx` is wired to its `GrokClientHandler`, and the liveness watcher is running.
+    /// This matches the post-handshake state [`Self::ensure_mcp_tools_initialized`] produces for a fresh server.
     ///
-    /// Tools that were previously registered against this server
-    /// remain in `ToolBridge` and resolve transparently through
-    /// `McpTool::mcp_state` — there's no per-tool re-registration
-    /// step. `tools/list_changed` notifications from the respawned
-    /// server flow through the normal dispatcher path.
+    /// Tools previously registered against this server remain in `ToolBridge` and resolve transparently through `McpTool::mcp_state`.
+    /// There is no per-tool re-registration step.
+    /// `tools/list_changed` notifications from the respawned server flow through the normal dispatcher path.
     ///
     /// ## Event-tx wiring order
     ///
-    /// Unlike the first-time handshake path (which wires
-    /// `set_event_tx` before `ensure_initialized` so the dispatcher
-    /// gets the `Ready → Initialized` push), the **restart** path
-    /// wires `set_event_tx` after `ensure_initialized`. Reason: the
-    /// auto-restart task is the SOLE emitter of restart status —
-    /// it pushes `Reason::RestartSucceeded` directly. Letting
-    /// `ensure_initialized` also emit `McpClientEvent::Ready` would
-    /// produce two wire pushes for one restart (one
-    /// `Reason::Initialized` from the dispatcher's mapping, one
-    /// `Reason::RestartSucceeded` from the restart task).
+    /// The first-time handshake path wires `set_event_tx` before `ensure_initialized` so the dispatcher gets the `Ready → Initialized` push.
+    /// The **restart** path instead wires `set_event_tx` after `ensure_initialized`.
+    /// The auto-restart task is the SOLE emitter of restart status; it pushes `Reason::RestartSucceeded` directly.
+    /// If `ensure_initialized` also emitted `McpClientEvent::Ready`, one restart would produce two wire pushes.
+    /// The dispatcher's mapping would push `Reason::Initialized` on top of the restart task's `Reason::RestartSucceeded`.
     ///
-    /// The `GrokClientHandler` constructed inside `try_handshake`
-    /// holds the shared `Arc<Mutex<Option<Sender>>>` slot
-    /// (`SharedEventTx`), so wiring the sender after the handshake
-    /// still routes subsequent `tools/list_changed` /
-    /// `resources/list_changed` server pushes through the
-    /// dispatcher — the handler re-reads the slot on every emit.
+    /// The `GrokClientHandler` constructed inside `try_handshake` holds the shared `Arc<Mutex<Option<Sender>>>` slot (`SharedEventTx`).
+    /// Wiring the sender after the handshake still routes later `tools/list_changed` / `resources/list_changed` pushes through the dispatcher.
+    /// The handler re-reads the slot on every emit.
     ///
-    /// **Contract:**
-    /// [`xai_grok_mcp::servers`] test
-    /// `client_handler_observes_post_handshake_set_event_tx`
-    /// builds a handler from a
-    /// client whose slot is `None`, then installs a sender via
-    /// `client.set_event_tx(Some(_))` and verifies the next emit
-    /// reaches the new receiver. If that test regresses — i.e. a
-    /// future refactor snapshots `notify_tx` at handler
-    /// construction instead of re-reading via the `Arc<Mutex<_>>` —
-    /// the restart path here will silently fail to deliver
-    /// `tools/list_changed` for respawned servers. Keep that test
-    /// and this comment together.
+    /// **Contract:** the [`xai_grok_mcp::servers`] test `client_handler_observes_post_handshake_set_event_tx` covers this.
+    /// It builds a handler from a client whose slot is `None`, then installs a sender via `client.set_event_tx(Some(_))`.
+    /// The next emit must reach the new receiver.
+    /// If a future refactor snapshots `notify_tx` at handler construction instead of re-reading via the `Arc<Mutex<_>>`, that test regresses.
+    /// The restart path here would then silently fail to deliver `tools/list_changed` for respawned servers.
+    /// Keep that test and this comment together.
     ///
     /// ## TOCTOU re-check
     ///
-    /// `start_mcp_server` plus `ensure_initialized` can take O(1) s
-    /// (npm package fetch, OAuth dance, handshake). A concurrent
-    /// `ToggleMcpServer enabled=false` or config-diff removal during
-    /// that window must not result in a freshly-installed client for
-    /// a server the user just disabled. After `ensure_initialized`
-    /// succeeds and before the `owned_clients.insert`, this function
-    /// re-checks [`Self::is_stdio_server_configured`]. On `false` it
-    /// drops the new `Arc<McpClient>` — `kill_on_drop(true)` then
-    /// SIGKILLs the spawned child — and returns an explicit error so
-    /// the auto-restart loop can emit `Reason::Disabled`.
+    /// `start_mcp_server` plus `ensure_initialized` can take seconds (npm package fetch, OAuth flow, handshake).
+    /// A concurrent `ToggleMcpServer enabled=false` or config-diff removal can land during that window.
+    /// It must not result in a freshly installed client for a server the user just disabled.
+    /// After `ensure_initialized` succeeds and before the `owned_clients.insert`, this function re-checks [`Self::is_stdio_server_configured`].
+    /// On `false` it drops the new `Arc<McpClient>`; `kill_on_drop(true)` then SIGKILLs the spawned child.
+    /// It returns an explicit error so the auto-restart loop can emit `Reason::Disabled`.
     pub(crate) async fn respawn_stdio(&self, server: &str) -> Result<(), String> {
         let (server_config, meta_config, event_tx) = {
             let mcp_state = self.mcp_state.lock().await;
@@ -1169,14 +1107,11 @@ impl SessionActor {
             "Injected MCP connecting system-reminder"
         );
     }
-    /// Re-apply the attaching client's per-attachment policy. Sent by the
-    /// resident `session/load` rail when the request carries explicit
-    /// `startupHints`, so an actor spawned under one client's policy serves a
-    /// later-attaching client under *its* policy (a headless attachment gets
-    /// Blocking MCP init and its delivery-tool guidance even when the actor
-    /// was spawned by an interactive client, and vice versa). Only policy
-    /// fields are touched — structural spawn-time hints (subagent identity,
-    /// inherited prefix, preserved system head) stay frozen.
+    /// Re-apply the attaching client's per-attachment policy.
+    /// The resident `session/load` rail sends this when the request carries explicit `startupHints`.
+    /// An actor spawned under one client's policy then serves a later-attaching client under *its* policy.
+    /// A headless attachment gets Blocking MCP init and its delivery-tool guidance even when an interactive client spawned the actor, and vice versa.
+    /// Only policy fields are touched; structural spawn-time hints (subagent identity, inherited prefix, preserved system head) stay frozen.
     pub(super) fn apply_attach_policy(&self, hints: &crate::session::StartupHints) {
         let strategy = hints.resolve_mcp_strategy();
         let changed = self.mcp_strategy.get() != strategy
@@ -1487,13 +1422,11 @@ impl SessionActor {
             async move {
                 let handshake_start = std::time::Instant::now();
 
-                // Must precede the handshakes: notifications during them are
-                // otherwise lost for good.
+                // Must precede the handshakes: notifications during them are otherwise lost for good
                 let dispatcher_event_tx = mcp_state_bg.lock().await.client_event_tx();
 
-                // Run all handshakes in parallel (outside lock), emitting progress
-                // notifications as each server completes so the pager can show
-                // incremental "MCP (3/7)" status in the top bar.
+                // Run all handshakes in parallel (outside lock), emitting progress notifications as each server completes
+                // The pager can then show incremental "MCP (3/7)" status in the top bar
                 use futures::stream::StreamExt;
                 let mut futs = futures::stream::FuturesUnordered::new();
                 for client in mcp_clients.iter() {
@@ -1519,22 +1452,17 @@ impl SessionActor {
                             target,
                             timeout_sec,
                         });
-                        // Must precede the handshake: the handler built during
-                        // it snapshots this slot.
+                        // Must precede the handshake: the handler built during it snapshots this slot
                         if let Some(tx) = task_event_tx {
                             client.set_event_tx(Some(tx));
                         }
                         attach_elicitation_tx(&*mcp_state.lock().await, client);
-                        // `try_handshake` already bounds the connect with
-                        // `startup_timeout_sec`, but the post-handshake
-                        // `tools/list` round-trip inside `get_tool_registrations`
-                        // is otherwise unbounded. The progress loop below only
-                        // finishes once every future resolves, so a server that
-                        // connects then stalls on `tools/list` would block
-                        // `mcp_initialized` forever and wedge the pager's
-                        // "Connecting MCPs (N/M)…" spinner. Budget the whole
-                        // per-server init (handshake + initial list) so one hung
-                        // server can't hold up the others' completion signal.
+                        // `try_handshake` already bounds the connect with `startup_timeout_sec`
+                        // The post-handshake `tools/list` round-trip inside `get_tool_registrations` is otherwise unbounded
+                        // The progress loop below only finishes once every future resolves
+                        // A server that connects then stalls on `tools/list` would block `mcp_initialized` forever
+                        // That hangs the pager's "Connecting MCPs (N/M)…" spinner
+                        // Budget the per-server init (handshake and initial list) so one hung server can't hold up the others' completion signal
                         let init_budget = std::time::Duration::from_secs(
                             timeout_sec.saturating_mul(2).saturating_add(5),
                         );
@@ -1740,7 +1668,9 @@ impl SessionActor {
                                     _ => xai_grok_telemetry::events::McpTransport::Http,
                                 };
                                 debug_assert!(
-                                    xai_grok_telemetry::activity::MCP_SERVERS_CONNECTED.get() >= 1,
+                                    xai_grok_telemetry::activity::gauge_value(
+                                        xai_grok_telemetry::activity::MCP_SERVERS_CONNECTED_KEY
+                                    ) >= 1,
                                     "McpServerConnected must stamp a self-inclusive count"
                                 );
                                 xai_grok_telemetry::session_ctx::log_event(
@@ -1801,6 +1731,7 @@ impl SessionActor {
                                         error_type: error_type_label,
                                         duration_ms: elapsed.as_millis() as u64,
                                         timeout_sec,
+                                        error_message: Some(e.to_string()),
                                     },
                                 );
                                 let transport_str = server_transport_map
@@ -1837,16 +1768,12 @@ impl SessionActor {
                                 if needs_auth {
                                     servers_auth_required += 1;
                                 }
-                                // Record the failure for status reporting. Auth
-                                // failures are owned by `auth_required` (the auth
-                                // recovery path clears them); every other failure —
-                                // including a handshake that succeeded but timed out
-                                // on `tools/list` — goes to `init_failed` so the
-                                // server surfaces as Unavailable. Keeping the two
-                                // disjoint means a server that later authenticates is
-                                // not left stuck Unavailable with zero tools.
-                                // Stash the real cause for the model-facing MCP
-                                // reminder (vs a bare "connection failed").
+                                // Record the failure for status reporting
+                                // Auth failures are owned by `auth_required`; the auth recovery path clears them
+                                // Every other failure, including a handshake that succeeded but timed out on `tools/list`, goes to `init_failed`
+                                // Those servers surface as Unavailable
+                                // Keeping the two disjoint means a server that later authenticates is not left stuck Unavailable with zero tools
+                                // Stash the real cause for the model-facing MCP reminder rather than a bare "connection failed"
                                 let detail = (!needs_auth).then(|| {
                                     xai_grok_tools::util::truncate_str_with_marker(
                                         &e.to_string(),
@@ -1855,8 +1782,7 @@ impl SessionActor {
                                     .into_owned()
                                 });
                                 if !needs_auth && e.is_connect_failure() {
-                                    // Disk-only spawn can't observe connectivity;
-                                    // the unreachable-retry schedule starts here.
+                                    // Disk-only spawn can't observe connectivity; the unreachable-retry schedule starts here
                                     mcp_state.record_unreachable_failure(
                                         &server_name,
                                         detail.unwrap_or_default(),
@@ -1876,7 +1802,7 @@ impl SessionActor {
                     // The clone already carries the sender wired earlier.
                     for c in mcp_clients {
                         let arc = std::sync::Arc::new(c);
-                        // `arm_liveness_watcher` self-gates (not-`Ready`, already-armed, ACP).
+                        // `arm_liveness_watcher` does nothing when the client is not `Ready`, already has a watcher, or is ACP
                         let _ = arc
                             .arm_liveness_watcher(xai_grok_mcp::liveness::DEFAULT_POLL_INTERVAL)
                             .await;
@@ -1989,10 +1915,8 @@ impl SessionActor {
                 )
                 .await;
 
-                // Emit tools-changed notifications. Each payload
-                // carries `sessionId` so the
-                // pager routes via `find_session_match` rather than
-                // falling back to `app.active_view`.
+                // Emit tools-changed notifications
+                // Each payload carries `sessionId` so the pager routes via `find_session_match` rather than falling back to `app.active_view`
                 for (server_name, tools) in ui_tools_by_server {
                     let payload = crate::extensions::mcp::McpToolsChanged {
                         session_id: session_id_owned.to_string(),
@@ -2036,9 +1960,8 @@ impl SessionActor {
             }
         ));
     }
-    /// Summaries of the currently connected MCP servers, from the live
-    /// tool-metadata snapshot. The single source for every consumer of
-    /// the server list.
+    /// Summaries of the currently connected MCP servers, from the live tool-metadata snapshot.
+    /// The single source for every consumer of the server list.
     pub(crate) fn connected_server_summaries(
         &self,
     ) -> Vec<xai_grok_tools::types::tool_index::ServerSummary> {
@@ -2046,27 +1969,22 @@ impl SessionActor {
         crate::session::tool_index::Bm25ToolSearchIndex::new(self.tool_metadata_snapshot.clone())
             .list_server_summaries()
     }
-    /// Render the tool usage hint appended to every injected MCP reminder
-    /// body, with the session's tool names substituted. Shared by the
-    /// injector and the `/context` estimate. `None` when the template
-    /// fails to render.
+    /// Render the tool usage hint appended to every injected MCP reminder body, with the session's tool names substituted.
+    /// Shared by the injector and the `/context` estimate.
+    /// `None` when the template fails to render.
     async fn rendered_mcp_hint(&self) -> Option<String> {
         let hint_template = "\nTo use MCP tools, you MUST call `${{ tools.by_kind.search_tool }}` first to retrieve the tool's input schema before calling `${{ tools.by_kind.use_tool }}`. NEVER guess parameter names — always use the exact schema returned by `${{ tools.by_kind.search_tool }}`.";
         self.tool_bridge_handle()
             .render_prompt(hint_template, &serde_json::json!({}))
             .await
     }
-    /// The full MCP announcement for the current server set, for
-    /// `/context` accounting: the server listing plus the tool usage hint,
-    /// as [`Self::maybe_inject_mcp_reminder`] injects in `Full` mode.
+    /// The full MCP announcement for the current server set, for `/context` accounting.
+    /// It is the server listing plus the tool usage hint, as [`Self::maybe_inject_mcp_reminder`] injects in `Full` mode.
     ///
-    /// Returns `None` when no servers are connected, or when the active
-    /// template carries MCP in its first user message rather than in
-    /// reminders. Known approximations: the default reminder mode is
-    /// `Delta`, which injects incremental texts (each carrying its own
-    /// copy of the hint) rather than this full listing; and the transient
-    /// failed or connecting sections and the `<system-reminder>` wrapper
-    /// are not counted.
+    /// Returns `None` when no servers are connected, or when the active template carries MCP in its first user message rather than in reminders.
+    /// Known approximations: the default reminder mode is `Delta`, which injects incremental texts rather than this full listing.
+    /// Each delta carries its own copy of the hint.
+    /// The transient failed or connecting sections and the `<system-reminder>` wrapper are not counted.
     pub(super) async fn mcp_announcement_snapshot(&self) -> Option<McpAnnouncementSnapshot> {
         let server_summaries = self.connected_server_summaries();
         let mut text =
@@ -2087,23 +2005,18 @@ pub(super) struct McpAnnouncementSnapshot {
     pub(super) text: String,
     pub(super) server_count: usize,
 }
-/// Render the "MCP servers currently connecting" system reminder
-/// (pure rendering — see `maybe_inject_mcp_connecting_reminder`).
+/// Render the "MCP servers currently connecting" system reminder (pure rendering; see `maybe_inject_mcp_connecting_reminder`).
 ///
-/// Sessions that declared `startupHints.deliveryTools` get different
-/// guidance. On surfaces that declare delivery tools the user sees output
-/// only through those MCP tools (e.g. a message-posting tool), and the
-/// servers providing them are exactly the ones listed as still connecting.
-/// The default wording ("proceed with what you can do in the meantime")
-/// steers the model into answering in plain text and ending the turn, i.e.
-/// replying into a void on such surfaces. Keying on the explicit opt-in —
-/// not on `nonInteractive` — keeps the default for every other client
-/// (SDK/stdio consumers DO read plain-text responses; subagents report to
-/// their parent). Declaring sessions typically also run
-/// `McpInitStrategy::Blocking`, so handshakes are awaited at turn start and
-/// the servers are expected to become ready while the model works — the
-/// right guidance is to keep working and deliver through the tool, not to
-/// skip it.
+/// Sessions that declared `startupHints.deliveryTools` get different guidance.
+/// On surfaces that declare delivery tools the user sees output only through those MCP tools (e.g. a message-posting tool).
+/// The servers providing them are exactly the ones listed as still connecting.
+/// The default wording ("proceed with what you can do in the meantime") steers the model into answering in plain text and ending the turn.
+/// On such surfaces that means replying into a void.
+/// Keying on the explicit opt-in rather than on `nonInteractive` keeps the default for every other client.
+/// SDK/stdio consumers DO read plain-text responses, and subagents report to their parent.
+/// Declaring sessions typically also run `McpInitStrategy::Blocking`, so handshakes are awaited at turn start.
+/// The servers are expected to become ready while the model works.
+/// The right guidance there is to keep working and deliver through the tool, not to skip it.
 pub(super) fn format_mcp_connecting_reminder(
     connecting: &[String],
     delivery_tools: &[String],

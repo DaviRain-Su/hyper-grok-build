@@ -1,6 +1,6 @@
-//! Advisory `auth.json.lock` handling. The lock file is never deleted and a held
-//! flock is never broken — an unlinked lock lets two processes spend the same
-//! refresh token. Staleness resolves in place on the live lock, via [`flock_wait`].
+//! Advisory `auth.json.lock` handling.
+//! The lock file is never deleted and a held flock is never broken: an unlinked lock lets two processes spend the same refresh token.
+//! Staleness resolves in place on the live lock, via [`flock_wait`].
 
 #[path = "lock/flock_wait.rs"]
 mod flock_wait;
@@ -36,8 +36,8 @@ const _: () = assert!(
     "a heartbeating holder must never age past the stale threshold"
 );
 
-// TODO: delete once the token endpoint tolerates racing refreshes AND unlink-recovery
-// binaries have aged out of the fleet; the heartbeat only placates their staleness check.
+// TODO: delete once the token endpoint tolerates racing refreshes AND unlink-recovery binaries have aged out of the fleet
+// The heartbeat only placates their staleness check
 /// Re-dates the lock file's holder info while the lock is held.
 pub(crate) struct LockHeartbeat {
     stop: std::sync::mpsc::Sender<()>,
@@ -89,8 +89,8 @@ fn write_holder_info(file: &mut File) -> io::Result<()> {
     write_holder_info_at(file, ts)
 }
 
-/// Writes `PID:ts` into the lock file, replacing any prior holder line. The sole
-/// production writer of the on-disk holder stamp format.
+/// Writes `PID:ts` into the lock file, replacing any prior holder line.
+/// This is the sole production writer of the on-disk holder stamp format.
 fn write_holder_info_at(file: &mut File, ts: u64) -> io::Result<()> {
     let pid = std::process::id();
     file.set_len(0)?;

@@ -108,8 +108,7 @@ pub async fn list(
     params: &FsListParams,
     confine_to_canonical_root: Option<PathBuf>,
 ) -> Result<FsListData> {
-    // Confined to the canonical root when set (escaping symlinks not enumerated);
-    // `None` (the default) walks unconfined.
+    // The walk is confined to the canonical root when set (escaping symlinks are not enumerated); `None` (the default) walks unconfined
     let page = wfs::list_directory_paged(
         abs_path,
         wfs::ListOptions {
@@ -158,10 +157,8 @@ pub async fn read_file(abs_path: &Path) -> Result<FsReadFileData> {
     Ok(build_file_entry(&bytes))
 }
 
-/// Binary-safe ranged read: returns the chunk `[offset, offset + min(length,
-/// max_bytes, cap))` with the full file `size`. `lineCount` is omitted and
-/// the MIME `type` is a coarse text/binary tag (mid-file chunks defeat
-/// magic-byte sniffing).
+/// Binary-safe ranged read: returns the chunk `[offset, offset + min(length, max_bytes, cap))` with the full file `size`.
+/// `lineCount` is omitted and the MIME `type` is a coarse text/binary tag (mid-file chunks defeat magic-byte sniffing).
 pub(crate) async fn read_file_ranged(
     abs_path: &Path,
     offset: u64,
@@ -173,8 +170,7 @@ pub(crate) async fn read_file_ranged(
     if md.is_dir() {
         anyhow::bail!("not a file: {}", abs_path.display());
     }
-    // Best-effort snapshot: a concurrent truncate/grow between here and
-    // read_range can make `size` inconsistent with the returned chunk.
+    // Best-effort snapshot: a concurrent truncate/grow between here and read_range can make `size` inconsistent with the returned chunk
     let size = md.len();
     let length = wfs::clamp_read_length(Some(length), max_bytes);
     let chunk = wfs::read_range(abs_path, offset, length).await?;
@@ -296,7 +292,7 @@ mod tests {
         std::fs::create_dir(root.join("zd")).unwrap();
         let names = |d: FsListData| d.nodes.into_iter().map(|n| n.name).collect::<Vec<_>>();
 
-        // Dir sorts ahead of files: [zd, a.txt | b.txt, c.txt].
+        // The dir sorts ahead of files: [zd, a.txt | b.txt, c.txt]
         let p0 = list(root, &params(2, 0), Some(root.to_path_buf()))
             .await
             .unwrap();
@@ -316,7 +312,7 @@ mod tests {
         let path = dir.path().join("data.bin");
         std::fs::write(&path, b"hello world").unwrap();
 
-        // UTF-8 chunk → `content`; `size` stays the full file size.
+        // A UTF-8 chunk lands in `content`; `size` stays the full file size
         let d = read_file_ranged(&path, 0, 5, 1 << 20, FsReadEncoding::Utf8)
             .await
             .unwrap();
@@ -325,7 +321,7 @@ mod tests {
         assert_eq!(d.size, "hello world".len() as u64);
         assert!(d.line_count.is_none());
 
-        // base64 of a mid-file chunk.
+        // Base64 of a mid-file chunk
         let d = read_file_ranged(&path, 6, 5, 1 << 20, FsReadEncoding::Base64)
             .await
             .unwrap();
@@ -335,7 +331,7 @@ mod tests {
             Some(base64::engine::general_purpose::STANDARD.encode(b"world")),
         );
 
-        // Non-UTF-8 bytes fall back to base64 + octet-stream.
+        // Non-UTF-8 bytes fall back to base64 and octet-stream
         std::fs::write(&path, [0xff_u8, 0x00]).unwrap();
         let d = read_file_ranged(&path, 0, 10, 1 << 20, FsReadEncoding::Utf8)
             .await
@@ -349,7 +345,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("big.txt");
         std::fs::write(&path, vec![b'a'; 64]).unwrap();
-        // length far over the file; clamped to file end, full size echoed.
+        // A length far over the file is clamped to the file end; the full size is echoed
         let d = read_file_ranged(&path, 0, u64::MAX, 1 << 20, FsReadEncoding::Utf8)
             .await
             .unwrap();

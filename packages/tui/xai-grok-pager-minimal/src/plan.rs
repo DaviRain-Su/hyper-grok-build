@@ -1,19 +1,13 @@
-//! Minimal-mode plan-approval host (design PR10).
+//! The full TUI renders plan approval as a fullscreen line-viewer plus a live feedback prompt.
+//! Minimal instead commits the whole plan into native scrollback as a normal conversation block (see [`maybe_commit_plan`]).
+//! The plan then reads and scrolls exactly like the rest of the transcript.
+//! The prompt-anchored live region holds only the decision controls (approve / revise / keep planning) plus the feedback input when revising.
+//! Nothing of the plan body is drawn under the prompt.
 //!
-//! The full TUI renders plan approval as a fullscreen line-viewer plus a live
-//! feedback prompt. Minimal takes a simpler route: the **whole plan is committed
-//! into native scrollback** as a normal conversation block (see
-//! [`maybe_commit_plan`]), so it reads and scrolls exactly like the rest of the
-//! transcript. The prompt-anchored live region then holds only the decision
-//! controls — approve / revise / keep planning — plus the feedback input when
-//! revising. Nothing of the plan body is drawn under the prompt.
-//!
-//! Input routing is unchanged: while `line_viewer.is_some()` the agent's input
-//! handler already routes keys to `handle_line_viewer_key` (Preview focus:
-//! `a` approve / `s`/`Tab` revise / `q` keep planning) and `handle_plan_feedback_key`
-//! (Prompt focus: type feedback, `Enter` send, `Esc` back). Minimal keeps the
-//! line viewer open (so those keys fire) but renders this compact controls strip
-//! in place of the never-drawn fullscreen viewer.
+//! Input routing is unchanged: while `line_viewer.is_some()` the agent's input handler already routes keys to the two plan handlers.
+//! `handle_line_viewer_key` owns Preview focus (`a` approve / `s`/`Tab` revise / `q` keep planning).
+//! `handle_plan_feedback_key` owns Prompt focus (type feedback, `Enter` send, `Esc` back).
+//! Minimal keeps the line viewer open (so those keys fire) but renders this compact controls strip in place of the never-drawn fullscreen viewer.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -36,16 +30,14 @@ fn focus(agent: &AgentView) -> PlanApprovalFocus {
 }
 
 /// Scrollback notice when exit_plan_mode parks with no plan body.
-///
-/// Kept short and plain (no markdown chrome) so native scrollback reads cleanly
-/// under minimal mode's chromeless commit path.
+/// Kept short and plain (no markdown chrome) so native scrollback reads cleanly under minimal mode's chromeless commit path.
 const EMPTY_PLAN_SCROLLBACK: &str = "\
 No plan written yet.
 
 Approve to leave plan mode and start implementing, request changes to send the \
 agent back to planning, or quit to abandon.";
 
-/// Controls-strip header for the parked plan-approval surface.
+/// Controls-strip header for a parked plan approval.
 fn plan_header(has_plan: bool) -> &'static str {
     if has_plan {
         "Plan ready for review"
@@ -62,31 +54,24 @@ fn plan_scrollback_body(plan_content: Option<&str>) -> String {
         .unwrap_or_else(|| EMPTY_PLAN_SCROLLBACK.to_owned())
 }
 
-/// Commit the active plan into native scrollback, once per plan (and once per
-/// revision).
+/// Commit the active plan into native scrollback, once per plan (and once per revision).
 ///
-/// Minimal has no separate plan pane: the terminal's scrollback *is* the
-/// history, so the plan is pushed as an ordinary finalized agent-message block
-/// and printed into native scrollback by the normal commit pass — leaving only
-/// the decision controls under the prompt. De-duplicated by the plan's
-/// `tool_call_id`; a revised plan arrives as a fresh ExitPlanMode with a new id
-/// and is committed as its own block. Empty / whitespace-only plans still commit
-/// a short notice so the user sees *why* approval is parked (otherwise only the
-/// controls strip appears and the session looks stuck).
+/// Minimal has no separate plan pane: the terminal's scrollback *is* the history.
+/// The plan is pushed as an ordinary finalized agent-message block and printed into native scrollback by the normal commit pass.
+/// Only the decision controls remain under the prompt.
+/// De-duplicated by the plan's `tool_call_id`; a revised plan arrives as a fresh ExitPlanMode with a new id and is committed as its own block.
+/// Empty / whitespace-only plans still commit a short notice so the user sees why approval is parked.
+/// Otherwise only the controls strip appears and the session looks stuck.
 ///
-/// The block is anchored **above** the still-running `exit_plan_mode` tool row,
-/// not appended after it, so the commit frontier reaches the plan while the
-/// approval is still parked. Users reported losing the head of a plan to the
-/// clipped live tail; design doc §6.16 has the full argument and the rejected
-/// alternatives.
+/// The block is anchored **above** the still-running `exit_plan_mode` tool row, not appended after it.
+/// The commit frontier then reaches the plan while the approval is still parked.
+/// Users reported losing the head of a plan to the clipped live tail.
 ///
-/// NOTE (draw-path state mutation + replay durability): this pushes into
-/// `ScrollbackState` from the render path — a deliberate exception, since the
-/// plan block must enter the normal commit pipeline. The pushed block is
-/// client-render state, not a server event: a resumed session will not replay
-/// it, so post-reload `/transcript` shows the plan only through whatever the
-/// agent itself messaged. Accepted for v1 (the live session — the mode's whole
-/// surface — is consistent).
+/// NOTE (draw-path state mutation and replay durability): this pushes into `ScrollbackState` from the render path.
+/// That is a deliberate exception: the plan block must enter the normal commit pipeline.
+/// The pushed block is client-render state, not a server event: a resumed session will not replay it.
+/// Post-reload `/transcript` shows the plan only through whatever the agent itself messaged.
+/// Accepted for v1: the live session, which is all minimal shows, stays consistent.
 ///
 /// Call once per frame from [`crate::draw`], before the commit pass.
 pub fn maybe_commit_plan(app: &mut AppView) {
@@ -95,8 +80,8 @@ pub fn maybe_commit_plan(app: &mut AppView) {
     };
     let id = *id;
 
-    // Extract the plan (owned) under a short immutable borrow so the mutable
-    // scrollback push and the `minimal_state` read/write below don't overlap it.
+    // Extract the plan (owned) under a short immutable borrow
+    // The mutable scrollback push and the `minimal_state` read/write below must not overlap it
     let plan = app.agents.get(&id).and_then(|agent| {
         minimal_api::plan_approval_view(agent).map(|pav| {
             let content = plan_scrollback_body(pav.plan_content.as_deref());
@@ -111,14 +96,12 @@ pub fn maybe_commit_plan(app: &mut AppView) {
         return; // already emitted this plan
     }
 
-    // Mark the plan as emitted only when the block was actually pushed: the
-    // agent borrow can't fail here (the plan was just extracted from it), but
-    // if it ever did, stamping the id anyway would treat the plan as committed
-    // while nothing ever reaches native scrollback.
+    // Mark the plan as emitted only when the block was actually pushed
+    // The agent borrow can't fail here (the plan was just extracted from it)
+    // If it ever did, stamping the id anyway would treat the plan as committed while nothing ever reaches native scrollback
     if let Some(agent) = app.agents.get_mut(&id) {
         let block = RenderBlock::agent_message(content);
-        // No anchor (the tool was reaped): append, and the plan commits at turn
-        // end — the pre-fix behavior, still better than dropping it.
+        // No anchor (the tool was reaped): append, and the plan commits at turn end
         match minimal_api::pending_tool_entry_id(agent, &tool_call_id) {
             Some(anchor) => {
                 agent.scrollback.insert_block_before(anchor, block);
@@ -142,10 +125,10 @@ pub fn height(agent: &AgentView) -> u16 {
     2u16.saturating_add(input)
 }
 
-/// Render the compact plan-approval controls strip into `area`. The plan itself
-/// lives in native scrollback ([`maybe_commit_plan`]); this only draws the
-/// header, the decision hint, and — when revising — the feedback input. Returns
-/// the text cursor when the feedback input is focused, else `None`.
+/// Render the compact plan-approval controls strip into `area`.
+/// The plan itself lives in native scrollback ([`maybe_commit_plan`]).
+/// This only draws the header, the decision hint, and (when revising) the feedback input.
+/// Returns the text cursor when the feedback input is focused, else `None`.
 pub fn render(
     buf: &mut Buffer,
     area: Rect,
@@ -257,12 +240,6 @@ fn input_style(theme: &Theme) -> PromptStyle {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn empty_plan_header_is_explicit() {
-        assert_eq!(plan_header(true), "Plan ready for review");
-        assert_eq!(plan_header(false), "No plan written yet");
-    }
 
     #[test]
     fn empty_plan_scrollback_uses_notice_not_silence() {

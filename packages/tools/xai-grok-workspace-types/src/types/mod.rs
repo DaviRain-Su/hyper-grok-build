@@ -8,9 +8,8 @@
 //! `// TODO(workspace): align with <canonical type>` comment naming the
 //! crate it should eventually be reconciled against.
 //!
-//! Until those subsystems are extracted, the only contract these types
-//! must satisfy is that they're `Debug + Clone + Serialize + Deserialize`
-//! and that the field shapes are sensible for the wire-format walkthrough.
+//! Until those subsystems are extracted, the only contract these types must satisfy is `Debug + Clone + Serialize + Deserialize`.
+//! The field shapes need only be sensible for the wire-format walkthrough.
 
 pub mod config;
 pub mod files;

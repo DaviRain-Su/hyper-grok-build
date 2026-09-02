@@ -1,8 +1,6 @@
-//! `large_codeblock` — render a large syntax-highlighted Rust code block
-//! and scroll through it.
+//! Render a large syntax-highlighted Rust code block and scroll through it.
 //!
-//! What it stresses: `syntect` highlighting cache, wrapping of long source
-//! lines, ScratchBuffer copy for a single oversized entry.
+//! What it stresses: `syntect` highlighting cache, wrapping of long source lines, ScratchBuffer copy for a single oversized entry.
 
 use std::time::{Duration, Instant};
 

@@ -51,8 +51,7 @@ struct Args {
     /// Where the JSON observation record is written.
     #[arg(long)]
     out: PathBuf,
-    /// Where the measured boot's `unified.jsonl` is copied before the sandbox
-    /// is removed.
+    /// Where the measured boot's `unified.jsonl` is copied before the sandbox is removed.
     #[arg(long)]
     log_out: PathBuf,
 }
@@ -249,8 +248,7 @@ fn quit_pager(harness: &mut PtyHarness) -> Result<()> {
     }
 }
 
-// Every word is unique to its turn, so the resume ready marker (the final
-// turn's final word) cannot match an earlier turn's replayed paint.
+// Every word is unique to its turn, so the resume ready marker (the final turn's final word) cannot match an earlier turn's replayed paint
 fn seed_response(turn: usize, words: usize) -> String {
     use std::fmt::Write as _;
 

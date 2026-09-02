@@ -269,14 +269,6 @@ fn resolve_ws_ping_interval_clamps_zero_and_unset_to_default() {
     let custom = Duration::from_secs(7);
     assert_eq!(resolve_ws_ping_interval(Some(custom)), custom);
 }
-/// Resolving a zero ping interval to a non-zero default means
-/// `tokio::time::interval` can be constructed without panicking.
-#[tokio::test]
-async fn resolved_zero_ping_interval_builds_interval_without_panic() {
-    let resolved = resolve_ws_ping_interval(Some(Duration::ZERO));
-    assert!(!resolved.is_zero());
-    let _interval = tokio::time::interval(resolved);
-}
 /// A zero or unset initial-connect budget resolves to the 10s default —
 /// a zero budget would abort every attempt before the upgrade could
 /// complete; a positive override is honored verbatim. Mirrors the

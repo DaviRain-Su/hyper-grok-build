@@ -1,5 +1,3 @@
-//! Shell-owned control handle for one active child session.
-
 use tokio::sync::mpsc;
 use xai_grok_tools::implementations::grok_build::task::coordinator::{
     ActiveMessageAdmission, ChildControl, LocalBoxFuture, SendBoxFuture, SubagentProgress,
@@ -16,8 +14,8 @@ pub(crate) struct ShellChildRuntime {
     pub(crate) message_delivery: crate::session::message_delivery::MessageDeliveryHandle,
     pub(crate) active_message_target_session_id: String,
     pub(crate) child_signals: crate::session::signals::SessionSignalsHandle,
-    /// Held by the worker until promotion succeeds; `None` while the caller
-    /// still owns the join handle so cancel-at-promote can wait for exit.
+    /// Held by the worker until promotion succeeds.
+    /// `None` means the caller still owns the join handle, so a cancel during promotion can wait for the actor to exit.
     pub(crate) _child_thread: Option<SessionThread>,
     pub(crate) receipt_sink: mpsc::Sender<PromptTurnReceipt>,
     #[cfg(test)]
@@ -94,12 +92,12 @@ impl ChildControl for ShellChildRuntime {
 
 const SESSION_THREAD_EXIT_POLL: std::time::Duration = std::time::Duration::from_millis(10);
 
-/// Bound for waiting out an unpromoted child actor after cancel+shutdown.
+/// How long to wait for an unpromoted child actor to exit after cancel and shutdown.
 pub(crate) const UNPROMOTED_SESSION_THREAD_EXIT_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(5);
 
-/// Poll `SessionThread::is_finished` until the actor thread exits or `timeout`.
-/// `Duration::ZERO` is a single observation and never sleeps.
+/// Polls `SessionThread::is_finished` until the actor thread exits or `timeout` elapses.
+/// A `timeout` of `Duration::ZERO` checks once and never sleeps.
 pub(crate) async fn await_session_thread_exit(
     thread: &SessionThread,
     timeout: std::time::Duration,

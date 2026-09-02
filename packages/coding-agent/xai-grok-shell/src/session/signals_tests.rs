@@ -4,7 +4,6 @@ use super::*;
 async fn test_session_signals_basic() {
     let (handle, actor) = SessionSignalsActor::new();
 
-    // Spawn the actor
     let actor_handle = tokio::spawn(actor.run());
 
     // Send some signals
@@ -17,7 +16,6 @@ async fn test_session_signals_basic() {
     handle.record_compaction(5_000);
     handle.record_cancellation();
 
-    // Get snapshot
     let snapshot = handle.snapshot().await.unwrap();
 
     assert_eq!(snapshot.turn_count, 2);
@@ -39,8 +37,8 @@ async fn test_pr_metrics_counters_and_turn_delta() {
     let (handle, actor) = SessionSignalsActor::new();
     let actor_handle = tokio::spawn(actor.run());
 
-    // Create recorded BEFORE the commit (parallel tool results can land
-    // out of order) — turn-end reconciliation must still attribute it.
+    // The PR-created signal is recorded BEFORE the commit (parallel tool results can land out of order)
+    // Turn-end reconciliation must still attribute it
     handle.record_pr_created(PrCreatedSignal {
         url: Some("https://github.com/o/r/pull/7".into()),
         number: Some(7),
@@ -99,7 +97,7 @@ async fn test_consecutive_cancellations() {
 
     let snapshot = handle.snapshot().await.unwrap();
     assert_eq!(snapshot.cancellation_count, 3); // Total unchanged
-    assert_eq!(snapshot.consecutive_cancellations, 0); // Reset
+    assert_eq!(snapshot.consecutive_cancellations, 0);
 
     // New cancellation starts counting again
     handle.record_cancellation();
@@ -131,7 +129,6 @@ async fn test_model_tracking() {
     let (handle, actor) = SessionSignalsActor::new();
     let actor_handle = tokio::spawn(actor.run());
 
-    // Set primary model
     handle.set_primary_model("grok-3");
 
     let snapshot = handle.snapshot().await.unwrap();
@@ -221,7 +218,7 @@ async fn test_session_duration() {
 
     let snapshot = handle.snapshot().await.unwrap();
     // Duration tracking works (u64 so always >= 0)
-    assert!(snapshot.session_duration_seconds < 100); // Sanity check - not hours old
+    assert!(snapshot.session_duration_seconds < 100); // Sanity check: not hours old
 
     handle.shutdown();
     actor_handle.await.unwrap();
@@ -232,16 +229,13 @@ async fn test_check_and_mark_sync() {
     let (handle, actor) = SessionSignalsActor::with_sync_interval(Duration::from_millis(50));
     let actor_handle = tokio::spawn(actor.run());
 
-    // First sync should be allowed
     assert!(handle.check_and_mark_sync().await);
 
-    // Immediate check should return false
     assert!(!handle.check_and_mark_sync().await);
 
     // Wait for sync interval
     tokio::time::sleep(Duration::from_millis(60)).await;
 
-    // Now should be allowed again
     assert!(handle.check_and_mark_sync().await);
 
     handle.shutdown();
@@ -311,7 +305,7 @@ async fn test_turn_end_snapshot_first_turn() {
 
     let snap = handle.take_turn_end_snapshot().await.unwrap();
 
-    // First turn — delta should equal cumulative
+    // First turn: delta should equal cumulative
     assert_eq!(snap.delta.turn_number, 1);
     assert_eq!(snap.delta.delta_tool_calls, 3);
     assert_eq!(snap.delta.delta_assistant_messages, 1);
@@ -322,12 +316,11 @@ async fn test_turn_end_snapshot_first_turn() {
     );
     assert_eq!(snap.delta.last_time_to_first_token_ms, Some(150));
     assert_eq!(snap.delta.last_total_response_time_ms, Some(2500));
-    // New fields
     assert_eq!(snap.delta.delta_long_pauses, 0);
     assert_eq!(snap.delta.delta_successful_tool_uses, 3); // 3 calls, 0 failures
     assert_eq!(snap.delta.consecutive_cancellations, 0);
     assert!(snap.delta.error_types_this_turn.is_empty());
-    // No explicit success/failure signals sent, so tool_outcomes should be empty
+    // No explicit success/failure signals were sent
     assert!(snap.delta.tool_outcomes_this_turn.is_empty());
 
     // Cumulative should match
@@ -347,7 +340,7 @@ async fn test_inference_metrics_single_response() {
         time_to_first_token_ms: Some(150),
         time_to_last_byte_ms: 2500,
         chunk_count: 20,
-        itl_intervals_ms: vec![30, 30, 30], // 3 intervals, all 30ms
+        itl_intervals_ms: vec![30, 30, 30],
         itl_p50_ms: Some(30),
         itl_p99_ms: Some(30),
         itl_max_ms: Some(30),
@@ -365,7 +358,7 @@ async fn test_inference_metrics_single_response() {
     // Counts
     assert_eq!(snap.total_chunk_count, 20);
     assert_eq!(snap.itl_sample_count, 1);
-    // Existing TTFB/TTLB tracking should also be populated
+    // TTFB/TTLB tracking is also populated
     assert_eq!(snap.avg_time_to_first_token_ms, 150);
     assert_eq!(snap.avg_response_time_ms, 2500);
     assert_eq!(snap.latency_sample_count, 1);
@@ -404,14 +397,14 @@ async fn test_turn_end_snapshot_multi_turn_deltas() {
 
     let snap2 = handle.take_turn_end_snapshot().await.unwrap();
     assert_eq!(snap2.delta.turn_number, 2);
-    assert_eq!(snap2.delta.delta_tool_calls, 1); // only 1 this turn
+    assert_eq!(snap2.delta.delta_tool_calls, 1);
     assert_eq!(snap2.delta.delta_errors, 1); // tool failure counted as error
     assert_eq!(snap2.delta.delta_tool_failures, 1);
     assert_eq!(snap2.delta.delta_successful_tool_uses, 0); // 1 call - 1 failure
     assert_eq!(snap2.delta.delta_assistant_messages, 1);
     assert_eq!(snap2.delta.tools_this_turn, vec!["search_replace"]);
     assert_eq!(snap2.delta.last_time_to_first_token_ms, Some(200));
-    // error_types_this_turn should be empty — tool_failure doesn't set an error type
+    // tool_failure doesn't set an error type
     assert!(snap2.delta.error_types_this_turn.is_empty());
 
     // Cumulative should reflect both turns
@@ -440,7 +433,7 @@ async fn test_inference_metrics_multi_response_aggregation() {
     let (handle, actor) = SessionSignalsActor::new();
     let actor_handle = tokio::spawn(actor.run());
 
-    // Response 1: intervals [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+    // Response 1: 10 intervals
     handle.record_inference_metrics(InferenceLatencyStats {
         time_to_first_token_ms: Some(100),
         time_to_last_byte_ms: 1000,
@@ -453,7 +446,7 @@ async fn test_inference_metrics_multi_response_aggregation() {
         attempts: 0,
     });
 
-    // Response 2: intervals [100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200] (11 intervals)
+    // Response 2: 11 intervals
     handle.record_inference_metrics(InferenceLatencyStats {
         time_to_first_token_ms: Some(120),
         time_to_last_byte_ms: 2000,
@@ -466,7 +459,7 @@ async fn test_inference_metrics_multi_response_aggregation() {
         attempts: 0,
     });
 
-    // Response 3: intervals [5, 10, 15, 20, 25] (5 intervals)
+    // Response 3: 5 intervals
     handle.record_inference_metrics(InferenceLatencyStats {
         time_to_first_token_ms: Some(90),
         time_to_last_byte_ms: 1500,
@@ -481,15 +474,14 @@ async fn test_inference_metrics_multi_response_aggregation() {
 
     let snap = handle.snapshot().await.unwrap();
 
-    // With 26 total intervals combined: [5,10,10,15,20,20,25,30,40,50,60,70,80,90,100,100,110,120,130,140,150,160,170,180,190,200]
-    // Sorted: [5,10,10,15,20,20,25,30,40,50,60,70,80,90,100,100,110,120,130,140,150,160,170,180,190,200]
+    // The 26 combined intervals, sorted: [5,10,10,15,20,20,25,30,40,50,60,70,80,90,100,100,110,120,130,140,150,160,170,180,190,200]
     // Exact p50 (26/2=13) -> index 13 = 90
     // Exact p99: ceil(26*0.99)-1 = ceil(25.74)-1 = 26-1 = 25, min(25, 25) = 25 -> 200
     // Exact max = 200
     // Exact mean = (10+20+30+40+50+60+70+80+90+100 + 100+110+120+130+140+150+160+170+180+190+200 + 5+10+15+20+25) / 26
     //            = (550 + 1650 + 75) / 26 = 2275 / 26 = 87
 
-    // TDigest gives approximate percentiles - verify they're reasonable
+    // TDigest gives approximate percentiles
     let p50 = snap.itl_p50_ms.unwrap();
     let p99 = snap.itl_p99_ms.unwrap();
     assert!(
@@ -521,13 +513,13 @@ async fn test_turn_end_snapshot_resets_per_turn_state() {
     handle.record_error_typed("rate_limit");
     handle.record_latency(100, 500);
 
-    // Take snapshot — should consume per-turn state
+    // Take snapshot; it should consume per-turn state
     let snap1 = handle.take_turn_end_snapshot().await.unwrap();
     assert_eq!(snap1.delta.tools_this_turn, vec!["bash"]);
     assert_eq!(snap1.delta.error_types_this_turn, vec!["rate_limit"]);
     assert_eq!(snap1.delta.last_time_to_first_token_ms, Some(100));
 
-    // Take another snapshot immediately — per-turn state should be empty
+    // Take another snapshot immediately; per-turn state should be empty
     let snap2 = handle.take_turn_end_snapshot().await.unwrap();
     assert!(snap2.delta.tools_this_turn.is_empty());
     assert!(snap2.delta.error_types_this_turn.is_empty());
@@ -577,7 +569,7 @@ async fn test_turn_end_snapshot_error_types_mixed() {
     handle.increment_turn();
     // Mix of typed and untyped errors
     handle.record_error_typed("timeout");
-    handle.record_error(); // untyped — doesn't add to error_types_this_turn
+    handle.record_error(); // untyped, doesn't add to error_types_this_turn
     handle.record_error_typed("rate_limit");
     handle.record_assistant_message();
 
@@ -642,7 +634,7 @@ async fn test_turn_end_snapshot_tool_outcomes() {
         }
     );
 
-    // Turn 2: no tools — outcomes should be empty
+    // Turn 2: no tools, outcomes should be empty
     handle.increment_turn();
     handle.record_assistant_message();
 
@@ -661,13 +653,13 @@ async fn test_turn_end_snapshot_token_usage() {
     // Turn 1: one response with completion and reasoning tokens
     handle.increment_turn();
     handle.record_assistant_message();
-    handle.record_token_usage(500, 200); // 500 completion, 200 reasoning → 300 response
+    handle.record_token_usage(500, 200); // 500 completion, 200 reasoning, so 300 response
 
     let snap1 = handle.take_turn_end_snapshot().await.unwrap();
-    assert_eq!(snap1.delta.response_tokens, Some(300)); // 500 - 200
+    assert_eq!(snap1.delta.response_tokens, Some(300));
     assert_eq!(snap1.delta.thinking_tokens, Some(200));
 
-    // Turn 2: multi-round tool use — two responses accumulate
+    // Turn 2: multi-round tool use, two responses accumulate
     handle.increment_turn();
     handle.record_tool_call("bash");
     handle.record_token_usage(100, 50); // first response: 50 response + 50 thinking
@@ -675,10 +667,10 @@ async fn test_turn_end_snapshot_token_usage() {
     handle.record_token_usage(400, 0); // second response: 400 response, 0 thinking
 
     let snap2 = handle.take_turn_end_snapshot().await.unwrap();
-    assert_eq!(snap2.delta.response_tokens, Some(450)); // (100-50) + (400-0)
-    assert_eq!(snap2.delta.thinking_tokens, Some(50)); // 50 + 0
+    assert_eq!(snap2.delta.response_tokens, Some(450));
+    assert_eq!(snap2.delta.thinking_tokens, Some(50));
 
-    // Turn 3: no token usage recorded — should be None (not Some(0))
+    // Turn 3: no token usage recorded, should be None (not Some(0))
     handle.increment_turn();
     handle.record_assistant_message();
 
@@ -710,19 +702,19 @@ async fn test_seed_counts_restores_all_counters() {
 
     let snapshot = handle.snapshot().await.unwrap();
 
-    // Message counts (existing behavior)
+    // Message counts
     assert_eq!(snapshot.turn_count, 5);
     assert_eq!(snapshot.user_message_count, 5);
     assert_eq!(snapshot.assistant_message_count, 4);
 
-    // Tool counts (newly restored)
+    // Tool counts
     assert_eq!(snapshot.tool_call_count, 12);
     assert_eq!(snapshot.tools_used.len(), 3);
     assert!(snapshot.tools_used.contains(&"read_file".to_string()));
     assert!(snapshot.tools_used.contains(&"bash".to_string()));
     assert!(snapshot.tools_used.contains(&"search_replace".to_string()));
 
-    // Model tracking (newly restored)
+    // Model tracking
     assert_eq!(snapshot.models_used.len(), 2);
     assert!(snapshot.models_used.contains(&"grok-3".to_string()));
     assert!(snapshot.models_used.contains(&"grok-4".to_string()));
@@ -734,7 +726,7 @@ async fn test_seed_counts_restores_all_counters() {
     handle.record_model_usage("grok-4.5"); // new model
 
     let snapshot = handle.snapshot().await.unwrap();
-    assert_eq!(snapshot.tool_call_count, 14); // 12 + 2
+    assert_eq!(snapshot.tool_call_count, 14); // the seeded 12 plus 2 new calls
     assert_eq!(snapshot.tools_used.len(), 4); // bash not duplicated, grep added
     assert!(snapshot.tools_used.contains(&"grep".to_string()));
     assert_eq!(snapshot.models_used.len(), 3); // grok-3 not duplicated, grok-5 added
@@ -759,7 +751,6 @@ async fn test_restore_signals_full_round_trip() {
     handle1.record_assistant_message();
     handle1.record_model_usage("grok-3");
 
-    // Record inference metrics with ITL intervals for turn 1
     handle1.record_inference_metrics(InferenceLatencyStats {
         time_to_first_token_ms: Some(100),
         time_to_last_byte_ms: 1000,
@@ -788,7 +779,6 @@ async fn test_restore_signals_full_round_trip() {
     // Take a turn-end snapshot (to set previous_turn_snapshot baseline)
     let _snap1 = handle1.take_turn_end_snapshot().await;
 
-    // Take the final snapshot
     let snapshot = handle1.snapshot().await.unwrap();
 
     // Verify the snapshot has meaningful data
@@ -802,8 +792,8 @@ async fn test_restore_signals_full_round_trip() {
     assert_eq!(snapshot.tools_used.len(), 3);
     assert_eq!(snapshot.models_used.len(), 2);
     assert_eq!(snapshot.latency_sample_count, 2);
-    assert_eq!(snapshot.avg_time_to_first_token_ms, 150); // (100+200)/2
-    assert_eq!(snapshot.avg_response_time_ms, 1500); // (1000+2000)/2
+    assert_eq!(snapshot.avg_time_to_first_token_ms, 150); // mean of the 100 and 200 samples
+    assert_eq!(snapshot.avg_response_time_ms, 1500); // mean of the 1000 and 2000 samples
     assert_eq!(snapshot.min_time_to_first_token_ms, 100);
     assert_eq!(snapshot.max_time_to_first_token_ms, 200);
     // ITL stats from phase 1 should be present
@@ -816,7 +806,7 @@ async fn test_restore_signals_full_round_trip() {
         "itl_p99_ms should be set after recording ITL data"
     );
     assert_eq!(snapshot.itl_max_ms, Some(50));
-    assert_eq!(snapshot.itl_mean_ms, Some(30)); // (10+20+30+40+50)/5
+    assert_eq!(snapshot.itl_mean_ms, Some(30)); // mean of the five recorded intervals
     assert_eq!(snapshot.total_chunk_count, 6);
     assert_eq!(snapshot.itl_sample_count, 1);
 
@@ -850,7 +840,7 @@ async fn test_restore_signals_full_round_trip() {
     assert_eq!(restored.avg_response_time_ms, 1500);
     assert_eq!(restored.min_time_to_first_token_ms, 100);
     assert_eq!(restored.max_time_to_first_token_ms, 200);
-    // ITL stats must survive the restore (regression test for grok-critique bug)
+    // ITL stats must survive the restore
     assert_eq!(
         restored.itl_p50_ms, snapshot.itl_p50_ms,
         "itl_p50_ms should survive restore"
@@ -873,14 +863,11 @@ async fn test_restore_signals_full_round_trip() {
     assert_eq!(restored.itl_sample_count, 1);
 
     // Phase 2b: Take a turn-end snapshot *without* recording new ITL data.
-    // This is the exact scenario the grok-critique bug describes: the
-    // TakeTurnEndSnapshot handler calls update_session_itl_percentiles()
-    // which must NOT wipe persisted ITL p50/p99 when itl_digest is None.
+    // The TakeTurnEndSnapshot handler calls update_session_itl_percentiles() which must NOT wipe persisted ITL p50/p99 when itl_digest is None
     handle2.increment_turn(); // turn 4 (no ITL data recorded this turn)
     handle2.record_assistant_message();
     let delta_snap_no_itl = handle2.take_turn_end_snapshot().await.unwrap();
     let after_empty_turn = handle2.snapshot().await.unwrap();
-    // ITL percentiles must still be present even without new ITL data
     assert_eq!(
         after_empty_turn.itl_p50_ms, snapshot.itl_p50_ms,
         "itl_p50_ms must survive TakeTurnEndSnapshot without new ITL data"
@@ -891,7 +878,6 @@ async fn test_restore_signals_full_round_trip() {
     );
     assert_eq!(after_empty_turn.itl_max_ms, Some(50));
     assert_eq!(after_empty_turn.itl_mean_ms, Some(30));
-    // Per-turn ITL should be None since no ITL data was recorded this turn
     assert_eq!(delta_snap_no_itl.delta.last_itl_p50_ms, None);
 
     // Phase 3: Verify subsequent signals accumulate correctly after restore
@@ -902,15 +888,15 @@ async fn test_restore_signals_full_round_trip() {
     handle2.record_error();
     handle2.record_assistant_message();
 
-    // Record latency — average should incorporate restored history
+    // Record latency; average should incorporate restored history
     handle2.record_latency(300, 3000);
 
     let after_turn = handle2.snapshot().await.unwrap();
     assert_eq!(after_turn.turn_count, 5);
     assert_eq!(after_turn.user_message_count, 5);
     assert_eq!(after_turn.assistant_message_count, 5);
-    assert_eq!(after_turn.tool_call_count, 6); // 4 + 2
-    assert_eq!(after_turn.error_count, 3); // 2 + 1
+    assert_eq!(after_turn.tool_call_count, 6); // the restored 4 plus 2 new calls
+    assert_eq!(after_turn.error_count, 3); // the restored 2 plus 1 new error
     assert_eq!(after_turn.tools_used.len(), 4); // bash not duplicated, grep added
     assert!(after_turn.tools_used.contains(&"grep".to_string()));
     assert_eq!(after_turn.models_used.len(), 2); // grok-3 not duplicated
@@ -921,13 +907,12 @@ async fn test_restore_signals_full_round_trip() {
 
     // Phase 4: Verify turn-end delta is computed against restored baseline, not zero
     let delta_snap = handle2.take_turn_end_snapshot().await.unwrap();
-    // Delta should only reflect turn 5, not all 5 turns
     assert_eq!(delta_snap.delta.turn_number, 5);
     assert_eq!(delta_snap.delta.delta_tool_calls, 2); // only the 2 new calls
     assert_eq!(delta_snap.delta.delta_errors, 1); // only the 1 new error
     assert_eq!(delta_snap.delta.delta_tool_failures, 0); // no new failures
 
-    // session_duration should be >= the restored value (not reset to 0)
+    // Restore must not reset the session duration to 0
     assert!(after_turn.session_duration_seconds >= snapshot.session_duration_seconds);
 
     handle2.shutdown();
@@ -982,8 +967,7 @@ async fn test_loc_revert_is_noop_until_per_author_attribution() {
     // Agent adds 10 lines
     handle.record_loc_change(true, 10, 0, "/tmp/a.rs".into());
 
-    // Revert event is received but intentionally ignored — all 4 revert
-    // counters stay at 0 to avoid publishing misleading partial data.
+    // Revert event is received but intentionally ignored; all 4 revert counters stay at 0 to avoid publishing misleading partial data
     handle.record_loc_revert(5, 0);
 
     let snap = handle.snapshot().await.unwrap();
@@ -1058,9 +1042,8 @@ async fn test_loc_file_dedup() {
     actor_handle.await.unwrap();
 }
 
-/// Hunk reshuffling (content moves between hunks during diff recomputation)
-/// must cancel out. A -12 and +12 from two ContentChanged events should
-/// net to zero, not inflate the counter.
+/// Hunk reshuffling (content moves between hunks during diff recomputation) must cancel out.
+/// A -12 and +12 from two ContentChanged events should net to zero, not inflate the counter.
 #[tokio::test]
 async fn test_loc_hunk_reshuffle_cancels_out() {
     let (handle, actor) = SessionSignalsActor::new();
@@ -1069,7 +1052,7 @@ async fn test_loc_hunk_reshuffle_cancels_out() {
     // Agent adds 13 lines
     handle.record_loc_change(true, 13, 1, "/tmp/jokes.md".into());
 
-    // Human edits the file — hunk reshuffling:
+    // Human edits the file (hunk reshuffling):
     // One hunk shrinks by 12 (content migrated away)
     handle.record_loc_change(false, -12, 0, "/tmp/jokes.md".into());
     // Another hunk grows by 12 (absorbed the content)
@@ -1083,7 +1066,6 @@ async fn test_loc_hunk_reshuffle_cancels_out() {
     assert_eq!(snap.agent_lines_added, 13);
     assert_eq!(snap.agent_lines_removed, 1);
 
-    // Human: the -12 and +12 must cancel out, leaving only the +1
     assert_eq!(
         snap.human_lines_added, 1,
         "Hunk reshuffling (-12/+12) must cancel out, only actual +1 should count"
@@ -1190,9 +1172,8 @@ async fn test_gcs_queue_snapshot() {
 #[test]
 fn test_sample_rss_bytes_returns_nonzero() {
     let rss = sample_rss_bytes();
-    // On macOS and Linux, RSS should be > 0 for any running process
+    // Any running process has RSS > 0 on macOS and Linux
     assert!(rss > 0, "RSS should be > 0, got {rss}");
-    // Sanity upper bound: process RSS should be under 10 GB
     assert!(
         rss < 10 * 1024 * 1024 * 1024,
         "RSS unreasonably large: {rss} bytes ({:.1} GB) — possible sign extension bug",
@@ -1207,7 +1188,6 @@ fn test_sample_rss_bytes_is_stable() {
     let rss2 = sample_rss_bytes();
     assert!(rss1 > 0);
     assert!(rss2 > 0);
-    // The two samples should be within 10x of each other
     let ratio = rss1.max(rss2) as f64 / rss1.min(rss2) as f64;
     assert!(
         ratio < 10.0,
@@ -1223,7 +1203,6 @@ async fn test_peak_rss_recorded_at_turn_end() {
     handle.increment_turn();
     let snapshot = handle.take_turn_end_snapshot().await.unwrap();
 
-    // peak_rss_bytes should have been sampled during the turn-end snapshot
     assert!(
         snapshot.current.peak_rss_bytes > 0,
         "peak_rss_bytes should be > 0 after turn end, got {}",
@@ -1236,15 +1215,14 @@ async fn test_peak_rss_recorded_at_turn_end() {
 
 /// Regression test for Windows Instant underflow panic.
 ///
-/// When `session_duration_seconds` exceeds system uptime, the old code
-/// `Instant::now() - Duration::from_secs(d)` panicked. The fix uses
-/// `checked_sub` and falls back to `Instant::now()`.
+/// When `session_duration_seconds` exceeds system uptime, the old code `Instant::now() - Duration::from_secs(d)` panicked.
+/// The fix uses `checked_sub` and falls back to `Instant::now()`.
 #[tokio::test]
 async fn test_restore_signals_with_huge_duration_does_not_panic() {
     let (handle, actor) = SessionSignalsActor::new();
     let actor_handle = tokio::spawn(actor.run());
 
-    // A duration larger than any realistic uptime — would panic before the fix.
+    // A duration larger than any realistic uptime
     let signals = SessionSignals {
         session_duration_seconds: u64::MAX,
         ..Default::default()
@@ -1252,8 +1230,6 @@ async fn test_restore_signals_with_huge_duration_does_not_panic() {
 
     handle.restore_signals(signals);
 
-    // If we reach here without panicking, the fix works. Verify the
-    // snapshot is still usable and duration was reset to ~0.
     let snapshot = handle.snapshot().await.unwrap();
     assert!(
         snapshot.session_duration_seconds < 5,

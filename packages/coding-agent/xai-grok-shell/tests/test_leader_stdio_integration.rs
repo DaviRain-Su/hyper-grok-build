@@ -1,13 +1,5 @@
-//! Integration tests for leader mode with stdio clients.
-//!
-//! These tests verify that the leader server correctly handles stdio clients,
-//! including message routing, multiple client connections, and proper cleanup.
-//!
-//! Currently Unix-only: the tests use `tokio::net::UnixStream` directly
-//! (rather than the leader's `LeaderStream` transport abstraction) so they
-//! exercise the on-disk socket path. Equivalent Windows coverage would
-//! need to go through `LeaderStream`/`LeaderListener` and is tracked as a
-//! follow-up.
+//! Currently Unix-only: the tests use `tokio::net::UnixStream` directly so they exercise the on-disk socket path.
+//! Equivalent Windows coverage would need to go through `LeaderStream`/`LeaderListener` and is tracked as a follow-up.
 
 #![cfg(unix)]
 
@@ -41,8 +33,6 @@ async fn wait_for_socket(sock_path: &std::path::Path) {
     panic!("Timeout waiting for socket to become available");
 }
 
-/// Helper to set up a test server and return its socket path and handle.
-/// Waits for the socket to be connectable rather than using a fixed sleep.
 async fn setup_test_server(
     temp: &TempDir,
 ) -> (
@@ -54,7 +44,6 @@ async fn setup_test_server(
     let sock_path = temp.path().join("leader.sock");
     let handle = spawn_leader_server(sock_path.clone()).await.unwrap();
 
-    // Wait for socket to be connectable instead of fixed sleep
     wait_for_socket(&sock_path).await;
 
     (sock_path, handle.cancel, handle.acp_rx, handle.response_tx)
@@ -69,15 +58,13 @@ async fn setup_control_test_server(
     (sock_path, handle)
 }
 
-/// Parse a namespaced ID to extract client ID and original ID JSON.
-/// Format: "client_id<SEP>original_id_json"
+/// A namespaced id has the form "client_id<SEP>original_id_json".
 fn parse_namespaced_id(namespaced_id: &str) -> Option<(u64, String)> {
     let (client_part, original_json) = namespaced_id.split_once(ID_NAMESPACE_SEP)?;
     let client_id: u64 = client_part.parse().ok()?;
     Some((client_id, original_json.to_string()))
 }
 
-/// Check if a namespaced ID ends with the given original ID value.
 fn namespaced_id_has_original(namespaced_id: &str, expected_original: &str) -> bool {
     if let Some((_, original_json)) = parse_namespaced_id(namespaced_id) {
         original_json == expected_original
@@ -86,7 +73,6 @@ fn namespaced_id_has_original(namespaced_id: &str, expected_original: &str) -> b
     }
 }
 
-/// Test that a single stdio client can connect to the leader server.
 #[tokio::test]
 async fn test_single_stdio_client_connects() {
     let temp = TempDir::new().unwrap();
@@ -107,7 +93,6 @@ async fn test_single_stdio_client_connects() {
     cancel.cancel();
 }
 
-/// Test that a stdio client can send ACP messages and the server receives them.
 #[tokio::test]
 async fn test_stdio_client_sends_acp_message() {
     let temp = TempDir::new().unwrap();
@@ -135,7 +120,6 @@ async fn test_stdio_client_sends_acp_message() {
     // Parse and verify the message was received (ID will be namespaced)
     let json: serde_json::Value = serde_json::from_str(&received).unwrap();
     assert_eq!(json["method"], "initialize");
-    // ID should be namespaced with format "client_id<SEP>1" where 1 is the original ID
     assert!(
         namespaced_id_has_original(json["id"].as_str().unwrap(), "1"),
         "ID should contain original ID 1"
@@ -145,7 +129,6 @@ async fn test_stdio_client_sends_acp_message() {
     cancel.cancel();
 }
 
-/// Test that a stdio client can receive responses from the server.
 #[tokio::test]
 async fn test_stdio_client_receives_response() {
     let temp = TempDir::new().unwrap();
@@ -190,7 +173,6 @@ async fn test_stdio_client_receives_response() {
     cancel.cancel();
 }
 
-/// Test that multiple stdio clients can connect to the same leader.
 #[tokio::test]
 async fn test_multiple_stdio_clients() {
     let temp = TempDir::new().unwrap();
@@ -214,12 +196,10 @@ async fn test_multiple_stdio_clients() {
     .await
     .unwrap();
 
-    // Client 1 sends a message
     client1
         .send(r#"{"jsonrpc":"2.0","method":"from_client_1","id":1}"#.to_string())
         .unwrap();
 
-    // Client 2 sends a message
     client2
         .send(r#"{"jsonrpc":"2.0","method":"from_client_2","id":2}"#.to_string())
         .unwrap();
@@ -270,7 +250,6 @@ async fn test_multiple_stdio_clients() {
     let recv_json1: serde_json::Value = serde_json::from_str(&recv1).unwrap();
     let recv_json2: serde_json::Value = serde_json::from_str(&recv2).unwrap();
 
-    // IDs should be restored to originals
     assert_eq!(recv_json1["id"], 1);
     assert_eq!(recv_json2["id"], 2);
 
@@ -279,9 +258,7 @@ async fn test_multiple_stdio_clients() {
     cancel.cancel();
 }
 
-/// Test that multiple clients sending the same message IDs are correctly disambiguated.
-/// This verifies that ID namespacing prevents collisions when different clients
-/// use the same request IDs.
+/// ID namespacing prevents collisions when different clients use the same request IDs.
 #[tokio::test]
 async fn test_multiple_clients_same_message_ids() {
     let temp = TempDir::new().unwrap();
@@ -333,7 +310,6 @@ async fn test_multiple_clients_same_message_ids() {
     let json2: serde_json::Value = serde_json::from_str(&msg2).unwrap();
     let json3: serde_json::Value = serde_json::from_str(&msg3).unwrap();
 
-    // All messages should have namespaced IDs with original ID "1"
     let id1 = json1["id"].as_str().unwrap();
     let id2 = json2["id"].as_str().unwrap();
     let id3 = json3["id"].as_str().unwrap();
@@ -356,7 +332,7 @@ async fn test_multiple_clients_same_message_ids() {
     assert_ne!(id2, id3, "Namespaced IDs should be unique");
     assert_ne!(id1, id3, "Namespaced IDs should be unique");
 
-    // Build a map of method -> namespaced_id for targeted responses
+    // Build a map from method to namespaced_id for targeted responses
     let mut method_to_id: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     method_to_id.insert(
@@ -372,7 +348,7 @@ async fn test_multiple_clients_same_message_ids() {
         id3.to_string(),
     );
 
-    // Send responses back using the namespaced IDs - each with a unique result
+    // Send responses back using the namespaced IDs, each with a unique result
     let resp1 = format!(
         r#"{{"jsonrpc":"2.0","result":"result_for_client_1","id":"{}"}}"#,
         method_to_id.get("method_1").unwrap()
@@ -408,12 +384,10 @@ async fn test_multiple_clients_same_message_ids() {
     let recv_json2: serde_json::Value = serde_json::from_str(&recv2).unwrap();
     let recv_json3: serde_json::Value = serde_json::from_str(&recv3).unwrap();
 
-    // All IDs should be restored to the original value (1)
     assert_eq!(recv_json1["id"], 1, "Client 1's ID should be restored to 1");
     assert_eq!(recv_json2["id"], 1, "Client 2's ID should be restored to 1");
     assert_eq!(recv_json3["id"], 1, "Client 3's ID should be restored to 1");
 
-    // Each client should have received its unique result
     assert_eq!(recv_json1["result"], "result_for_client_1");
     assert_eq!(recv_json2["result"], "result_for_client_2");
     assert_eq!(recv_json3["result"], "result_for_client_3");
@@ -424,7 +398,6 @@ async fn test_multiple_clients_same_message_ids() {
     cancel.cancel();
 }
 
-/// Test that the server handles client disconnect properly.
 #[tokio::test]
 async fn test_stdio_client_disconnect() {
     let temp = TempDir::new().unwrap();
@@ -449,7 +422,6 @@ async fn test_stdio_client_disconnect() {
     let response: ServerMessage = read_message(&mut reader).await.unwrap();
     assert!(matches!(response, ServerMessage::Registered { .. }));
 
-    // Send disconnect message
     write_message(&mut writer, &ClientMessage::Disconnect)
         .await
         .unwrap();
@@ -460,7 +432,6 @@ async fn test_stdio_client_disconnect() {
     cancel.cancel();
 }
 
-/// Test ping-pong heartbeat with stdio client.
 #[tokio::test]
 async fn test_stdio_client_ping_pong() {
     let temp = TempDir::new().unwrap();
@@ -482,12 +453,10 @@ async fn test_stdio_client_ping_pong() {
     .unwrap();
     let _: ServerMessage = read_message(&mut reader).await.unwrap();
 
-    // Send ping
     write_message(&mut writer, &ClientMessage::Ping)
         .await
         .unwrap();
 
-    // Should receive pong
     let response: ServerMessage = read_message(&mut reader).await.unwrap();
     assert!(matches!(response, ServerMessage::Pong));
 
@@ -501,7 +470,6 @@ async fn test_server_exits_when_all_clients_disconnect() {
     let sock_path = temp.path().join("leader.sock");
     let handle = spawn_leader_server(sock_path.clone()).await.unwrap();
 
-    // Wait for socket to be connectable
     wait_for_socket(&sock_path).await;
 
     // Connect a client
@@ -520,18 +488,13 @@ async fn test_server_exits_when_all_clients_disconnect() {
     .unwrap();
     let _: ServerMessage = read_message(&mut reader).await.unwrap();
 
-    // Disconnect
     write_message(&mut writer, &ClientMessage::Disconnect)
         .await
         .unwrap();
 
-    // Server should shut down on its own (all clients disconnected)
-    // We can verify by checking the cancel token is cancelled or socket is removed
+    // The server exits on its own when all clients disconnect; this test only checks it completes without hanging
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Socket should be cleaned up
-    // Note: The server exits when all clients disconnect, so socket may be removed
-    // We just verify the test completes without hanging
     handle.cancel.cancel();
 }
 
@@ -565,8 +528,7 @@ async fn test_runtime_profile_start_status_stop_across_clients() {
         .is_some_and(|capabilities| capabilities.runtime_cpu_profile);
 
     if runtime_cpu_profile {
-        // In sandboxed CI (Bazel), pprof may report as supported at compile time
-        // but fail at runtime because signal-based sampling is blocked.
+        // In sandboxed CI (Bazel), pprof may report as supported at compile time but fail at runtime because signal-based sampling is blocked
         let start_result = client_a
             .send_control(ControlCommand::StartCpuProfile {
                 output: Some(output_path.display().to_string()),
@@ -578,7 +540,7 @@ async fn test_runtime_profile_start_status_stop_across_clients() {
             client_a.cancel();
             client_b.cancel();
             handle.cancel.cancel();
-            return; // pprof can't start in sandbox — skip
+            return; // pprof can't start in sandbox, skip
         };
         assert!(matches!(
             started,
@@ -662,7 +624,7 @@ async fn test_runtime_profile_finalizes_on_graceful_shutdown() {
             .await
             .unwrap();
         if start_result.is_err() {
-            // pprof can't start in sandbox — skip
+            // pprof can't start in sandbox, skip
             client.cancel();
             handle.cancel.cancel();
             return;
@@ -723,7 +685,7 @@ async fn test_runtime_profile_creates_missing_parent_directory_end_to_end() {
         let Ok(started) = start_result else {
             client.cancel();
             handle.cancel.cancel();
-            return; // pprof can't start in sandbox — skip
+            return; // pprof can't start in sandbox, skip
         };
         assert!(matches!(
             started,
@@ -796,7 +758,6 @@ async fn test_runtime_profile_rejects_output_collision_end_to_end() {
     handle.cancel.cancel();
 }
 
-/// Test ACP message with session-based routing.
 #[tokio::test]
 async fn test_session_based_routing() {
     let temp = TempDir::new().unwrap();
@@ -816,11 +777,9 @@ async fn test_session_based_routing() {
         r#"{"jsonrpc":"2.0","method":"session/start","id":1,"params":{"sessionId":"session-123"}}"#;
     client.send(test_message.to_string()).unwrap();
 
-    // Server receives the message
     let received = acp_rx.recv().await.unwrap();
     let json: serde_json::Value = serde_json::from_str(&received).unwrap();
 
-    // Verify session_id is in params
     assert_eq!(json["params"]["sessionId"], "session-123");
 
     // Send a response with session_id for routing (without using request ID)
@@ -841,8 +800,6 @@ async fn test_session_based_routing() {
     cancel.cancel();
 }
 
-/// Test that a stdio client can receive tool call results (e.g., read_file output) routed from the server.
-/// This verifies routing of tool responses (common in ACP tool execution flow) in leader mode.
 #[tokio::test]
 async fn test_stdio_client_receives_tool_result() {
     let temp = TempDir::new().unwrap();
@@ -889,9 +846,8 @@ async fn test_stdio_client_receives_tool_result() {
     cancel.cancel();
 }
 
-/// Test that a session/new request without modelId is forwarded unchanged when
-/// the client has no default_model set. This is the scenario that caused the
-/// "unknown model id" error in leader mode (GitHub issue).
+/// A session/new request without modelId is forwarded unchanged when the client has no default_model set.
+/// This scenario caused the "unknown model id" error in leader mode.
 #[tokio::test]
 async fn test_session_new_without_model_id_no_default() {
     let temp = TempDir::new().unwrap();
@@ -920,7 +876,6 @@ async fn test_session_new_without_model_id_no_default() {
     let json: serde_json::Value = serde_json::from_str(&received).unwrap();
 
     assert_eq!(json["method"], "session/new");
-    // _meta should have yoloMode but NOT modelId
     let meta = &json["params"]["_meta"];
     assert_eq!(meta["yoloMode"], true);
     assert!(
@@ -932,8 +887,7 @@ async fn test_session_new_without_model_id_no_default() {
     cancel.cancel();
 }
 
-/// Test that when a client registers with yolo_mode, yoloMode is injected
-/// into session/new _meta, but modelId is NOT injected when default_model is None.
+/// When a client registers with yolo_mode, yoloMode is injected into session/new _meta, but modelId is NOT injected when default_model is None.
 #[tokio::test]
 async fn test_session_new_yolo_mode_no_model() {
     let temp = TempDir::new().unwrap();
@@ -963,7 +917,6 @@ async fn test_session_new_yolo_mode_no_model() {
     // yoloMode should be injected from capabilities
     let meta = &json["params"]["_meta"];
     assert_eq!(meta["yoloMode"], true);
-    // modelId should NOT be present
     assert!(
         meta.get("modelId").is_none(),
         "modelId should not be injected when default_model is None"
@@ -973,7 +926,6 @@ async fn test_session_new_yolo_mode_no_model() {
     cancel.cancel();
 }
 
-/// Test that an empty default_model is NOT injected into session/new requests.
 #[tokio::test]
 async fn test_session_new_empty_default_model_not_injected() {
     let temp = TempDir::new().unwrap();
@@ -999,10 +951,8 @@ async fn test_session_new_empty_default_model_not_injected() {
     let received = acp_rx.recv().await.unwrap();
     let json: serde_json::Value = serde_json::from_str(&received).unwrap();
 
-    // yoloMode should be injected
     let meta = &json["params"]["_meta"];
     assert_eq!(meta["yoloMode"], true);
-    // Empty modelId should NOT be injected
     assert!(
         meta.get("modelId").is_none(),
         "empty default_model should not be injected as modelId"
@@ -1012,7 +962,6 @@ async fn test_session_new_empty_default_model_not_injected() {
     cancel.cancel();
 }
 
-/// Test that a valid default_model IS injected into session/new requests.
 #[tokio::test]
 async fn test_session_new_valid_default_model_injected() {
     let temp = TempDir::new().unwrap();
@@ -1047,9 +996,8 @@ async fn test_session_new_valid_default_model_injected() {
 
 // ── Session ownership & notification routing ──────────────────────────
 
-/// Test that the leader tracks session ownership from session/new responses
-/// and routes subsequent notifications (which have no request ID) to the
-/// correct client based on sessionId.
+/// The leader learns session ownership from session/new responses.
+/// Notifications have no request ID, so it routes them to the owning client by sessionId.
 #[tokio::test]
 async fn test_session_ownership_from_response_routes_notifications() {
     let temp = TempDir::new().unwrap();
@@ -1090,7 +1038,7 @@ async fn test_session_ownership_from_response_routes_notifications() {
     assert_eq!(resp_json["id"], 1); // original ID restored
 
     // Now send a notification for this session (no id field, only sessionId in params)
-    // This tests session-based routing — the leader must know which client owns sess-abc-123
+    // This tests session-based routing: the leader must know which client owns sess-abc-123
     let notification = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-abc-123","status":"ready"}}"#;
     response_tx.send(notification.to_string()).unwrap();
 
@@ -1109,9 +1057,8 @@ async fn test_session_ownership_from_response_routes_notifications() {
 
 // ── Multi-client session isolation ────────────────────────────────────
 
-/// Test that two clients with different sessions receive only their own
-/// notifications, not each other's. This is critical for VS Code extension
-/// isolation when multiple instances are connected.
+/// Two clients with different sessions receive only their own notifications, not each other's.
+/// Multiple connected VS Code windows rely on this isolation.
 #[tokio::test]
 async fn test_two_clients_session_isolation() {
     let temp = TempDir::new().unwrap();
@@ -1183,7 +1130,7 @@ async fn test_two_clients_session_isolation() {
     assert_eq!(r1["result"]["sessionId"], "sess-AAA");
     assert_eq!(r2["result"]["sessionId"], "sess-BBB");
 
-    // Now send a notification for session A — only client 1 should get it
+    // Now send a notification for session A; only client 1 should get it
     let notif_a = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-AAA","data":"for-client-1"}}"#;
     response_tx.send(notif_a.to_string()).unwrap();
 
@@ -1195,7 +1142,7 @@ async fn test_two_clients_session_isolation() {
     assert_eq!(n1["params"]["sessionId"], "sess-AAA");
     assert_eq!(n1["params"]["data"], "for-client-1");
 
-    // Send a notification for session B — only client 2 should get it
+    // Send a notification for session B; only client 2 should get it
     let notif_b = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-BBB","data":"for-client-2"}}"#;
     response_tx.send(notif_b.to_string()).unwrap();
 
@@ -1214,25 +1161,12 @@ async fn test_two_clients_session_isolation() {
 
 // ── Multi-client model switch fan-out ─────────────────────────────────
 
-/// Multi-client model switch: when one TUI client switches models on a
-/// session shared with another TUI client, the leader must fan the
-/// `x.ai/session_notification` (carrying the `ModelChanged` update) out
-/// to **every** subscriber of that session — not just the invoker — so
-/// the follower client mirrors the new model in its UI.
-///
-/// This is the leader-server half of the multi-client model sync fix.
-/// The other half is:
-///   - agent emits the notification from `model_switch::apply` after the
-///     actor confirms the swap (covered by `extensions::notification`
-///     wire-format tests in `xai-grok-shell`);
-///   - pager applies the notification silently on followers and skips it
-///     on the invoker (covered by `model_changed_*` tests in
-///     `xai-grok-pager`'s `acp_handler` tests).
-///
-/// The setModel response itself still routes back to the invoker only —
-/// this test asserts BOTH (broadcast to all + response to one) so a
-/// future regression that, say, accidentally suppresses the notification
-/// when a response is also produced is caught.
+/// When a client switches models on a shared session, the leader must broadcast `ModelChanged` to every subscriber, not just the invoker.
+/// Only that broadcast lets the follower mirror the new model in its UI.
+/// The agent emitting it from `model_switch::apply` is covered by the `extensions::notification` tests in `xai-grok-shell`.
+/// The pager applying it silently on followers is covered by the `model_changed_*` tests in `xai-grok-pager`'s `acp_handler` tests.
+/// The setModel response itself still routes back to the invoker only.
+/// Asserting both the broadcast and the response catches a regression that suppresses the notification when a response is also produced.
 #[tokio::test]
 async fn test_set_model_broadcasts_to_session_subscribers() {
     let temp = TempDir::new().unwrap();
@@ -1256,10 +1190,9 @@ async fn test_set_model_broadcasts_to_session_subscribers() {
     .await
     .unwrap();
 
-    // Subscribe both clients to the SAME session id. The leader registers
-    // a client as a subscriber the first time it sees a sessionId-carrying
-    // ACP message from that client — any session-scoped method works, so
-    // we use a cheap synthetic one with distinct ids per client.
+    // Subscribe both clients to the SAME session id
+    // The leader registers a client as a subscriber the first time it sees an ACP message from that client carrying a sessionId
+    // Any session-scoped method works, so we use a cheap synthetic one with distinct ids per client
     let shared_sid = "sess-shared-multi-client";
     invoker
         .send(format!(
@@ -1274,9 +1207,8 @@ async fn test_set_model_broadcasts_to_session_subscribers() {
         ))
         .unwrap();
 
-    // Drain the two synthetic subscribe requests off the server's outgoing
-    // channel; the leader has already registered both clients as
-    // subscribers of `shared_sid` by the time it puts them on `acp_rx`.
+    // Drain the two synthetic subscribe requests off the server's outgoing channel
+    // The leader has already registered both clients as subscribers of `shared_sid` by the time it puts them on `acp_rx`
     let _ = tokio::time::timeout(Duration::from_secs(2), acp_rx.recv())
         .await
         .expect("timeout draining subscribe 1")
@@ -1301,14 +1233,10 @@ async fn test_set_model_broadcasts_to_session_subscribers() {
 
     // Simulate the agent's two outputs for a successful switch:
     //
-    //   1. A session-scoped `ModelChanged` broadcast — what `model_switch::apply`
-    //      now emits via the gateway after the actor confirms the swap.
-    //   2. The `SetSessionModelResponse` — routed by the leader to the
-    //      invoker only via namespaced-id matching.
+    //   1. A session-scoped `ModelChanged` broadcast, which `model_switch::apply` emits via the gateway after the actor confirms the swap.
+    //   2. The `SetSessionModelResponse`, routed by the leader to the invoker only via namespaced-id matching.
     //
-    // Order matters for the assertions below: the broadcast is fired
-    // BEFORE the response in `model_switch::apply`, so it must arrive at
-    // each subscriber's recv() first.
+    // Order matters: `model_switch::apply` fires the broadcast BEFORE the response, so it arrives at each subscriber's recv() first
     let broadcast = format!(
         r#"{{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{{"sessionId":"{}","update":{{"sessionUpdate":"model_changed","model_id":"grok-4","reasoning_effort":"high"}}}}}}"#,
         shared_sid
@@ -1320,16 +1248,12 @@ async fn test_set_model_broadcasts_to_session_subscribers() {
     );
     response_tx.send(response).unwrap();
 
-    // --- Invoker: must receive BOTH the broadcast AND the targeted
-    // response, in that order. The broadcast is the multi-client sync
-    // signal; the response is what the invoker's `SwitchModelComplete`
-    // dispatch handler keys on for the user-facing "Switched to X"
-    // message. The pager's broadcast handler ignores it (it gates on
-    // `model_switch_pending == true`), so the invoker doesn't
-    // double-apply state — but the leader is still required to fan it
-    // out, because the same JSON-RPC connection is what the response
-    // travels on; suppressing it leader-side would also suppress it
-    // for the follower below.
+    // --- Invoker: must receive BOTH the broadcast AND the targeted response, in that order
+    // The broadcast is what keeps the other clients in sync
+    // The response is what the invoker's `SwitchModelComplete` dispatch handler keys on for the user-facing "Switched to X" message
+    // The pager's broadcast handler ignores it (it gates on `model_switch_pending == true`), so the invoker doesn't double-apply state
+    // But the leader is still required to fan it out, because the same JSON-RPC connection is what the response travels on
+    // Suppressing it leader-side would also suppress it for the follower below
     let invoker_msg1 = tokio::time::timeout(Duration::from_secs(2), invoker.recv())
         .await
         .expect("timeout waiting for broadcast on invoker")
@@ -1352,11 +1276,9 @@ async fn test_set_model_broadcasts_to_session_subscribers() {
     );
     assert_eq!(inv2["result"]["meta"]["model"], "grok-4");
 
-    // --- Follower: must receive the broadcast (this is the fix — before
-    // this notification existed, the follower's status bar / `/model`
-    // dropdown / prompt header stayed stuck on the pre-switch model).
-    // It must NOT receive the targeted response (that one is routed
-    // by request id to the invoker only).
+    // --- Follower: must receive the broadcast
+    // Without it the follower's status bar, `/model` dropdown, and prompt header stay stuck on the pre-switch model
+    // It must NOT receive the targeted response (that one is routed by request id to the invoker only)
     let follower_msg = tokio::time::timeout(Duration::from_secs(2), follower.recv())
         .await
         .expect(
@@ -1371,9 +1293,8 @@ async fn test_set_model_broadcasts_to_session_subscribers() {
     assert_eq!(f["params"]["update"]["model_id"], "grok-4");
     assert_eq!(f["params"]["update"]["reasoning_effort"], "high");
 
-    // Follower must NOT see the namespaced setModel response — the
-    // leader routes responses by request-id prefix, and only the invoker's
-    // ClientId prefixes that id.
+    // Follower must NOT see the namespaced setModel response
+    // The leader routes responses by request-id prefix, and only the invoker's ClientId prefixes that id
     let unexpected = tokio::time::timeout(Duration::from_millis(200), follower.recv()).await;
     assert!(
         unexpected.is_err(),
@@ -1389,9 +1310,8 @@ async fn test_set_model_broadcasts_to_session_subscribers() {
 
 // ── Capability injection scope ────────────────────────────────────────
 
-/// Test that capability injection ONLY applies to session/new, NOT to other
-/// methods like session/prompt or session/load. The leader must not mutate
-/// arbitrary requests.
+/// Test that capability injection ONLY applies to session/new, NOT to other methods like session/prompt or session/load.
+/// The leader must not mutate arbitrary requests.
 #[tokio::test]
 async fn test_capabilities_not_injected_into_non_session_new() {
     let temp = TempDir::new().unwrap();
@@ -1410,28 +1330,25 @@ async fn test_capabilities_not_injected_into_non_session_new() {
     .await
     .unwrap();
 
-    // Send session/prompt — capabilities should NOT be injected
+    // Send session/prompt: capabilities should NOT be injected
     let prompt = r#"{"jsonrpc":"2.0","id":10,"method":"session/prompt","params":{"sessionId":"sess-123","prompt":{"content":"hello"}}}"#;
     client.send(prompt.to_string()).unwrap();
 
     let received = acp_rx.recv().await.unwrap();
     let json: serde_json::Value = serde_json::from_str(&received).unwrap();
 
-    // The params should NOT have _meta.yoloMode or _meta.modelId injected
     assert!(
         json["params"].get("_meta").is_none(),
         "session/prompt should not have _meta injected"
     );
-    // Original params should be preserved
     assert_eq!(json["params"]["sessionId"], "sess-123");
 
-    // Send session/load — should get clientIdentifier but NOT yoloMode/modelId
+    // Send session/load: it gets clientIdentifier but NOT yoloMode or modelId
     let load = r#"{"jsonrpc":"2.0","id":11,"method":"session/load","params":{"sessionId":"sess-456","cwd":"/tmp","mcpServers":[]}}"#;
     client.send(load.to_string()).unwrap();
 
     let received = acp_rx.recv().await.unwrap();
     let json: serde_json::Value = serde_json::from_str(&received).unwrap();
-    // session/load should NOT get yoloMode or modelId injected
     assert!(
         json["params"]["_meta"].get("yoloMode").is_none(),
         "session/load should not have yoloMode injected"
@@ -1445,9 +1362,8 @@ async fn test_capabilities_not_injected_into_non_session_new() {
     cancel.cancel();
 }
 
-/// Test that capability injection does NOT overwrite yoloMode if the
-/// request already has _meta.yoloMode set to false. This lets a client
-/// disable YOLO for a single session even when its default capability is on.
+/// Test that capability injection does NOT overwrite yoloMode if the request already has _meta.yoloMode set to false.
+/// This lets a client disable YOLO for a single session even when its default capability is on.
 #[tokio::test]
 async fn test_yolo_mode_injection_preserves_explicit_false() {
     let temp = TempDir::new().unwrap();
@@ -1483,8 +1399,8 @@ async fn test_yolo_mode_injection_preserves_explicit_false() {
 
 // ── Notification (no ID) pass-through ─────────────────────────────────
 
-/// Test that JSON-RPC notifications (no "id" field) sent by a client are
-/// forwarded without ID rewriting. Notifications include cancel, yolo_mode_changed, etc.
+/// Test that JSON-RPC notifications (no "id" field) sent by a client are forwarded without ID rewriting.
+/// Notifications include cancel, yolo_mode_changed, etc.
 #[tokio::test]
 async fn test_client_notification_forwarded_without_id_rewrite() {
     let temp = TempDir::new().unwrap();
@@ -1506,7 +1422,6 @@ async fn test_client_notification_forwarded_without_id_rewrite() {
     let received = acp_rx.recv().await.unwrap();
     let json: serde_json::Value = serde_json::from_str(&received).unwrap();
 
-    // Should not have an "id" field added
     assert!(
         json.get("id").is_none(),
         "notifications should not get an id"
@@ -1518,14 +1433,10 @@ async fn test_client_notification_forwarded_without_id_rewrite() {
     cancel.cancel();
 }
 
-/// `session/cancel` carrying `_meta.cancelPromptId` (the cancelling
-/// client's awaited prompt id) must reach the agent **unmodified** with
-/// multiple clients attached — the meta is how the session actor scopes the
-/// cancel to the canceller's own queued prompt while preserving the other
-/// client's queued work (the actor-side semantics are covered by
-/// `cancel_running_task_resolves_cancellers_queued_prompt`). Also pins that a
-/// second client's interleaved cancel for a different session passes through
-/// independently (no cross-client meta bleed or reordering).
+/// With two clients attached, `session/cancel` carrying `_meta.cancelPromptId` (the canceller's awaited prompt id) must reach the agent unmodified.
+/// The meta is how the session actor cancels only the canceller's queued prompt while preserving the other client's queued work.
+/// The actor side is covered by `cancel_running_task_resolves_cancellers_queued_prompt`.
+/// A second client's interleaved cancel for a different session must also pass through independently, with no cross-client meta bleed or reordering.
 #[tokio::test]
 async fn test_cancel_prompt_id_meta_passes_through_with_two_clients() {
     let temp = TempDir::new().unwrap();
@@ -1548,8 +1459,7 @@ async fn test_cancel_prompt_id_meta_passes_through_with_two_clients() {
     .await
     .unwrap();
 
-    // A cancels its queued prompt on the shared session; B cancels a turn on
-    // another session at the same time.
+    // A cancels its queued prompt on the shared session; B cancels a turn on another session at the same time
     let cancel_a = r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"sess-shared","_meta":{"cancelSubagents":true,"cancelPromptId":"a-queued-pid"}}}"#;
     let cancel_b = r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"sess-other","_meta":{"cancelSubagents":false}}}"#;
     client_a.send(cancel_a.to_string()).unwrap();
@@ -1594,8 +1504,7 @@ async fn test_cancel_prompt_id_meta_passes_through_with_two_clients() {
 
 // ── Extension method routing ──────────────────────────────────────────
 
-/// Test that extension methods (prefixed with _) are correctly forwarded
-/// through the leader with proper ID namespacing and response routing.
+/// Test that extension methods (prefixed with _) are correctly forwarded through the leader with proper ID namespacing and response routing.
 #[tokio::test]
 async fn test_extension_method_roundtrip() {
     let temp = TempDir::new().unwrap();
@@ -1617,7 +1526,6 @@ async fn test_extension_method_roundtrip() {
     let received = acp_rx.recv().await.unwrap();
     let json: serde_json::Value = serde_json::from_str(&received).unwrap();
 
-    // Method should be preserved, ID should be namespaced
     assert_eq!(json["method"], "_x.ai/search/fuzzy/open");
     let namespaced_id = json["id"].as_str().unwrap();
     assert!(namespaced_id.contains(ID_NAMESPACE_SEP));
@@ -1636,7 +1544,6 @@ async fn test_extension_method_roundtrip() {
         .expect("closed");
     let resp_json: serde_json::Value = serde_json::from_str(&client_response).unwrap();
 
-    // Original ID should be restored, result preserved
     assert_eq!(resp_json["id"], 50);
     assert_eq!(resp_json["result"]["searchId"], "search-xyz");
 
@@ -1646,8 +1553,7 @@ async fn test_extension_method_roundtrip() {
 
 // ── Error response routing ────────────────────────────────────────────
 
-/// Test that JSON-RPC error responses from the agent are correctly routed
-/// back to the requesting client with the original ID restored.
+/// Test that JSON-RPC error responses from the agent are correctly routed back to the requesting client with the original ID restored.
 #[tokio::test]
 async fn test_error_response_routing() {
     let temp = TempDir::new().unwrap();
@@ -1662,7 +1568,6 @@ async fn test_error_response_routing() {
     .await
     .unwrap();
 
-    // Send a request
     client
         .send(
             r#"{"jsonrpc":"2.0","id":99,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}"#
@@ -1687,7 +1592,6 @@ async fn test_error_response_routing() {
         .expect("closed");
     let resp_json: serde_json::Value = serde_json::from_str(&client_response).unwrap();
 
-    // Original ID restored, error preserved
     assert_eq!(resp_json["id"], 99);
     assert_eq!(resp_json["error"]["code"], -32001);
     assert_eq!(resp_json["error"]["message"], "auth_required");
@@ -1699,14 +1603,12 @@ async fn test_error_response_routing() {
 
 // ── Session cleanup on disconnect ─────────────────────────────────────
 
-/// Test that when a client disconnects, notifications for its sessions are
-/// still delivered to the next active client via fallback routing.
+/// Test that when a client disconnects, notifications for its sessions are still delivered to the next active client via fallback routing.
 ///
-/// Session ownership entries are intentionally *not* removed on disconnect so
-/// the server can distinguish IPC-originated sessions (present in
-/// `session_owners`) from relay-originated ones (absent). The session-based
-/// routing path naturally falls through (the dead client is gone from
-/// `clients`), and the fallback picks up the notification for the new client.
+/// Session ownership entries are intentionally *not* removed on disconnect so the server can distinguish IPC-originated sessions
+/// (present in `session_owners`) from relay-originated ones (absent).
+/// The session-based routing path naturally falls through (the dead client is gone from `clients`), and the fallback picks up the notification
+/// for the new client.
 #[tokio::test]
 async fn test_session_ownership_cleanup_on_disconnect() {
     use xai_grok_shell::leader::run_leader_server;
@@ -1714,8 +1616,7 @@ async fn test_session_ownership_cleanup_on_disconnect() {
     let temp = TempDir::new().unwrap();
     let sock_path = temp.path().join("leader.sock");
 
-    // Manually create server with no_exit_on_disconnect=true so the server
-    // survives the first client disconnecting.
+    // Manually create server with no_exit_on_disconnect=true so the server survives the first client disconnecting
     let (acp_tx, mut acp_rx) = tokio::sync::mpsc::unbounded_channel();
     let (response_tx, response_rx) = tokio::sync::mpsc::unbounded_channel();
     let cancel = tokio_util::sync::CancellationToken::new();
@@ -1791,14 +1692,14 @@ async fn test_session_ownership_cleanup_on_disconnect() {
     // Give server time to process disconnect
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // The server sends an eviction notification for "sess-temp" when client1
-    // disconnects. Drain it before client2's initialize to keep the channel
-    // in sync. Also verifies the eviction was actually sent.
+    // The server sends an eviction notification for "sess-temp" when client1 disconnects
+    // Drain it before client2's initialize to keep the channel in sync
+    // Also verifies the eviction was actually sent
     let eviction = acp_rx.recv().await.unwrap();
     let eviction_json: serde_json::Value = serde_json::from_str(&eviction).unwrap();
     assert_eq!(eviction_json["method"], "_x.ai/internal/evict_sessions");
 
-    // Connect a NEW client — server should still be running
+    // Connect a NEW client; the server should still be running
     let mut client2 = LeaderClient::connect(
         sock_path,
         "vscode-new",
@@ -1814,17 +1715,15 @@ async fn test_session_ownership_cleanup_on_disconnect() {
         .unwrap();
     let _ = acp_rx.recv().await.unwrap();
 
-    // Send a notification for the old session — it should be DROPPED, not
-    // forwarded to client2. The dead client's session entry is still in
-    // session_owners (for relay detection), and tier-2 routing sees the
-    // owner is dead → drops the notification to prevent cross-session leaks.
+    // Send a notification for the old session; it should be DROPPED, not forwarded to client2
+    // The dead client's session entry is still in session_owners (for relay detection)
+    // Session-based routing sees the owner is dead and drops the notification to prevent cross-session leaks
     // The reconnecting client will replay via session/load instead.
     let old_notif = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-temp","data":"orphan"}}"#;
     response_tx.send(old_notif.to_string()).unwrap();
 
     // client2 should NOT receive the dead-session notification.
-    // Send a second notification without a sessionId — this one SHOULD
-    // arrive via fallback routing, proving client2 is alive and connected.
+    // Send a second notification without a sessionId; this one SHOULD arrive via fallback routing, proving client2 is alive and connected
     let probe = r#"{"jsonrpc":"2.0","method":"x.ai/probe","params":{"ping":true}}"#;
     response_tx.send(probe.to_string()).unwrap();
 
@@ -1843,13 +1742,10 @@ async fn test_session_ownership_cleanup_on_disconnect() {
 // =============================================================================
 // Code-nav capability injection integration tests
 //
-// These tests exercise the full leader→agent injection pipeline for the
-// `code_nav_enabled` capability, verifying that per-client isolation is
-// correct from the leader boundary all the way to the forwarded ACP payload.
+// These tests drive `code_nav_enabled` injection from the leader boundary all the way to the forwarded ACP payload and check per-client isolation
 // =============================================================================
 
-/// Verify that the leader injects `codeNavEnabled: true` into session/new for
-/// a web client that registered with `code_nav_enabled: true`.
+/// Verify that the leader injects `codeNavEnabled: true` into session/new for a web client that registered with `code_nav_enabled: true`.
 #[tokio::test]
 async fn test_code_nav_capable_client_gets_true_injected_into_session_new() {
     let temp = TempDir::new().unwrap();
@@ -1885,8 +1781,7 @@ async fn test_code_nav_capable_client_gets_true_injected_into_session_new() {
     cancel.cancel();
 }
 
-/// Verify that the leader injects `codeNavEnabled: false` into session/new for
-/// a TUI client that did NOT register `code_nav_enabled`.
+/// Verify that the leader injects `codeNavEnabled: false` into session/new for a TUI client that did NOT register `code_nav_enabled`.
 #[tokio::test]
 async fn test_non_code_nav_client_gets_false_injected_into_session_new() {
     let temp = TempDir::new().unwrap();
@@ -1922,10 +1817,9 @@ async fn test_non_code_nav_client_gets_false_injected_into_session_new() {
     cancel.cancel();
 }
 
-/// Verify leader-mode per-client isolation end to end:
-/// two clients with different code-nav capabilities receive independent
-/// `codeNavEnabled` values in their session/new requests, proving that
-/// one client's capability does not contaminate the other.
+/// Verify leader-mode per-client isolation end to end.
+/// Two clients with different code-nav capabilities receive independent `codeNavEnabled` values in their session/new requests.
+/// One client's capability does not contaminate the other.
 #[tokio::test]
 async fn test_leader_code_nav_client_isolation() {
     let temp = TempDir::new().unwrap();
@@ -1969,7 +1863,7 @@ async fn test_leader_code_nav_client_isolation() {
     let tui_fwd = acp_rx.recv().await.unwrap();
     let tui_json: serde_json::Value = serde_json::from_str(&tui_fwd).unwrap();
 
-    // Each client's request must carry its own capability — no cross-contamination.
+    // Each client's request must carry its own capability, with no cross-contamination
     assert_eq!(
         web_json["params"]["_meta"]["codeNavEnabled"],
         serde_json::json!(true),
@@ -1986,8 +1880,7 @@ async fn test_leader_code_nav_client_isolation() {
     cancel.cancel();
 }
 
-/// Verify that `codeNavEnabled` is also injected into session/load so that
-/// reconnecting sessions receive the correct per-client capability.
+/// Verify that `codeNavEnabled` is also injected into session/load so that reconnecting sessions receive the correct per-client capability.
 #[tokio::test]
 async fn test_code_nav_capability_injected_into_session_load() {
     let temp = TempDir::new().unwrap();
@@ -2022,11 +1915,8 @@ async fn test_code_nav_capability_injected_into_session_load() {
     cancel.cancel();
 }
 
-/// Verify that an `x.ai/code/status` extension request is forwarded to the
-/// agent with the correct method, sessionId, and cwd in the params.
-///
-/// This tests the routing boundary between leader and agent for the
-/// code-nav extension surface without requiring a live agent.
+/// Verify that an `x.ai/code/status` extension request is forwarded to the agent with the correct method, sessionId, and cwd in the params.
+/// This tests the routing boundary between leader and agent for code-nav extension requests without requiring a live agent.
 #[tokio::test]
 async fn test_code_status_ext_request_forwarded_to_agent() {
     let temp = TempDir::new().unwrap();
@@ -2044,7 +1934,7 @@ async fn test_code_status_ext_request_forwarded_to_agent() {
     .await
     .unwrap();
 
-    // Send x.ai/code/status with a sessionId — the leader must forward it to the agent.
+    // Send x.ai/code/status with a sessionId; the leader must forward it to the agent
     let status_req = r#"{"jsonrpc":"2.0","id":42,"method":"extensions/ext","params":{"method":"x.ai/code/status","params":{"sessionId":"sess-web-1","cwd":"/repo"}}}"#;
     web_client.send(status_req.to_string()).unwrap();
 
@@ -2069,10 +1959,8 @@ async fn test_code_status_ext_request_forwarded_to_agent() {
 /// - The server then sends `LeaderReady` once `ready_tx` fires.
 /// - Post-readiness ACP traffic is forwarded to the agent normally.
 ///
-/// This test uses the raw IPC wire protocol (`write_message` / `read_message`)
-/// rather than `LeaderClient::connect`, because the high-level client now correctly
-/// blocks in `connect()` until `LeaderReady` is received — which prevents it from
-/// being used to test the intermediate `Registered { ready: false }` state.
+/// Uses the raw IPC wire protocol (`write_message` / `read_message`) rather than `LeaderClient::connect`.
+/// The high-level client blocks in `connect()` until `LeaderReady`, so it cannot observe the intermediate `Registered { ready: false }` state.
 #[tokio::test]
 async fn test_raw_registration_handshake_not_ready_then_ready() {
     use std::sync::Arc;
@@ -2218,16 +2106,8 @@ async fn test_raw_registration_handshake_not_ready_then_ready() {
     cancel.cancel();
 }
 
-/// End-to-end readiness contract test: `LeaderClient::connect` blocks until the
-/// leader signals `LeaderReady`, then returns a fully-ready connection.
-///
-/// This is the key regression test: first-party clients
-/// (TUI, headless) that call `connect_or_spawn` must not see `leader_starting`
-/// errors on their initial `initialize` request even when auth/prefetch are slow.
-///
-/// The contract: `LeaderClient::connect` (and therefore `connect_or_spawn`) only
-/// returns AFTER the leader has signalled readiness, so callers can safely send
-/// `initialize` immediately.
+/// `LeaderClient::connect` (and therefore `connect_or_spawn`) returns only after the leader signals `LeaderReady`.
+/// Callers can send `initialize` immediately: TUI and headless clients must not see `leader_starting` errors even when auth/prefetch are slow.
 #[tokio::test]
 async fn test_connect_waits_for_leader_ready() {
     use std::sync::Arc;
@@ -2282,8 +2162,7 @@ async fn test_connect_waits_for_leader_ready() {
     });
 
     // LeaderClient::connect should block until LeaderReady arrives, then return.
-    // If it returned immediately (before readiness), the subsequent `initialize`
-    // would hit `leader_starting` errors — the bug this test guards against.
+    // If it returned immediately (before readiness), `initialize` would hit `leader_starting` errors, the bug this test guards against
     let connect_start = tokio::time::Instant::now();
     let mut client = LeaderClient::connect(
         sock_path,
@@ -2301,8 +2180,7 @@ async fn test_connect_waits_for_leader_ready() {
         "connect returned too early ({elapsed:?}); should have waited for LeaderReady"
     );
 
-    // Now that we're connected, send `initialize` — must reach the agent (not get
-    // a leader_starting error), because the leader is fully ready.
+    // Now that we're connected, send `initialize`; it must reach the agent (not get a leader_starting error), because the leader is fully ready
     client
         .send(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#.to_string())
         .unwrap();
@@ -2340,11 +2218,8 @@ async fn test_connect_waits_for_leader_ready() {
 
 // ── Version mismatch notification ────────────────────────────────────
 
-/// Integration test: a connected client receives `x.ai/leader/version_mismatch`
-/// when its `client_version` differs from the leader's version.
-///
-/// Uses `leader_version_override` so the test bypasses the `"unknown"` constant
-/// that appears in dev builds where `VERSION_WITH_COMMIT` is not set.
+/// A connected client receives `x.ai/leader/version_mismatch` when its `client_version` differs from the leader's version.
+/// Uses `leader_version_override` so the test bypasses the `"unknown"` constant that appears in dev builds where `VERSION_WITH_COMMIT` is not set.
 #[tokio::test]
 async fn test_version_mismatch_notification_sent_to_client() {
     use std::sync::Arc;
@@ -2418,7 +2293,6 @@ async fn test_version_mismatch_notification_sent_to_client() {
     cancel.cancel();
 }
 
-/// Confirm no mismatch notification is sent when versions match.
 #[tokio::test]
 async fn test_no_version_mismatch_notification_when_versions_match() {
     use std::sync::Arc;
@@ -2490,8 +2364,8 @@ async fn test_no_version_mismatch_notification_when_versions_match() {
 
 // ── Shutdown reason end-to-end ────────────────────────────────────────
 
-/// End-to-end test: a connected `LeaderClient` receives `ShuttingDown { reason: AutoUpdate }`
-/// and `LeaderClient::shutting_down_reason()` updates to `Some(AutoUpdate)`.
+/// A connected `LeaderClient` receives `ShuttingDown { reason: AutoUpdate }`.
+/// `LeaderClient::shutting_down_reason()` then updates to `Some(AutoUpdate)`.
 ///
 /// This covers the full propagation path:
 ///   shutdown_tx.send(AutoUpdate) → cancel → server cancel branch reads reason →
@@ -2525,8 +2399,7 @@ async fn test_auto_update_shutdown_reason_reaches_client() {
         "shutdown reason must be None before any ShuttingDown message"
     );
 
-    // Simulate what run_auto_update_checker does:
-    // write AutoUpdate BEFORE cancelling so the server reads the right reason.
+    // Simulate what run_auto_update_checker does: write AutoUpdate BEFORE cancelling so the server reads the right reason
     handle.shutdown_tx.send(ShutdownReason::AutoUpdate).unwrap();
     handle.cancel.cancel();
 
@@ -2559,9 +2432,8 @@ async fn test_auto_update_shutdown_reason_reaches_client() {
 
 // ── Disruptive relaunch-for-update ────────────────────────────────────
 
-/// A `RelaunchForUpdate` with a strictly-newer target is accepted with a
-/// `Relaunching` ack, and the leader then broadcasts `ShuttingDown { AutoUpdate }`
-/// (idle → drains immediately) so connected clients reconnect onto the new binary.
+/// A `RelaunchForUpdate` with a strictly-newer target is accepted with a `Relaunching` ack.
+/// The idle leader drains immediately and broadcasts `ShuttingDown { AutoUpdate }` so connected clients reconnect onto the new binary.
 #[tokio::test]
 async fn test_relaunch_for_update_accepts_and_shuts_down() {
     use xai_grok_shell::leader::{
@@ -2611,8 +2483,7 @@ async fn test_relaunch_for_update_accepts_and_shuts_down() {
     );
 }
 
-/// A `RelaunchForUpdate` whose target is not strictly newer than the leader is
-/// declined (directional guard), and the leader stays up.
+/// A `RelaunchForUpdate` whose target is not strictly newer than the leader is declined, and the leader stays up.
 #[tokio::test]
 async fn test_relaunch_for_update_declines_when_not_newer() {
     use xai_grok_shell::leader::{
@@ -2657,9 +2528,8 @@ async fn test_relaunch_for_update_declines_when_not_newer() {
     );
 }
 
-/// The bounded-grace drain waits while the agent is busy and only relaunches
-/// once it goes idle — so an in-flight turn isn't cut off the instant a
-/// relaunch is requested.
+/// The bounded-grace drain waits while the agent is busy and only relaunches once it goes idle.
+/// An in-flight turn isn't cut off the instant a relaunch is requested.
 #[tokio::test]
 async fn test_relaunch_for_update_waits_for_busy_then_exits() {
     use std::sync::atomic::Ordering;
@@ -2700,7 +2570,7 @@ async fn test_relaunch_for_update_waits_for_busy_then_exits() {
         "a busy leader still accepts the relaunch, got {payload:?}"
     );
 
-    // While busy, the leader must NOT shut down — the drain is waiting.
+    // While busy, the leader must NOT shut down; the drain is waiting
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
         *shutdown_reason_rx.borrow(),
@@ -2723,13 +2593,9 @@ async fn test_relaunch_for_update_waits_for_busy_then_exits() {
 
 // ── initialize_seen correctness ───────────────────────────────────────
 
-/// Regression test: if the first ACP message is NOT `initialize`, a later
-/// `initialize` must still receive `clientIdentifier` injection.
-///
-/// Previously, `identity_injected` was set to `true` after the first ACP
-/// message regardless of its method, so a client whose first message was a
-/// notification (e.g., `session/cancel`) would never have `clientIdentifier`
-/// injected into the real `initialize` that followed.
+/// Regression test: if the first ACP message is NOT `initialize`, a later `initialize` must still receive `clientIdentifier` injection.
+/// Previously, `identity_injected` was set to `true` after the first ACP message regardless of its method.
+/// A client whose first message was a notification (e.g., `session/cancel`) never got `clientIdentifier` injected into the later `initialize`.
 #[tokio::test]
 async fn test_initialize_injected_when_not_first_message() {
     let temp = TempDir::new().unwrap();
@@ -2744,7 +2610,7 @@ async fn test_initialize_injected_when_not_first_message() {
     .await
     .unwrap();
 
-    // First message is a notification — NOT initialize.
+    // First message is a notification, NOT initialize
     let first_non_init = r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"sess-x","reason":"user"}}"#;
     client.send(first_non_init.to_string()).unwrap();
 
@@ -2761,8 +2627,6 @@ async fn test_initialize_injected_when_not_first_message() {
     let fwd2: serde_json::Value = serde_json::from_str(&acp_rx.recv().await.unwrap()).unwrap();
     assert_eq!(fwd2["method"], "initialize");
 
-    // `clientIdentifier` must be present — the server must not have skipped injection
-    // just because the first message was not initialize.
     let client_id = fwd2
         .get("params")
         .and_then(|p| p.get("_meta"))
@@ -2778,10 +2642,8 @@ async fn test_initialize_injected_when_not_first_message() {
     cancel.cancel();
 }
 
-/// End-to-end leader test: web client (code-nav capable) and TUI client
-/// (not capable) both send code-nav extension requests; verify that
-/// codeNavEnabled is independently injected into each client's session
-/// and that extension requests are routed with correct params.
+/// End-to-end leader test: a web client (code-nav capable) and a TUI client (not capable) both send code-nav extension requests.
+/// Verify that codeNavEnabled is independently injected into each client's session and that extension requests are routed with correct params.
 #[tokio::test]
 async fn test_leader_code_nav_isolation_end_to_end() {
     let temp = TempDir::new().unwrap();
@@ -2832,7 +2694,7 @@ async fn test_leader_code_nav_isolation_end_to_end() {
         serde_json::json!(false)
     );
 
-    // Web client sends x.ai/code/status (the primary non-starting code-nav call).
+    // Web client sends x.ai/code/status
     let status_with_session = r#"{"jsonrpc":"2.0","id":10,"method":"extensions/ext","params":{"method":"x.ai/code/status","params":{"sessionId":"web-session","cwd":"/repo"}}}"#;
     web_client.send(status_with_session.to_string()).unwrap();
 
@@ -2848,13 +2710,11 @@ async fn test_leader_code_nav_isolation_end_to_end() {
 
 /// Regression test for a deadlock in `connect_or_spawn`.
 ///
-/// The bug: the spawner held a file lock while doing a full
-/// `LeaderClient::connect`, which blocks in `register()` waiting for
-/// `LeaderReady`. The leader needs the same lock to reach readiness.
+/// The bug: the spawner held a file lock while doing a full `LeaderClient::connect`, which blocks in `register()` waiting for `LeaderReady`.
+/// The leader needs the same lock to reach readiness.
 ///
-/// This test couples readiness to a file lock (matching production) so
-/// holding the lock while connecting would deadlock. Existing tests missed
-/// this because they drove readiness via a bare `watch::channel`.
+/// This test couples readiness to a file lock (matching production) so holding the lock while connecting would deadlock.
+/// Existing tests missed this because they drove readiness via a bare `watch::channel`.
 #[tokio::test]
 async fn test_lock_released_before_connect_prevents_deadlock() {
     use fs2::FileExt;
@@ -2912,16 +2772,15 @@ async fn test_lock_released_before_connect_prevents_deadlock() {
     });
     wait_for_socket(&sock_path).await;
 
-    // Simulate the leader: acquire lock → signal readiness.
-    // Blocks until the spawner releases the lock above.
+    // Simulate the leader: acquire the lock, then signal readiness
+    // It blocks until the spawner releases the lock above
     tokio::task::spawn_blocking(move || {
         let f = std::fs::File::open(&lock_path).unwrap();
         f.lock_exclusive().unwrap();
         ready_tx.send(true).unwrap();
     });
 
-    // Release lock BEFORE connecting (the fix). Without this,
-    // connect blocks on LeaderReady, which needs the lock → deadlock.
+    // Release the lock BEFORE connecting: connect blocks on LeaderReady, which needs the lock, and holding it here would deadlock
     lock_file.unlock().unwrap();
 
     let result = tokio::time::timeout(
@@ -2944,17 +2803,15 @@ async fn test_lock_released_before_connect_prevents_deadlock() {
 }
 
 // =============================================================================
-// Hung-agent + sever-mid-RPC scenarios
+// Hung-agent and sever-mid-RPC scenarios
 //
-// The fake agent in these tests is the test body itself (acp_rx/response_tx),
-// so "agent hangs" and "agent completes after the client is gone" are driven
-// deterministically. Reconnects use fresh raw `UnixStream`s so the sever is
-// an abrupt socket close, not a graceful `Disconnect`.
+// The fake agent in these tests is the test body itself (acp_rx/response_tx)
+// "Agent hangs" and "agent completes after the client is gone" are driven deterministically
+// Reconnects use fresh raw `UnixStream`s so the sever is an abrupt socket close, not a graceful `Disconnect`
 // =============================================================================
 
-/// Server that survives client disconnects (`no_exit_on_disconnect = true`),
-/// for sever/reconnect scenarios. Same wiring as
-/// `test_session_ownership_cleanup_on_disconnect`.
+/// Server that survives client disconnects (`no_exit_on_disconnect = true`), for sever/reconnect scenarios.
+/// Same wiring as `test_session_ownership_cleanup_on_disconnect`.
 async fn setup_persistent_test_server(
     temp: &TempDir,
 ) -> (
@@ -3007,9 +2864,8 @@ type RawClient = (
     tokio::io::WriteHalf<UnixStream>,
 );
 
-/// Connect a raw socket client and complete registration. Raw (not
-/// `LeaderClient`) so dropping the halves is an abrupt sever with no
-/// `Disconnect` handshake.
+/// Connect a raw socket client and complete registration.
+/// Raw (not `LeaderClient`) so dropping the halves is an abrupt sever with no `Disconnect` handshake.
 async fn raw_register(sock_path: &std::path::Path, client_type: &str) -> RawClient {
     let stream = UnixStream::connect(sock_path).await.unwrap();
     let (mut reader, mut writer) = tokio::io::split(stream);
@@ -3044,9 +2900,9 @@ async fn raw_recv_acp(reader: &mut tokio::io::ReadHalf<UnixStream>) -> serde_jso
     }
 }
 
-/// Count `unified.jsonl` orphan-drop entries for `request_id`. Namespaced
-/// request ids are unique per process (global `ClientId` counter) and the pid
-/// filter fences off other test processes appending to the same shared log.
+/// Count `unified.jsonl` orphan-drop entries for `request_id`.
+/// Namespaced request ids are unique per process (global `ClientId` counter).
+/// The pid filter fences off other test processes appending to the same shared log.
 ///
 /// This binary does not sandbox GROK_HOME, so on a dev machine these entries
 /// land in the real `~/.grok` log — accepted: the server already writes
@@ -3082,9 +2938,8 @@ async fn wait_for_orphan_log(request_id: &str) -> usize {
 }
 
 /// Poll until the server logged `leader.client.disconnected` for `client_id`.
-/// The deterministic disconnect signal for sessions that still have other
-/// subscribers (no `evict_sessions` is emitted for those). Same
-/// real-home-write caveat and pid fence as [`orphan_log_count`].
+/// This is the deterministic disconnect signal for sessions that still have other subscribers (no `evict_sessions` is emitted for those).
+/// The same caveat about writing to the real home log and the same pid fence as [`orphan_log_count`] apply.
 async fn wait_for_client_disconnected_log(client_id: u64) -> bool {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
@@ -3104,11 +2959,11 @@ async fn wait_for_client_disconnected_log(client_id: u64) -> bool {
     }
 }
 
-/// Hung agent: a prompt is forwarded but the agent never replies. The client
-/// must not receive a fabricated response, the transport must stay healthy
-/// (a later cancel still reaches the agent), and other traffic still flows.
-/// This is the client-visible state of the hung-turn class; deadman semantics
-/// on top of it are a product change asserted by the ignored test below.
+/// Hung agent: a prompt is forwarded but the agent never replies.
+/// The client must not receive a fabricated response.
+/// The transport must stay healthy: a later cancel still reaches the agent, and other traffic still flows.
+/// This is the client-visible state of the hung-turn class.
+/// Deadman semantics on top of it are a product change asserted by the ignored test below.
 #[tokio::test]
 async fn test_hung_agent_leaves_transport_healthy_and_forwards_cancel() {
     let temp = TempDir::new().unwrap();
@@ -3131,8 +2986,8 @@ async fn test_hung_agent_leaves_transport_healthy_and_forwards_cancel() {
     let json: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
     assert_eq!(json["method"], "session/prompt");
 
-    // The agent hangs: no response. The client must see nothing (no error
-    // synthesis, no disconnect) within a bounded observation window.
+    // The agent hangs: no response
+    // The client must see nothing (no synthesized error, no disconnect) within a bounded observation window
     let quiet = tokio::time::timeout(Duration::from_millis(500), client.recv()).await;
     assert!(
         quiet.is_err(),
@@ -3169,10 +3024,9 @@ async fn test_hung_agent_leaves_transport_healthy_and_forwards_cancel() {
     cancel.cancel();
 }
 
-/// Sever mid-RPC, agent completes anyway, a fresh client recovers via
-/// `session/load`: the response to the dead client is dropped exactly once
-/// (`leader.response.orphaned`), and post-load notifications for the session
-/// reach the new owner — the durable-terminal recovery path.
+/// Sever mid-RPC, the agent completes anyway, and a fresh client recovers via `session/load`.
+/// The response to the dead client is dropped exactly once (`leader.response.orphaned`).
+/// Post-load notifications for the session reach the new owner: the durable-terminal recovery path.
 #[tokio::test]
 async fn test_sever_mid_rpc_orphans_response_and_replay_recovers() {
     let temp = TempDir::new().unwrap();
@@ -3215,14 +3069,12 @@ async fn test_sever_mid_rpc_orphans_response_and_replay_recovers() {
     drop(reader1);
     drop(writer1);
 
-    // The eviction notification on the agent channel is the deterministic
-    // signal that the server processed the disconnect.
+    // The eviction notification on the agent channel is the deterministic signal that the server processed the disconnect
     let evict = acp_rx.recv().await.unwrap();
     let evict_json: serde_json::Value = serde_json::from_str(&evict).unwrap();
     assert_eq!(evict_json["method"], "_x.ai/internal/evict_sessions");
 
-    // The agent completes the turn anyway: durable terminal notification plus
-    // the RPC response addressed to the dead client.
+    // The agent completes the turn anyway: durable terminal notification plus the RPC response addressed to the dead client
     response_tx
         .send(format!(
             r#"{{"jsonrpc":"2.0","result":{{"stopReason":"end_turn"}},"id":"{prompt_id}"}}"#
@@ -3257,8 +3109,7 @@ async fn test_sever_mid_rpc_orphans_response_and_replay_recovers() {
     let load_resp = raw_recv_acp(&mut reader2).await;
     assert_eq!(load_resp["id"], 1);
 
-    // Post-load, the durable terminal state reaches the new owner (in
-    // production this line comes from the agent's updates.jsonl replay).
+    // Post-load, the durable terminal state reaches the new owner (in production this line comes from the agent's updates.jsonl replay)
     let terminal = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-sever","update":{"sessionUpdate":"turn_completed","stopReason":"end_turn"}}}"#;
     response_tx.send(terminal.to_string()).unwrap();
     let update = raw_recv_acp(&mut reader2).await;
@@ -3273,11 +3124,9 @@ async fn test_sever_mid_rpc_orphans_response_and_replay_recovers() {
     cancel.cancel();
 }
 
-/// Acceptance: a `session/cancel` composed just before the leader dies is
-/// currently lost in the reconnect swap window — the send lands in a dead
-/// channel and nothing re-delivers it, so the turn runs on. This asserts the
-/// DESIRED behavior (the cancel reaches the agent after recovery) and stays
-/// ignored until a cancel-ack/resend protocol ships.
+/// Acceptance: a `session/cancel` composed just before the leader dies is currently lost in the reconnect swap window.
+/// The send lands in a dead channel and nothing re-delivers it, so the turn runs on.
+/// This asserts the DESIRED behavior (the cancel reaches the agent after recovery) and stays ignored until a cancel-ack/resend protocol ships.
 #[tokio::test]
 #[ignore = "leader-acceptance: cancel severed in reconnect swap window is not resent; un-ignore with cancel-ack"]
 async fn test_cancel_severed_in_swap_window_reaches_agent_after_recovery() {
@@ -3312,11 +3161,9 @@ async fn test_cancel_severed_in_swap_window_reaches_agent_after_recovery() {
         .unwrap();
     let _prompt_fwd = acp_rx.recv().await.unwrap();
 
-    // Leader dies; the cancel is composed while the connection is already
-    // dead (the swap window), so it is silently eaten today.
+    // Leader dies; the cancel is composed while the connection is already dead (the swap window), so it is silently eaten today
     cancel.cancel();
-    // Wait until the old server finished its socket cleanup so the same-path
-    // respawn below cannot have its fresh socket deleted from under it.
+    // Wait until the old server finished its socket cleanup so the same-path respawn below cannot have its fresh socket deleted from under it
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while sock_path.exists() && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -3326,8 +3173,7 @@ async fn test_cancel_severed_in_swap_window_reaches_agent_after_recovery() {
             .to_string(),
     );
 
-    // Recovery: a fresh leader at the same path, a fresh client reloading the
-    // session (what the pager bridge does on reconnect).
+    // Recovery: a fresh leader at the same path, a fresh client reloading the session (what the pager bridge does on reconnect)
     let (sock_path2, cancel2, mut acp_rx2, response_tx2) =
         setup_persistent_test_server(&temp).await;
 
@@ -3351,8 +3197,8 @@ async fn test_cancel_severed_in_swap_window_reaches_agent_after_recovery() {
         ))
         .unwrap();
 
-    // DESIRED: the severed cancel intent is re-delivered after recovery so
-    // the turn does not run on. Today nothing arrives and this times out.
+    // DESIRED: the severed cancel intent is re-delivered after recovery so the turn does not run on
+    // Today nothing arrives and this times out
     let cancelled = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let fwd = acp_rx2.recv().await.expect("agent channel closed");
@@ -3372,9 +3218,9 @@ async fn test_cancel_severed_in_swap_window_reaches_agent_after_recovery() {
     cancel2.cancel();
 }
 
-/// Two clients on one session; the driver severs mid-turn. The viewer must
-/// keep receiving the stream and the durable terminal, while the driver's
-/// in-flight RPC response is orphan-dropped (not misrouted to the viewer).
+/// Two clients on one session; the driver severs mid-turn.
+/// The viewer must keep receiving the stream and the durable terminal.
+/// The driver's in-flight RPC response is orphan-dropped, not misrouted to the viewer.
 #[tokio::test]
 async fn test_driver_sever_mid_turn_viewer_sees_durable_terminal() {
     let temp = TempDir::new().unwrap();
@@ -3443,8 +3289,8 @@ async fn test_driver_sever_mid_turn_viewer_sees_durable_terminal() {
     let viewer_chunk = raw_recv_acp(&mut viewer_reader).await;
     assert_eq!(viewer_chunk["params"]["update"]["content"]["text"], "one");
 
-    // Driver severs mid-turn. The viewer still subscribes to the session, so
-    // no evict_sessions fires — wait on the disconnect log entry instead.
+    // Driver severs mid-turn
+    // The viewer still subscribes to the session, so no evict_sessions fires; wait on the disconnect log entry instead
     let (driver_client_id, _) =
         parse_namespaced_id(&prompt_id).expect("namespaced prompt id parses");
     drop(driver_reader);
@@ -3460,8 +3306,7 @@ async fn test_driver_sever_mid_turn_viewer_sees_durable_terminal() {
     let viewer_chunk2 = raw_recv_acp(&mut viewer_reader).await;
     assert_eq!(viewer_chunk2["params"]["update"]["content"]["text"], "two");
 
-    // Durable terminal reaches the viewer; the driver's RPC response is
-    // orphan-dropped, not misrouted.
+    // Durable terminal reaches the viewer; the driver's RPC response is orphan-dropped, not misrouted
     let terminal = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-handoff","update":{"sessionUpdate":"turn_completed","stopReason":"end_turn"}}}"#;
     response_tx.send(terminal.to_string()).unwrap();
     response_tx
@@ -3481,8 +3326,8 @@ async fn test_driver_sever_mid_turn_viewer_sees_durable_terminal() {
         "the severed driver's prompt response must be orphan-dropped exactly once"
     );
 
-    // The viewer must NOT have been handed the driver's RPC response: the next
-    // message it sees (if any) is not a response with the driver's original id.
+    // The viewer must NOT have been handed the driver's RPC response
+    // The next message it sees (if any) is not a response with the driver's original id
     let stray = tokio::time::timeout(Duration::from_millis(300), async {
         raw_recv_acp(&mut viewer_reader).await
     })

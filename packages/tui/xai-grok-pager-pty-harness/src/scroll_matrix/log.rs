@@ -1,10 +1,8 @@
-//! `GROK_SCROLL_LOG` JSONL parsing, per-stream grouping, and finalize
-//! synchronization.
+//! `GROK_SCROLL_LOG` JSONL parsing, per-stream grouping, and finalize synchronization.
 //!
-//! Wire schema source of truth: the pager's `ScrollLogRecord` in
-//! `xai-grok-pager/src/input/scroll_log.rs`. [`ScrollLogLine`] mirrors it
-//! field-for-field with every always-emitted field **required** (see the
-//! module docs in [`super`] for the drift-tripwire rationale).
+//! Wire schema source of truth: the pager's `ScrollLogRecord` in `xai-grok-pager/src/input/scroll_log.rs`.
+//! [`ScrollLogLine`] mirrors it field-for-field with every always-emitted field **required**.
+//! The module docs in [`super`] explain why the schema is duplicated.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -21,13 +19,11 @@ pub const EVT_FINALIZE: &str = "finalize";
 
 /// One parsed flight-recorder line.
 ///
-/// Field names and required/optional split mirror the producer's
-/// `ScrollLogRecord` (`scroll_log.rs`): the producer always emits the
-/// non-`Option` fields, `#[serde(skip_serializing_if)]`s the `Option`
-/// bookkeeping fields, and `#[serde(flatten)]`s the config echo onto
-/// `stream_start` records only. Unknown fields are tolerated (additive
-/// producer changes must not break older matrix code); missing required
-/// fields fail loudly with the line number via [`parse_jsonl`].
+/// Field names and the required/optional split mirror the producer's `ScrollLogRecord` (`scroll_log.rs`).
+/// The producer always emits the non-`Option` fields and `#[serde(skip_serializing_if)]`s the `Option` bookkeeping fields.
+/// It `#[serde(flatten)]`s the config echo onto `stream_start` records only.
+/// Unknown fields are tolerated so additive producer changes don't break older matrix code.
+/// Missing required fields fail loudly with the line number via [`parse_jsonl`].
 #[derive(Debug, Clone, Deserialize)]
 pub struct ScrollLogLine {
     /// Monotonic ms since recorder start (the state machine's timeline).
@@ -57,15 +53,12 @@ pub struct ScrollLogLine {
     /// Per-flush delta cap in effect.
     pub cap: i64,
 
-    /// Rolling average inter-event interval (ms); absent until two
-    /// accel-countable events arrived.
+    /// Rolling average inter-event interval (ms); absent until two accel-countable events arrived.
     pub avg_interval_ms: Option<f64>,
-    /// Spacing from the previous flush-bearing record; absent before the
-    /// first. **Global, not per-stream** — the producer's `last_flush_at`
-    /// never resets at stream boundaries, so on a stream's first
-    /// flush-bearing record this measures from the *previous stream*. Use
-    /// [`StreamGroup::intra_stream_flush_spacings_ms`] for per-stream
-    /// cadence.
+    /// Spacing from the previous flush-bearing record; absent before the first.
+    /// **Global, not per-stream**: the producer's `last_flush_at` never resets at stream boundaries.
+    /// On a stream's first flush-bearing record this measures from the *previous stream*.
+    /// Use [`StreamGroup::intra_stream_flush_spacings_ms`] for per-stream cadence.
     pub ms_since_prev_flush: Option<f64>,
     /// Finalize only: whole lines discarded with the stream.
     pub dropped: Option<i64>,
@@ -106,12 +99,9 @@ impl ScrollLogLine {
 
 /// Parse a `GROK_SCROLL_LOG` JSONL file into records.
 ///
-/// Every line must parse — errors carry the 1-based line number and the
-/// offending line. Call after the capture is quiescent (the producer
-/// force-flushes on finalize, so a file whose last gesture finalized ends
-/// on a record boundary); mid-write reads can see a torn tail line, which
-/// fails here by design — synchronize with [`wait_for_finalize_count`]
-/// first.
+/// Every line must parse; errors carry the 1-based line number and the offending line.
+/// Call after the capture is quiescent (the producer force-flushes on finalize, so a file whose last gesture finalized ends on a record boundary).
+/// Mid-write reads can see a torn tail line, which fails here by design; synchronize with [`wait_for_finalize_count`] first.
 pub fn parse_jsonl(path: &Path) -> Result<Vec<ScrollLogLine>> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read scroll log {}", path.display()))?;
@@ -131,9 +121,8 @@ pub fn parse_jsonl_str(raw: &str) -> Result<Vec<ScrollLogLine>> {
 
 /// One recorded gesture: `stream_start` → `flush`* → `finalize`.
 ///
-/// `finalize` is `None` only for a trailing stream still in flight when the
-/// capture ended: finalize rides the 80ms-gap and direction-flip
-/// transitions, so a capture cut mid-gesture leaves the last stream open.
+/// `finalize` is `None` only for a trailing stream still in flight when the capture ended.
+/// Finalize rides the 80ms-gap and direction-flip transitions, so a capture cut mid-gesture leaves the last stream open.
 #[derive(Debug, Clone)]
 pub struct StreamGroup<'a> {
     /// The `stream_start` record (carries the config echo).
@@ -157,12 +146,9 @@ impl<'a> StreamGroup<'a> {
 
     /// Intra-stream flush spacings (ms), in order.
     ///
-    /// Skips the stream's **first** flush-bearing record: the producer's
-    /// `ms_since_prev_flush` is global (its `last_flush_at` never resets at
-    /// stream boundaries — see `scroll_log.rs`), so the first value
-    /// measures from the previous stream's last flush/finalize and says
-    /// nothing about this stream's cadence. Every subsequent flush-bearing
-    /// record's spacing is intra-stream by construction.
+    /// Skips the stream's **first** flush-bearing record: the producer's `ms_since_prev_flush` is global (see `scroll_log.rs`).
+    /// That first value measures from the previous stream's last flush/finalize and says nothing about this stream's cadence.
+    /// Every subsequent flush-bearing record's spacing is intra-stream by construction.
     pub fn intra_stream_flush_spacings_ms(&self) -> Vec<f64> {
         self.flush_bearing()
             .skip(1)
@@ -173,17 +159,14 @@ impl<'a> StreamGroup<'a> {
 
 /// Group parsed records into per-gesture [`StreamGroup`]s.
 ///
-/// Expects the shape the pager emits when the recorder exists for the whole
-/// session (`GROK_SCROLL_LOG` set at spawn): `stream_start` → `flush`* →
-/// `finalize`, repeated, with at most one trailing unfinalized stream. A
-/// direction flip emits `finalize` and the next `stream_start` at the same
-/// `ts_ms`; that boundary is a plain group boundary here.
+/// Expects the shape the pager emits when the recorder exists for the whole session (`GROK_SCROLL_LOG` set at spawn).
+/// That shape is `stream_start` → `flush`* → `finalize`, repeated, with at most one trailing unfinalized stream.
+/// A direction flip emits `finalize` and the next `stream_start` at the same `ts_ms`; that boundary is a plain group boundary here.
 ///
-/// Malformed shapes (flush/finalize before any start, start while a stream
-/// is open) are errors: with a spawn-time recorder they indicate producer
-/// drift. Caveat: a `/debug log` *runtime-toggled* recorder can begin
-/// mid-stream and legitimately open with an orphan flush/finalize — the
-/// matrix never does that, so it is rejected rather than silently grouped.
+/// Malformed shapes (flush/finalize before any start, start while a stream is open) are errors.
+/// With a spawn-time recorder they indicate producer drift.
+/// Caveat: a `/debug log` *runtime-toggled* recorder can begin mid-stream and legitimately open with an orphan flush/finalize.
+/// The matrix never does that, so it is rejected rather than silently grouped.
 pub fn group_streams(records: &[ScrollLogLine]) -> Result<Vec<StreamGroup<'_>>> {
     let mut groups: Vec<StreamGroup<'_>> = Vec::new();
     let mut open: Option<StreamGroup<'_>> = None;
@@ -233,21 +216,17 @@ pub fn group_streams(records: &[ScrollLogLine]) -> Result<Vec<StreamGroup<'_>>> 
     Ok(groups)
 }
 
-/// Poll interval for [`wait_for_finalize_count`]. Short enough that the
-/// wait adds at most ~10ms latency past the write, long enough not to spin.
+/// Poll interval for [`wait_for_finalize_count`].
+/// Short enough that the wait adds at most ~10ms latency past the write, long enough not to spin.
 const FINALIZE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-/// Block until `path` contains at least `n` finalize records, or `timeout`
-/// expires.
+/// Block until `path` contains at least `n` finalize records, or `timeout` expires.
 ///
-/// The producer force-flushes its `BufWriter` on every finalize record
-/// (gesture boundary — the `tail -f` contract in `scroll_log.rs`), so
-/// polling the file is race-free for finalize counting: once the flush
-/// lands, the line is fully present. Counting uses a raw substring match
-/// (`"evt":"finalize"` — serde_json's compact encoding) rather than a full
-/// parse so a torn non-finalize tail mid-write can't fail the wait. A
-/// not-yet-created file (the recorder opens lazily on the first record)
-/// counts as zero.
+/// The producer force-flushes its `BufWriter` on every finalize record (a gesture boundary; the `tail -f` contract in `scroll_log.rs`).
+/// Polling the file is therefore race-free for finalize counting: once the flush lands, the line is fully present.
+/// Counting uses a raw substring match (`"evt":"finalize"`, serde_json's compact encoding) rather than a full parse.
+/// A torn non-finalize tail mid-write therefore can't fail the wait.
+/// A not-yet-created file (the recorder opens lazily on the first record) counts as zero.
 pub fn wait_for_finalize_count(path: &Path, n: usize, timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -280,11 +259,10 @@ fn count_finalize_lines(path: &Path) -> Result<usize> {
 mod tests {
     use super::*;
 
-    // Fixture lines shaped exactly like the producer's serde output
-    // (compact JSON, snake_case evt/trigger, config echo flattened onto
-    // stream_start, skip-if-None optionals) — copied from the wire format
-    // pinned by `scroll_log_records_flood_flushes_and_capped_finalize_drop`
-    // in `xai-grok-pager/src/input/mouse/tests.rs`.
+    // Fixture lines shaped like the producer's serde output: compact JSON, snake_case evt/trigger, config echo flattened onto stream_start
+    // Optionals are skipped when None
+    // The lines are copied from `scroll_log_records_flood_flushes_and_capped_finalize_drop` in `xai-grok-pager/src/input/mouse/tests.rs`
+    // That test pins the wire format
     const START: &str = r#"{"ts_ms":0.0,"evt":"stream_start","trigger":"event","kind":"unknown","events_total":0,"events_since_flush":0,"accel":1.0,"desired":0.0,"applied_total":0,"flushed":0,"backlog_after":0,"carry":0.0,"cap":6,"mode":"trackpad","ept":3,"wheel_lpt":3,"trackpad_lpt":3,"invert":false,"speed":1.0,"viewport_height":40}"#;
     const FLUSH_FIRST: &str = r#"{"ts_ms":16.0,"evt":"flush","trigger":"event","kind":"trackpad","events_total":9,"events_since_flush":9,"avg_interval_ms":2.0,"accel":1.0,"desired":9.4,"applied_total":6,"flushed":6,"backlog_after":3,"carry":0.4,"cap":6}"#;
     const FLUSH_SECOND: &str = r#"{"ts_ms":32.0,"evt":"flush","trigger":"tick","kind":"trackpad","events_total":17,"events_since_flush":8,"avg_interval_ms":2.0,"accel":1.0,"desired":17.4,"applied_total":12,"flushed":6,"backlog_after":5,"carry":0.4,"cap":6,"ms_since_prev_flush":16.0}"#;
@@ -359,9 +337,8 @@ mod tests {
 
     #[test]
     fn groups_flip_boundary_and_trailing_unfinalized_stream() {
-        // Direction flip: finalize and the next stream_start share ts_ms
-        // (both emitted from the same on_scroll_event call). The capture
-        // ends with stream 2 still in flight (no finalize).
+        // Direction flip: finalize and the next stream_start share ts_ms (both emitted from the same on_scroll_event call)
+        // The capture ends with stream 2 still in flight (no finalize)
         let flip_finalize = FINALIZE.replace("\"ts_ms\":114.0", "\"ts_ms\":40.0");
         let flip_start = START.replace("\"ts_ms\":0.0", "\"ts_ms\":40.0");
         let records = parse_jsonl_str(&jsonl(&[
@@ -405,10 +382,8 @@ mod tests {
 
     #[test]
     fn per_stream_spacing_skips_the_global_first_flush_record() {
-        // Stream 2's first flush carries ms_since_prev_flush measured from
-        // stream 1's finalize (producer's last_flush_at is global) — 500ms
-        // of inter-gesture idle that is NOT stream-2 cadence and must be
-        // skipped; the later flush (16ms) and finalize (82ms) are kept.
+        // Stream 2's first flush carries ms_since_prev_flush measured from stream 1's finalize (producer's last_flush_at is global)
+        // That 500ms of inter-gesture idle is NOT stream-2 cadence and must be skipped; the later flush (16ms) and finalize (82ms) are kept
         let s2_start = START.replace("\"ts_ms\":0.0", "\"ts_ms\":600.0");
         let s2_flush_global = FLUSH_SECOND
             .replace("\"ts_ms\":32.0", "\"ts_ms\":616.0")
@@ -436,8 +411,7 @@ mod tests {
             vec![16.0, 82.0],
             "the 500ms cross-stream value must be skipped"
         );
-        // Stream 1: first flush has no spacing at all (recorder start);
-        // only the finalize's intra-stream spacing remains.
+        // Stream 1: first flush has no spacing at all (recorder start); only the finalize's intra-stream spacing remains
         assert_eq!(groups[0].intra_stream_flush_spacings_ms(), vec![82.0]);
     }
 
@@ -448,9 +422,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("scroll-log.jsonl");
 
-        // Lazy-open recorder: the file does not exist yet — n=0 succeeds.
+        // Lazy-open recorder: the file does not exist yet, so n=0 succeeds
         wait_for_finalize_count(&path, 0, Duration::ZERO).expect("n=0 on missing file");
-        // …but n=1 times out, reporting the current count.
+        // n=1 still times out, reporting the current count
         let err = wait_for_finalize_count(&path, 1, Duration::from_millis(30))
             .expect_err("missing file cannot satisfy n=1");
         assert!(format!("{err:#}").contains("found 0"), "err: {err:#}");
@@ -462,8 +436,7 @@ mod tests {
         file.flush().expect("flush");
         wait_for_finalize_count(&path, 1, Duration::from_secs(5)).expect("one finalize present");
 
-        // A torn tail mid-write (BufWriter fill boundary) must not fail the
-        // wait — counting is a raw substring match, not a parse.
+        // A torn tail mid-write (BufWriter fill boundary) must not fail the wait; counting is a raw substring match, not a parse
         write!(file, "{{\"ts_ms\":9").expect("torn tail");
         file.flush().expect("flush");
         wait_for_finalize_count(&path, 1, Duration::from_secs(5)).expect("torn tail tolerated");
@@ -485,8 +458,7 @@ mod tests {
         let path = dir.path().join("scroll-log.jsonl");
         let writer_path = path.clone();
 
-        // Bounded writer delay, generous deadline: the wait must return as
-        // soon as the poll sees the flushed finalize, not at the deadline.
+        // Bounded writer delay, generous deadline: the wait must return as soon as the poll sees the flushed finalize, not at the deadline
         let writer = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(20));
             let mut file = std::fs::File::create(&writer_path).expect("create");

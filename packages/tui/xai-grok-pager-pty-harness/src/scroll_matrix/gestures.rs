@@ -1,19 +1,15 @@
-//! Gesture step tables G1–G11: the timed SGR wheel-report shapes every
-//! matrix cell replays.
+//! Gesture step tables G1-G11: the timed SGR wheel-report shapes every matrix cell replays.
 //!
-//! A gesture is a `&'static [WheelStep]`; the A13 runner emits each step's
-//! report after sleeping `pre_delay_ms` (never before the first step, never
-//! after the last — the `send_wheel_sequence` contract in the pager's
-//! `tests/pty_e2e/scroll.rs`). Delays are HOST-side lower bounds: scheduler
-//! jitter can only stretch gaps, which is why the invariant suite
-//! ([`super::invariants`]) judges timing from the recorder's own clock.
+//! A gesture is a `&'static [WheelStep]`.
+//! The runner emits each step's report after sleeping `pre_delay_ms`, never before the first step and never after the last.
+//! That is the `send_wheel_sequence` contract in the pager's `tests/pty_e2e/scroll.rs`.
+//! Delays are HOST-side lower bounds: scheduler jitter can only stretch gaps.
+//! So the invariant suite ([`super::invariants`]) judges timing from the recorder's own clock.
 //!
-//! Timing thresholds below mirror the pager's `src/input/mouse.rs` (the
-//! harness deliberately has no pager dependency — same drift-tripwire
-//! stance as [`super::log`]): a table's shape is meaningful only relative
-//! to those constants, e.g. G2's 50ms notch gap sits under `STREAM_GAP_MS`
-//! (one stream) but over `WHEEL_TICK_DETECT_MAX_MS` (no wheel promotion of
-//! the train as one tick).
+//! Timing thresholds below mirror the pager's `src/input/mouse.rs`; the harness deliberately has no pager dependency.
+//! Like [`super::log`]'s schema copy, the duplication is a tripwire for pager-side drift.
+//! A table's shape is meaningful only relative to those constants.
+//! For example, G2's 50ms notch gap sits under `STREAM_GAP_MS` (one stream) but over `WHEEL_TICK_DETECT_MAX_MS` (no wheel promotion of the train).
 
 use crate::scripted::{SGR_SCROLL_DOWN, SGR_SCROLL_UP};
 
@@ -21,12 +17,11 @@ use crate::scripted::{SGR_SCROLL_DOWN, SGR_SCROLL_UP};
 pub const REDRAW_CADENCE_MS: u64 = 16;
 /// Mirror of `mouse.rs` `STREAM_GAP_MS`: idle gap that finalizes a stream.
 pub const STREAM_GAP_MS: u64 = 80;
-/// Mirror of `mouse.rs` `DEFAULT_WHEEL_TICK_DETECT_MAX_MS`: an ept≥2 stream
-/// promotes to wheel only when the first tick completes within this window.
+/// Mirror of `mouse.rs` `DEFAULT_WHEEL_TICK_DETECT_MAX_MS`.
+/// A stream with ept of 2 or more promotes to wheel only when the first tick completes within this window.
 pub const WHEEL_TICK_DETECT_MAX_MS: u64 = 12;
-/// Mirror of `mouse.rs` `ACCEL_MIN_INTERVAL_MS`: sub-6ms inter-event
-/// intervals are terminal batching artifacts and stay out of the
-/// accel/detection interval window.
+/// Mirror of `mouse.rs` `ACCEL_MIN_INTERVAL_MS`.
+/// Sub-6ms inter-event intervals are terminal batching artifacts and stay out of the accel/detection interval window.
 pub const ACCEL_MIN_INTERVAL_MS: f64 = 6.0;
 /// Mirror of `mouse.rs` `DEFAULT_TRACKPAD_ACCEL_MAX`: accel clamp ceiling.
 pub const TRACKPAD_ACCEL_MAX: f64 = 3.0;
@@ -35,9 +30,7 @@ pub const MIN_LINES_PER_WHEEL_STREAM: i64 = 1;
 
 /// One SGR wheel report: sleep `pre_delay_ms`, then emit `button`.
 ///
-/// `button` is [`SGR_SCROLL_UP`]/[`SGR_SCROLL_DOWN`] — `u16` because those
-/// harness consts are `u16` (the design sketch said `u8`; deviating keeps
-/// one shared definition instead of a cast at every emission site).
+/// `button` is [`SGR_SCROLL_UP`]/[`SGR_SCROLL_DOWN`]; `u16` matches those harness consts so no emission site needs a cast.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WheelStep {
     /// Host-side sleep before emitting this report (0 for the first step).
@@ -77,37 +70,28 @@ const fn notch_train<const N: usize>(
     steps
 }
 
-/// G1 single notch, ept=3 brands: 3 back-to-back reports (first tick lands
-/// inside the 12ms window → wheel promotion in Auto mode).
+/// G1 single notch, ept=3 brands: 3 back-to-back reports (the first tick lands inside the 12ms window, so Auto mode promotes to wheel).
 pub const G1_NOTCH_EPT3: [WheelStep; 3] = burst::<3>(0, SGR_SCROLL_UP);
 /// G1 single notch, ept=1 brands (iTerm2/zed/vscode/mux): one report.
 pub const G1_NOTCH_EPT1: [WheelStep; 1] = burst::<1>(0, SGR_SCROLL_UP);
-/// G2 notch train: 5 notches 50ms apart (< `STREAM_GAP_MS` → one stream).
+/// G2 notch train: 5 notches 50ms apart (under `STREAM_GAP_MS`, so one stream).
 pub const G2_NOTCH_TRAIN_EPT3: [WheelStep; 15] = notch_train::<15>(3, 50, SGR_SCROLL_UP);
 pub const G2_NOTCH_TRAIN_EPT1: [WheelStep; 5] = burst::<5>(50, SGR_SCROLL_UP);
-/// G3 flood: 60 back-to-back reports (cap/pacing exercise — A4 teleport).
+/// G3 flood: 60 back-to-back reports (cap/pacing exercise).
 pub const G3_FLOOD: [WheelStep; 60] = burst::<60>(0, SGR_SCROLL_UP);
-/// G4 jerk repro: a 3-event anti-promotion head at 8ms, 57 dense reports,
-/// then a decelerating 6-event tail (gaps growing 40→70ms, all under the
-/// 80ms stream gap).
+/// G4 jerk repro: a 3-event anti-promotion head at 8ms, 57 dense reports, then a decelerating 6-event tail (gaps 40ms to 70ms).
+/// Every gap stays under the 80ms stream gap, so the whole gesture is one stream.
 ///
-/// Two shape details make the repro real under a PTY (verified against the
-/// live recorder):
-/// - **The head.** Back-to-back writes arrive batched, so a fully dense
-///   burst completes its first ept=3 tick inside the 12ms window and
-///   promotes to WHEEL pricing — which never re-prices at finalize and
-///   never jerks. The 8ms head lands the first tick past the window, so
-///   the stream stays Unknown (priced ~1 line/event, accel window seeded
-///   in the fast band).
-/// - **The 40ms+ tail gaps.** They open cadence slots with no new events
-///   while the dense backlog is still draining: capped `events_since_flush
-///   == 0` coast flushes (the I-SMOOTH-COAST signature). Tighter gaps ride
-///   every slot and mask the coast.
+/// Two shape details make the repro real under a PTY (verified against the live recorder):
+/// - **The head.** Back-to-back writes arrive batched, so a fully dense burst completes its first ept=3 tick inside the 12ms window.
+///   That promotes to WHEEL pricing, which never re-prices at finalize and never jerks.
+///   The 8ms head lands the first tick past the window, so the stream stays Unknown (priced ~1 line/event, accel window seeded in the fast band).
+/// - **The 40ms+ tail gaps.** They open cadence slots with no new events while the dense backlog is still draining.
+///   The backlog then drains as capped `events_since_flush == 0` coast flushes, the I-SMOOTH-COAST signature.
+///   Tighter gaps ride every slot and mask the coast.
 ///
-/// At the gap finalize the Unknown→Trackpad re-price (accel-weighted,
-/// ~2.5× the mid-stream pricing) then bursts one more capped flush and
-/// drops the rest — the I-NO-DROP half of the jerk (xfail cell until the
-/// finalize-decel fix).
+/// At the gap finalize, the Unknown-to-Trackpad re-price (accel-weighted, ~2.5× the mid-stream pricing) bursts one more capped flush.
+/// It drops the rest: the I-NO-DROP half of the jerk (the cell was xfail until the finalize-decel fix).
 pub const G4_JERK: [WheelStep; 66] = {
     let mut steps = burst::<66>(0, SGR_SCROLL_UP);
     steps[1].pre_delay_ms = 8;
@@ -120,10 +104,8 @@ pub const G4_JERK: [WheelStep; 66] = {
     }
     steps
 };
-/// G5 ghostty dup: 10 notches 60ms apart, each report duplicated 4ms later
-/// (ghostty emits ≥2 SGR reports per physical notch ~4ms apart). The 4ms
-/// dups sit under `ACCEL_MIN_INTERVAL_MS` and must stay out of the
-/// interval window — the I-ACCEL G5 clause.
+/// G5 ghostty dup: 10 notches 60ms apart, each report duplicated 4ms later (ghostty emits two or more SGR reports per physical notch, ~4ms apart).
+/// The 4ms dups sit under `ACCEL_MIN_INTERVAL_MS` and must stay out of the interval window (the I-ACCEL G5 clause).
 pub const G5_GHOSTTY_DUP: [WheelStep; 20] = {
     let mut steps = burst::<20>(0, SGR_SCROLL_UP);
     let mut i = 1;
@@ -133,8 +115,7 @@ pub const G5_GHOSTTY_DUP: [WheelStep; 20] = {
     }
     steps
 };
-/// G6 flip: 10×8ms up then 10×8ms down — the direction flip finalizes
-/// stream 1 and opens stream 2 at the same instant (two streams).
+/// G6 flip: 10×8ms up then 10×8ms down; the direction flip finalizes stream 1 and opens stream 2 at the same instant (two streams).
 pub const G6_FLIP: [WheelStep; 20] = {
     let mut steps = burst::<20>(8, SGR_SCROLL_UP);
     let mut i = 10;
@@ -144,8 +125,8 @@ pub const G6_FLIP: [WheelStep; 20] = {
     }
     steps
 };
-/// G7 overscroll: bottom-pinned 10×8ms down (viewport must clamp — the
-/// harness-side I-SCREEN check) then 3 up (must move again). Two streams.
+/// G7 overscroll: bottom-pinned 10×8ms down (viewport must clamp, the harness-side I-SCREEN check) then 3 up (must move again).
+/// The direction flip splits it into two streams.
 pub const G7_OVERSCROLL: [WheelStep; 13] = {
     let mut steps = burst::<13>(8, SGR_SCROLL_DOWN);
     let mut i = 10;
@@ -155,18 +136,15 @@ pub const G7_OVERSCROLL: [WheelStep; 13] = {
     }
     steps
 };
-/// G9a mux re-chunk 1:1: 8 single reports 55ms apart (tmux re-emitting one
-/// event per notch; 55ms > the 30ms ept=1 trackpad-detect window → never
-/// promotes to trackpad mid-stream).
+/// G9a mux re-chunk 1:1: 8 single reports 55ms apart (tmux re-emitting one event per notch).
+/// 55ms is past the 30ms ept=1 trackpad-detect window, so the stream never promotes to trackpad mid-stream.
 pub const G9A_MUX_SINGLES: [WheelStep; 8] = burst::<8>(55, SGR_SCROLL_UP);
-/// G9b mux re-chunk batch: 8 notches 55ms apart × 3 back-to-back events
-/// (tmux passing through an inner ept=3 chunking, re-timed).
+/// G9b mux re-chunk batch: 8 notches 55ms apart × 3 back-to-back events (tmux passing through an inner ept=3 chunking, re-timed).
 pub const G9B_MUX_BATCH: [WheelStep; 24] = notch_train::<24>(3, 55, SGR_SCROLL_UP);
-/// G10 ambiguous slow roll: 12 reports 40ms apart — inside the vscode-embed
-/// 60ms trackpad-detect window, outside the default 30ms one.
+/// G10 ambiguous slow roll: 12 reports 40ms apart, inside the vscode-embed 60ms trackpad-detect window but outside the default 30ms one.
 pub const G10_AMBIGUOUS_SLOW: [WheelStep; 12] = burst::<12>(40, SGR_SCROLL_UP);
-/// G11 carry: one notch, a 120ms wait (> `STREAM_GAP_MS` → finalize), one
-/// notch — the sub-line carry handoff across same-direction streams.
+/// G11 carry: one notch, a 120ms wait (past `STREAM_GAP_MS`, so a finalize), then one notch.
+/// It exercises the sub-line carry passing from one same-direction stream to the next.
 pub const G11_CARRY_EPT3: [WheelStep; 6] = notch_train::<6>(3, 120, SGR_SCROLL_UP);
 pub const G11_CARRY_EPT1: [WheelStep; 2] = burst::<2>(120, SGR_SCROLL_UP);
 
@@ -180,8 +158,7 @@ pub enum GestureId {
     G5GhosttyDup,
     G6Flip,
     G7Overscroll,
-    /// G2's step table replayed while the turn is still streaming
-    /// (`SessionKind::Streaming`); the shape lives in the session, not here.
+    /// G2's step table replayed while the turn is still streaming (`SessionKind::Streaming`); the shape lives in the session, not here.
     G8MidStreamTrain,
     G9aMuxSingles,
     G9bMuxBatch,
@@ -190,7 +167,7 @@ pub enum GestureId {
 }
 
 impl GestureId {
-    /// Every gesture, for exhaustive table sweeps (tests, the A13 runner).
+    /// Every gesture, for exhaustive table sweeps (tests, the matrix runner).
     pub const ALL: [GestureId; 12] = [
         GestureId::G1Notch,
         GestureId::G2NotchTrain,
@@ -207,9 +184,8 @@ impl GestureId {
     ];
 
     /// Step table for this gesture on a brand with `ept` events per notch.
-    /// Only the notch-based gestures (G1/G2/G8/G11) vary by class; the rest
-    /// are fixed event shapes (G9b is deliberately 3-per-notch even on the
-    /// ept=1 mux profile — it simulates the mux passing re-chunked input).
+    /// Only the notch-based gestures (G1/G2/G8/G11) vary by class; the rest are fixed event shapes.
+    /// G9b stays 3-per-notch even on the ept=1 mux profile: it simulates the mux passing re-chunked input.
     pub fn steps(self, ept: u16) -> &'static [WheelStep] {
         let ept3 = ept >= 2;
         match self {
@@ -245,9 +221,8 @@ impl GestureId {
         }
     }
 
-    /// Streams (finalize records) this gesture produces: 1, plus one per
-    /// direction flip or >`STREAM_GAP_MS` intra-gesture pause. The A13
-    /// runner's `wait_for_finalize_count` target.
+    /// Streams (finalize records) this gesture produces: 1, plus one per direction flip or intra-gesture pause over `STREAM_GAP_MS`.
+    /// The runner uses this as its `wait_for_finalize_count` target.
     pub fn expected_streams(self) -> usize {
         match self {
             GestureId::G6Flip | GestureId::G7Overscroll | GestureId::G11Carry => 2,
@@ -256,7 +231,7 @@ impl GestureId {
     }
 }
 
-/// `(up, down)` report counts — direction-sum test primitive.
+/// `(up, down)` report counts, used by the direction-sum tests.
 pub fn direction_counts(steps: &[WheelStep]) -> (usize, usize) {
     let up = steps.iter().filter(|s| s.button == SGR_SCROLL_UP).count();
     (up, steps.len() - up)
@@ -266,8 +241,7 @@ pub fn direction_counts(steps: &[WheelStep]) -> (usize, usize) {
 mod tests {
     use super::*;
 
-    /// Streams split on gaps > STREAM_GAP_MS or direction flips — recompute
-    /// from the table and compare to the declared `expected_streams`.
+    /// Streams split on gaps over STREAM_GAP_MS or on direction flips; this recomputes the count from the table to compare with `expected_streams`.
     fn streams_in(steps: &[WheelStep]) -> usize {
         let mut streams = 1;
         for pair in steps.windows(2) {
@@ -303,7 +277,7 @@ mod tests {
             let expected = if i > 0 && i % 3 == 0 { 50 } else { 0 };
             assert_eq!(step.pre_delay_ms, expected, "G2 ept3 step {i}");
         }
-        // G9b: same shape at 55ms — under the 80ms gap, one stream.
+        // G9b: same shape at 55ms (under the 80ms gap, one stream)
         let notch_gaps = G9B_MUX_BATCH
             .iter()
             .filter(|s| s.pre_delay_ms == 55)
@@ -324,10 +298,8 @@ mod tests {
 
     #[test]
     fn jerk_head_blocks_promotion_and_tail_decays_monotonically() {
-        // Anti-promotion head: the first ept=3 tick must complete strictly
-        // after the 12ms wheel-promotion window even with zero jitter
-        // (sleeps only stretch), or PTY batching wheel-promotes the burst
-        // and the finalize re-price under test never happens.
+        // Anti-promotion head: even with zero jitter (sleeps only stretch), the first ept=3 tick must complete strictly after the 12ms window
+        // Otherwise PTY batching wheel-promotes the burst and the finalize re-price under test never happens
         let head_span: u64 = G4_JERK[..3].iter().map(|s| s.pre_delay_ms).sum();
         assert!(head_span > WHEEL_TICK_DETECT_MAX_MS);
 
@@ -337,16 +309,14 @@ mod tests {
             tail.windows(2).all(|w| w[0] < w[1]),
             "strictly decelerating"
         );
-        // Coast window: every tail gap opens ≥2 empty 16ms cadence slots so
-        // the dense backlog drains as events_since_flush == 0 flushes.
+        // Coast window: every tail gap opens at least two empty 16ms cadence slots so the dense backlog drains as events_since_flush == 0 flushes
         assert!(tail.iter().all(|&gap| gap >= 2 * REDRAW_CADENCE_MS));
         assert!(G4_JERK[3..60].iter().all(|s| s.pre_delay_ms == 0));
     }
 
     #[test]
     fn delays_agree_with_stream_gap_thresholds() {
-        // Single-stream gestures never pause past the 80ms finalize gap and
-        // never flip; multi-stream ones split exactly as declared.
+        // Single-stream gestures never pause past the 80ms finalize gap and never flip; multi-stream ones split exactly as declared
         for gesture in GestureId::ALL {
             for ept in [1u16, 3] {
                 let steps = gesture.steps(ept);

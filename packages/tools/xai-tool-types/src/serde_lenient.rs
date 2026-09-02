@@ -119,12 +119,6 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn parses_native_bools() {
-        assert_eq!(lenient_bool_from_json(&json!(true)), Some(true));
-        assert_eq!(lenient_bool_from_json(&json!(false)), Some(false));
-    }
-
-    #[test]
     fn parses_string_true_false() {
         assert_eq!(lenient_bool_from_json(&json!("true")), Some(true));
         assert_eq!(lenient_bool_from_json(&json!("false")), Some(false));

@@ -42,9 +42,8 @@ fn response_without_usage() -> ConversationResponse {
     }
 }
 
-/// A reasoning-capable Responses turn reports the live context after its output
-/// has already been included. Persisting that output must not add it again to
-/// the context sent to the pager or the pre-sampling compaction gate.
+/// A reasoning-capable Responses turn reports the live context after its output has already been included.
+/// Persisting that output must not add it again to the context sent to the pager or the pre-sampling compaction gate.
 #[tokio::test(flavor = "current_thread")]
 async fn response_reasoning_does_not_inflate_model_reported_context() {
     let local = tokio::task::LocalSet::new();
@@ -187,8 +186,8 @@ async fn response_without_usage_keeps_model_output_as_estimated_growth() {
                     .any(|item| matches!(item, ConversationItem::Reasoning(_))),
                 "reasoning must still be persisted",
             );
-            // Reasoning: encrypted-only, base64-corrected: 4000*3/4/4 = 750.
-            // Assistant: 4000/4 = 1000.
+            // The encrypted-only reasoning estimates at 4000*3/4/4 = 750 after the base64 correction
+            // The assistant text estimates at 4000/4 = 1000
             assert_eq!(
                 actor.chat_state_handle.get_estimated_total_tokens().await,
                 101_750,
@@ -198,10 +197,9 @@ async fn response_without_usage_keeps_model_output_as_estimated_growth() {
         .await;
 }
 
-/// `record_response_token_usage` must update `chat_state.total_tokens`
-/// to the model-reported value. Without this call, `total_tokens`
-/// stays frozen at the seed from `ChatState::new`, freezing
-/// `/context` and corrupting resume restore (the original bug).
+/// `record_response_token_usage` must update `chat_state.total_tokens` to the model-reported value.
+/// Without this call, `total_tokens` stays frozen at the seed from `ChatState::new`.
+/// That freezes `/context` and corrupts resume restore (the original bug).
 #[tokio::test(flavor = "current_thread")]
 async fn updates_chat_state_total_tokens_from_response_usage() {
     let local = tokio::task::LocalSet::new();
@@ -258,11 +256,9 @@ async fn preserves_total_tokens_when_response_has_no_usage() {
         .await;
 }
 
-/// Wire contract the pager + TUI renderers depend on:
-/// `build_session_info().context.used` must reflect the model-reported
-/// `total_tokens` after a turn, and `usage_pct` / `free_tokens` /
-/// `message_tokens` must be server-computed (not derived by the renderer
-/// via subtraction).
+/// The wire contract the pager and TUI renderers depend on.
+/// `build_session_info().context.used` must reflect the model-reported `total_tokens` after a turn.
+/// `usage_pct`, `free_tokens`, and `message_tokens` must be server-computed, not derived by the renderer via subtraction.
 #[tokio::test(flavor = "current_thread")]
 async fn build_session_info_used_reflects_recorded_response() {
     let local = tokio::task::LocalSet::new();
@@ -273,12 +269,10 @@ async fn build_session_info_used_reflects_recorded_response() {
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
 
-            // Push a small non-system fixture (user + assistant + tool
-            // result). Without non-system items `message_tokens` would
-            // be 0 and the Bug F regression could slip through this
-            // assertion. Bytes/4 of these strings is small but >0.
-            // The trailing `_and_ack` flushes the actor mailbox so the
-            // subsequent query sees the writes.
+            // Push a small non-system fixture (user, assistant, and tool result)
+            // Without non-system items `message_tokens` would be 0 and the regression guard below would pass vacuously
+            // Bytes/4 of these strings is small but above zero
+            // The trailing `_and_ack` flushes the actor mailbox so the subsequent query sees the writes
             actor
                 .chat_state_handle
                 .push_assistant_response(ConversationItem::assistant("hi there hi there hi there"));
@@ -298,13 +292,12 @@ async fn build_session_info_used_reflects_recorded_response() {
             let info = actor.build_session_info().await;
             assert_eq!(info.context.used, 120_000);
             assert_eq!(info.context.total, 256_000);
-            // Server-computed: renderer no longer derives these.
+            // Server-computed: the renderer no longer derives these
             assert_eq!(info.context.free_tokens, 256_000 - 120_000);
-            // 120_000 / 256_000 = 0.46875 -> 47 after rounding.
+            // 120_000 / 256_000 = 0.46875, which rounds to 47
             assert_eq!(info.context.usage_pct, 47);
-            // Bug F regression guard: bytes/4 of the non-system items
-            // must be > 0. Subtraction-based formulas saturated this to
-            // zero; the direct sum returns the real estimate.
+            // Regression guard: bytes/4 of the non-system items must be above zero
+            // Subtraction-based formulas saturated this to zero; the direct sum returns the real estimate
             assert!(
                 info.context.message_tokens > 0,
                 "message_tokens should reflect non-system items, got {}",
@@ -318,15 +311,10 @@ async fn build_session_info_used_reflects_recorded_response() {
         .await;
 }
 
-/// Shell sourcing seam for the fingerprint display gate:
-/// `build_session_info` must populate `SessionInfoData.show_model_fingerprint`
-/// from the catalog entry for the session's current model. Guards the slug-vs-key
-/// bug: the catalog map is keyed by the config key (`"custom-catalog-id"`), which
-/// differs from the routing slug (`"test"`, the harness sampling model) that
-/// `build_session_info` reads from the sampling config. A direct `.get(slug)` would
-/// miss the entry and wrongly yield false. The flag is the sole control — the
-/// client keeps no built-in per-slug default — so this is the only thing that
-/// can turn checkpoint identity on.
+/// `build_session_info` must populate `SessionInfoData.show_model_fingerprint` from the catalog entry for the session's current model.
+/// The catalog map is keyed by the config key (`"custom-catalog-id"`), not by the routing slug (`"test"`, the harness sampling model).
+/// `build_session_info` reads the slug from the sampling config, so a direct `.get(slug)` would miss the entry and wrongly yield false.
+/// The flag is the sole control (the client keeps no built-in per-slug default), so this is the only thing that can turn checkpoint identity on.
 #[tokio::test(flavor = "current_thread")]
 async fn build_session_info_sources_show_model_fingerprint_from_catalog() {
     use crate::agent::config::{ModelEntry, ModelInfo};
@@ -339,8 +327,8 @@ async fn build_session_info_sources_show_model_fingerprint_from_catalog() {
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
 
-            // Catalog KEY ("custom-catalog-id") differs from the session's routing
-            // SLUG ("test", the harness sampling model). Flag OFF → false.
+            // The catalog KEY ("custom-catalog-id") differs from the session's routing SLUG ("test", the harness sampling model)
+            // The flag starts off, so the lookup must yield false
             let mut entry = ModelEntry {
                 info: ModelInfo::fallback("test"),
                 api_key: None,
@@ -358,9 +346,8 @@ async fn build_session_info_sources_show_model_fingerprint_from_catalog() {
                 "non-coding slug without the catalog flag must yield false",
             );
 
-            // Same entry with the flag ON → true. Exercises slug→catalog-key
-            // resolution end-to-end; a direct slug `.get("test")` would miss the
-            // entry keyed "custom-catalog-id" and regress to false.
+            // The same entry with the flag ON must yield true, exercising slug-to-catalog-key resolution end-to-end
+            // A direct slug `.get("test")` would miss the entry keyed "custom-catalog-id" and regress to false
             entry.info.show_model_fingerprint = true;
             actor
                 .models_manager
@@ -373,9 +360,8 @@ async fn build_session_info_sources_show_model_fingerprint_from_catalog() {
         .await;
 }
 
-/// `record_response_token_usage` must also stash the per-turn `TokenUsage`
-/// in chat state so the next `PromptResponse._meta` can carry input/output
-/// token counts to the bot's telemetry layer.
+/// `record_response_token_usage` must also stash the per-turn `TokenUsage` in chat state.
+/// The next `PromptResponse._meta` carries the input/output token counts to the bot's telemetry.
 #[tokio::test(flavor = "current_thread")]
 async fn stashes_per_turn_usage_in_chat_state() {
     let local = tokio::task::LocalSet::new();
@@ -395,7 +381,7 @@ async fn stashes_per_turn_usage_in_chat_state() {
                     .is_none()
             );
 
-            // Use existing fixture: total=200_000 → prompt=199_950, completion=50.
+            // The fixture splits total 200_000 into prompt 199_950 and completion 50
             actor.record_response_token_usage(&response_with_usage(200_000), None);
 
             let stashed = actor

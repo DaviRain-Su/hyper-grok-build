@@ -263,7 +263,7 @@ impl ScheduledTask {
             now
         };
         Self {
-            id: uuid::Uuid::now_v7().to_string().replace('-', ""),
+            id: uuid::Uuid::now_v7().to_string(),
             interval_secs,
             prompt,
             recurring,
@@ -431,26 +431,10 @@ mod tests {
 
         assert_ne!(first.id, second.id);
         for id in [&first.id, &second.id] {
-            assert_eq!(id.len(), 32);
-            assert!(!id.contains('-'));
             let parsed = uuid::Uuid::parse_str(id).unwrap();
             assert_eq!(parsed.get_version_num(), 7);
+            assert_eq!(parsed.to_string(), *id);
         }
-    }
-
-    #[test]
-    fn full_uuid_distinguishes_same_millisecond_values() {
-        let first = uuid::Uuid::parse_str("01a022ca-4f32-7000-8000-000000000001")
-            .unwrap()
-            .simple()
-            .to_string();
-        let second = uuid::Uuid::parse_str("01a022ca-4f32-7000-8000-000000000002")
-            .unwrap()
-            .simple()
-            .to_string();
-
-        assert_eq!(first.split_at(12).0, second.split_at(12).0);
-        assert_ne!(first, second);
     }
 
     #[test]

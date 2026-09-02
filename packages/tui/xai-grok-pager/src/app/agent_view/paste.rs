@@ -393,6 +393,11 @@ impl AgentView {
         &mut self,
         text: &str,
     ) -> Option<(InputOutcome, crate::app::actions::ClipboardPasteCompletion)> {
+        // Over SSH, Finder `file://` URLs point at the client machine and
+        // must not be classified as remote paths. Tests create files on this
+        // process's filesystem (including SSH CI hosts) and must still run
+        // the classifier.
+        #[cfg(not(test))]
         if crate::terminal::terminal_context().is_ssh {
             return None;
         }

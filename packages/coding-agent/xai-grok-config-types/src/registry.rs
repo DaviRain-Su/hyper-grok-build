@@ -1,8 +1,7 @@
 //! The registry of boolean `[features]` keys.
 //!
-//! One row per feature spells it on every surface that can set it, and
-//! [`Feature::resolve`] is the only place precedence lives. A key needing
-//! different precedence keeps its own resolver, as `remote_fetch` does.
+//! One row per feature spells it on every surface that can set it, and [`Feature::resolve`] is the only place precedence lives.
+//! A key needing different precedence keeps its own resolver, as `remote_fetch` does.
 
 use crate::{
     RemoteSettings,
@@ -46,6 +45,9 @@ pub enum Feature {
     SubagentWorktreeSnapshot,
     /// Send model-authored follow-ups to an owned active descendant.
     ActiveAgentMessages,
+    RepoStatusInSystemPrompt,
+    /// Consolidated panel dock above the prompt (Subagents / Tasks / Watchers / Queued).
+    Dock,
 }
 
 /// How one feature is written on each surface it can be set from.
@@ -58,8 +60,7 @@ pub struct FeatureSpec {
     pub default_enabled: bool,
     /// `None` where the key has no remote tier, so adding one is a deliberate edit.
     pub remote: Option<fn(&RemoteSettings) -> Option<bool>>,
-    // No managed tier: `config` is the loader's merge, where a user's
-    // config.toml already beats managed_config.toml.
+    // No managed tier: `config` is the loader's merge, where a user's config.toml already beats managed_config.toml
 }
 
 /// What each tier had to say about one feature.
@@ -220,6 +221,22 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: false,
         remote: Some(|settings| settings.active_agent_messages_enabled),
     },
+    FeatureSpec {
+        id: Feature::RepoStatusInSystemPrompt,
+        key: "repo_status_in_system_prompt",
+        path: "features.repo_status_in_system_prompt",
+        env: "GROK_REPO_STATUS_IN_SYSTEM_PROMPT",
+        default_enabled: true,
+        remote: Some(|settings| settings.repo_status_in_system_prompt),
+    },
+    FeatureSpec {
+        id: Feature::Dock,
+        key: "dock",
+        path: "features.dock",
+        env: "GROK_DOCK",
+        default_enabled: false,
+        remote: Some(|settings| settings.dock_enabled),
+    },
 ];
 
 impl Feature {
@@ -248,8 +265,7 @@ impl Feature {
         read(settings?)
     }
 
-    /// Reads like `off (a requirements.toml pin)`. Resolves rather than taking a
-    /// resolution, so a reason cannot name another feature's tiers.
+    /// Reads like `off (a requirements.toml pin)`. It resolves rather than taking a resolution, so a reason cannot name another feature's tiers.
     pub fn off_reason(self, sources: FeatureSources) -> Option<String> {
         let resolved = self.resolve(sources);
         if resolved.value {

@@ -128,8 +128,7 @@ fn fork_filter_strips_incomplete_tool_turn() {
 fn fork_filter_keeps_turn_with_reasoning_between_user_and_assistant() {
     use xai_grok_sampling_types::conversation::*;
 
-    // Reasoning between the user query and the assistant must not end the
-    // turn scan.
+    // Reasoning between the user query and the assistant must not end the turn scan
     let mut items = vec![
         ConversationItem::system("sys"),
         ConversationItem::user("q"),
@@ -150,8 +149,7 @@ fn fork_filter_keeps_turn_with_reasoning_between_user_and_assistant() {
 fn fork_filter_keeps_multi_tool_turn_with_reasoning_between_results() {
     use xai_grok_sampling_types::conversation::*;
 
-    // Reasoning between the tool results must not hide the second result
-    // from the completeness scan.
+    // Reasoning between the tool results must not hide the second result from the completeness scan
     let mut items = vec![
         ConversationItem::system("sys"),
         ConversationItem::user("q"),
@@ -199,9 +197,8 @@ fn fork_filter_keeps_multi_tool_turn_with_reasoning_between_results() {
 fn fork_filter_drops_trailing_incomplete_goal_turn_after_reasoning() {
     use xai_grok_sampling_types::conversation::*;
 
-    // The in-flight /goal turn is a trailing bare user with no assistant; it
-    // must be dropped even though a Reasoning sibling precedes the prior
-    // assistant.
+    // The /goal turn is still running: a trailing user message with no assistant reply
+    // It must be dropped even though a Reasoning item sits before the prior assistant
     let mut items = vec![
         ConversationItem::system("sys"),
         ConversationItem::user("q"),

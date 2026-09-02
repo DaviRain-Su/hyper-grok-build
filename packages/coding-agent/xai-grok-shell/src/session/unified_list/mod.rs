@@ -43,24 +43,19 @@ static FACET_REGISTRY: LazyLock<FacetRegistry> = LazyLock::new(build_facet_regis
 pub(crate) fn facet_registry() -> &'static FacetRegistry {
     &FACET_REGISTRY
 }
-/// Hard-off in release builds so they can't enable the
-/// conversations lane via env.
+/// Hard-off in release builds so they can't enable the conversations lane via env.
 pub(crate) fn conversations_lane_enabled() -> bool {
     false
 }
-/// Env lane (desktop `GROK_SESSION_LIST_CONVERSATIONS`) OR process-wide
-/// `--chat` (`GROK_CHAT_MODE`); hard-off in release builds.
+/// Env lane (desktop `GROK_SESSION_LIST_CONVERSATIONS`) OR process-wide `--chat` (`GROK_CHAT_MODE`); hard-off in release builds.
 /// The single predicate `MvpAgent::conversations_client()` keys on.
 pub fn conversations_lane_active() -> bool {
     conversations_lane_enabled() || crate::agent::chat_modes::process_chat_mode_enabled()
 }
-/// Parse `x.ai/session/list` params and, under process-wide chat mode, force
-/// the conversations-only `kind` facet (see [`force_kind_chat`]).
+/// Parse `x.ai/session/list` params and, under process-wide chat mode, force the conversations-only `kind` facet (see [`force_kind_chat`]).
 ///
-/// Client-sent `kind` of `chat`/`build` is honored only behind
-/// `feature = "local-workspace"` (pager welcome Local history). Chat-only
-/// Desktop/ACP agents keep the force-rewrite so `kind: ["build"]` cannot
-/// surface Build rows.
+/// Client-sent `kind` of `chat`/`build` is honored only behind `feature = "local-workspace"` (pager welcome Local history).
+/// Chat-only Desktop/ACP agents keep the force-rewrite so `kind: ["build"]` cannot surface Build rows.
 pub fn parse_list_req(raw: &str) -> Result<ListReq, serde_json::Error> {
     let mut req: ListReq = serde_json::from_str(raw)?;
     if crate::agent::chat_modes::process_chat_mode_enabled() {
@@ -109,9 +104,8 @@ pub struct ListReq {
     pub limit: Option<usize>,
     #[serde(default)]
     pub cursor: Option<String>,
-    /// Which directories the listing draws from. The wire carries the original
-    /// `allowRelax` boolean; `Only` is reachable only in code (ACP
-    /// `session/list`), so "exact" and "relax" cannot be requested together.
+    /// Which directories the listing draws from. The wire carries the original `allowRelax` boolean.
+    /// `Only` is reachable only in code (ACP `session/list`), so "exact" and "relax" cannot be requested together.
     /// A relaxed response sets `_meta["x.ai/listScope"]`, re-evaluated per page.
     #[serde(
         default,
@@ -120,15 +114,14 @@ pub struct ListReq {
     )]
     pub cwd_scope: CwdScope,
     /// `session_kind=headless` policy: `"exclude"` | `"only"` | `"include"`.
-    /// Omission preserves the legacy inclusive behavior; unknown explicit
-    /// values fail closed to exclude.
+    /// Omission preserves the legacy inclusive behavior; unknown explicit values fail closed to exclude.
     #[serde(default)]
     pub headless: Option<String>,
     #[serde(default, rename = "_meta")]
     pub meta: Option<serde_json::Value>,
 }
-/// Directory scope the returned sessions were drawn from. Wire form is the
-/// `as_str` value (`x.ai/listScope`), so no serde derive is needed.
+/// Directory scope the returned sessions were drawn from.
+/// Wire form is the `as_str` value (`x.ai/listScope`), so no serde derive is needed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ListScope {
     /// Scoped to the request cwd.
@@ -203,15 +196,12 @@ fn value_list(v: &serde_json::Value) -> Vec<serde_json::Value> {
 }
 /// Rewrite `req` so the `kind` facet filter is exactly `["chat"]`.
 ///
-/// Used when process chat mode is on **and** the client omitted a recognized
-/// `kind` facet (see [`parse_list_req`]). Welcome history sends an explicit
-/// `kind` (`chat` / `build`) that must not be rewritten. Other facet filters
-/// and `_meta` keys are left untouched.
+/// Used when process chat mode is on **and** the client omitted a recognized `kind` facet (see [`parse_list_req`]).
+/// Welcome history sends an explicit `kind` (`chat` / `build`) that must not be rewritten.
 pub(crate) fn force_kind_chat(req: &mut ListReq) {
     force_kind(req, SessionKind::Chat);
 }
-/// REPLACES any client-sent `kind` allow-list (a union would re-enable the
-/// excluded lanes); every other facet filter and `_meta` key is untouched.
+/// REPLACES any client-sent `kind` allow-list (a union would re-enable the excluded lanes); every other facet filter and `_meta` key is untouched.
 pub(crate) fn force_kind(req: &mut ListReq, kind: SessionKind) {
     let mut meta = match req.meta.take() {
         Some(serde_json::Value::Object(map)) => map,
@@ -440,9 +430,8 @@ fn relax_eligible(gate: RelaxGate) -> bool {
 fn lane_has_no_messages(rows: &[UnifiedRow]) -> bool {
     rows.iter().all(|r| r.legacy.num_messages == 0)
 }
-/// Policy emptied this cwd's local lane (`retain_session_lanes` dropped every
-/// remaining row). A partial drop that still leaves interactive husks must
-/// not block the stranded-cwd widen.
+/// Policy emptied this cwd's local lane (`retain_session_lanes` dropped every remaining row).
+/// A partial drop that still leaves interactive husks must not block the stranded-cwd widen.
 fn policy_emptied_cwd_lane(dropped: bool, remaining: &[UnifiedRow]) -> bool {
     dropped && remaining.is_empty()
 }
@@ -482,8 +471,8 @@ async fn maybe_relax(
         None => (local_rows, ListScope::Cwd),
     }
 }
-/// Re-merge the registry page with a repo-scoped local scan (all directories
-/// when the cwd is not a repo); relax only when it reveals a messaged session.
+/// Re-merge the registry page with a repo-scoped local scan (all directories when the cwd is not a repo).
+/// Relax only when it reveals a messaged session.
 fn relax_rows(
     relax: RelaxInputs,
     mut all_local: Vec<crate::session::persistence::Summary>,
@@ -516,8 +505,7 @@ fn excludes_conversations(
             _ => false,
         }
 }
-/// Mirror of [`excludes_conversations`]: `true` when a non-empty `kind`
-/// allow-list does not include `"build"`, so the local lane can be skipped.
+/// Mirror of [`excludes_conversations`]: `true` when a non-empty `kind` allow-list does not include `"build"`, so the local lane can be skipped.
 fn excludes_build(filters: &BTreeMap<String, Vec<serde_json::Value>>) -> bool {
     match filters.get(KIND_FACET_KEY) {
         Some(allowed) if !allowed.is_empty() => !allowed
@@ -787,8 +775,7 @@ mod tests {
             HeadlessPolicy::Exclude,
         ));
     }
-    /// The forced `kind` REPLACES a client-sent `kind: ["build"]` (never
-    /// unions), so the local lane stays excluded.
+    /// The forced `kind` REPLACES a client-sent `kind: ["build"]` (never unions), so the local lane stays excluded.
     #[test]
     fn forced_kind_replaces_client_build_filter() {
         let mut req = ListReq {
@@ -884,8 +871,7 @@ mod tests {
         });
         addr
     }
-    /// A client-sent `kind: ["build"]` rewritten by [`force_kind_chat`]
-    /// yields conversations only.
+    /// A client-sent `kind: ["build"]` rewritten by [`force_kind_chat`] yields conversations only.
     #[tokio::test]
     #[serial_test::serial]
     async fn forced_kind_serves_conversations_only() {
@@ -928,8 +914,7 @@ mod tests {
         );
         assert_eq!(result.conversations_partial, None);
     }
-    /// A degraded conversations lane (no OAuth) surfaces through
-    /// `conversations_partial` instead of failing the list.
+    /// A degraded conversations lane (no OAuth) is reported through `conversations_partial` instead of failing the list.
     #[tokio::test]
     #[serial_test::serial]
     async fn degraded_conversations_lane_reports_no_oauth() {
@@ -946,8 +931,7 @@ mod tests {
         assert!(result.rows.is_empty());
         assert_eq!(result.conversations_partial, Some(PartialReason::NoOauth));
     }
-    /// Build-mode canary: with no conversations client the lane is skipped —
-    /// not degraded.
+    /// Build-mode canary: with no conversations client the lane is skipped, not degraded.
     #[tokio::test]
     async fn non_chat_list_without_client_skips_conversations_lane() {
         let req = ListReq {
@@ -978,8 +962,7 @@ mod tests {
             assert!(!conversations_lane_enabled());
         }
     }
-    /// Truth table for `conversations_lane_active`: desktop env lane OR
-    /// process chat mode, hard-off in release builds.
+    /// Truth table for `conversations_lane_active`: desktop env lane OR process chat mode, hard-off in release builds.
     #[test]
     #[serial_test::serial]
     fn conversations_lane_active_truth_table() {
@@ -1073,9 +1056,8 @@ mod tests {
             }
         }
     }
-    /// Wire pin for the cross-crate `x.ai/partial` envelope the pager parses:
-    /// the serialized reason strings must not drift (the pager maps unknown
-    /// reasons to a generic retry notice, masking a rename).
+    /// Wire pin for the cross-crate `x.ai/partial` envelope the pager parses: the serialized reason strings must not drift.
+    /// The pager maps unknown reasons to a generic retry notice, masking a rename.
     #[test]
     fn ext_list_response_serializes_partial_reasons() {
         for (reason, wire) in [
@@ -1109,8 +1091,7 @@ mod tests {
             serde_json::json!({ "conversations": false })
         );
     }
-    /// Receive-side wire pin: a field rename would silently drop the pager's
-    /// `allowRelax`.
+    /// Receive-side wire pin: a field rename would silently drop the pager's `allowRelax`.
     #[test]
     fn list_req_deserializes_allow_relax_key() {
         let req: ListReq = serde_json::from_str(r#"{"allowRelax": true}"#).expect("parse");
@@ -1131,7 +1112,6 @@ mod tests {
             HeadlessPolicy::Include
         );
     }
-    /// relax_rows scopes to the cwd's repo and relaxes only on a messaged session.
     #[test]
     fn relax_rows_scopes_to_repo_and_requires_messages() {
         use crate::session::persistence::Summary;

@@ -1,9 +1,7 @@
 //! Regression tests for the session-recap display-only invariant.
 //!
-//! A recap must NEVER mutate the model conversation — it is generated from a
-//! read-only snapshot and surfaced as a notification only. These tests lock
-//! that contract: after `handle_recap` returns, `get_conversation()` must be
-//! byte-identical to what it was before.
+//! A recap must NEVER mutate the model conversation: it is generated from a read-only snapshot and sent to the client as a notification only.
+//! These tests lock that contract: after `handle_recap` returns, `get_conversation()` must be byte-identical to what it was before.
 
 use super::support::*;
 use super::*;
@@ -314,8 +312,8 @@ async fn new_prompt_cancels_in_flight_recap_epoch() {
         .await;
 }
 
-/// `queue_input` for a real user prompt bumps epoch before any await so a
-/// LocalSet recap cannot commit after Prompt accept but before handle_prompt.
+/// `queue_input` for a real user prompt bumps the epoch before any await.
+/// A LocalSet recap therefore cannot commit after Prompt accept but before handle_prompt.
 #[tokio::test(flavor = "current_thread")]
 async fn queue_input_user_prompt_bumps_recap_epoch() {
     let local = tokio::task::LocalSet::new();
@@ -339,7 +337,7 @@ async fn queue_input_user_prompt_bumps_recap_epoch() {
         .await;
 }
 
-/// Synthetic auto-wake must not cancel an in-flight recap.
+/// A synthetic `queue_input`, sent when a background task completes, must not cancel an in-flight recap.
 #[tokio::test(flavor = "current_thread")]
 async fn queue_input_synthetic_does_not_bump_recap_epoch() {
     let local = tokio::task::LocalSet::new();
@@ -390,7 +388,7 @@ async fn skipped_auto_recap_leaves_in_flight_claim() {
         .await;
 }
 
-/// Production commit branch: epoch bump mid-flight → no watermark, in-flight cleared.
+/// When the epoch bumps mid-flight, `try_commit_recap` advances no watermark and still clears `recap_in_flight`.
 #[tokio::test(flavor = "current_thread")]
 async fn try_commit_recap_cancelled_clears_in_flight_without_watermark() {
     let local = tokio::task::LocalSet::new();
@@ -423,7 +421,7 @@ async fn try_commit_recap_cancelled_clears_in_flight_without_watermark() {
         .await;
 }
 
-/// Live epoch commits watermark and clears in-flight (emit path may proceed).
+/// A live epoch commits the watermark and clears `recap_in_flight`, so the emit path may proceed.
 #[tokio::test(flavor = "current_thread")]
 async fn try_commit_recap_live_advances_watermark() {
     let local = tokio::task::LocalSet::new();
@@ -484,7 +482,7 @@ async fn drop_recap_after_cancel_auto_silent_manual_unavailable() {
         .await;
 }
 
-/// Drain whether a `SessionRecap` update was emitted.
+/// Drain the persistence channel and report whether a `SessionRecap` update was emitted.
 fn drained_session_recap(rx: &mut tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>) -> bool {
     let mut saw = false;
     while let Ok(msg) = rx.try_recv() {
@@ -539,9 +537,9 @@ async fn auto_recap_below_min_turns_is_noop_and_display_only() {
         .await;
 }
 
-/// A manual `/recap` passes the gate (when a new main turn exists) and attempts
-/// generation; the test's base_url is unreachable so the model call fails.
-/// Either way the conversation must be byte-identical afterwards — display-only.
+/// A manual `/recap` passes the gate (when a new main turn exists) and attempts generation.
+/// The test's base_url is unreachable so the model call fails.
+/// Either way the conversation must be byte-identical afterwards: display-only.
 #[tokio::test(flavor = "current_thread")]
 async fn manual_recap_never_mutates_conversation() {
     let local = tokio::task::LocalSet::new();
@@ -576,8 +574,7 @@ async fn manual_recap_never_mutates_conversation() {
         .await;
 }
 
-/// Drain the persistence channel and report whether a `SessionRecapUnavailable`
-/// xAI update was emitted.
+/// Drain the persistence channel and report whether a `SessionRecapUnavailable` xAI update was emitted.
 fn drained_recap_unavailable(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
 ) -> bool {
@@ -595,11 +592,9 @@ fn drained_recap_unavailable(
     saw
 }
 
-/// A manual `/recap` on a brand-new session (no main turns yet) must NOT strand
-/// the client's loading spinner: the recap gate skips before any model call, but
-/// instead of silently dropping, the shell emits `SessionRecapUnavailable` so
-/// the client can clear it. Deterministic (no-network) repro of the
-/// forever-spinner bug.
+/// A manual `/recap` on a brand-new session (no main turns yet) must NOT strand the client's loading spinner.
+/// The gate skips before any model call, but the shell emits `SessionRecapUnavailable` instead of dropping silently, so the client can clear it.
+/// This test reproduces, with no network, the bug where the spinner never cleared.
 #[tokio::test(flavor = "current_thread")]
 async fn manual_recap_with_no_turns_emits_unavailable() {
     let local = tokio::task::LocalSet::new();
@@ -611,7 +606,7 @@ async fn manual_recap_with_no_turns_emits_unavailable() {
                 tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
 
-            // No main (user) turns — the gate skips before any model call.
+            // No main (user) turns: the gate skips before any model call
             actor.chat_state_handle.replace_conversation(vec![]);
 
             actor.handle_recap(false).await;
@@ -624,9 +619,8 @@ async fn manual_recap_with_no_turns_emits_unavailable() {
         .await;
 }
 
-/// A manual `/recap` whose generation fails (the test's base_url is
-/// unreachable, so the prepare/model call errors) must also emit
-/// `SessionRecapUnavailable` rather than leaving the spinner running.
+/// A manual `/recap` whose generation fails must also emit `SessionRecapUnavailable` rather than leaving the spinner running.
+/// The test's base_url is unreachable, so the prepare/model call errors.
 #[tokio::test(flavor = "current_thread")]
 async fn manual_recap_generation_failure_emits_unavailable() {
     let local = tokio::task::LocalSet::new();
@@ -638,8 +632,7 @@ async fn manual_recap_generation_failure_emits_unavailable() {
                 tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
 
-            // One main (user) turn clears the recap gate, so the failure comes
-            // from the (unreachable) prepare/model call rather than the gate.
+            // One main (user) turn clears the recap gate, so the failure comes from the (unreachable) prepare/model call rather than the gate
             actor.chat_state_handle.replace_conversation(vec![
                 ConversationItem::system("you are a coding agent"),
                 ConversationItem::user("explain the borrow checker"),
@@ -656,9 +649,8 @@ async fn manual_recap_generation_failure_emits_unavailable() {
         .await;
 }
 
-/// When the recap model call is attempted (gate passes) but fails, we still
-/// persist a `RecapRequest` artifact (with `error` set) for offline replay —
-/// same idea as compaction request artifacts on failure.
+/// When the recap model call is attempted (gate passes) but fails, we still persist a `RecapRequest` artifact (with `error` set) for offline replay.
+/// Compaction persists its request artifacts on failure the same way.
 #[tokio::test(flavor = "current_thread")]
 async fn manual_recap_generation_failure_persists_request_artifact() {
     let local = tokio::task::LocalSet::new();
@@ -710,9 +702,8 @@ async fn manual_recap_generation_failure_persists_request_artifact() {
         .await;
 }
 
-/// An automatic recap below the turn gate stays silent — it shows no spinner,
-/// so it must NOT emit `SessionRecapUnavailable` (which would be wasted wire
-/// traffic and could clear an unrelated manual spinner on another client).
+/// An automatic recap below the turn gate stays silent: it shows no spinner, so it must NOT emit `SessionRecapUnavailable`.
+/// That emit would be wasted wire traffic and could clear an unrelated manual spinner on another client.
 #[tokio::test(flavor = "current_thread")]
 async fn auto_recap_gated_does_not_emit_unavailable() {
     let local = tokio::task::LocalSet::new();
@@ -724,8 +715,7 @@ async fn auto_recap_gated_does_not_emit_unavailable() {
                 tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
 
-            // One main turn (below the auto min-turns gate): the auto path is
-            // gated and shows no spinner, so it must stay silent.
+            // One main turn (below the auto min-turns gate): the auto path is gated and shows no spinner, so it must stay silent
             actor
                 .chat_state_handle
                 .replace_conversation(vec![ConversationItem::user("hi, nothing yet")]);
@@ -740,9 +730,8 @@ async fn auto_recap_gated_does_not_emit_unavailable() {
         .await;
 }
 
-/// Over-budget recap: the persisted `RecapRequest` is trimmed within budget and
-/// the conversation is left unmutated (display-only). Seeds an oversized item so
-/// the over-budget branch runs deterministically with no network.
+/// Over-budget recap: the persisted `RecapRequest` is trimmed within budget and the conversation is left unmutated (display-only).
+/// The test seeds an oversized item so the over-budget branch runs deterministically with no network.
 #[tokio::test(flavor = "current_thread")]
 async fn manual_recap_over_budget_trims_persisted_request_and_is_display_only() {
     let local = tokio::task::LocalSet::new();
@@ -752,12 +741,11 @@ async fn manual_recap_over_budget_trims_persisted_request_and_is_display_only() 
                 tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
             let (persistence_tx, mut persistence_rx) =
                 tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-            // window 8_000 => prompt_budget = 8_000 * 85 / 100 - 4_000 = 2_800.
+            // A window of 8_000 gives prompt_budget = 8_000 * 85 / 100 - 4_000 = 2_800
             const PROMPT_BUDGET: u64 = 8_000 * 85 / 100 - 4_000;
             let actor = create_test_actor(0, 8_000, 85, gateway_tx, persistence_tx).await;
 
-            // An oversized real user turn (~40 KB => ~10k est tokens) forces the
-            // over-budget branch regardless of the harness `total_tokens` arg.
+            // An oversized real user turn (~40 KB, about 10k estimated tokens) forces the over-budget branch regardless of the harness `total_tokens` arg
             actor.chat_state_handle.replace_conversation(vec![
                 ConversationItem::system("you are a coding agent"),
                 ConversationItem::user("x".repeat(40_000)),
@@ -774,8 +762,7 @@ async fn manual_recap_over_budget_trims_persisted_request_and_is_display_only() 
                 "an over-budget recap must not mutate the conversation"
             );
 
-            // The model call fails (unreachable base_url) → the error arm persists
-            // the (trimmed) request artifact.
+            // The model call fails (unreachable base_url), so the error arm persists the (trimmed) request artifact
             let mut saw_recap_request = false;
             while let Ok(msg) = persistence_rx.try_recv() {
                 if let PersistenceMsg::RecapRequest(artifact) = msg {
@@ -833,9 +820,8 @@ fn over_budget_recap_serializes_to_well_formed_messages_request() {
         arguments: std::sync::Arc::from("{}"),
     };
 
-    // Over-budget (window 8_000) conversation that ENDS in a tool run and carries
-    // reasoning; a valid interior tool pair sits behind a non-tool barrier so it
-    // survives the trim.
+    // An over-budget (window 8_000) conversation that ENDS in a tool run and carries reasoning
+    // A valid interior tool pair sits behind a non-tool barrier so it survives the trim
     let conv = vec![
         ConversationItem::system("you are a coding agent"),
         ConversationItem::user("o".repeat(60_000)), // oldest, dropped by trim
@@ -848,15 +834,14 @@ fn over_budget_recap_serializes_to_well_formed_messages_request() {
         ConversationItem::tool_result("c2", "z".repeat(40_000)),     // trailing run
     ];
 
-    // grok backend => strip_reasoning=false; the over-budget branch strips anyway.
+    // The grok backend sets `strip_reasoning` to false; the over-budget branch strips anyway
     let items = session_recap::budget_recap_items(conv, "system-reminder", false, 8_000);
     let req = ConversationRequest::from_items(items);
     let msg = xai_grok_sampling_types::build_messages_request(&req);
 
     assert!(msg.system.is_some(), "system prompt must be preserved");
 
-    // Flatten every content block across all messages (each message's content is
-    // a `Blocks` vec here).
+    // Flatten every content block across all messages (each message's content is a `Blocks` vec here)
     let all_blocks: Vec<ContentBlock> = msg
         .messages
         .iter()
@@ -866,7 +851,6 @@ fn over_budget_recap_serializes_to_well_formed_messages_request() {
         })
         .collect();
 
-    // Reasoning stripped: no thinking block anywhere.
     assert!(
         !all_blocks
             .iter()
@@ -903,8 +887,7 @@ fn over_budget_recap_serializes_to_well_formed_messages_request() {
     );
 }
 
-/// Recap wire shape: main-turn tools + `prompt_cache_key` = session id, so the
-/// request rides the parent turn's prefix cache instead of cold-prefilling.
+/// The recap sends the main turn's tools and the session id as `prompt_cache_key`, so it rides the parent turn's prefix cache.
 #[tokio::test(flavor = "current_thread")]
 async fn recap_request_rides_parent_prompt_cache() {
     use xai_grok_test_support::MockInferenceServer;
@@ -916,8 +899,7 @@ async fn recap_request_rides_parent_prompt_cache() {
                 tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
             let (persistence_tx, _prx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-            // Register a real tool so the "recap sends the main turn's tools"
-            // assertion is non-vacuous.
+            // Register a real tool so the "recap sends the main turn's tools" assertion is non-vacuous
             *actor.agent.borrow_mut() = test_agent_with_goal_tool().await;
 
             let server = MockInferenceServer::start().await.unwrap();
@@ -971,8 +953,8 @@ async fn recap_request_rides_parent_prompt_cache() {
         .await;
 }
 
-/// Hosted tools serialize into the token prefix on the Responses path, so a recap in a backend-search session must send the main turn's hosted
-/// tools or its prefix diverges and cold-misses the cache.
+/// Hosted tools serialize into the token prefix on the Responses path.
+/// A recap in a backend-search session must send the main turn's hosted tools or its prefix diverges and misses the cache.
 #[tokio::test(flavor = "current_thread")]
 async fn recap_request_sends_hosted_tools_under_backend_search() {
     use xai_grok_sampling_types::HostedTool;
@@ -1054,10 +1036,9 @@ async fn recap_request_sends_hosted_tools_under_backend_search() {
 
 // ── Turn-summary task lifecycle (bail / abort-and-respawn) ──────────────
 
-/// A queued follow-up promoted before the post-turn respawn fires is already
-/// running; a snapshot taken now would contain its user message. The entry
-/// gate on `current_prompt_id` bails — that turn's completion re-fires. The
-/// gate also stays inert when the feature is off.
+/// A queued follow-up promoted before the post-turn respawn fires is already running; a snapshot taken now would contain its user message.
+/// The entry gate on `current_prompt_id` bails; that turn's completion re-fires.
+/// The gate also stays inert when the feature is off.
 #[tokio::test(flavor = "current_thread")]
 async fn turn_summary_bails_when_newer_turn_already_running() {
     let local = tokio::task::LocalSet::new();
@@ -1101,9 +1082,8 @@ async fn turn_summary_bails_when_newer_turn_already_running() {
         .await;
 }
 
-/// A real user prompt aborts an in-flight summary generation — its result
-/// would describe a conversation the prompt is about to extend. (A newer
-/// completion aborts via `restart_turn_summary` the same way.)
+/// A real user prompt aborts an in-flight summary generation: its result would describe a conversation the prompt is about to extend.
+/// (A newer completion aborts via `restart_turn_summary` the same way.)
 #[tokio::test(flavor = "current_thread")]
 async fn new_prompt_aborts_in_flight_turn_summary() {
     let local = tokio::task::LocalSet::new();
@@ -1129,8 +1109,7 @@ async fn new_prompt_aborts_in_flight_turn_summary() {
         .await;
 }
 
-/// Happy path: a successful side-call persists the summary and broadcasts it
-/// transiently, then clears the task slot.
+/// Happy path: a successful side-call persists the summary and broadcasts it transiently, then clears the task slot.
 #[tokio::test(flavor = "current_thread")]
 async fn turn_summary_generate_persists_and_broadcasts() {
     use xai_grok_test_support::MockInferenceServer;
@@ -1211,7 +1190,7 @@ async fn turn_summary_generate_persists_and_broadcasts() {
                 );
                 let summary = update.get("summary").and_then(|v| v.as_str()).unwrap_or("");
                 assert!(!summary.is_empty(), "broadcast summary must be non-empty");
-                // Transient path must not stamp eventId (reconnect cursor).
+                // The transient path must not stamp eventId, the cursor a reconnect resumes from
                 let meta = value.get("meta");
                 assert!(
                     meta.and_then(|m| m.get("eventId")).is_none(),
@@ -1224,8 +1203,8 @@ async fn turn_summary_generate_persists_and_broadcasts() {
         .await;
 }
 
-/// A recap must serialize the main turn's *effective* hosted tools, so an active per-turn cutoff
-/// reaches the recap's `x_search` entry rather than an unbounded tool.
+/// A recap must serialize the main turn's *effective* hosted tools.
+/// An active per-turn cutoff must reach the recap's `x_search` entry rather than an unbounded tool.
 #[tokio::test(flavor = "current_thread")]
 async fn recap_hosted_tools_reflect_the_active_per_turn_override() {
     use xai_grok_sampling_types::{HostedTool, SearchDateBound, ToolOverrides, XSearchOptions};
@@ -1240,8 +1219,8 @@ async fn recap_hosted_tools_reflect_the_active_per_turn_override() {
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             *actor.agent.borrow_mut() = test_agent_with_goal_tool().await;
 
-            // Backend-search fixture seeded with an *unbounded* x_search (options: None), so any
-            // bound the recap sends can only have come from the per-turn override below.
+            // The backend-search fixture seeds an *unbounded* x_search (options: None)
+            // Any bound the recap sends can only have come from the per-turn override below
             {
                 let mut agent_slot = actor.agent.borrow_mut();
                 let agent = &*agent_slot;
@@ -1258,7 +1237,7 @@ async fn recap_hosted_tools_reflect_the_active_per_turn_override() {
             }
             actor.supports_backend_search.set(true);
 
-            // A per-turn cutoff (toDate only), with no definition seed: the recap must reflect it.
+            // The per-turn override sets a cutoff (toDate only) the tool definition never seeded; the recap must reflect it
             *actor.tool_overrides.borrow_mut() = Some(ToolOverrides {
                 x_search: Some(XSearchOptions {
                     date_bound: Some(
@@ -1766,8 +1745,7 @@ async fn side_question_trims_reasoning_orphaned_by_mid_turn_truncation() {
         .await;
 }
 
-/// Side calls persist text without executing tools, so the shared builder
-/// must pin `Fail` rather than inherit the tool-salvaging default.
+/// Side calls persist text without executing tools, so the shared builder must pin `Fail` rather than inherit the default that salvages tool calls.
 #[tokio::test]
 async fn parent_cached_request_pins_fail_length_policy() {
     let local = tokio::task::LocalSet::new();

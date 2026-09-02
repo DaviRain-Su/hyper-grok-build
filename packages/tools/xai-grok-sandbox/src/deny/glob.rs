@@ -1,12 +1,10 @@
-//! Glob deny entries: detection, the macOS Seatbelt-regex translation, and the
-//! Linux launch-time expansion. A deny entry is a GLOB iff it contains a glob
-//! metacharacter; macOS emits an anchored runtime regex (covers files created
-//! after launch), Linux expands to concrete existing matches at bwrap launch
-//! (best-effort).
+//! Glob deny entries: detection, the macOS Seatbelt-regex translation, and the Linux launch-time expansion.
+//! A deny entry is a GLOB iff it contains a glob metacharacter.
+//! macOS emits an anchored runtime regex (covers files created after launch).
+//! Linux expands to concrete existing matches at bwrap launch (best-effort).
 //!
-//! Parity invariant: `validate_deny_glob` accepts/rejects identically on both
-//! platforms, and the accepted subset translates the SAME on both — asserted by
-//! the `macos_regex_matches_globset_property` cross-product test.
+//! Parity invariant: `validate_deny_glob` accepts/rejects identically on both platforms, and the accepted subset translates the SAME on both.
+//! The `macos_regex_matches_globset_property` cross-product test asserts this.
 
 #[cfg(all(feature = "enforce", unix))]
 use nono::CapabilitySet;
@@ -16,14 +14,13 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 #[cfg(all(feature = "enforce", target_os = "linux"))]
 use std::sync::Mutex;
-// macOS regex translation reuses the parent module's alias + write-deny helpers.
+// macOS regex translation reuses the parent module's alias and write-deny helpers
 use super::is_glob;
 #[cfg(all(feature = "enforce", target_os = "macos"))]
 use super::{emit_seatbelt_deny, macos_deny_aliases};
 
-/// Split a profile's raw deny entries into exact paths (handled by the literal /
-/// subpath kernel-deny flow) and glob patterns. Non-glob entries are returned
-/// unchanged so their exact-path enforcement is preserved with no regression.
+/// Split a profile's raw deny entries into exact paths (handled by the literal / subpath kernel-deny flow) and glob patterns.
+/// Non-glob entries are returned unchanged so their exact-path enforcement is preserved.
 #[cfg(all(feature = "enforce", unix))]
 pub(crate) fn partition_deny_entries(deny: &[PathBuf]) -> (Vec<PathBuf>, Vec<String>) {
     let mut exact = Vec::new();
@@ -37,11 +34,9 @@ pub(crate) fn partition_deny_entries(deny: &[PathBuf]) -> (Vec<PathBuf>, Vec<Str
     (exact, globs)
 }
 
-/// Split a glob into its literal root and the tail from the first glob
-/// component (`secrets/**` -> `<workspace>/secrets` + `**`; `/home/**/.ssh` ->
-/// `/home` + `**/.ssh`). Root plus tail always re-joins to the original
-/// pattern, so the macOS regex body is unchanged; the alias set follows the
-/// (possibly deeper) root.
+/// Split a glob into its literal root and the tail from the first glob component.
+/// For example `secrets/**` splits to `<workspace>/secrets` plus `**`, and `/home/**/.ssh` to `/home` plus `**/.ssh`.
+/// Root plus tail always re-joins to the original pattern, so the macOS regex body is unchanged; the alias set follows the (possibly deeper) root.
 #[cfg(all(feature = "enforce", unix))]
 fn split_glob_root(workspace: &Path, glob: &str) -> (PathBuf, String) {
     let (mut root, rest) = match glob.strip_prefix('/') {
@@ -60,19 +55,15 @@ fn split_glob_root(workspace: &Path, glob: &str) -> (PathBuf, String) {
     (root, segments[first_glob_index..].join("/"))
 }
 
-/// Validate a deny glob on BOTH platforms so a given pattern is interpreted
-/// IDENTICALLY everywhere or rejected everywhere (never silently under-enforced
-/// on macOS). Two checks, run before the macOS regex translation and the Linux
-/// globset expansion alike:
+/// Validate a deny glob on BOTH platforms so a given pattern is interpreted IDENTICALLY everywhere or rejected everywhere.
+/// This keeps macOS from silently under-enforcing a pattern.
+/// Two checks, run before the macOS regex translation and the Linux globset expansion alike:
 ///
-/// 1. Reject `{`/`}`/`\`: globset honors brace alternation and backslash-escapes,
-///    but Seatbelt's runtime regex (sourced from globset's own `.regex()` mis-
-///    enforces `**/` for root-level paths, so we hand-roll the regex instead and
-///    cannot faithfully reproduce those forms — rejecting them on both platforms
-///    keeps the two backends in agreement. A user wanting alternation writes
-///    separate deny entries.
-/// 2. Compile through `globset` (the Linux matcher) so a malformed glob (`a**b`,
-///    unterminated `[`) fails closed identically on both platforms.
+/// 1. Reject `{`/`}`/`\`: globset honors brace alternation and backslash-escapes, but the Seatbelt regex cannot faithfully reproduce them.
+///    (globset's own `.regex()` mis-enforces `**/` for root-level paths, so we hand-roll the regex instead.)
+///    Rejecting those forms on both platforms keeps the two backends in agreement.
+///    A user wanting alternation writes separate deny entries.
+/// 2. Compile through `globset` (the Linux matcher) so a malformed glob (`a**b`, unterminated `[`) fails closed identically on both platforms.
 #[cfg(all(feature = "enforce", unix))]
 pub(crate) fn validate_deny_glob(glob: &str) -> anyhow::Result<()> {
     if let Some(c) = glob.chars().find(|&c| matches!(c, '{' | '}' | '\\')) {
@@ -82,11 +73,10 @@ pub(crate) fn validate_deny_glob(glob: &str) -> anyhow::Result<()> {
              use separate deny entries)"
         );
     }
-    // `**` must be a whole path component (gitignore semantics). A non-component
-    // `**` (e.g. `a**b`) would translate to `.*` on macOS but collapse to `*` in
-    // globset — reject it on both platforms so they never diverge. Empty
-    // segments (`a//*`) drift the same way: globset keeps `//` literally while
-    // the macOS regex collapses it.
+    // `**` must be a whole path component (gitignore semantics)
+    // A non-component `**` (e.g. `a**b`) would translate to `.*` on macOS but collapse to `*` in globset.
+    // Reject it on both platforms so they never diverge
+    // Empty segments (`a//*`) drift the same way: globset keeps `//` literally while the macOS regex collapses it
     for (index, segment) in glob.split('/').enumerate() {
         if segment.is_empty() && !(index == 0 && glob.starts_with('/')) {
             anyhow::bail!(
@@ -94,8 +84,7 @@ pub(crate) fn validate_deny_glob(glob: &str) -> anyhow::Result<()> {
                  trailing '/'); remove the extra slash in sandbox.toml"
             );
         }
-        // `.`/`..` would let a relative glob scan outside the workspace on
-        // Linux while the macOS regex stays dead; reject on both platforms.
+        // `.`/`..` would let a relative glob scan outside the workspace on Linux while the macOS regex stays dead; reject on both platforms
         if segment == "." || segment == ".." {
             anyhow::bail!(
                 "deny glob {glob:?}: `.` and `..` segments are not supported; \
@@ -110,10 +99,10 @@ pub(crate) fn validate_deny_glob(glob: &str) -> anyhow::Result<()> {
             );
         }
     }
-    // Char classes: support only the simple subset that translates identically to
-    // globset. Reject a literal `]`-first member (`[]a]`) and any nested `[` —
-    // which covers POSIX `[[:…:]]` — since globset and the hand-rolled regex parse
-    // those differently. (A leading `!`/`^` negation IS supported.)
+    // Char classes: support only the simple subset that translates identically to globset
+    // Reject a literal `]`-first member (`[]a]`) and any nested `[` (which covers POSIX `[[:…:]]`)
+    // They are rejected because globset and the hand-rolled regex parse them differently
+    // (A leading `!`/`^` negation IS supported.)
     let cc: Vec<char> = glob.chars().collect();
     let mut i = 0;
     while i < cc.len() {
@@ -168,11 +157,10 @@ fn escape_regex_literal_str(s: &str) -> String {
     out
 }
 
-/// Translate a gitignore-style glob tail into an (unanchored) Seatbelt regex
-/// body. Dialect: `**/`->`(.*/)?`, `**`->`.*`, `*`->`[^/]*`, `?`->`[^/]`,
-/// `[...]` classes copied with a leading `!`/`^` -> regex negation `[^…]`, all
-/// other literal text regex-escaped. Only the class subset `validate_deny_glob`
-/// accepts reaches here, so it always matches globset.
+/// Translate a gitignore-style glob tail into an (unanchored) Seatbelt regex body.
+/// Dialect: `**/`->`(.*/)?`, `**`->`.*`, `*`->`[^/]*`, `?`->`[^/]`.
+/// `[...]` classes are copied, with a leading `!`/`^` becoming regex negation `[^…]`; all other literal text is regex-escaped.
+/// Only the class subset `validate_deny_glob` accepts reaches here, so it always matches globset.
 #[cfg(all(feature = "enforce", target_os = "macos"))]
 fn glob_tail_to_regex(tail: &str) -> String {
     let mut out = String::new();
@@ -195,7 +183,7 @@ fn glob_tail_to_regex(tail: &str) -> String {
             '?' => out.push_str("[^/]"),
             '[' => {
                 out.push('[');
-                // globset treats a leading `!` OR `^` as negation -> regex `[^…]`
+                // globset treats a leading `!` OR `^` as negation, so it becomes regex `[^…]`
                 // (validate_deny_glob has rejected the class forms that would drift).
                 if matches!(chars.peek(), Some('!') | Some('^')) {
                     chars.next();
@@ -205,8 +193,7 @@ fn glob_tail_to_regex(tail: &str) -> String {
                     if cc == ']' {
                         break;
                     }
-                    // Backslash-escapes are rejected by validate_deny_glob; this
-                    // passthrough stays defensive.
+                    // Backslash-escapes are rejected by validate_deny_glob; this passthrough stays defensive
                     if cc == '\\' {
                         out.push('\\');
                         if let Some(n) = chars.next() {
@@ -224,8 +211,7 @@ fn glob_tail_to_regex(tail: &str) -> String {
     out
 }
 
-/// Canonicalize the nearest existing ancestor and re-append the rest; a glob
-/// root whose prefix does not exist yet must keep the workspace's aliases.
+/// Canonicalize the nearest existing ancestor and re-append the rest; a glob root whose prefix does not exist yet must keep the workspace's aliases.
 #[cfg(all(feature = "enforce", target_os = "macos"))]
 fn canonicalize_existing_ancestor(root: &Path) -> PathBuf {
     let mut ancestor = root;
@@ -248,9 +234,8 @@ fn canonicalize_existing_ancestor(root: &Path) -> PathBuf {
     }
 }
 
-/// Anchored Seatbelt regex bodies for one glob, one per alias form of its root
-/// (the `/private` firmlink must not bypass the deny). A symlinked prefix also
-/// anchors the deny at its resolved target, matching the Linux masking.
+/// Anchored Seatbelt regex bodies for one glob, one per alias form of its root (the `/private` firmlink must not bypass the deny).
+/// A symlinked prefix also anchors the deny at its resolved target, matching the Linux masking.
 #[cfg(all(feature = "enforce", target_os = "macos"))]
 fn glob_to_seatbelt_regexes(workspace: &Path, glob: &str) -> Vec<String> {
     let (root, tail) = split_glob_root(workspace, glob);
@@ -269,10 +254,8 @@ fn glob_to_seatbelt_regexes(workspace: &Path, glob: &str) -> Vec<String> {
     regexes
 }
 
-/// Wrap a finished regex body in a Seatbelt `(regex #"…")` filter, escaping the
-/// SBPL string delimiter and rejecting control chars. Fail-closed: returns
-/// `None` for an inexpressible pattern so the caller errors rather than emitting
-/// a rule that silently targets the wrong path.
+/// Wrap a finished regex body in a Seatbelt `(regex #"…")` filter, escaping the SBPL string delimiter and rejecting control chars.
+/// Fail-closed: returns `None` for an inexpressible pattern so the caller errors rather than emitting a rule that silently targets the wrong path.
 #[cfg(all(feature = "enforce", target_os = "macos"))]
 fn seatbelt_regex_filter(regex: &str) -> Option<String> {
     if regex.chars().any(|c| c.is_control()) {
@@ -284,16 +267,14 @@ fn seatbelt_regex_filter(regex: &str) -> Option<String> {
 
 /// Apply kernel-level deny rules for glob patterns.
 ///
-/// On macOS, translate each glob to an anchored Seatbelt regex and emit the same
-/// read + per-write-sub-action denies as the exact-path flow (so `mv x y && cat y`
-/// stays closed), covering files created after launch. On Linux this is a no-op:
-/// a mount namespace can't match a regex at runtime, so globs are expanded to
-/// concrete paths and bound over at bwrap re-exec (see [`expand_deny_globs`]).
+/// On macOS, translate each glob to an anchored Seatbelt regex and emit the same read and per-write-sub-action denies as the exact-path flow.
+/// That keeps `mv x y && cat y` closed and covers files created after launch.
+/// On Linux this is a no-op: a mount namespace can't match a regex at runtime.
+/// Globs are instead expanded to concrete paths and bound over at bwrap re-exec (see [`expand_deny_globs`]).
 ///
-/// Unlike the exact-path flow, this does NOT call `remove_exact_file_caps_for_paths`
-/// (a glob can't enumerate the file caps it collides with); glob denies rely on
-/// Seatbelt last-match ordering — the deny platform rules are emitted after the
-/// read/write allows, so the regex deny wins. The e2e is the contract.
+/// Unlike the exact-path flow, this does NOT call `remove_exact_file_caps_for_paths` (a glob can't enumerate the file caps it collides with).
+/// Glob denies rely on Seatbelt last-match ordering: the deny platform rules are emitted after the read/write allows, so the regex deny wins.
+/// The e2e is the contract.
 #[cfg(all(feature = "enforce", unix))]
 pub(crate) fn apply_deny_globs_to_capability_set(
     caps: &mut CapabilitySet,
@@ -341,8 +322,8 @@ pub(crate) fn apply_deny_globs_to_capability_set(
     Ok(())
 }
 
-/// Launch-time expansion caps: a mount namespace can't glob at runtime, so
-/// matches are enumerated once at launch. Exceeding a cap fails closed.
+/// Launch-time expansion caps: a mount namespace can't glob at runtime, so matches are enumerated once at launch.
+/// Exceeding a cap fails closed.
 #[cfg(all(feature = "enforce", target_os = "linux"))]
 #[derive(Clone, Copy)]
 pub(crate) struct DenyGlobCaps {
@@ -350,8 +331,7 @@ pub(crate) struct DenyGlobCaps {
     pub depth: usize,
     /// Each match becomes one `--ro-bind`; kept under bwrap's argv budget.
     pub matches: usize,
-    /// Visited-entry budget bounding launch latency; the walk includes
-    /// gitignored/hidden trees, so ordinary repos reach hundreds of thousands.
+    /// Visited-entry budget bounding launch latency; the walk includes gitignored/hidden trees, so ordinary repos reach hundreds of thousands.
     pub entries: usize,
 }
 
@@ -362,8 +342,7 @@ pub(crate) const DENY_GLOB_CAPS: DenyGlobCaps = DenyGlobCaps {
     entries: 2_000_000,
 };
 
-/// A permission error is skippable (the agent is equally denied by the OS);
-/// any other walk error could hide a readable match, so it fails closed.
+/// A permission error is skippable (the agent is equally denied by the OS); any other walk error could hide a readable match, so it fails closed.
 #[cfg(all(feature = "enforce", target_os = "linux"))]
 fn deny_glob_walk_error_is_fatal(err: &ignore::Error) -> bool {
     match err.io_error() {
@@ -372,9 +351,9 @@ fn deny_glob_walk_error_is_fatal(err: &ignore::Error) -> bool {
     }
 }
 
-/// Insert a match plus its canonical target when the path involves a symlink;
-/// masking only the logical path leaves the content readable at its real
-/// location. Canonicalize failures keep just the logical path.
+/// Insert a match plus its canonical target when the path involves a symlink.
+/// Masking only the logical path leaves the content readable at its real location.
+/// Canonicalize failures keep just the logical path.
 #[cfg(all(feature = "enforce", target_os = "linux"))]
 fn insert_match(
     matches: &Mutex<BTreeSet<String>>,
@@ -408,10 +387,9 @@ fn insert_match(
     Ok(())
 }
 
-/// Expand deny globs into the concrete existing paths to bind over. Fails
-/// closed on an invalid glob, an exceeded cap, or a non-permission walk error.
-/// Only files that exist at launch are covered; macOS enforces the same globs
-/// as runtime Seatbelt regexes.
+/// Expand deny globs into the concrete existing paths to bind over.
+/// Fails closed on an invalid glob, an exceeded cap, or a non-permission walk error.
+/// Only files that exist at launch are covered; macOS enforces the same globs as runtime Seatbelt regexes.
 #[cfg(all(feature = "enforce", target_os = "linux"))]
 pub(crate) fn expand_deny_globs(
     workspace: &Path,
@@ -432,8 +410,7 @@ pub(crate) fn expand_deny_globs(
     for glob in globs {
         // Same validation as macOS, so both platforms fail closed identically.
         validate_deny_glob(glob).map_err(|err| err.to_string())?;
-        // Relative globs get the escaped workspace prefix; `literal_separator`
-        // keeps `*`/`?` from crossing `/`, matching the macOS translation.
+        // Relative globs get the escaped workspace prefix; `literal_separator` keeps `*`/`?` from crossing `/`, matching the macOS translation
         let pattern = if glob.starts_with('/') {
             glob.clone()
         } else {
@@ -454,10 +431,9 @@ pub(crate) fn expand_deny_globs(
     // First fail-closed cause wins; parallel walkers race to `Quit`.
     let failure: OnceLock<String> = OnceLock::new();
     let visited = AtomicUsize::new(0);
-    // Overlapping globs share one walk. A nested root is covered by its
-    // parent's walk only when the segment below the parent holds no symlinks
-    // (the walk does not descend them): its canonical path then equals the
-    // parent's canonical path plus that segment.
+    // Overlapping globs share one walk
+    // A nested root is covered by its parent's walk only when the segment below the parent holds no symlinks (the walk does not descend them)
+    // Its canonical path then equals the parent's canonical path plus that segment
     let mut walked: Vec<&Path> = Vec::new();
     for root in &roots {
         if !root.exists() {
@@ -476,8 +452,7 @@ pub(crate) fn expand_deny_globs(
             continue;
         }
         walked.push(root.as_path());
-        // Include hidden/gitignored files (denied secrets usually are both);
-        // never descend symlinked dirs, though a named root resolves through one.
+        // Include hidden/gitignored files (denied secrets usually are both); never descend symlinked dirs, though a named root resolves through one
         WalkBuilder::new(root)
             .max_depth(Some(caps.depth))
             .standard_filters(false)
@@ -546,8 +521,7 @@ pub(crate) fn expand_deny_globs(
 
 #[cfg(test)]
 mod tests {
-    // All tests here exercise enforce+unix paths; without the gate `super::*`
-    // is unused on `--no-default-features`.
+    // All tests here exercise enforce+unix paths; without the gate `super::*` is unused on `--no-default-features`
     #[cfg(all(feature = "enforce", unix))]
     use super::*;
 
@@ -559,7 +533,7 @@ mod tests {
         assert!(is_glob("secrets/**"));
         assert!(is_glob("a?b"));
         assert!(is_glob("[abc].txt"));
-        // Exact paths must NOT be treated as globs (no regression in literal deny).
+        // Exact paths must NOT be treated as globs
         assert!(!is_glob(".env"));
         assert!(!is_glob("src/server.pem"));
         assert!(!is_glob("/etc/shadow"));
@@ -627,7 +601,7 @@ mod tests {
                 "{glob} should be supported"
             );
         }
-        // Braces + backslash drift macOS vs globset -> rejected (fail closed) on BOTH.
+        // Braces and backslash drift between macOS and globset, so BOTH platforms reject them (fail closed)
         for glob in ["**/*.{pem,key}", "a\\*b", "{a,b}"] {
             assert!(
                 validate_deny_glob(glob).is_err(),
@@ -666,8 +640,8 @@ mod tests {
     #[test]
     #[cfg(all(feature = "enforce", target_os = "macos"))]
     fn glob_to_regex_doubles_private_aliased_root() {
-        // A workspace under /tmp (firmlinked to /private/tmp) must emit a deny
-        // regex for BOTH alias roots, else the broad read-allow leaks via the alias.
+        // A workspace under /tmp (firmlinked to /private/tmp) must emit a deny regex for BOTH alias roots
+        // Otherwise the broad read-allow leaks via the alias
         let regexes = glob_to_seatbelt_regexes(Path::new("/tmp/projalias"), "**/.env");
         assert!(
             regexes.contains(&"^/tmp/projalias/(.*/)?\\.env$".to_string()),
@@ -682,13 +656,12 @@ mod tests {
     #[test]
     #[cfg(all(feature = "enforce", target_os = "macos"))]
     fn macos_regex_matches_globset_property() {
-        // PARITY GUARD (cross-product): for EVERY pattern `validate_deny_glob`
-        // accepts, the hand-rolled macOS regex must match a path IFF globset (the
-        // Linux backend) matches it. Generated from building blocks (literals,
-        // regex-metachar literal, `*`, `?`, `**`, char classes incl. both
-        // negations, ranges, class-content edge cases, and a `]` outside a class)
-        // crossed with sample paths, so any future dialect drift fails
-        // mechanically. Rejected forms are asserted to fail closed.
+        // PARITY GUARD (cross-product)
+        // For EVERY pattern `validate_deny_glob` accepts, the hand-rolled macOS regex must match a path IFF globset (the Linux backend) matches it
+        // Patterns are generated from building blocks crossed with sample paths, so any future dialect drift fails mechanically
+        // The blocks: literals, a regex-metachar literal, `*`, `?`, `**`, and char classes
+        // Char classes cover both negations, ranges, class-content edge cases, and a `]` outside a class
+        // Rejected forms are asserted to fail closed
         let segs = [
             "a", "x.y", "*", "?", "**", "[abc]", "[a-z]", "[!a]", "[^a]", "[.]", "[*]", "[a^]",
             "[a-]", "[-a]", "*]",
@@ -811,8 +784,8 @@ mod tests {
             .expect("emitted Seatbelt deny regexes must be accepted by nono");
     }
 
-    // Linux launch-time expansion + its fail-closed caps. Gated to enforce+linux,
-    // so they run on the Linux CI lane (not on macOS).
+    // Linux launch-time expansion and its fail-closed caps
+    // Gated to enforce+linux, so they run on the Linux CI lane (not on macOS)
     #[cfg(all(feature = "enforce", target_os = "linux"))]
     mod linux_expand {
         use super::*;
@@ -833,8 +806,7 @@ mod tests {
                     .as_nanos()
             ));
             std::fs::create_dir_all(&p).unwrap();
-            // A symlinked temp dir would double every insert (logical +
-            // canonical) and skew the cap-boundary assertions.
+            // A symlinked temp dir would double every insert (logical and canonical) and skew the cap-boundary assertions
             dunce::canonicalize(&p).unwrap()
         }
         fn caps(depth: usize, matches: usize, entries: usize) -> DenyGlobCaps {
@@ -847,7 +819,7 @@ mod tests {
 
         #[test]
         fn production_entries_cap_covers_large_workspaces() {
-            // 200k refused startup on ordinary large workspaces.
+            // A 200k cap refused startup on ordinary large workspaces
             const { assert!(DENY_GLOB_CAPS.entries >= 2_000_000) };
         }
 
@@ -857,7 +829,7 @@ mod tests {
             let _workspace_guard = TmpTree(workspace.clone());
             std::fs::create_dir_all(workspace.join("sub/dir")).unwrap();
             std::fs::write(workspace.join("sub/dir/key.pem"), "x").unwrap();
-            std::fs::write(workspace.join(".env"), "x").unwrap(); // hidden + usually gitignored
+            std::fs::write(workspace.join(".env"), "x").unwrap(); // hidden and usually gitignored
             std::fs::write(workspace.join("readable.txt"), "x").unwrap();
             let globs = vec!["**/*.pem".to_string(), "**/.env".to_string()];
             let expanded =
@@ -1015,8 +987,7 @@ mod tests {
             std::os::unix::fs::symlink(&outside, &link).unwrap();
             let link_str = link.to_str().unwrap();
             let globs = vec![format!("{link_str}/**/*.pem"), format!("{link_str}/sub/**")];
-            // The nested root resolves to the parent's target plus `sub`, so
-            // the parent's walk covers it; a one-walk budget suffices.
+            // The nested root resolves to the parent's target plus `sub`, so the parent's walk covers it; a one-walk budget suffices
             let workspace = tmp_tree("symparent-workspace");
             let _extra_guard = TmpTree(workspace.clone());
             let expanded =
@@ -1075,7 +1046,7 @@ mod tests {
             std::fs::write(outside.join("real.pem"), "x").unwrap();
             std::os::unix::fs::symlink(outside.join("real.pem"), workspace.join("link.pem"))
                 .unwrap();
-            // One matched symlink yields two bind paths: logical + canonical.
+            // One matched symlink yields two bind paths: logical and canonical
             assert!(
                 expand_deny_globs(&workspace, &["**/*.pem".to_string()], caps(64, 1, 200_000))
                     .is_err()

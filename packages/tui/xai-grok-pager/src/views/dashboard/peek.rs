@@ -927,7 +927,6 @@ pub fn extract_last_response_type(agent: &AgentView) -> String {
             RenderBlock::BgTask(_) => return "Task".to_string(),
             RenderBlock::Btw(_) => return "Btw".to_string(),
             RenderBlock::ContextInfo(_) => return "Context".to_string(),
-            RenderBlock::CreditLimit(_) => return "Credit limit".to_string(),
             // The user's latest input marks the turn boundary; there's no agent response after it yet
             RenderBlock::UserPrompt(_) => break,
             // Structural blocks carry no response type; keep scanning
@@ -1035,7 +1034,6 @@ fn block_short_text(block: &crate::scrollback::block::RenderBlock) -> Option<Str
         RenderBlock::Workflow(_) => Some("(workflow)".to_string()),
         RenderBlock::Btw(_) => Some("(btw)".to_string()),
         RenderBlock::ContextInfo(_) => Some("(context info)".to_string()),
-        RenderBlock::CreditLimit(_) => Some("(credit limit)".to_string()),
         RenderBlock::Stub(_) => None,
     }
 }

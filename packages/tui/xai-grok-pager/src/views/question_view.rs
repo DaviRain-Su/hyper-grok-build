@@ -108,8 +108,9 @@ pub enum LocalQuestionKind {
     /// On submit, the selected option index is translated into an [`crate::app::actions::Action::NewSessionAnswered`].
     NewSession,
     /// Modal shown when the user hits the credit/rate limit (403).
-    /// Options map to upsell URLs: upgrade tier or enable on-demand.
-    /// `choices` maps each option index to a telemetry choice variant.
+    /// Options map to upsell URLs (upgrade tier when not max-tier, buy
+    /// credits / PAYG) plus "Try Again". `choices` maps each option
+    /// index to a telemetry choice variant.
     CreditLimitUpsell {
         choices: Vec<xai_grok_telemetry::events::CreditLimitChoice>,
     },

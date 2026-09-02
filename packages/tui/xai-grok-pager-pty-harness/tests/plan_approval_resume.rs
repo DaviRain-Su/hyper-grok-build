@@ -1,9 +1,8 @@
-//! Integration test: the shell re-parks `exit_plan_mode` on
-//! resume, so approval chrome reappears after quit/`--continue` and approving
-//! leaves plan mode + starts the implement turn.
+//! Integration test: the shell re-parks `exit_plan_mode` on resume, so approval chrome reappears after quit/`--continue`.
+//! Approving then leaves plan mode and starts the implement turn.
 //!
-//! CI stages the pager binary via `PAGER_BINARY`. Also runs under plain cargo
-//! (which builds the pager on demand):
+//! CI stages the pager binary via `PAGER_BINARY`.
+//! The test also runs under plain cargo, which builds the pager on demand:
 //!
 //! ```bash
 //! cargo test -p xai-grok-pager-pty-harness --test plan_approval_resume -- --nocapture

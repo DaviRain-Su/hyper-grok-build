@@ -1,13 +1,10 @@
-//! Tests for the "MCP servers currently connecting" reminder rendering
-//! (`format_mcp_connecting_reminder`).
+//! Tests for the "MCP servers currently connecting" reminder rendering (`format_mcp_connecting_reminder`).
 //!
-//! The delivery-tool wording exists because some headless surfaces deliver
-//! output ONLY through MCP tools: telling the model to "proceed without" a
-//! still-connecting server made it answer in plain text that no user ever
-//! saw. The wording is gated on the explicit `startupHints.deliveryTools`
-//! opt-in — NOT on `nonInteractive` — so defaults stay unchanged for every
-//! client that does not declare delivery tools (SDK/stdio consumers read
-//! plain-text responses; subagents report to their parent).
+//! The delivery-tool wording exists because some headless clients deliver output ONLY through MCP tools.
+//! Telling the model to "proceed without" a still-connecting server made it answer in plain text that no user ever saw.
+//! The wording is gated on the explicit `startupHints.deliveryTools` opt-in, NOT on `nonInteractive`.
+//! Defaults therefore stay unchanged for every client that does not declare delivery tools.
+//! SDK/stdio consumers read plain-text responses; subagents report to their parent.
 
 use super::mcp::format_mcp_connecting_reminder;
 use super::support::*;
@@ -31,10 +28,9 @@ fn declared_delivery_tools_are_named_in_the_reminder() {
     assert!(text.contains("alpha__post, alpha__ask"));
 }
 
-/// A resident `session/load` carrying explicit `startupHints` re-applies the
-/// attaching client's policy (`UpdateAttachPolicy` → `apply_attach_policy`):
-/// the MCP init strategy and delivery tools must track the CURRENT
-/// attachment, not the client that originally spawned the actor.
+/// A resident `session/load` carrying explicit `startupHints` re-applies the attaching client's policy.
+/// The `UpdateAttachPolicy` message is handled by `apply_attach_policy`.
+/// The MCP init strategy and delivery tools must track the CURRENT attachment, not the client that originally spawned the actor.
 #[tokio::test(flavor = "current_thread")]
 async fn apply_attach_policy_tracks_the_current_attachment() {
     // `create_test_actor` spawns local tasks; it must run inside a LocalSet.
@@ -45,8 +41,7 @@ async fn apply_attach_policy_tracks_the_current_attachment() {
             let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
             let actor = create_test_actor(0, 100_000, 85, gateway_tx, persistence_tx).await;
 
-            // Strategy assertions only hold without the env override (the override
-            // deliberately wins over hints; tests must not mutate global env).
+            // Strategy assertions only hold without the env override (the override deliberately wins over hints; tests must not mutate global env)
             let env_override =
                 std::env::var("MCP_INIT_STRATEGY").is_ok_and(|v| !v.trim().is_empty());
 
@@ -58,9 +53,8 @@ async fn apply_attach_policy_tracks_the_current_attachment() {
             assert!(actor.delivery_tools.borrow().is_empty());
             assert!(!actor.attach_non_interactive.get());
 
-            // Headless attachment re-applies Blocking + its delivery tools, and the
-            // OAuth-interactivity flag follows the attachment (a headless re-attach
-            // must not run interactive browser OAuth on the MCP re-init).
+            // Headless attachment re-applies Blocking and its delivery tools, and the OAuth-interactivity flag follows the attachment
+            // A headless re-attach must not run interactive browser OAuth on the MCP re-init
             actor.apply_attach_policy(&crate::session::StartupHints {
                 non_interactive: true,
                 delivery_tools: vec!["srv__post".to_string()],
@@ -78,10 +72,9 @@ async fn apply_attach_policy_tracks_the_current_attachment() {
         .await;
 }
 
-/// A policy-changing re-attach must re-arm the once-per-actor connecting
-/// reminder (a latched default reminder must not suppress the delivery
-/// wording for a later delivery-tool attachment), while an identical
-/// re-attach keeps the latch so per-prompt loads don't re-inject each turn.
+/// A policy-changing re-attach must re-arm the once-per-actor connecting reminder.
+/// A latched default reminder must not suppress the delivery wording for a later delivery-tool attachment.
+/// An identical re-attach keeps the latch so per-prompt loads don't re-inject each turn.
 #[tokio::test(flavor = "current_thread")]
 async fn apply_attach_policy_rearms_connecting_reminder_only_on_change() {
     // `create_test_actor` spawns local tasks; it must run inside a LocalSet.

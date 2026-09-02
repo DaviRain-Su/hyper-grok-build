@@ -1,25 +1,22 @@
-//! Heap-leak test for the session lifecycle: create and remove many sessions,
-//! then fail if heap memory grows per session. Run:
+//! Heap-leak test for the session lifecycle: create and remove many sessions, then fail if heap memory grows per session.
+//! Run:
 //!   cargo test -p xai-grok-shell --features dhat-heap \
 //!     leader_session_lifecycle_heap_steady_state -- --ignored --nocapture
 use super::*;
 use xai_grok_workspace::permission::PermissionEvent;
 
-// Chosen between a healthy build (about zero retained allocations per
-// session) and the smallest deliberately introduced leak (one per session);
-// re-tune if healthy runs drift toward the limits.
+// Chosen between a healthy build (about zero retained allocations per session) and the smallest deliberately introduced leak (one per session)
+// Re-tune if healthy runs drift toward the limits
 const MAX_BLOCKS_PER_SESSION: f64 = 0.5;
 const MAX_BYTES_PER_SESSION: f64 = 1024.0;
 
-/// Creates the per-session state that `remove_session` must clean up, then
-/// removes the session. A full `SessionHandle` would allocate so much
-/// unrelated memory that a small leak would be lost in the noise.
+/// Creates the per-session state that `remove_session` must clean up, then removes the session.
+/// A full `SessionHandle` would allocate so much unrelated memory that a small leak would be lost in the noise.
 fn populate_and_evict(agent: &MvpAgent, i: usize) {
     let sid = acp::SessionId::new(format!("soak-{i}"));
 
-    // The same workspace binding `spawn_session_actor` creates; if
-    // `remove_session` does not release it, the session map holds every
-    // toolset for the life of the process.
+    // This is the same workspace binding `spawn_session_actor` creates
+    // If `remove_session` does not release it, the session map holds every toolset for the life of the process
     {
         let ops = agent.workspace_ops.borrow();
         let ops = ops.as_ref().expect("test installs workspace ops");
@@ -60,8 +57,7 @@ async fn quiesce() {
 
 /// Creating and removing N sessions must not grow the heap.
 ///
-/// Only one `dhat::Profiler` can exist at a time, and the test harness runs
-/// tests in parallel, so keep this the only test that creates one.
+/// Only one `dhat::Profiler` can exist at a time, and the test harness runs tests in parallel, so keep this the only test that creates one.
 #[test]
 #[ignore = "heap soak; nightly only, needs --features dhat-heap"]
 fn leader_session_lifecycle_heap_steady_state() {
@@ -73,8 +69,7 @@ fn leader_session_lifecycle_heap_steady_state() {
         const WARMUP: usize = 16;
         const MEASURE: usize = 256;
 
-        // The first runs fill caches and one-time allocations; do them before
-        // the measured window so they do not count as growth.
+        // The first runs fill caches and one-time allocations; do them before the measured window so they do not count as growth
         for i in 0..WARMUP {
             populate_and_evict(&agent, i);
         }

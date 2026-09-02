@@ -1,11 +1,7 @@
 //! Minimal-mode sign-in / folder-trust rendering for the live region.
 //!
-//! Before any agent session exists (unauthenticated / folder-trust pending) the
-//! minimal live region shows the sign-in flow itself — device or external-command
-//! flow, a sign-in error, the folder-trust question, or a brief "starting"
-//! transient once both gates are open — since minimal has no welcome screen.
-//! [`draw_live`](super::live::draw_live) computes a [`MinimalAuthHint`] from the
-//! app's [`AuthState`] + [`TrustState`] and renders it via [`render_auth`].
+//! Minimal has no welcome screen, so before any agent session exists the live region shows the sign-in flow itself.
+//! [`draw_live`](super::live::draw_live) maps [`AuthState`] and [`TrustState`] to a [`MinimalAuthHint`] and renders it via [`render_auth`].
 
 use std::path::PathBuf;
 
@@ -17,35 +13,28 @@ use ratatui::text::{Line, Span};
 use xai_grok_pager::app::app_view::{AuthState, TrustState};
 use xai_grok_pager::theme::Theme;
 
-/// What the minimal live region shows when there is no active agent yet: the
-/// in-region sign-in flow (device or external-command), a sign-in error, the
-/// folder-trust question, or a brief "starting" transient once authenticated
-/// (and trusted). Computed before the draw closure so the closure can own it.
+/// What the minimal live region shows when there is no active agent yet.
+/// Computed before the draw closure so the closure can own it.
 pub(super) enum MinimalAuthHint {
-    /// Interactive sign-in underway — show the URL (when known) and the device
-    /// code (when the URL carries one). Covers device flow and the external
-    /// command flow (where the provider opens its own browser; `url` may be
-    /// `None`).
+    /// Interactive sign-in underway: show the URL (when known) and the device code (when the URL carries one).
+    /// Covers device flow and the external command flow, where the provider opens its own browser and `url` may be `None`.
     SigningIn {
         url: Option<String>,
         code: Option<String>,
     },
     /// The last sign-in attempt failed; show the error.
     Failed(String),
-    /// Authenticated, but the cwd has untrusted repo-local config — ask before
-    /// creating a session. Input (y/Enter trust, n/Esc quit) is handled by the
-    /// welcome interceptor in `AppView::handle_input`; this is render-only.
+    /// Authenticated, but the cwd has untrusted repo-local config: ask before creating a session.
+    /// Input (y/Enter trust, n/Esc quit) is handled by the welcome interceptor in `AppView::handle_input`; this is render-only.
     TrustFolder { workspace: PathBuf },
-    /// Authenticated (+ trusted) — the session is being created (brief transient).
+    /// Authenticated and trusted; the session is being created (brief transient).
     Starting,
 }
 
-/// Map the app's auth + trust state to what the no-agent live region should show.
+/// Map the app's auth and trust state to what the no-agent live region should show.
 ///
-/// Mirrors the welcome screen's gate order: trust is only offered after auth is
-/// `Done`, when the user has access and is not ZDR-blocked (those gates already
-/// block sessions, and the input interceptor only answers trust under the same
-/// conditions).
+/// Mirrors the welcome screen's gate order: trust is only offered after auth is `Done`, when the user has access and is not ZDR-blocked.
+/// Those gates already block sessions, and the input interceptor only answers trust under the same conditions.
 pub(super) fn minimal_auth_hint(
     auth: &AuthState,
     trust: &TrustState,
@@ -61,8 +50,7 @@ pub(super) fn minimal_auth_hint(
                 .map(str::to_owned),
         },
         AuthState::Pending { error: Some(err) } => MinimalAuthHint::Failed(err.clone()),
-        // Login is starting (auto-triggered at startup) — the URL arrives via
-        // AuthUrlReady, which flips us to `Authenticating`.
+        // Login is starting (auto-triggered at startup); the URL arrives via AuthUrlReady, which flips us to `Authenticating`
         AuthState::Pending { error: None } => MinimalAuthHint::SigningIn {
             url: None,
             code: None,
@@ -80,15 +68,13 @@ pub(super) fn minimal_auth_hint(
     }
 }
 
-/// Rows the no-agent live region needs for `hint` (before path wrap). Used by
-/// the overlay host so the viewport grows enough to show the trust question
-/// instead of clipping to the idle prompt height.
+/// Rows the no-agent live region needs for `hint` (before path wrap).
+/// Used by the overlay host so the viewport grows enough to show the trust question instead of clipping to the idle prompt height.
 pub(super) fn auth_hint_rows(hint: &MinimalAuthHint, width: u16) -> u16 {
     match hint {
         // header + blank + "Opening browser…"
         MinimalAuthHint::SigningIn { url: None, code: _ } => 3,
-        // header + blank + "Open this URL" + url rows + optional code block +
-        // blank + "Waiting…"
+        // header + blank + "Open this URL" + url rows + optional code block + blank + "Waiting…"
         MinimalAuthHint::SigningIn {
             url: Some(url),
             code,
@@ -109,8 +95,7 @@ pub(super) fn auth_hint_rows(hint: &MinimalAuthHint, width: u16) -> u16 {
     }
 }
 
-/// How many rows `text` needs when painted char-by-char at `width` (no
-/// wrap-inserted spaces) — same layout as [`render_url`].
+/// How many rows `text` needs when painted char-by-char at `width` (no wrap-inserted spaces); same layout as [`render_url`].
 fn wrapped_char_rows(text: &str, width: u16) -> u16 {
     let width = width.max(1) as usize;
     let chars = text.chars().filter(|c| !c.is_control()).count();
@@ -120,9 +105,8 @@ fn wrapped_char_rows(text: &str, width: u16) -> u16 {
     chars.div_ceil(width) as u16
 }
 
-/// Parse the device-flow `user_code` from a verification URL (`None` if absent
-/// or malformed). Mirrors `views::welcome::extract_user_code`, kept local so
-/// minimal does not depend on welcome-screen internals.
+/// Parse the device-flow `user_code` from a verification URL (`None` if absent or malformed).
+/// Mirrors `views::welcome::extract_user_code`, kept local so minimal does not depend on welcome-screen internals.
 fn device_user_code(url: &str) -> Option<&str> {
     let code = url
         .split('?')
@@ -143,10 +127,9 @@ fn put_line(buf: &mut Buffer, area: Rect, y: u16, bottom: u16, line: Line<'_>) -
     }
 }
 
-/// Write `url` character-by-character across as many rows as it needs (no
-/// wrap-inserted spaces), so the terminal's native selection copies it verbatim
-/// — minimal has no mouse capture, so copy is the terminal's job. Returns the
-/// next free row.
+/// Write `url` char-by-char across as many rows as it needs (no wrap-inserted spaces), so the terminal's native selection copies it verbatim.
+/// Minimal has no mouse capture, so copy is the terminal's job.
+/// Returns the next free row.
 fn render_url(
     buf: &mut Buffer,
     area: Rect,
@@ -156,8 +139,7 @@ fn render_url(
     style: Style,
 ) -> u16 {
     let width = area.width.max(1);
-    // Snapshot the buffer bounds as values so the `&Rect` borrow doesn't outlive
-    // the mutable cell writes below.
+    // Snapshot the buffer bounds as values so the `&Rect` borrow doesn't outlive the mutable cell writes below
     let (max_x, max_y) = {
         let a = buf.area();
         (a.right(), a.bottom())
@@ -185,8 +167,8 @@ fn render_url(
     y.saturating_add(1)
 }
 
-/// Render the sign-in / trust flow (or transient status) in the live region when
-/// no agent exists yet. Top-aligned in `area`; clips to its height.
+/// Render the sign-in / trust flow (or transient status) in the live region when no agent exists yet.
+/// Top-aligned in `area`; clips to its height.
 pub(super) fn render_auth(buf: &mut Buffer, area: Rect, theme: &Theme, hint: &MinimalAuthHint) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -395,7 +377,7 @@ mod tests {
 
         let trust_done = TrustState::Done;
 
-        // Device flow → SigningIn carrying the URL and the parsed code.
+        // Device flow maps to SigningIn carrying the URL and the parsed code
         let st = AuthState::Authenticating {
             request_seq: 1,
             handle: None,
@@ -413,7 +395,7 @@ mod tests {
             _ => panic!("expected SigningIn"),
         }
 
-        // External command flow with no code → SigningIn, URL but no code.
+        // External command flow maps to SigningIn with the URL and no code
         let st = AuthState::Authenticating {
             request_seq: 2,
             handle: None,
@@ -457,8 +439,7 @@ mod tests {
             _ => panic!("expected TrustFolder"),
         }
 
-        // Access / ZDR gates suppress the trust question (matches welcome +
-        // the input interceptor).
+        // Access / ZDR gates suppress the trust question (matches welcome and the input interceptor)
         assert!(matches!(
             minimal_auth_hint(&AuthState::Done, &trust, false, false),
             MinimalAuthHint::Starting
@@ -526,7 +507,7 @@ mod tests {
             workspace: PathBuf::from(long),
         };
         let rows = auth_hint_rows(&hint, 40);
-        // path alone needs 5 rows at width 40 (200/40); total well above base.
+        // The 200-char path wraps to 5 rows at width 40, so the total sits well above the fixed rows
         assert!(rows >= 12, "expected room for wrapped path, got {rows}");
     }
 

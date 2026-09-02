@@ -1,9 +1,8 @@
-//! Shell-side MCP merge: local/plugin/compat sources plus admitted client
-//! servers. Managed connectors exist only via the gateway catalog
-//! (`GET /v1/mcp/tools/list`), not as injected `grok_com_*` HTTP servers.
+//! Shell-side MCP merge: local/plugin/compat sources plus admitted client servers.
+//! Managed connectors exist only via the gateway catalog (`GET /v1/mcp/tools/list`), not as injected `grok_com_*` HTTP servers.
 //!
-//! Merge layers are applied in order, keyed by server NAME (two names sharing
-//! one URL are distinct servers); later `insert()` beats earlier `or_insert()`:
+//! Merge layers are applied in order, keyed by server NAME (two names sharing one URL are distinct servers).
+//! Later `insert()` beats earlier `or_insert()`:
 //!   - config.toml    — seeds the map; `enabled = false` blocks lower layers
 //!   - Plugins        — `or_insert` (won't override config.toml)
 //!   - ~/.claude.json — `or_insert` (imported user/local MCP servers)
@@ -12,9 +11,8 @@
 //!                      vendor `mcps` kill switch, which matches by normalized
 //!                      URL; see `admit_client_mcp_servers`)
 //!
-//! The gateway catalog/call core lives in
-//! `xai_grok_shell_session_support::managed_mcp` and is re-exported here so
-//! `crate::session::managed_mcp::…` paths keep resolving unchanged.
+//! The gateway catalog/call core lives in `xai_grok_shell_session_support::managed_mcp`.
+//! It is re-exported here so `crate::session::managed_mcp::…` paths keep resolving unchanged.
 
 pub use xai_grok_shell_session_support::managed_mcp::*;
 
@@ -22,8 +20,7 @@ use std::collections::HashMap;
 
 use agent_client_protocol as acp;
 
-/// Vendor kill-switch attribution key: normalized URL for Http/Sse (a client
-/// re-forwards the same endpoint under any display name), name for Stdio.
+/// Vendor kill-switch attribution key: normalized URL for Http/Sse (a client re-forwards the same endpoint under any display name), name for Stdio.
 /// Only for [`admit_client_mcp_servers`]; merge/discovery maps key by name.
 fn mcp_vendor_block_key(s: &acp::McpServer) -> String {
     match s {
@@ -45,10 +42,8 @@ pub(crate) fn mcp_server_name(s: &acp::McpServer) -> &str {
     }
 }
 
-/// Merge/discovery map key: server NAME is the sole merge identity (two names
-/// sharing one URL are distinct servers). Every name-keyed map in this module
-/// must derive its key through this helper so merge and discovery keying
-/// cannot desynchronize.
+/// Merge/discovery map key: server NAME is the sole merge identity (two names sharing one URL are distinct servers).
+/// Every name-keyed map in this module must derive its key through this helper so merge and discovery keying cannot desynchronize.
 fn mcp_merge_key(s: &acp::McpServer) -> String {
     mcp_server_name(s).to_string()
 }
@@ -66,13 +61,11 @@ pub(crate) fn merge_managed_mcp_servers(
         .collect()
 }
 
-/// Merge local/plugin/client MCP sources into ONE live session and push the
-/// result via [`crate::session::SessionCommand::UpdateMcpServers`]; returns
-/// `true` if the command was enqueued (session still alive).
+/// Merge local/plugin/client MCP sources into ONE live session and push the result via [`crate::session::SessionCommand::UpdateMcpServers`].
+/// Returns `true` if the command was enqueued (session still alive).
 ///
-/// Shared core for every "re-merge MCP sources into a live session" path
-/// (config hot-reload, post-grant reload, plugin reload) so the merge
-/// inputs and the dropped-oneshot-response contract can't drift between them.
+/// Shared core for every "re-merge MCP sources into a live session" path (config hot-reload, post-grant reload, plugin reload).
+/// Sharing it keeps the merge inputs identical across those paths; all of them drop the oneshot response unread.
 pub(crate) fn merge_and_send_managed_mcp_update(
     cmd_tx: &tokio::sync::mpsc::UnboundedSender<crate::session::SessionCommand>,
     cwd: &std::path::Path,
@@ -91,14 +84,11 @@ pub(crate) fn merge_and_send_managed_mcp_update(
         .is_ok()
 }
 
-/// Drop client-forwarded servers that match on-disk vendor MCP configs while
-/// that vendor's `mcps` kill switch is off.
+/// Drop client-forwarded servers that match on-disk vendor MCP configs while that vendor's `mcps` kill switch is off.
 ///
-/// Call at session ingress before storing the hot-reload seed
-/// (`initial_client_mcp_servers`) so later merges cannot re-admit a previously
-/// rejected server merely because disk attribution vanished. Explicit later
-/// client updates re-run this with current disk, so a now-client-only server
-/// can be admitted once it no longer matches disabled-vendor disk.
+/// Call at session ingress before storing the hot-reload seed (`initial_client_mcp_servers`).
+/// Otherwise a later merge could re-admit a previously rejected server merely because its disk attribution vanished.
+/// Explicit later client updates re-run this with current disk, so a server that no longer matches a disabled vendor's config can be admitted.
 pub(crate) fn admit_client_mcp_servers(
     client_mcp_servers: Vec<acp::McpServer>,
     cwd: &std::path::Path,
@@ -115,8 +105,7 @@ pub(crate) fn admit_client_mcp_servers(
         );
     }
     if !compat.claude.mcps {
-        // Attribution must see disk even when import-marker / runtime gates
-        // empty the normal Claude loader.
+        // Attribution must see disk even when import-marker / runtime gates empty the normal Claude loader
         blocked.extend(
             crate::util::config::load_claude_json_mcp_servers_for_attribution(cwd)
                 .iter()
@@ -144,8 +133,7 @@ pub(crate) fn merge_managed_mcp_servers_with_policy(
             .map(|(s, _source)| (mcp_merge_key(&s), s))
             .collect();
 
-    // Re-admit at merge so a caller that forgot ingress sanitization cannot
-    // spawn disabled-vendor client servers.
+    // Re-admit at merge so a caller that forgot ingress sanitization cannot spawn disabled-vendor client servers
     for server in admit_client_mcp_servers(client_mcp_servers, cwd, compat) {
         servers.insert(mcp_merge_key(&server), server);
     }
@@ -153,24 +141,15 @@ pub(crate) fn merge_managed_mcp_servers_with_policy(
     let disabled = crate::util::config::disabled_mcp_server_names(cwd);
 
     let mut merged: Vec<acp::McpServer> = servers.into_values().collect();
-    // Deterministic order: this list is collected from a HashMap (random
-    // iteration order). Downstream equality checks (`mcp_servers_equal`, used
-    // by both `update_configs` and the `update_configs_diff` short-circuit) are
-    // order-sensitive, so an unsorted list makes an unchanged server set look
-    // changed — spuriously cancelling/restarting MCP init on e.g. a hooks-only
-    // plugin reload. Sorting by name (the unique merge key) keeps reloads a
-    // true no-op when nothing changed.
+    // This list comes from a HashMap, and the downstream equality checks (`mcp_servers_equal`) are order-sensitive
+    // An unsorted list makes an unchanged server set look changed, spuriously cancelling/restarting MCP init on e.g. a hooks-only plugin reload.
     merged.sort_by(|a, b| mcp_server_name(a).cmp(mcp_server_name(b)));
-    // Folder-trust gate: when `cwd`'s workspace is untrusted, drop its
-    // repo-local (project-scoped) servers before they can be spawned. No-op for
-    // a trusted/unrecorded workspace. Composes with the managed-deny allowlist
-    // applied next (both filters run on the survivors).
+    // Drop an untrusted workspace's repo-local (project-scoped) servers before the managed-settings policy runs on the survivors
     let merged = crate::agent::folder_trust::filter_untrusted_project_mcp(cwd, merged);
     let allowlist = &xai_grok_workspace::permission::resolution::managed_settings().mcp_allowlist;
     apply_mcp_server_policy(merged, &disabled, allowlist)
 }
 
-/// Why an MCP server was disabled by policy.
 #[derive(Debug, Clone)]
 pub(crate) enum McpDisabledReason {
     Allowlist { source: std::path::PathBuf },
@@ -191,8 +170,6 @@ impl std::fmt::Display for McpDisabledReason {
 }
 
 impl McpDisabledReason {
-    /// Classify why a blocked server was rejected by the managed-settings
-    /// MCP policy: an explicit deny match vs a missing allowlist entry.
     pub(crate) fn for_blocked_server(
         policy: &xai_grok_workspace::permission::resolution::McpServerAllowlist,
         server: &acp::McpServer,
@@ -206,20 +183,15 @@ impl McpDisabledReason {
     }
 }
 
-/// An MCP server paired with its policy status.
 pub(crate) struct McpServerWithPolicy {
     pub server: acp::McpServer,
     pub disabled_reason: Option<McpDisabledReason>,
 }
 
-/// Tag each merged MCP server with its managed-settings policy status and drop
-/// names disabled in config.toml. A server that fails `is_server_allowed` is
-/// tagged with a deny-vs-allowlist `McpDisabledReason` (via
-/// `McpDisabledReason::for_blocked_server`); the public
-/// `merge_managed_mcp_servers` then drops every tagged server. Split out from
-/// `merge_managed_mcp_servers_with_policy` so the deny/allow enforcement
-/// chokepoint can be tested with an injected allowlist — the runtime path reads
-/// the process-wide managed-settings `OnceLock`, which a test can't populate.
+/// Tag each merged MCP server with its managed-settings policy status and drop names disabled in config.toml.
+/// The public `merge_managed_mcp_servers` then drops every tagged server.
+/// Split out from `merge_managed_mcp_servers_with_policy` so the deny/allow enforcement chokepoint can be tested with an injected allowlist.
+/// The runtime path reads the process-wide managed-settings `OnceLock`, which a test can't populate.
 fn apply_mcp_server_policy(
     merged: Vec<acp::McpServer>,
     disabled: &std::collections::HashSet<String>,
@@ -269,9 +241,7 @@ pub(crate) fn merge_managed_mcp_servers_sourced(
         path: xai_grok_tools::util::grok_home::grok_home().join("config.toml"),
     };
 
-    // Use the TOML-only loader so that entries from imported editor configs
-    // and .mcp.json are not pre-loaded with ConfigSource::ConfigToml.  Those
-    // sources are added below with their correct ConfigSource variants.
+    // Use the TOML-only loader so that entries from imported editor configs and .mcp.json are not pre-loaded with ConfigSource::ConfigToml
     let mut servers: HashMap<String, (acp::McpServer, ConfigSource)> =
         crate::util::config::load_mcp_servers_toml_only(cwd)
             .into_iter()
@@ -297,9 +267,8 @@ pub(crate) fn merge_managed_mcp_servers_sourced(
 
 /// Plugin / Claude / Cursor / `.mcp.json` servers in merge priority order.
 ///
-/// Callers insert with `entry(name).or_insert` so the first listed source wins
-/// a shared name. TOML is applied separately (last-wins for merge and for
-/// discovery force-enable).
+/// Callers insert with `entry(name).or_insert` so the first listed source wins a shared name.
+/// TOML is applied separately (last-wins for merge and for discovery force-enable).
 fn non_toml_mcp_servers_with_source(
     cwd: &std::path::Path,
     plugin_registry: Option<&xai_grok_agent::plugins::PluginRegistry>,
@@ -400,11 +369,11 @@ pub(crate) struct McpDiscoveryInputs<'a> {
 
 /// Definitions that would exist if personal disable were cleared.
 ///
-/// Presence probe for list stubs (not a spawnable merge result). Shares the
-/// non-TOML walk ([`non_toml_mcp_servers_with_source`]), name keying (TOML
-/// wins a name, lower tiers `or_insert`), and folder-trust last with
-/// [`merge_managed_mcp_servers_with_policy`]. Does **not** include client
-/// forwarded servers. TOML `enabled = false` is force-enabled for stubs.
+/// This is a presence probe for list stubs, not a spawnable merge result.
+/// It shares the non-TOML walk ([`non_toml_mcp_servers_with_source`]) with [`merge_managed_mcp_servers_with_policy`].
+/// Both key by name (TOML wins a name, lower tiers `or_insert`) and apply folder trust last.
+/// It does **not** include client forwarded servers.
+/// TOML `enabled = false` is force-enabled for stubs.
 /// Returns transports keyed by server name.
 pub(crate) fn discover_mcp_definitions_ignoring_disable(
     inputs: &McpDiscoveryInputs<'_>,
@@ -543,13 +512,10 @@ mod tests {
         tempfile::tempdir().unwrap()
     }
 
-    /// A client-provided server (e.g. a client session binding injected at
-    /// `session/new`) exists in no on-disk config and no managed catalog —
-    /// the merge must keep it. Config hot-reload handlers
-    /// (`reload_all_mcp_servers` / `reload_project_mcp_servers`) rely on this
-    /// by re-seeding the merge with the session's
-    /// `initial_client_mcp_servers`; if this property breaks, those reloads
-    /// silently tear down client-injected servers mid-session.
+    /// A client-provided server (e.g. a client session binding injected at `session/new`) exists in no on-disk config and no managed catalog.
+    /// The merge must keep it.
+    /// Config hot-reload handlers (`reload_all_mcp_servers` / `reload_project_mcp_servers`) re-seed the merge with `initial_client_mcp_servers`.
+    /// If this property breaks, those reloads silently tear down client-injected servers mid-session.
     #[test]
     fn client_provided_servers_survive_merge() {
         let client = vec![acp::McpServer::Http(
@@ -584,8 +550,7 @@ mod tests {
         acp::McpServer::Stdio(acp::McpServerStdio::new(name.to_string(), "true"))
     }
 
-    /// Vendor mcps kill switch must drop client-forwarded servers that match
-    /// on-disk vendor config (pager may still load with default-on compat).
+    /// Vendor mcps kill switch must drop client-forwarded servers that match on-disk vendor config (pager may still load with default-on compat).
     #[test]
     fn client_cursor_server_dropped_when_cursor_mcps_disabled() {
         let cwd = empty_cwd();
@@ -691,8 +656,7 @@ args = ["ok"]
         }
     }
 
-    /// Admitted seed must stay empty of the blocked server after vendor disk
-    /// vanishes (hot-reload must not re-admit from a sanitized seed).
+    /// Admitted seed must stay empty of the blocked server after vendor disk vanishes (hot-reload must not re-admit from a sanitized seed).
     #[test]
     fn admitted_seed_stays_blocked_after_vendor_disk_vanishes() {
         let cwd = empty_cwd();
@@ -760,13 +724,11 @@ args = ["ok"]
         );
     }
 
-    /// The merge chokepoint must actually DROP a server matching
-    /// `deniedMcpServers`, and classify the drop as a `Denylist` hit (not a
-    /// missing `allowlist` entry) — that reason is the user-visible payload for
-    /// the toggle error and `mcp doctor` detail. The runtime merge reads the
-    /// process-wide managed-settings `OnceLock`, so we exercise the extracted
-    /// `apply_mcp_server_policy` seam with an injected allowlist built via the
-    /// public `McpServerAllowlist::new`.
+    /// The merge chokepoint must actually DROP a server matching `deniedMcpServers`.
+    /// The drop must be classified as a `Denylist` hit (not a missing `allowlist` entry).
+    /// That reason is the user-visible payload for the toggle error and the `mcp doctor` detail.
+    /// The runtime merge reads the process-wide managed-settings `OnceLock`.
+    /// So we exercise the extracted `apply_mcp_server_policy` directly, with an injected allowlist built via the public `McpServerAllowlist::new`.
     #[test]
     fn merge_drops_denied_server_and_classifies_as_denylist() {
         use xai_grok_workspace::permission::resolution::{AllowedMcpServer, McpServerAllowlist};
@@ -815,8 +777,7 @@ args = ["ok"]
             .expect("allowed server present in policy output");
         assert!(ok.disabled_reason.is_none());
 
-        // The public `merge_managed_mcp_servers` drop predicate removes exactly
-        // the denied server.
+        // The public `merge_managed_mcp_servers` drop predicate removes exactly the denied server
         let surviving: Vec<&str> = tagged
             .iter()
             .filter(|s| s.disabled_reason.is_none())
@@ -829,8 +790,8 @@ args = ["ok"]
         );
     }
 
-    /// A bare policy `serverName` deny drops the managed (prefixed) server as a
-    /// `Denylist` hit, exact-match only (no substring over-match).
+    /// A bare policy `serverName` deny drops the managed (prefixed) server as a `Denylist` hit.
+    /// The match is exact: a name that merely contains the denied name is not denied.
     #[test]
     fn merge_drops_server_denied_by_name_including_managed_prefix() {
         use xai_grok_workspace::permission::resolution::{AllowedMcpServer, McpServerAllowlist};
@@ -974,9 +935,8 @@ enabled = false
         );
     }
 
-    /// Trusted git repo whose project config.toml declares two HTTP servers
-    /// sharing one URL, each with its own auth header (GB-5207 shape: one
-    /// ClickHouse endpoint, two orgs).
+    /// Builds a trusted git repo whose project config.toml declares two HTTP servers sharing one URL, each with its own auth header.
+    /// This mirrors a real setup: one ClickHouse endpoint, two orgs.
     fn same_url_project_repo() -> tempfile::TempDir {
         let cwd = empty_cwd();
         std::fs::create_dir_all(cwd.path().join(".grok")).unwrap();
@@ -1002,8 +962,7 @@ Authorization = "Bearer org2-token"
         cwd
     }
 
-    /// Server NAME is the identity: two entries sharing one URL are distinct
-    /// servers, and each keeps its own transport config.
+    /// Server NAME is the identity: two entries sharing one URL are distinct servers, and each keeps its own transport config.
     #[test]
     fn same_url_different_names_both_survive_merge() {
         let cwd = same_url_project_repo();
@@ -1049,11 +1008,8 @@ Authorization = "Bearer org2-token"
         }
     }
 
-    /// End-to-end folder-trust gate through the public merge: an untrusted
-    /// workspace's project `.mcp.json` server is dropped before spawn (a
-    /// client-supplied server still survives), while a trusted workspace keeps
-    /// it. Existing merge tests record no decision, so the default-allowed gate
-    /// leaves them a no-op.
+    /// End-to-end folder-trust gate through the public merge: an untrusted workspace's project `.mcp.json` server is dropped before spawn.
+    /// A client-supplied server still survives, and a trusted workspace keeps its `.mcp.json` server.
     #[test]
     fn untrusted_workspace_drops_project_mcp_servers() {
         fn repo_with_project_server() -> tempfile::TempDir {

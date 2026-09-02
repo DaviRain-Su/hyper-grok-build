@@ -685,6 +685,7 @@ pub(super) fn dispatch_send_btw(app: &mut AppView, question: String) -> Vec<Effe
                 question.clone(),
             ))
         } else {
+            agent.clear_btw_owned_selection();
             agent.btw_state = Some(crate::views::btw_overlay::BtwOverlayState::Loading {
                 question: question.clone(),
             });

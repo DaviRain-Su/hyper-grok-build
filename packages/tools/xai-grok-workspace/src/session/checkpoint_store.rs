@@ -1,17 +1,15 @@
 //! Disk-backed, co-located checkpoint store.
 //!
-//! Each finalized [`RewindCheckpoint`] is mirrored to a small on-disk store that
-//! lives *inside* the session working tree (the snapshotted rootfs), so the
-//! per-turn rootfs snapshot carries serialized checkpoints across a sandbox
-//! restore. A restored session rehydrates them into the in-memory cache (see
-//! [`CheckpointStore::with_cap`]); the cache is the hot read path, disk the
-//! durable copy. Re-seeding the *live* trackers from the cache is not yet wired.
+//! Each finalized [`RewindCheckpoint`] is mirrored to a small on-disk store inside the session working tree (the snapshotted rootfs).
+//! The per-turn rootfs snapshot therefore carries serialized checkpoints across a sandbox restore.
+//! A restored session rehydrates them into the in-memory cache (see [`CheckpointStore::with_cap`]).
+//! The cache is the hot read path; disk is the durable copy.
+//! Re-seeding the *live* trackers from the cache is not yet wired.
 //!
-//! The store is a durability **mirror**, not the restore mechanism: in-session
-//! [`rewind_to`](crate::handle::WorkspaceHandle::rewind_to) always reverts
-//! in-process, never via a rootfs rollback. All disk I/O is gated by
-//! `workspace_rewind_durable` ([`rewind_durable_enabled`](super::checkpoint::rewind_durable_enabled));
-//! off ⇒ the legacy in-memory-only path.
+//! The store is a durability **mirror**, not the restore mechanism.
+//! In-session [`rewind_to`](crate::handle::WorkspaceHandle::rewind_to) always reverts in-process, never via a rootfs rollback.
+//! All disk I/O is gated by `workspace_rewind_durable` ([`rewind_durable_enabled`](super::checkpoint::rewind_durable_enabled)).
+//! Off keeps the legacy in-memory-only path.
 //!
 //! **On-disk layout** (under the session `cwd`):
 //!
@@ -33,12 +31,11 @@ use crate::session::checkpoint::RewindCheckpoint;
 /// Directory (under `<cwd>/.grok`) holding every session's checkpoint store.
 const STORE_SUBDIR: &str = "rewind-checkpoints";
 
-/// Default cap on retained checkpoints per session. Bounds on-disk and in-memory
-/// size; the oldest (lowest `prompt_index`) are evicted beyond this.
+/// Default cap on retained checkpoints per session.
+/// Bounds on-disk and in-memory size; the oldest (lowest `prompt_index`) are evicted beyond this.
 const DEFAULT_CHECKPOINT_CAP: usize = 64;
 
-/// Monotonic counter making each checkpoint temp-file name unique within the
-/// process, so concurrent writers for the same `prompt_index` never collide.
+/// Monotonic counter making each checkpoint temp-file name unique in the process, so concurrent writers for the same `prompt_index` never collide.
 static TMP_WRITE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Disk-backed, co-located checkpoint store fronted by an in-memory cache.
@@ -47,36 +44,33 @@ static TMP_WRITE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 pub(crate) struct CheckpointStore {
     /// Per-session store directory: `<cwd>/.grok/rewind-checkpoints/<session_id>`.
     dir: PathBuf,
-    /// Rewritten store dir after a virtualization remount. First bind may
-    /// construct the store under `/workspace`; rebind with `session_root`
-    /// must persist under the real session tree.
+    /// Rewritten store dir after a virtualization remount.
+    /// The first bind may construct the store under `/workspace`; a rebind with `session_root` must persist under the real session tree.
     remounted_dir: std::sync::OnceLock<PathBuf>,
     /// Max retained checkpoints; the oldest are evicted beyond this.
     cap: usize,
-    /// In-memory cache fronting disk (the hot read path). A `BTreeMap` keeps keys
-    /// ordered, so the oldest prompt (smallest key) is cheap to find for eviction.
+    /// In-memory cache fronting disk (the hot read path).
+    /// A `BTreeMap` keeps keys ordered, so the oldest prompt (smallest key) is cheap to find for eviction.
     cache: Mutex<BTreeMap<usize, RewindCheckpoint>>,
-    /// Serializes `persist` against `truncate_from` so a finalize and a rewind
-    /// can't interleave their disk + cache mutations and drift out of sync.
+    /// Serializes `persist` against `truncate_from` so a finalize and a rewind can't interleave disk and cache mutations and drift out of sync.
     io_lock: Mutex<()>,
 }
 
 impl CheckpointStore {
     /// Build a store for `session_id` rooted at the session `cwd`.
     ///
-    /// With the durable flag **off** this does no disk I/O. With it **on** it
-    /// rehydrates the cache from any blobs the rootfs snapshot carried (see
-    /// [`with_cap`](Self::with_cap)).
+    /// With the durable flag **off** this does no disk I/O.
+    /// With it **on** it rehydrates the cache from any blobs the rootfs snapshot carried (see [`with_cap`](Self::with_cap)).
     pub(crate) fn new(cwd: &Path, session_id: &str) -> Self {
         Self::with_cap(cwd, session_id, DEFAULT_CHECKPOINT_CAP)
     }
 
-    /// Like [`new`](Self::new) but with an explicit retention cap (clamped to ≥1).
-    /// With the durable flag on, rehydrates the cache from the blobs the rootfs
-    /// snapshot carried and enforces the cap against them; flag off ⇒ empty, no I/O.
+    /// Like [`new`](Self::new) but with an explicit retention cap (clamped to at least 1).
+    /// With the durable flag on, rehydrates the cache from the blobs the rootfs snapshot carried and enforces the cap against them.
+    /// With the flag off the cache starts empty and no I/O happens.
     pub(crate) fn with_cap(cwd: &Path, session_id: &str, cap: usize) -> Self {
-        // `session_id` is RPC-controlled: never join it verbatim (a `../../etc`
-        // would escape the store root). Map it to a safe, collision-free name first.
+        // `session_id` is RPC-controlled: never join it verbatim (a `../../etc` would escape the store root)
+        // Map it to a safe, collision-free name first
         let dir = cwd
             .join(".grok")
             .join(STORE_SUBDIR)
@@ -100,10 +94,9 @@ impl CheckpointStore {
         self.remounted_dir.get().unwrap_or(&self.dir)
     }
 
-    /// Point subsequent persists at `cwd` after path-virtualization remount.
-    /// Copies already-written blobs so rewind does not orphan pre-virt state.
-    /// Blocking `std::fs` runs in `spawn_blocking`; a failed copy leaves
-    /// `remounted_dir` unset so persist keeps writing the source tree.
+    /// Point subsequent persists at `cwd` after a path-virtualization remount.
+    /// Copies already-written blobs so rewind does not orphan state written before the remount.
+    /// Blocking `std::fs` runs in `spawn_blocking`; a failed copy leaves `remounted_dir` unset so persist keeps writing the source tree.
     pub(crate) async fn remount(&self, cwd: &Path, session_id: &str) -> bool {
         let dest = cwd
             .join(".grok")
@@ -137,18 +130,15 @@ impl CheckpointStore {
         checkpoint_file_path(self.store_dir(), prompt_index)
     }
 
-    /// Write `checkpoint` through to disk and the cache (last-write-wins per
-    /// `prompt_index`), then evict the oldest beyond the cap. Takes the checkpoint
-    /// by value to avoid cloning its (potentially large) contents on the hot path.
+    /// Write `checkpoint` through to disk and the cache (last-write-wins per `prompt_index`), then evict the oldest beyond the cap.
+    /// Takes the checkpoint by value to avoid cloning its (potentially large) contents on the hot path.
     pub(crate) async fn persist(&self, checkpoint: RewindCheckpoint) {
-        // Serialize against `truncate_from` so a finalize and a rewind can't
-        // interleave and leave the cache and disk inconsistent.
+        // Serialize against `truncate_from` so a finalize and a rewind can't interleave and leave the cache and disk inconsistent
         let _io = self.io_lock.lock().await;
 
         let prompt_index = checkpoint.prompt_index;
-        // Skip a checkpoint below the retention window: it would be evicted the
-        // instant it's inserted (write-then-delete). Overwrites of an existing
-        // index, or any index while under the cap, are always retained.
+        // Skip a checkpoint below the retention window: it would be evicted the instant it's inserted (write-then-delete)
+        // Overwrites of an existing index, or any index while under the cap, are always retained
         {
             let cache = self.cache.lock().await;
             let below_window = cache.len() >= self.cap
@@ -179,15 +169,14 @@ impl CheckpointStore {
             return;
         }
 
-        // Pick cap victims under the cache lock, then release it before the file
-        // deletions (never hold the mutex across I/O). The just-inserted index is
-        // guaranteed to survive eviction by the retention-window check above.
+        // Pick cap victims under the cache lock, then release it before the file deletions (never hold the mutex across I/O)
+        // The just-inserted index is guaranteed to survive eviction by the retention-window check above
         let evicted = {
             let mut cache = self.cache.lock().await;
             cache.insert(prompt_index, checkpoint);
             let mut evicted = Vec::new();
             while cache.len() > self.cap {
-                // `pop_first` removes the smallest key — the oldest prompt.
+                // `pop_first` removes the smallest key, the oldest prompt
                 let Some((oldest, _)) = cache.pop_first() else {
                     break;
                 };
@@ -200,26 +189,24 @@ impl CheckpointStore {
         }
     }
 
-    /// Drop persisted checkpoints `>= target` from cache and disk. Scans the
-    /// directory (not just the cache) so it stays correct when the cache is cold
-    /// (e.g. after a sandbox restore). Missing store dir is a no-op.
+    /// Drop persisted checkpoints `>= target` from cache and disk.
+    /// Scans the directory (not just the cache) so it stays correct when the cache is cold (e.g. after a sandbox restore).
+    /// A missing store dir is a no-op.
     pub(crate) async fn truncate_from(&self, target: usize) {
-        // Serialize against `persist` (see [`persist`](Self::persist)) so a rewind
-        // and a concurrent finalize can't interleave their cache + disk mutations.
+        // Serialize against `persist` so a rewind and a concurrent finalize can't interleave their cache and disk mutations
         let _io = self.io_lock.lock().await;
 
-        // Open the disk scan *before* pruning the cache so the two can't diverge:
-        // if the dir can't be opened while it still holds `>= target` blobs, a pruned
-        // cache would let a later rehydrate resurrect the just-rewound checkpoints.
+        // Open the disk scan *before* pruning the cache so the two can't diverge
+        // If the dir still holds `>= target` blobs but can't be opened, pruning the cache would let a later rehydrate resurrect them
         let mut entries = match tokio::fs::read_dir(&self.store_dir()).await {
             Ok(entries) => entries,
-            // Dir absent ⇒ no on-disk blobs to diverge from; safe to prune the cache.
+            // Dir absent, so no on-disk blobs to diverge from; safe to prune the cache
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 self.cache.lock().await.retain(|&idx, _| idx < target);
                 return;
             }
-            // Unscannable dir may still hold `>= target` blobs: keep the cache so it
-            // stays consistent with disk (the rewound checkpoints aren't resurrected).
+            // An unscannable dir may still hold `>= target` blobs
+            // Keep the cache so it stays consistent with disk; the rewound checkpoints aren't resurrected
             Err(e) => {
                 tracing::warn!(
                     error = %e,
@@ -231,10 +218,9 @@ impl CheckpointStore {
         };
         // Scan opened: prune the cache, then delete the `>= target` blobs below.
         self.cache.lock().await.retain(|&idx, _| idx < target);
-        // Explicit loop (not `while let Ok(Some(..))`) so a transient mid-scan
-        // `read_dir` error continues instead of ending early: aborting would leave
-        // a `>= target` blob after the cache was pruned, and a later rehydrate would
-        // resurrect that rewound checkpoint. `remove_file` failures are logged.
+        // Explicit loop (not `while let Ok(Some(..))`) so a transient mid-scan `read_dir` error continues instead of ending early
+        // Aborting would leave a `>= target` blob after the cache was pruned, and a later rehydrate would resurrect that rewound checkpoint
+        // `remove_file` failures are logged
         loop {
             match entries.next_entry().await {
                 Ok(Some(entry)) => {
@@ -265,14 +251,14 @@ impl CheckpointStore {
         }
     }
 
-    /// Create the store dir and its `.gitignore` (idempotent). The `.gitignore`
-    /// at the `rewind-checkpoints` root uses `*` so no blob is ever committed.
+    /// Create the store dir and its `.gitignore` (idempotent).
+    /// The `.gitignore` at the `rewind-checkpoints` root uses `*` so no blob is ever committed.
     async fn ensure_store_dir(&self) -> std::io::Result<()> {
         tokio::fs::create_dir_all(&self.store_dir()).await?;
         if let Some(root) = self.store_dir().parent() {
             let gitignore = root.join(".gitignore");
-            // `Path::exists` is a blocking `stat` on the async runtime thread; use
-            // the async probe to stay consistent with the surrounding tokio::fs I/O.
+            // `Path::exists` is a blocking `stat` on the async runtime thread
+            // Use the async probe to stay consistent with the surrounding tokio::fs I/O
             if !tokio::fs::try_exists(&gitignore).await.unwrap_or(false) {
                 tokio::fs::write(&gitignore, "*\n").await?;
             }
@@ -280,10 +266,9 @@ impl CheckpointStore {
         Ok(())
     }
 
-    /// Serialize `checkpoint` via temp-file + rename, so a crash mid-write can't
-    /// leave a torn JSON blob at the final path. The temp path carries a per-write
-    /// unique suffix (pid + counter), not just `prompt_index`: two overlapping
-    /// persists of the same prompt would otherwise share one temp file and tear.
+    /// Serialize `checkpoint` via temp file and rename, so a crash mid-write can't leave a torn JSON blob at the final path.
+    /// The temp path carries a per-write unique suffix (pid and counter), not just `prompt_index`.
+    /// Two overlapping persists of the same prompt would otherwise share one temp file and tear.
     async fn write_checkpoint_file(&self, checkpoint: &RewindCheckpoint) -> std::io::Result<()> {
         let json = serde_json::to_vec(checkpoint).map_err(std::io::Error::other)?;
         let final_path = self.checkpoint_path(checkpoint.prompt_index);
@@ -294,18 +279,17 @@ impl CheckpointStore {
             std::process::id(),
             unique,
         ));
-        // Flush the blob to disk *before* the rename: atomic rename gives visibility,
-        // not data persistence, so without this fsync the durability mechanism (a
-        // rootfs snapshot carrying these files) could capture a zero-length/short
-        // blob. `sync_all` fsyncs contents + metadata.
+        // Flush the blob to disk *before* the rename: atomic rename gives visibility, not data persistence
+        // Without this fsync the durability mechanism (a rootfs snapshot carrying these files) could capture a zero-length or short blob
+        // `sync_all` fsyncs contents and metadata
         {
             let mut f = tokio::fs::File::create(&tmp_path).await?;
             f.write_all(&json).await?;
             f.sync_all().await?;
         }
         tokio::fs::rename(&tmp_path, &final_path).await?;
-        // Best-effort dir fsync so the rename (the new dir entry) is itself durable;
-        // async open keeps this off the blocking path. Ignored where unsupported.
+        // Best-effort dir fsync so the rename (the new dir entry) is itself durable; async open keeps this off the blocking path
+        // Errors are ignored where unsupported
         if let Ok(dir) = tokio::fs::File::open(&self.store_dir()).await {
             let _ = dir.sync_all().await;
         }
@@ -319,10 +303,9 @@ fn checkpoint_file_path(dir: &Path, prompt_index: usize) -> PathBuf {
 }
 
 /// Derive the on-disk store directory name for a caller-controlled `session_id`.
-/// Must be (1) a single traversal-safe component (`../../etc` must not escape the
-/// root) and (2) collision-free across distinct raw ids. A readable sanitized
-/// prefix (`[^A-Za-z0-9_-]` → `_`, length-bounded) plus a short hash of the *raw*
-/// id; deterministic so a restored session reads back the same directory.
+/// Must be (1) a single traversal-safe component (`../../etc` must not escape the root) and (2) collision-free across distinct raw ids.
+/// The name is a readable sanitized prefix (`[^A-Za-z0-9_-]` mapped to `_`, length-bounded) plus a short hash of the *raw* id.
+/// It is deterministic, so a restored session reads back the same directory.
 fn session_store_dir_name(session_id: &str) -> String {
     const PREFIX_MAX: usize = 48;
     let prefix: String = session_id
@@ -336,13 +319,13 @@ fn session_store_dir_name(session_id: &str) -> String {
         })
         .take(PREFIX_MAX)
         .collect();
-    // The hash makes the name collision-resistant; appended unconditionally so
-    // the result always contains `-<hex>` and can never be empty, `.`, or `..`.
+    // The hash makes the name collision-resistant
+    // It is appended unconditionally, so the result always contains `-<hex>` and can never be empty, `.`, or `..`
     format!("{prefix}-{:016x}", fnv1a_64(session_id.as_bytes()))
 }
 
-/// FNV-1a 64-bit hash. Small and fully specified, so the digest is stable across
-/// platforms and toolchains — required since the store dir name depends on it.
+/// FNV-1a 64-bit hash.
+/// Small and fully specified, so the digest is stable across platforms and toolchains; the store dir name depends on that stability.
 fn fnv1a_64(bytes: &[u8]) -> u64 {
     const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -354,8 +337,8 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
     hash
 }
 
-/// Blocking blob copy for remount. Returns false if dest cannot be created
-/// or any missing blob fails to copy.
+/// Blocking blob copy for remount.
+/// Returns false if dest cannot be created or any missing blob fails to copy.
 fn copy_checkpoint_blobs(src: &Path, dest: &Path) -> bool {
     if std::fs::create_dir_all(dest).is_err() {
         return false;
@@ -373,8 +356,7 @@ fn copy_checkpoint_blobs(src: &Path, dest: &Path) -> bool {
             continue;
         }
         let to = dest.join(entry.file_name());
-        // Overwrite dest so a retry after a partial copy cannot keep stale
-        // blobs while persist has advanced the source tree.
+        // Overwrite dest so a retry after a partial copy cannot keep stale blobs while persist has advanced the source tree
         if std::fs::copy(&from, &to).is_err() {
             return false;
         }
@@ -383,9 +365,8 @@ fn copy_checkpoint_blobs(src: &Path, dest: &Path) -> bool {
 }
 
 /// Run the blocking disk rehydrate without starving the async runtime.
-/// [`load_capped_from_disk`] uses blocking `std::fs` but the constructor is sync
-/// and reached from async paths: on a multi-thread runtime hand it to
-/// `block_in_place`; otherwise (current-thread, where that panics) run inline.
+/// [`load_capped_from_disk`] uses blocking `std::fs`, but the constructor is sync and reached from async paths.
+/// On a multi-thread runtime hand it to `block_in_place`; otherwise (current-thread, where that panics) run inline.
 fn rehydrate_off_runtime(dir: &Path, cap: usize) -> BTreeMap<usize, RewindCheckpoint> {
     use tokio::runtime::{Handle, RuntimeFlavor};
     match Handle::try_current() {
@@ -396,9 +377,9 @@ fn rehydrate_off_runtime(dir: &Path, cap: usize) -> BTreeMap<usize, RewindCheckp
     }
 }
 
-/// Load persisted checkpoints from `dir`, trimmed to the newest `cap` (older
-/// blobs are deleted, bounding on-disk size). Blocking `std::fs`, run once at
-/// construction. Missing dir ⇒ empty; unreadable/corrupt blobs are skipped.
+/// Load persisted checkpoints from `dir`, trimmed to the newest `cap` (older blobs are deleted, bounding on-disk size).
+/// Blocking `std::fs`, run once at construction.
+/// A missing dir yields empty; unreadable or corrupt blobs are skipped.
 fn load_capped_from_disk(dir: &Path, cap: usize) -> BTreeMap<usize, RewindCheckpoint> {
     let mut loaded = BTreeMap::new();
     let entries = match std::fs::read_dir(dir) {
@@ -414,8 +395,7 @@ fn load_capped_from_disk(dir: &Path, cap: usize) -> BTreeMap<usize, RewindCheckp
         }
     };
     for entry in entries {
-        // Don't `flatten()` away per-entry errors: a dropped entry would omit a blob
-        // from the cache while leaving it on disk, diverging the two. Log and skip.
+        // Don't `flatten()` away per-entry errors: a dropped entry would omit a blob from the cache while leaving it on disk, diverging the two
         let entry = match entry {
             Ok(entry) => entry,
             Err(e) => {
@@ -429,9 +409,8 @@ fn load_capped_from_disk(dir: &Path, cap: usize) -> BTreeMap<usize, RewindCheckp
         };
         let file_name = entry.file_name();
         let Some(idx) = parse_checkpoint_index(&file_name) else {
-            // Sweep orphaned temp files from a crashed `write_checkpoint_file`:
-            // rehydrate runs once at construction before this instance writes, so
-            // removing them is safe and bounds clutter. Best-effort.
+            // Sweep orphaned temp files from a crashed `write_checkpoint_file`
+            // Rehydrate runs once at construction before this instance writes, so removing them is safe and bounds clutter
             if is_orphan_checkpoint_tmp(&file_name) {
                 let _ = std::fs::remove_file(entry.path());
             }
@@ -464,8 +443,8 @@ fn load_capped_from_disk(dir: &Path, cap: usize) -> BTreeMap<usize, RewindCheckp
     loaded
 }
 
-/// Parse `checkpoint-<n>.json` → `n`. `None` for anything else (including the
-/// in-flight `checkpoint-<n>.json.tmp` written by `write_checkpoint_file`).
+/// Parse `checkpoint-<n>.json` into `n`.
+/// `None` for anything else (including the in-flight `checkpoint-<n>.json.tmp` written by `write_checkpoint_file`).
 fn parse_checkpoint_index(file_name: &std::ffi::OsStr) -> Option<usize> {
     file_name
         .to_str()?
@@ -475,9 +454,8 @@ fn parse_checkpoint_index(file_name: &std::ffi::OsStr) -> Option<usize> {
         .ok()
 }
 
-/// Whether `file_name` is an orphaned checkpoint temp file
-/// (`checkpoint-<idx>.json.tmp[...]`) left by a crashed `write_checkpoint_file`,
-/// swept on rehydrate (`parse_checkpoint_index` deliberately skips them).
+/// Whether `file_name` is an orphaned checkpoint temp file (`checkpoint-<idx>.json.tmp[...]`) left by a crashed `write_checkpoint_file`.
+/// These are swept on rehydrate; `parse_checkpoint_index` deliberately skips them.
 fn is_orphan_checkpoint_tmp(file_name: &std::ffi::OsStr) -> bool {
     file_name
         .to_str()
@@ -491,9 +469,8 @@ impl CheckpointStore {
         self.store_dir()
     }
 
-    /// Read a checkpoint, preferring the cache and falling back to a disk read
-    /// (warming the cache). Test-only: the prod consumer that re-seeds live
-    /// trackers from these blobs after a sandbox restore is not yet wired.
+    /// Read a checkpoint, preferring the cache and falling back to a disk read (warming the cache).
+    /// Test-only: the prod consumer that re-seeds live trackers from these blobs after a sandbox restore is not yet wired.
     pub(crate) async fn get(&self, prompt_index: usize) -> Option<RewindCheckpoint> {
         if let Some(cp) = self.cache.lock().await.get(&prompt_index).cloned() {
             return Some(cp);
@@ -590,8 +567,7 @@ mod tests {
         store.persist(fs_only_checkpoint(5)).await;
         store.persist(fs_only_checkpoint(10)).await;
 
-        // An index below the retained window would be evicted the moment it's
-        // inserted, so it must be skipped entirely — not written-then-deleted.
+        // An index below the retained window would be evicted the moment it's inserted, so it must be skipped entirely, not written-then-deleted
         store.persist(fs_only_checkpoint(3)).await;
         assert!(
             !store.checkpoint_path(3).exists(),
@@ -673,13 +649,13 @@ mod tests {
     async fn truncate_on_missing_store_dir_is_noop() {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::new(tmp.path(), "sess-1");
-        // Nothing persisted yet (dir absent) — truncate must not error or create it.
+        // Nothing persisted yet (dir absent): truncate must not error or create it
         store.truncate_from(0).await;
         assert!(!store.dir().exists());
     }
 
-    /// Rehydrate (post-restore): blobs the rootfs snapshot carried load back into
-    /// the cache, and the cap is enforced against the on-disk set (oldest deleted).
+    /// Rehydrate (post-restore): blobs the rootfs snapshot carried load back into the cache.
+    /// The cap is enforced against the on-disk set (oldest deleted).
     #[tokio::test]
     async fn rehydrate_loads_capped_set_from_disk() {
         let tmp = tempfile::tempdir().unwrap();
@@ -710,7 +686,7 @@ mod tests {
         let writer = CheckpointStore::with_cap(tmp.path(), "sess-1", 100);
         writer.persist(fs_only_checkpoint(0)).await;
 
-        // Simulate a crash / failed rename leaving an orphan temp file behind.
+        // Simulate a crash or failed rename leaving an orphan temp file behind
         let orphan = writer.dir.join("checkpoint-9.json.tmp.4242.0");
         std::fs::write(&orphan, b"partial").unwrap();
         assert!(orphan.exists());
@@ -760,8 +736,7 @@ mod tests {
                 "no separators for {raw:?}: {s:?}"
             );
             assert!(s != "." && s != "..", "not a traversal component: {s:?}");
-            // Joining must stay within the store root and add exactly one path
-            // component (no `..` escape).
+            // Joining must stay within the store root and add exactly one path component (no `..` escape)
             let joined = root.join(&s);
             assert!(joined.starts_with(root), "stays in root: {joined:?}");
             assert_eq!(
@@ -771,8 +746,8 @@ mod tests {
             );
         }
 
-        // Distinct raw ids sharing a sanitized prefix must still map to distinct
-        // directories (hash suffix differs), so sessions can't clobber each other.
+        // Distinct raw ids sharing a sanitized prefix must still map to distinct directories (the hash suffix differs)
+        // Otherwise sessions could clobber each other's stores
         assert_ne!(
             session_store_dir_name("foo/bar"),
             session_store_dir_name("foo_bar"),
@@ -780,8 +755,7 @@ mod tests {
         );
         assert_ne!(session_store_dir_name("a/b"), session_store_dir_name("a-b"));
 
-        // Deterministic: the same raw id always maps to the same directory, so a
-        // restored session rehydrates from the right place.
+        // Deterministic: the same raw id always maps to the same directory, so a restored session rehydrates from the right place
         assert_eq!(
             session_store_dir_name("session-123"),
             session_store_dir_name("session-123")

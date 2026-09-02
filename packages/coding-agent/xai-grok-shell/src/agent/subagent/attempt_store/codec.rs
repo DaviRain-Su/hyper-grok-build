@@ -1,5 +1,3 @@
-//! Canonical core attempt record types and encoder.
-
 use std::marker::PhantomData;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};

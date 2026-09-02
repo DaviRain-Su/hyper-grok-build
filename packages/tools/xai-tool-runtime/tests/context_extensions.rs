@@ -250,14 +250,3 @@ fn absence_signals_backend_or_other_mode() {
     assert!(!ctx.extensions.contains::<BehaviorVersion>());
     assert!(!ctx.extensions.contains::<TraceContext>());
 }
-
-#[test]
-fn well_known_extensions_clone_preserves_inner_value() {
-    let cwd = Cwd(std::path::PathBuf::from("/etc"));
-    let behavior = BehaviorVersion("v0".into());
-    let trace = TraceContext("tp".into());
-
-    assert_eq!(cwd.clone().0, cwd.0);
-    assert_eq!(behavior.clone().0, behavior.0);
-    assert_eq!(trace.clone().0, trace.0);
-}

@@ -1,11 +1,7 @@
-//! Terminal color support detection and quantization.
+//! Detects the terminal's color capabilities (truecolor / 256 / 16 / none).
+//! [`quantize_color`] downgrades a [`ratatui::style::Color`] to the highest level the terminal supports.
 //!
-//! Detects the terminal's color capabilities (truecolor / 256 / 16 / none) and
-//! provides a [`quantize_color`] function that downgrades a [`ratatui::style::Color`]
-//! to the highest level the terminal supports.
-//!
-//! The detected level is cached in a global [`OnceLock`] — call [`detect`] once
-//! at startup, then use [`get`] everywhere else.
+//! The detected level is cached in a global [`OnceLock`]; call [`detect`] once at startup, then use [`get`] everywhere else.
 
 use std::sync::OnceLock;
 
@@ -14,7 +10,7 @@ use ratatui::style::Color;
 use crate::render::color::{indexed_to_rgb, nearest_indexed};
 use crate::terminal::{TerminalName, terminal_context};
 
-/// Terminal color support level (ordered low → high).
+/// Terminal color support level (ordered low to high).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ColorLevel {
     /// No color support (monochrome).
@@ -40,10 +36,8 @@ impl ColorLevel {
         self >= Self::TrueColor
     }
 
-    /// Canonical lowercase spelling that round-trips through the
-    /// `GROK_FORCE_COLOR_LEVEL` parser. Use this in user-facing
-    /// diagnostics (not `{:?}` Debug, which yields `Basic` / `Ansi256`
-    /// / `TrueColor` / `None`).
+    /// Canonical lowercase spelling that round-trips through the `GROK_FORCE_COLOR_LEVEL` parser.
+    /// Use this in user-facing diagnostics (not `{:?}` Debug, which yields `Basic` / `Ansi256` / `TrueColor` / `None`).
     pub fn as_str(self) -> &'static str {
         match self {
             Self::None => "none",
@@ -66,17 +60,13 @@ static COLOR_LEVEL: OnceLock<ColorLevel> = OnceLock::new();
 
 /// Detect the terminal's color support and cache the result.
 ///
-/// Uses the `supports-color` crate which checks `COLORTERM`, `TERM`,
-/// terminal-specific env vars (`ITERM_SESSION_ID`, etc.) and whether
-/// stdout is a TTY.
+/// The `supports-color` crate checks `COLORTERM`, `TERM`, terminal-specific env vars (`ITERM_SESSION_ID`, etc.) and whether stdout is a TTY.
 ///
 /// If `NO_COLOR` is set the result is [`ColorLevel::None`].
-/// If stdout is not a TTY (test runner, piped output) and `NO_COLOR` is
-/// absent, defaults to [`ColorLevel::TrueColor`] — the safe assumption
-/// for a TUI app that always runs inside a terminal.
+/// If stdout is not a TTY (test runner, piped output) and `NO_COLOR` is absent, the result defaults to [`ColorLevel::TrueColor`].
+/// That is the safe assumption for a TUI app that always runs inside a terminal.
 ///
-/// Capped at [`ColorLevel::Basic`] while the terminal-native lock is
-/// engaged.
+/// Capped at [`ColorLevel::Basic`] while the terminal-native lock is engaged.
 pub fn detect() -> ColorLevel {
     // Test-only per-call override, consulted BEFORE the OnceLock-cached
     // environment detection (which cannot be reset between tests).
@@ -130,14 +120,12 @@ fn detect_raw() -> ColorLevel {
                     ColorLevel::None
                 }
             }
-            // Not a TTY (tests, piped) — default to TrueColor.
+            // `None` means stdout is not a TTY (tests, piped)
             None => ColorLevel::TrueColor,
         };
 
-        // The `supports-color` crate relies on COLORTERM=truecolor, but
-        // tmux/SSH/mosh often strip that variable.  When the crate reports
-        // only 256-color support, upgrade to TrueColor if we can identify
-        // the terminal emulator and know it handles 24-bit RGB.
+        // The `supports-color` crate relies on COLORTERM=truecolor, but tmux/SSH/mosh often strip that variable
+        // When the crate reports only 256-color support, upgrade to TrueColor if we can identify the emulator and know it handles 24-bit RGB
         if level < ColorLevel::TrueColor && terminal_supports_truecolor() {
             return ColorLevel::TrueColor;
         }
@@ -146,12 +134,9 @@ fn detect_raw() -> ColorLevel {
     })
 }
 
-/// Standalone diagnostic color evidence.
-///
 /// This never consults stdout, because `grok doctor --json` is commonly piped.
-/// Stderr or an independently opened controlling terminal is sufficient
-/// evidence that the process is diagnosing that terminal; a fully headless
-/// invocation is honest about having no color evidence.
+/// Stderr or an independently opened controlling terminal is sufficient evidence that the process is diagnosing that terminal.
+/// A fully headless invocation is honest about having no color evidence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StandaloneColorEvidence {
     Available(ColorLevel),
@@ -270,14 +255,9 @@ pub fn quantize(color: Color) -> Color {
 
 // ── Terminal-based truecolor inference ──────────────────────────────────
 
-/// Check whether the detected terminal emulator is known to support truecolor.
-///
-/// Used as a fallback when `COLORTERM` is missing (e.g. inside tmux, SSH, or
-/// — most importantly — under a bare `cmd.exe` / `powershell.exe` ConHost
-/// window, which has supported VT-encoded 24-bit color since Windows 10
-/// 1709 (Fall Creators Update) but doesn't advertise it via COLORTERM. Without
-/// this fallback our themes get quantized to the 16-color ANSI palette there
-/// and the subtle bg/border/muted gradations collapse onto each other.
+/// Used as a fallback when `COLORTERM` is missing: inside tmux, SSH, or a bare `cmd.exe` / `powershell.exe` ConHost window.
+/// ConHost has supported VT-encoded 24-bit color since Windows 10 1709 (Fall Creators Update) but doesn't advertise it via COLORTERM.
+/// Without the fallback, themes there get quantized to the 16-color ANSI palette and the subtle bg/border/muted gradations collapse onto each other.
 fn terminal_supports_truecolor() -> bool {
     terminal_supports_truecolor_brand(terminal_context().brand)
 }
@@ -298,9 +278,8 @@ fn terminal_supports_truecolor_brand(terminal: TerminalName) -> bool {
     ) {
         return true;
     }
-    // Native Windows: assume ConHost has VT processing enabled. Pre-1709
-    // hosts are effectively extinct and would gracefully degrade by
-    // ignoring the SGR 38;2;... sequences.
+    // Native Windows: assume ConHost has VT processing enabled
+    // Pre-1709 hosts are effectively extinct and would gracefully degrade by ignoring the SGR 38;2;... sequences.
     cfg!(target_os = "windows")
 }
 
@@ -336,8 +315,8 @@ fn indexed_to_ansi16(n: u8) -> Color {
 
 /// Find the nearest ANSI 16 color for an RGB triplet.
 ///
-/// Uses a simple squared-Euclidean distance over the standard xterm ANSI 16
-/// palette. Good enough for a fallback — 16-color terminals are very rare.
+/// Uses a simple squared-Euclidean distance over the standard xterm ANSI 16 palette.
+/// That is good enough for a fallback; 16-color terminals are very rare.
 fn rgb_to_ansi16(r: u8, g: u8, b: u8) -> Color {
     // Standard xterm ANSI 16 palette (same values used by indexed_to_rgb for 0–15).
     const PALETTE: [(u8, u8, u8, Color); 16] = [
@@ -477,7 +456,6 @@ mod tests {
     fn basic_quantizes_to_named() {
         let rgb = Color::Rgb(255, 0, 0);
         let q = quantize_color(rgb, ColorLevel::Basic);
-        // Should map to a red variant
         assert!(
             matches!(q, Color::Red | Color::LightRed),
             "expected Red/LightRed, got {q:?}"
@@ -486,7 +464,7 @@ mod tests {
 
     #[test]
     fn basic_quantizes_indexed_to_named() {
-        // Indexed(196) = (255,0,0) — pure bright red in the cube
+        // Indexed(196) is (255,0,0), pure bright red in the cube
         let idx = Color::Indexed(196);
         let q = quantize_color(idx, ColorLevel::Basic);
         assert!(
@@ -528,7 +506,6 @@ mod tests {
 
     #[test]
     fn ansi16_roundtrip_first_16() {
-        // Indices 0–15 should map to their corresponding named colors
         assert_eq!(indexed_to_ansi16(0), Color::Black);
         assert_eq!(indexed_to_ansi16(1), Color::Red);
         assert_eq!(indexed_to_ansi16(4), Color::Blue);

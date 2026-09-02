@@ -1,20 +1,15 @@
-//! E2E: the settings modal's locked coding-data row, driven off
-//! the seeded auth entry through the full pipeline (auth.json → shell
-//! `GrokAuth` → auth meta → `AppView::coding_data_sharing_lock()` →
-//! `PagerLocalSnapshot` → render):
+//! E2E: the settings modal's locked coding-data row, driven off the seeded auth entry through the full pipeline.
+//! The pipeline runs auth.json, shell `GrokAuth`, auth meta, `AppView::coding_data_sharing_lock()`, `PagerLocalSnapshot`, then the render:
 //!
-//! - ZDR team (`team_blocked_reasons` = `BLOCKED_REASON_NO_LOGS`): the value
-//!   column shows exactly `ZDR` (no Opt in / Opt out), no `›` chevron;
-//!   expanding the row shows only "Your team has Zero Data Retention."
-//! - Team non-admin (`team_role` = `MEMBER`): the value shows
-//!   `Opt out · Admin Managed`, no chevron; expanding shows only
-//!   "Managed by your team admin."
+//! - ZDR team (`team_blocked_reasons` = `BLOCKED_REASON_NO_LOGS`): the value column shows exactly `ZDR` (no Opt in / Opt out) and no `›` chevron.
+//!   Expanding the row shows only "Your team has Zero Data Retention."
+//! - Team non-admin (`team_role` = `MEMBER`): the value shows `Opt out · Admin Managed` and no chevron.
+//!   Expanding shows only "Managed by your team admin."
 //!
-//! Both accounts also suppress the welcome privacy banner even with
-//! `GROK_PRIVACY_NOTICE_ROLLOUT=1` — asserted on the authenticated welcome
-//! screen before opening settings. Row/input details are unit-tested in
-//! `xai-grok-pager` (`views/settings_modal/tests.rs`, `locked_coding_*`);
-//! this suite covers the auth-to-render pipeline.
+//! Both accounts also suppress the welcome privacy banner even with `GROK_PRIVACY_NOTICE_ROLLOUT=1`.
+//! That is asserted on the authenticated welcome screen before opening settings.
+//! Row/input details are unit-tested in `xai-grok-pager` (`views/settings_modal/tests.rs`, `locked_coding_*`).
+//! This suite covers the auth-to-render pipeline.
 //!
 //! ```bash
 //! cargo test -p xai-grok-pager-pty-harness --test settings_locked_row_e2e \
@@ -33,15 +28,15 @@ use xai_grok_pager_pty_harness::{
 const ROWS: u16 = 50;
 const COLS: u16 = 120;
 const BANNER_TITLE: &str = "Help improve Grok";
-/// Head of the row's label (`Coding data, retention, and training`). The
-/// modal truncates long labels, so match the stable prefix.
+/// Head of the row's label (`Coding data, retention, and training`).
+/// The modal truncates long labels, so match the stable prefix.
 const ROW_LABEL: &str = "Coding data";
 const CHEVRON: &str = "\u{203A}"; // ›
 const ZDR_REASON: &str = "Your team has Zero Data Retention.";
 const TEAM_REASON: &str = "Managed by your team admin.";
-/// Head of the row's description in `settings/defs.rs`. Kept short so it
-/// can't span one of the modal's word wraps — `contains_text` joins rows
-/// with `\n`, so a match on wrapped copy would silently never fire.
+/// Head of the row's description in `settings/defs.rs`.
+/// It is kept short so it can't span one of the modal's word wraps.
+/// `contains_text` joins rows with `\n`, so a match on wrapped copy would silently never fire.
 const DESCRIPTION_PREFIX: &str = "Opt-in to provide SpaceXAI";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -56,11 +51,10 @@ async fn team_member_sees_admin_managed_row_and_no_banner() {
     run_team_member().await.expect("team-member locked-row e2e");
 }
 
-/// Rollout flag forced on (the banner would show for a plain opted-out user),
-/// the sandbox's fake `XAI_API_KEY` removed so the seeded team OAuth entry is
-/// the active auth, and ZDR product access enabled — without it a ZDR account
-/// gets the blocked welcome screen ("not yet available") and can never reach
-/// settings; the row lock and banner suppression key off `is_zdr` regardless.
+/// The rollout flag is forced on: the banner would show for a plain opted-out user.
+/// The sandbox's fake `XAI_API_KEY` is removed so the seeded team OAuth entry is the active auth.
+/// ZDR product access is enabled; without it a ZDR account gets the blocked welcome screen ("not yet available") and can never reach settings.
+/// The row lock and banner suppression key off `is_zdr` regardless.
 fn locked_row_env_ops() -> [EnvOp<'static>; 3] {
     [
         EnvOp::set("GROK_PRIVACY_NOTICE_ROLLOUT", "1"),
@@ -180,9 +174,8 @@ fn spawn_pager(binary: &Path, content: &ContentController, project: &Path) -> Re
     )
 }
 
-/// Sync on "New worktree" — rendered only on the authenticated welcome menu
-/// ("Quit" also renders while auth is still pending, where the banner is
-/// gated off regardless of team state) — then assert the banner never shows.
+/// Sync on "New worktree", which renders only on the authenticated welcome menu, then assert the banner never shows.
+/// "Quit" also renders while auth is still pending, where the banner is gated off regardless of team state.
 fn assert_no_banner_on_welcome(pager: &mut PtyHarness) -> Result<()> {
     pager
         .wait_for_text("New worktree", Duration::from_secs(20))
@@ -196,18 +189,14 @@ fn assert_no_banner_on_welcome(pager: &mut PtyHarness) -> Result<()> {
     Ok(())
 }
 
-/// Open settings via F2 and return the screen line holding the Coding data
-/// sharing row. F2's `OpenSettings` binding is `When::AgentScreen` only —
-/// the welcome screen never routes it — so Enter first starts a session
-/// (`Action::NewSession`), then F2 in the agent view opens the modal
-/// (`dispatch_open_settings`).
+/// Open settings via F2 and return the screen line holding the Coding data sharing row.
+/// F2's `OpenSettings` binding is `When::AgentScreen` only; the welcome screen never routes it.
+/// Enter therefore first starts a session (`Action::NewSession`), then F2 in the agent view opens the modal (`dispatch_open_settings`).
 ///
-/// Navigation is always via the modal's `/` filter: typing the query clamps
-/// the selection to the filtered set (`clamp_selected_to_visible`) and Enter
-/// commits back to Browse PRESERVING query and selection, so afterwards the
-/// row is both in the viewport and FOCUSED — the precondition for `→`
-/// expansion in [`expand_focused_row`]. The lowercase query cannot collide
-/// with the case-sensitive label.
+/// Navigation is always via the modal's `/` filter: typing the query clamps the selection to the filtered set (`clamp_selected_to_visible`).
+/// Enter commits back to Browse PRESERVING query and selection, so afterwards the row is both in the viewport and FOCUSED.
+/// That is the precondition for the `→` expansion in [`expand_focused_row`].
+/// The lowercase query cannot collide with the case-sensitive label.
 fn open_settings_and_grab_row_line(pager: &mut PtyHarness) -> Result<String> {
     pager.inject_keys(keys::ENTER).context("start session")?;
     pager
@@ -237,10 +226,8 @@ fn open_settings_and_grab_row_line(pager: &mut PtyHarness) -> Result<String> {
         .with_context(|| format!("{ROW_LABEL:?} line not found:\n{screen}"))
 }
 
-/// Expand the focused row with `→` (Browse-mode `KeyCode::Right` inserts the
-/// focused key into `expanded_keys`) and wait for `reason` to render.
-/// Callers reach here from [`open_settings_and_grab_row_line`], which leaves
-/// the coding-data row focused.
+/// Expand the focused row with `→` (Browse-mode `KeyCode::Right` inserts the focused key into `expanded_keys`) and wait for `reason` to render.
+/// Callers reach here from [`open_settings_and_grab_row_line`], which leaves the coding-data row focused.
 fn expand_focused_row(pager: &mut PtyHarness, reason: &str) -> Result<()> {
     pager.inject_keys(keys::RIGHT).context("expand row")?;
     pager.update(Duration::from_millis(300));

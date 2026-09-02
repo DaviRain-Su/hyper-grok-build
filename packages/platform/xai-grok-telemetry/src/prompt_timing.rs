@@ -1,6 +1,4 @@
 //! Per-turn prompt latency measurement.
-//!
-//! Extracted from `xai-grok-shell::session::prompt_timing`.
 
 use std::time::Instant;
 
@@ -13,6 +11,7 @@ pub struct PromptTiming {
     turn_start: Instant,
     mcp_wait_ms: u64,
     tool_collection_ms: u64,
+    repo_status_wait_ms: Option<u64>,
     ttft_ms: Option<u64>,
     ttlb_ms: u64,
     attempts: u32,
@@ -25,6 +24,7 @@ impl PromptTiming {
             turn_start: Instant::now(),
             mcp_wait_ms: 0,
             tool_collection_ms: 0,
+            repo_status_wait_ms: None,
             ttft_ms: None,
             ttlb_ms: 0,
             attempts: 1,
@@ -35,6 +35,10 @@ impl PromptTiming {
     pub fn record_tool_prep(&mut self, mcp_wait_ms: u64, total_prep_ms: u64) {
         self.mcp_wait_ms = mcp_wait_ms;
         self.tool_collection_ms = total_prep_ms.saturating_sub(mcp_wait_ms);
+    }
+
+    pub fn record_repo_status_wait(&mut self, wait_ms: u64) {
+        self.repo_status_wait_ms = Some(wait_ms);
     }
 
     pub fn record_stream_latency(&mut self, ttft_ms: Option<u64>, ttlb_ms: u64) {
@@ -83,6 +87,7 @@ impl PromptTiming {
             total_ms,
             mcp_wait_ms: self.mcp_wait_ms,
             tool_collection_ms: self.tool_collection_ms,
+            repo_status_wait_ms: self.repo_status_wait_ms,
             model_call_ms,
             pre_model_ms,
             mcp_server_count,
@@ -108,6 +113,7 @@ mod tests {
             total_ms: 5200,
             mcp_wait_ms: 120,
             tool_collection_ms: 45,
+            repo_status_wait_ms: None,
             model_call_ms: 4800,
             pre_model_ms: 400,
             mcp_server_count: 6,

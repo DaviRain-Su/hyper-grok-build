@@ -1,13 +1,8 @@
 //! Session signals tracking for feedback heuristics.
 //!
-//! This module tracks session-level signals that inform feedback request decisions.
-//! Signals are collected locally in the agent and periodically synced to the
-//! backend for analytics / telemetry persistence.
+//! Signals are collected locally in the agent and periodically synced to the backend for analytics / telemetry persistence.
 //!
-//! Uses a channel-based actor pattern to avoid locks:
-//! - `SessionSignalsHandle` is a cheap, cloneable sender for reporting signals
-//! - `SessionSignalsActor` runs as a background task processing signal events
-//! - Snapshots are requested via oneshot channels for async response
+//! Uses a channel-based actor pattern to avoid locks.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -21,8 +16,8 @@ use super::inference_metrics::{InferenceLatencyStats, compute_percentiles};
 
 /// Sample the process resident-set high-water mark in bytes.
 ///
-/// Uses `getrusage(RUSAGE_SELF)` on Unix; returns 0 if sampling fails or on
-/// non-Unix targets. Cheap enough to call once per turn.
+/// Uses `getrusage(RUSAGE_SELF)` on Unix; returns 0 if sampling fails or on non-Unix targets.
+/// Cheap enough to call once per turn.
 pub(crate) fn sample_rss_bytes() -> u64 {
     #[cfg(unix)]
     {
@@ -36,8 +31,8 @@ pub(crate) fn sample_rss_bytes() -> u64 {
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
-                    // macOS (our only non-Linux Unix target) reports bytes. Other
-                    // BSDs report kB like Linux — revisit the unit if we ever port.
+                    // macOS (our only non-Linux Unix target) reports bytes
+                    // Other BSDs report kB like Linux; revisit the unit if we ever port
                     rss
                 }
             } else {
@@ -53,23 +48,20 @@ pub(crate) fn sample_rss_bytes() -> u64 {
 
 /// Per-tool success/failure breakdown for a single turn.
 ///
-/// Serialized as part of `SessionSignalsDelta` and synced to backend
-/// analytics for per-tool-name stats (e.g. "bash fails 10% of the time").
+/// Serialized as part of `SessionSignalsDelta` and synced to backend analytics for per-tool-name stats (e.g. "bash fails 10% of the time").
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolOutcome {
     /// Tool name (e.g. "bash", "read_file", "search_replace")
     pub tool_name: String,
-    /// Number of successful invocations this turn
     pub successes: u32,
-    /// Number of failed invocations this turn
     pub failures: u32,
 }
 
 /// Per-tool execution duration for a single invocation.
 ///
-/// Written into `turn_result.json` via `SessionSignalsDelta.tool_durations_this_turn`
-/// so downstream analytics can join wall time to a specific tool call.
+/// Written into `turn_result.json` via `SessionSignalsDelta.tool_durations_this_turn`.
+/// Downstream analytics join wall time to a specific tool call through it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolDuration {
@@ -78,20 +70,17 @@ pub struct ToolDuration {
     /// Join key (`missing-call-id-{batch_idx}` if the model omitted one). Empty on legacy packages.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tool_call_id: String,
-    /// Dispatch wall-clock ms (start → result ready), including lock wait and
-    /// in-dispatch auth retries. A managed-MCP reauth retry adds its second
-    /// attempt here; the reauth handshake wait itself is excluded.
+    /// Dispatch wall-clock ms (start to result ready), including lock wait and in-dispatch auth retries.
+    /// A managed-MCP reauth retry adds its second attempt here; the reauth handshake wait itself is excluded.
     pub duration_ms: u64,
 }
 
-/// How a PR creation was performed (shared with the `pr_created` telemetry
-/// event so signal and event values can never diverge).
+/// How a PR creation was performed (shared with the `pr_created` telemetry event so signal and event values can never diverge).
 pub use xai_grok_telemetry::enums::PrCreationSource;
 
 /// A PR created during a turn, recorded for PR metrics.
 ///
-/// Serialized as part of `SessionSignalsDelta` into `turn_result.json` so
-/// backend analytics can attribute PR creation to the turn's model.
+/// Serialized as part of `SessionSignalsDelta` into `turn_result.json` so backend analytics can attribute PR creation to the turn's model.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PrCreatedSignal {
@@ -101,17 +90,14 @@ pub struct PrCreatedSignal {
     /// PR number when parsed from the create output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub number: Option<u64>,
-    /// How the PR was created.
     pub source: PrCreationSource,
-    /// Whether the session recorded a `git commit` by the end of the turn
-    /// that created the PR (reconciled at `TakeTurnEndSnapshot`, so parallel
-    /// tool-result ordering cannot mis-attribute). Distinguishes end-to-end
-    /// PRs from ones whose work started elsewhere.
+    /// Whether the session recorded a `git commit` by the end of the turn that created the PR.
+    /// Reconciled at `TakeTurnEndSnapshot`, so parallel tool-result ordering cannot mis-attribute.
+    /// Distinguishes end-to-end PRs from ones whose work started elsewhere.
     pub had_commit_in_session: bool,
 }
 
-/// Snapshot produced at turn end, containing the delta from the previous turn
-/// and the current cumulative signals.
+/// Snapshot produced at turn end, containing the delta from the previous turn and the current cumulative signals.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnDeltaSnapshot {
@@ -127,8 +113,8 @@ pub struct TurnDeltaSnapshot {
     /// Populated by the session actor after taking the snapshot.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_prompt_mode: Option<String>,
-    /// Per-turn summed input tokens (all model calls). Stamped from
-    /// `TurnSpanTotals` post-snapshot; internal transport, not serialized.
+    /// Per-turn summed input tokens (all model calls).
+    /// Stamped from `TurnSpanTotals` post-snapshot; internal transport, not serialized.
     #[serde(skip)]
     pub turn_input_tokens: u64,
     /// Per-turn summed output tokens (incl. reasoning). See `turn_input_tokens`.
@@ -141,8 +127,7 @@ pub struct TurnDeltaSnapshot {
 
 /// Per-turn delta of counter fields.
 ///
-/// All values represent the change since the previous call to
-/// `TakeTurnEndSnapshot` (or since session start for the first turn).
+/// All values represent the change since the previous call to `TakeTurnEndSnapshot` (or since session start for the first turn).
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSignalsDelta {
@@ -160,7 +145,7 @@ pub struct SessionSignalsDelta {
     pub delta_assistant_messages: i64,
     pub delta_long_pauses: i64,
     pub delta_successful_tool_uses: i64,
-    /// Consecutive cancellations at turn end (snapshot, not delta — resets on turn complete)
+    /// Consecutive cancellations at turn end (snapshot, not delta; resets on turn complete)
     pub consecutive_cancellations: u32,
     /// Error type strings that occurred during this turn (e.g. "timeout", "rate_limit", "tool_error")
     pub error_types_this_turn: Vec<String>,
@@ -169,11 +154,8 @@ pub struct SessionSignalsDelta {
     /// `true` when `tools_this_turn` was truncated (> 100 unique entries)
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub tools_this_turn_truncated: bool,
-    /// Per-tool success/failure breakdown for this turn.
-    /// Each entry records how many times a specific tool succeeded or failed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_outcomes_this_turn: Vec<ToolOutcome>,
-    /// Per-tool execution durations for this turn.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_durations_this_turn: Vec<ToolDuration>,
     /// Latency for the most recent response in this turn (if recorded)
@@ -219,8 +201,7 @@ pub struct SessionSignalsDelta {
 
 /// Session signals that inform feedback request heuristics.
 ///
-/// These signals are tracked locally in the agent and periodically synced
-/// to the backend for analytics / telemetry persistence.
+/// These signals are tracked locally in the agent and periodically synced to the backend for analytics / telemetry persistence.
 ///
 /// Field names are aligned with the backend analytics schema for session signals.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -229,9 +210,7 @@ pub struct SessionSignals {
     // === Turn/Message Counts ===
     /// Number of user prompts/turns in this session
     pub turn_count: u32,
-    /// Number of user messages sent
     pub user_message_count: u32,
-    /// Number of assistant messages received
     pub assistant_message_count: u32,
 
     // === Error/Failure Counts ===
@@ -252,7 +231,6 @@ pub struct SessionSignals {
     pub has_reverted: bool,
 
     // === Context/Compaction ===
-    /// Number of conversation compactions performed
     pub compaction_count: u32,
     /// Cumulative total tokens across all compactions (sum of tokens_before each compaction)
     pub total_tokens_before_compaction: u64,
@@ -264,7 +242,6 @@ pub struct SessionSignals {
     pub context_window_tokens: u64,
 
     // === Tool Usage ===
-    /// Number of tool calls executed
     pub tool_call_count: u32,
     /// Distinct tools that have been used in this session
     #[serde(default)]
@@ -283,8 +260,7 @@ pub struct SessionSignals {
     pub edit_and_retry_count: u32,
 
     // === Bash tool patterns (grok_build) ===
-    /// Number of times the bash tool was used for a bare `echo "<msg>"` (or close
-    /// variant). Tracked for usage statistics.
+    /// Number of times the bash tool was used for a bare `echo "<msg>"` (or close variant).
     #[serde(default)]
     pub bash_bare_echo_count: u32,
 
@@ -300,26 +276,22 @@ pub struct SessionSignals {
     pub pr_merged_count: u32,
 
     // === Inference Idle Timeout ===
-    /// Number of inference idle timeout events in this session.
     #[serde(default)]
     pub inference_idle_timeouts: u32,
-    /// Number of doom-loop recovery resamples (server-detected reasoning
-    /// loops discarded and re-sampled by the sampler's retry loop).
+    /// Number of doom-loop recovery resamples (server-detected reasoning loops discarded and re-sampled by the sampler's retry loop).
     #[serde(default)]
     pub doom_loop_recovery_attempts: u32,
-    /// Completed responses accepted still carrying confident doom-loop
-    /// signals (the resample budget was spent).
+    /// Completed responses accepted still carrying confident doom-loop signals (the resample budget was spent).
     #[serde(default)]
     pub doom_loop_recovery_accepted_after_budget: u32,
-    /// Tightest (lowest-threshold) raw trigger label recovery observed this
-    /// session, e.g. `tail_repetition:4@thinking`. Labels only.
+    /// Tightest (lowest-threshold) raw trigger label recovery observed this session, e.g. `tail_repetition:4@thinking`.
+    /// Labels only.
     #[serde(default)]
     pub doom_loop_recovery_top_trigger: Option<String>,
-    /// Stream chunks consumed by doomed attempts at their mid-stream abort
-    /// points, summed across resamples (terminal detections add nothing).
+    /// Stream chunks consumed by doomed attempts at their mid-stream abort points, summed across resamples (terminal detections add nothing).
     #[serde(default)]
     pub doom_loop_recovery_aborted_chunks: u64,
-    /// Configured idle timeout threshold (seconds) — set once at session start.
+    /// Configured idle timeout threshold (seconds); set once at session start.
     #[serde(default)]
     pub inference_idle_timeout_configured_secs: Option<u64>,
 
@@ -336,7 +308,6 @@ pub struct SessionSignals {
     /// Enqueue failures that fell back to inline upload.
     #[serde(default)]
     pub gcs_queue_fallbacks: u64,
-    /// Circuit breaker activations.
     #[serde(default)]
     pub gcs_queue_circuit_breaker_trips: u64,
     /// Current queue depth (snapshot gauge).
@@ -368,9 +339,7 @@ pub struct SessionSignals {
     pub avg_time_to_first_token_ms: u64,
     /// Average total response time in milliseconds (across all turns)
     pub avg_response_time_ms: u64,
-    /// Minimum time to first token in milliseconds
     pub min_time_to_first_token_ms: u64,
-    /// Maximum time to first token in milliseconds
     pub max_time_to_first_token_ms: u64,
     /// Total number of responses measured for latency
     pub latency_sample_count: u32,
@@ -452,9 +421,7 @@ pub enum SignalEvent {
     RecordAssistantMessage,
 
     // === Tool Events ===
-    /// Record a tool call with the tool name
     RecordToolCall(String),
-    /// Record a tool success with the tool name
     RecordToolSuccess(String),
     /// Record a tool failure (tool returned error) with the tool name
     RecordToolFailure(String),
@@ -468,35 +435,34 @@ pub enum SignalEvent {
     // === Error Events ===
     /// Record a general error (sampling, network, etc.)
     /// Optionally carries an error type string (e.g. "timeout", "rate_limit", "tool_error").
-    RecordError { error_type: Option<String> },
+    RecordError {
+        error_type: Option<String>,
+    },
 
     // === User Behavior Events ===
     /// Record a cancellation (user pressed Ctrl+C)
     RecordCancellation,
-    /// Record a regeneration request
     RecordRegeneration,
     /// Record an edit-and-retry (user rewinds and submits a different prompt)
     RecordEditAndRetry,
-    /// Mark that user has reverted changes
     MarkReverted,
     /// Record successful turn completion (resets consecutive cancellations)
     RecordTurnComplete,
 
-    /// Record an inference idle timeout event.
     RecordIdleTimeout,
 
     /// Record a doom-loop recovery resample (poisoned attempt discarded).
     RecordDoomLoopRecoveryAttempt {
         /// Raw trigger labels of the aborted attempt (never content).
         triggers: Vec<String>,
-        /// Chunk index the mid-stream abort fired at; `None` for
-        /// terminal-response detections.
+        /// Chunk index the mid-stream abort fired at; `None` for terminal-response detections.
         aborted_at_chunk: Option<u64>,
     },
 
-    /// Record a completed response accepted with confident doom-loop
-    /// signals after the resample budget was spent.
-    RecordDoomLoopAcceptedAfterBudget { triggers: Vec<String> },
+    /// Record a completed response accepted with confident doom-loop signals after the resample budget was spent.
+    RecordDoomLoopAcceptedAfterBudget {
+        triggers: Vec<String>,
+    },
 
     /// Set-once tracing config fields (idle timeout threshold).
     /// Called once at session construction; preserved on the backend when unset.
@@ -504,8 +470,8 @@ pub enum SignalEvent {
         inference_idle_timeout_configured_secs: u64,
     },
 
-    /// Snapshot GCS upload queue stats into signals. The actor reads the atomics
-    /// once and stores plain u64 values — the Arc is not retained in actor state.
+    /// Snapshot GCS upload queue stats into signals.
+    /// The actor reads the atomics once and stores plain u64 values; the Arc is not retained in actor state.
     RecordGcsQueueSnapshot {
         enqueued: u64,
         uploaded: u64,
@@ -524,29 +490,25 @@ pub enum SignalEvent {
     RecordNegativeRating,
 
     // === Context Events ===
-    /// Record a compaction, including the token count before compaction.
-    RecordCompaction { tokens_before: u64 },
-    /// Update context window usage
+    RecordCompaction {
+        tokens_before: u64,
+    },
     UpdateContextUsage {
         tokens_used: u64,
         context_window: u64,
     },
 
     // === Model Events ===
-    /// Record model usage
     RecordModelUsage(String),
-    /// Set the primary model ID
     SetPrimaryModel(String),
 
     // === Latency Events ===
-    /// Record latency for a response (time to first token and total response time in ms)
     RecordLatency {
         time_to_first_token_ms: u64,
         total_response_time_ms: u64,
     },
-    /// Record detailed inference metrics including inter-token latency
     RecordInferenceMetrics(InferenceLatencyStats),
-    /// Record token usage from a model response (completion + reasoning tokens).
+    /// Record token usage from a model response (completion and reasoning tokens).
     /// Accumulated per turn and reset at each `TakeTurnEndSnapshot`.
     RecordTokenUsage {
         completion_tokens: u32,
@@ -597,11 +559,8 @@ pub enum SignalEvent {
     /// Restore full signals state from a persisted snapshot.
     /// Preferred over SeedCounts when a signals.json file exists.
     RestoreSignals(SessionSignals),
-    /// Request a snapshot of current signals
     GetSnapshot(oneshot::Sender<SessionSignals>),
-    /// Check if sync is needed and mark as synced if so
     CheckAndMarkSync(oneshot::Sender<bool>),
-    /// Shutdown the actor
     Shutdown,
 }
 
@@ -616,8 +575,6 @@ pub struct SessionSignalsHandle {
 
 impl SessionSignalsHandle {
     /// Create a new standalone signals handle with its own background actor.
-    ///
-    /// This spawns a background task to process signal events.
     pub fn new() -> Self {
         let (handle, actor) = SessionSignalsActor::new();
         tokio::spawn(actor.run());
@@ -652,19 +609,16 @@ impl SessionSignalsHandle {
 
     // === Tool Methods ===
 
-    /// Record a tool call.
     pub fn record_tool_call(&self, tool_name: impl Into<String>) {
         let _ = self.tx.send(SignalEvent::RecordToolCall(tool_name.into()));
     }
 
-    /// Record a tool success.
     pub(crate) fn record_tool_success(&self, tool_name: impl Into<String>) {
         let _ = self
             .tx
             .send(SignalEvent::RecordToolSuccess(tool_name.into()));
     }
 
-    /// Record a tool failure.
     pub fn record_tool_failure(&self, tool_name: impl Into<String>) {
         let _ = self
             .tx
@@ -711,7 +665,6 @@ impl SessionSignalsHandle {
 
     // === Error Methods ===
 
-    /// Record a general error.
     pub fn record_error(&self) {
         let _ = self.tx.send(SignalEvent::RecordError { error_type: None });
     }
@@ -730,7 +683,6 @@ impl SessionSignalsHandle {
         let _ = self.tx.send(SignalEvent::RecordCancellation);
     }
 
-    /// Record a regeneration request.
     pub fn record_regeneration(&self) {
         let _ = self.tx.send(SignalEvent::RecordRegeneration);
     }
@@ -740,7 +692,6 @@ impl SessionSignalsHandle {
         let _ = self.tx.send(SignalEvent::RecordEditAndRetry);
     }
 
-    /// Record an inference idle timeout event.
     pub(crate) fn record_idle_timeout(&self) {
         let _ = self.tx.send(SignalEvent::RecordIdleTimeout);
     }
@@ -767,7 +718,7 @@ impl SessionSignalsHandle {
     /// Set-once tracing config fields at session construction.
     ///
     /// Records the configured thresholds so dashboards can filter/group by config.
-    /// Preserved on the backend when unset — subsequent syncs with None don't overwrite.
+    /// Preserved on the backend when unset; subsequent syncs with None don't overwrite.
     pub(crate) fn set_tracing_config(&self, inference_idle_timeout_secs: u64) {
         let _ = self.tx.send(SignalEvent::SetTracingConfig {
             inference_idle_timeout_configured_secs: inference_idle_timeout_secs,
@@ -776,8 +727,7 @@ impl SessionSignalsHandle {
 
     /// Snapshot GCS upload queue stats into signals.
     ///
-    /// Reads the atomics from `UploadQueueStats` once and sends plain u64 values
-    /// to the actor — the Arc is NOT retained in the signal event.
+    /// Reads the atomics from `UploadQueueStats` once and sends plain u64 values to the actor; the Arc is NOT retained in the signal event.
     pub(crate) fn snapshot_gcs_queue(&self, stats: &xai_file_utils::queue::UploadQueueStats) {
         use std::sync::atomic::Ordering;
         let _ = self.tx.send(SignalEvent::RecordGcsQueueSnapshot {
@@ -792,7 +742,6 @@ impl SessionSignalsHandle {
         });
     }
 
-    /// Mark that the user has reverted changes.
     pub fn mark_reverted(&self) {
         let _ = self.tx.send(SignalEvent::MarkReverted);
     }
@@ -811,14 +760,12 @@ impl SessionSignalsHandle {
 
     // === Context Methods ===
 
-    /// Record a compaction with the token count before compaction.
     pub fn record_compaction(&self, tokens_before: u64) {
         let _ = self
             .tx
             .send(SignalEvent::RecordCompaction { tokens_before });
     }
 
-    /// Update context window usage percentage.
     pub fn update_context_usage(&self, tokens_used: u64, context_window: u64) {
         let _ = self.tx.send(SignalEvent::UpdateContextUsage {
             tokens_used,
@@ -833,7 +780,6 @@ impl SessionSignalsHandle {
         let _ = self.tx.send(SignalEvent::RecordModelUsage(model_id.into()));
     }
 
-    /// Set the primary model ID.
     pub fn set_primary_model(&self, model_id: impl Into<String>) {
         let _ = self.tx.send(SignalEvent::SetPrimaryModel(model_id.into()));
     }
@@ -842,8 +788,7 @@ impl SessionSignalsHandle {
 
     /// Seed initial counts from persisted conversation data.
     ///
-    /// Call this when resuming a session to restore accurate counters
-    /// (message counts, tool call count, distinct tools/models used).
+    /// Call this when resuming a session to restore accurate counters (message counts, tool call count, distinct tools/models used).
     ///
     /// Prefer `restore_signals` when a full persisted snapshot is available.
     pub fn seed_counts(
@@ -871,10 +816,8 @@ impl SessionSignalsHandle {
 
     /// Restore full signals state from a persisted snapshot.
     ///
-    /// This is the preferred method when a `signals.json` file exists from a
-    /// previous session. Unlike `seed_counts` (which only restores a subset),
-    /// this restores all counters faithfully, including those that survive
-    /// conversation compaction (turn_count, error_count, tool_failure_count, etc.).
+    /// Preferred over `seed_counts` when a `signals.json` file exists.
+    /// Restores all counters, including ones that survive compaction (turn_count, error_count, tool_failure_count, etc.).
     pub(crate) fn restore_signals(&self, signals: SessionSignals) {
         if self.tx.send(SignalEvent::RestoreSignals(signals)).is_err() {
             tracing::warn!("Failed to restore signals: actor shut down");
@@ -894,10 +837,7 @@ impl SessionSignalsHandle {
         });
     }
 
-    /// Record inference metrics including inter-token latency stats.
-    ///
-    /// Called after each streaming response completes with ITL stats
-    /// computed from per-chunk timestamps.
+    /// Called after each streaming response completes with ITL stats computed from per-chunk timestamps.
     pub(crate) fn record_inference_metrics(&self, stats: InferenceLatencyStats) {
         let _ = self.tx.send(SignalEvent::RecordInferenceMetrics(stats));
     }
@@ -907,7 +847,7 @@ impl SessionSignalsHandle {
     /// - `completion_tokens`: total output tokens (includes reasoning tokens)
     /// - `reasoning_tokens`: thinking/reasoning tokens (subset of completion_tokens)
     ///
-    /// Response tokens = completion_tokens - reasoning_tokens.
+    /// Response tokens are completion_tokens - reasoning_tokens.
     /// Multiple calls per turn are accumulated (e.g. multi-round tool use).
     #[tracing::instrument(skip_all, fields(completion_tokens, reasoning_tokens))]
     pub(crate) fn record_token_usage(&self, completion_tokens: u32, reasoning_tokens: u32) {
@@ -925,14 +865,8 @@ impl SessionSignalsHandle {
     /// Take a turn-end snapshot and compute delta from previous turn end.
     ///
     /// Called once per completed user turn (after all tool-call rounds finish).
-    /// Returns a `TurnDeltaSnapshot` containing:
-    /// - The current cumulative signals
-    /// - The per-turn delta (what changed since the last call)
-    /// - Tools used specifically in this turn
-    /// - Latest latency for this turn
-    ///
-    /// The actor atomically stores the current state as the new baseline
-    /// for the next delta computation. Returns `None` if the actor is shut down.
+    /// The actor atomically stores the current state as the new baseline for the next delta computation.
+    /// Returns `None` if the actor is shut down.
     pub(crate) async fn take_turn_end_snapshot(&self) -> Option<TurnDeltaSnapshot> {
         let (tx, rx) = oneshot::channel();
         self.tx.send(SignalEvent::TakeTurnEndSnapshot(tx)).ok()?;
@@ -941,8 +875,6 @@ impl SessionSignalsHandle {
 
     // === Control Methods ===
 
-    /// Get a snapshot of current signals.
-    ///
     /// Returns None if the actor has been shut down.
     pub async fn snapshot(&self) -> Option<SessionSignals> {
         let (tx, rx) = oneshot::channel();
@@ -963,8 +895,6 @@ impl SessionSignalsHandle {
         rx.await.unwrap_or_default()
     }
 
-    /// Check if sync should be performed and mark as synced.
-    ///
     /// Returns true if sync should be performed (enough time has passed).
     /// Automatically marks the sync time if returning true.
     pub async fn check_and_mark_sync(&self) -> bool {
@@ -1001,7 +931,6 @@ impl SessionSignalsHandle {
         });
     }
 
-    /// Shutdown the actor.
     pub fn shutdown(&self) {
         let _ = self.tx.send(SignalEvent::Shutdown);
     }
@@ -1011,9 +940,7 @@ impl SessionSignalsHandle {
 ///
 /// Runs as a background task and maintains the signal state.
 pub struct SessionSignalsActor {
-    /// Channel receiver for events
     rx: mpsc::UnboundedReceiver<SignalEvent>,
-    /// Current signal values
     signals: SessionSignals,
     /// Set of distinct tools used (for deduplication)
     tools_set: HashSet<String>,
@@ -1021,7 +948,6 @@ pub struct SessionSignalsActor {
     models_set: HashSet<String>,
     /// Session start time (for calculating duration)
     session_start: Instant,
-    /// Last sync timestamp
     last_sync: Option<Instant>,
     /// Minimum interval between syncs
     sync_interval: Duration,
@@ -1038,17 +964,13 @@ pub struct SessionSignalsActor {
     /// Snapshot of signals at the previous turn end (for delta computation).
     /// `None` before the first turn-end snapshot is taken.
     previous_turn_snapshot: Option<SessionSignals>,
-    /// Tools called during the current turn (accumulated between snapshots).
     /// Reset after each `TakeTurnEndSnapshot`.
     tools_this_turn: Vec<String>,
-    /// Per-tool success/failure counts for the current turn.
     /// Key: tool name, Value: (successes, failures).
     /// Reset after each `TakeTurnEndSnapshot`.
     tool_outcomes_this_turn: HashMap<String, (u32, u32)>,
-    /// Error type strings recorded during the current turn.
     /// Reset after each `TakeTurnEndSnapshot`.
     error_types_this_turn: Vec<String>,
-    /// Per-tool execution durations for the current turn.
     /// Reset after each `TakeTurnEndSnapshot`.
     tool_durations_this_turn: Vec<ToolDuration>,
     /// Latency of the most recent response in the current turn.
@@ -1066,7 +988,6 @@ pub struct SessionSignalsActor {
     /// `None` until the first `RecordTokenUsage` event in this turn.
     /// Reset to `None` after each `TakeTurnEndSnapshot`.
     turn_thinking_tokens: Option<u32>,
-    /// PRs created during the current turn.
     /// Reset after each `TakeTurnEndSnapshot`.
     prs_created_this_turn: Vec<PrCreatedSignal>,
     /// Preserved across turn resets for feedback notifications.
@@ -1082,8 +1003,7 @@ pub struct SessionSignalsActor {
 impl SessionSignalsActor {
     /// Create a new actor and its handle.
     ///
-    /// Returns a tuple of (handle, actor). The actor must be spawned
-    /// as a background task using `actor.run()`.
+    /// The actor must be spawned as a background task using `actor.run()`.
     pub fn new() -> (SessionSignalsHandle, Self) {
         Self::with_sync_interval(Duration::from_secs(60))
     }
@@ -1094,7 +1014,6 @@ impl SessionSignalsActor {
         self.signals.doom_loop_recovery_top_trigger = merge_tightest_trigger(current, triggers);
     }
 
-    /// Create a new actor with a custom sync interval.
     pub(crate) fn with_sync_interval(sync_interval: Duration) -> (SessionSignalsHandle, Self) {
         let (tx, rx) = mpsc::unbounded_channel();
         let handle = SessionSignalsHandle { tx };
@@ -1137,7 +1056,7 @@ impl SessionSignalsActor {
             match event {
                 // === Turn/Message Events ===
                 SignalEvent::IncrementTurn => {
-                    // Detect long pauses (> threshold since last turn)
+                    // Detect long pauses (longer than threshold since last turn)
                     if let Some(last) = self.last_turn_time
                         && last.elapsed() >= self.long_pause_threshold
                     {
@@ -1152,7 +1071,6 @@ impl SessionSignalsActor {
                     self.signals.assistant_message_count += 1;
                 }
                 SignalEvent::RecordTurnComplete => {
-                    // Reset consecutive cancellations on successful turn
                     self.signals.consecutive_cancellations = 0;
                 }
                 SignalEvent::RecordIdleTimeout => {
@@ -1314,8 +1232,7 @@ impl SessionSignalsActor {
                     time_to_first_token_ms,
                     total_response_time_ms,
                 } => {
-                    // Track per-turn latency (overwritten each time within a turn;
-                    // the last value before TakeTurnEndSnapshot is used)
+                    // Track per-turn latency (overwritten each time within a turn; the last value before TakeTurnEndSnapshot is used)
                     self.last_turn_ttft_ms = Some(time_to_first_token_ms);
                     self.last_turn_response_time_ms = Some(total_response_time_ms);
 
@@ -1345,7 +1262,6 @@ impl SessionSignalsActor {
                     completion_tokens,
                     reasoning_tokens,
                 } => {
-                    // response_tokens = completion - reasoning (non-thinking output)
                     let response = completion_tokens.saturating_sub(reasoning_tokens);
                     *self.turn_response_tokens.get_or_insert(0) += response;
                     *self.turn_thinking_tokens.get_or_insert(0) += reasoning_tokens;
@@ -1384,16 +1300,14 @@ impl SessionSignalsActor {
                     lines_added_reverted: _,
                     lines_removed_reverted: _,
                 } => {
-                    // TODO: Attribute reverts per-author once HunkRemoved events
-                    // carry author information. For now all 4 revert counters
-                    // stay at 0 to avoid publishing misleading partial data.
+                    // TODO: Attribute reverts per-author once HunkRemoved events carry author information
+                    // For now all 4 revert counters stay at 0 to avoid publishing misleading partial data
                 }
 
                 // === Turn Delta Events ===
                 SignalEvent::TakeTurnEndSnapshot(respond_to) => {
-                    // Reconcile PR-create attribution now that every event of the
-                    // turn has been processed (same channel, FIFO): parallel tool
-                    // results can record a create before a sibling commit lands.
+                    // Reconcile PR-create attribution now that every event of the turn has been processed (same channel, FIFO)
+                    // Parallel tool results can record a create before a sibling commit lands
                     if self.signals.git_commit_count > 0 {
                         for pr in &mut self.prs_created_this_turn {
                             pr.had_commit_in_session = true;
@@ -1409,11 +1323,9 @@ impl SessionSignalsActor {
                         self.signals.peak_rss_bytes = current_rss;
                     }
 
-                    // Compute per-turn ITL stats from accumulated intervals and merge into TDigest
                     let (turn_itl_p50, turn_itl_p99, turn_itl_max, turn_itl_mean) =
                         self.compute_and_merge_turn_itl();
 
-                    // Update session-level percentiles from TDigest after merging
                     self.update_session_itl_percentiles();
 
                     let prev = self.previous_turn_snapshot.as_ref();
@@ -1498,8 +1410,7 @@ impl SessionSignalsActor {
                     };
 
                     // Deduplicate and cap tools_this_turn at 100 entries.
-                    // With tool_outcomes_this_turn providing per-tool counts,
-                    // duplicates in tools_this_turn are redundant.
+                    // With tool_outcomes_this_turn providing per-tool counts, duplicates in tools_this_turn are redundant
                     let mut tools = std::mem::take(&mut self.tools_this_turn);
                     tools.sort();
                     tools.dedup();
@@ -1554,8 +1465,7 @@ impl SessionSignalsActor {
                     tools_used,
                     models_used,
                 } => {
-                    // Seed counts from persisted data (for session resume)
-                    // Turn count = user messages (each user prompt is a turn)
+                    // Turn count equals user messages (each user prompt is a turn)
                     self.signals.turn_count = user_message_count;
                     self.signals.user_message_count = user_message_count;
                     self.signals.assistant_message_count = assistant_message_count;
@@ -1575,8 +1485,7 @@ impl SessionSignalsActor {
                         }
                     }
 
-                    // Set previous_turn_snapshot so the first turn-end delta after
-                    // seed_counts is computed correctly (not against baseline 0).
+                    // Set previous_turn_snapshot so the first turn-end delta after seed_counts is computed correctly (not against baseline 0)
                     self.previous_turn_snapshot = Some(self.signals.clone());
                 }
                 SignalEvent::RestoreSignals(mut restored) => {
@@ -1584,22 +1493,16 @@ impl SessionSignalsActor {
                     self.tools_set = restored.tools_used.iter().cloned().collect();
                     self.models_set = restored.models_used.iter().cloned().collect();
 
-                    // TDigest is not serializable, so it will be None after
-                    // deserialization. We keep it None here; persisted
-                    // itl_p50_ms/itl_p99_ms values are preserved and
-                    // update_session_itl_percentiles() won't overwrite them
-                    // while digest is None.  Once new ITL data arrives, a
-                    // fresh TDigest will be created and will gradually
-                    // supersede the persisted percentiles.
+                    // TDigest is not serializable, so it will be None after deserialization
+                    // We keep it None here; persisted itl_p50_ms/itl_p99_ms values are preserved
+                    // update_session_itl_percentiles() won't overwrite them while digest is None
+                    // Once new ITL data arrives, a fresh TDigest will be created and will gradually supersede the persisted percentiles
                     restored.itl_digest = None;
 
-                    // Back-compute ITL running sums from persisted mean and
-                    // count so that compute_and_merge_turn_itl() produces
-                    // correct cumulative means when new intervals arrive.
-                    // itl_interval_count (number of individual inter-token
-                    // intervals) ≈ total_chunk_count - itl_sample_count,
-                    // since each of the itl_sample_count responses
-                    // contributes (chunks - 1) intervals.
+                    // Back-compute ITL running sums from persisted mean and count
+                    // compute_and_merge_turn_itl() then produces correct cumulative means when new intervals arrive
+                    // itl_interval_count (number of individual inter-token intervals) is approximately total_chunk_count - itl_sample_count
+                    // Each of the itl_sample_count responses contributes (chunks - 1) intervals
                     // NOTE: slightly lossy due to integer truncation.
                     let itl_n = restored
                         .total_chunk_count
@@ -1615,22 +1518,15 @@ impl SessionSignalsActor {
                     );
 
                     // Back-compute running latency sums from the persisted averages
-                    // so that subsequent update_latency_stats() calls produce correct
-                    // averages (the actor accumulates sums, not averages).
-                    // NOTE: Integer division makes this slightly lossy (truncation
-                    // error ≤ n per restore). For a more faithful restore, consider
-                    // persisting ttft_sum_ms / response_time_sum_ms as SessionSignals
-                    // fields (like itl_sum_ms).
+                    // Subsequent update_latency_stats() calls then produce correct averages (the actor accumulates sums, not averages)
+                    // NOTE: Integer division makes this slightly lossy (truncation error at most n per restore)
                     let n = restored.latency_sample_count as u64;
                     self.ttft_sum_ms = restored.avg_time_to_first_token_ms * n;
                     self.response_time_sum_ms = restored.avg_response_time_ms * n;
 
-                    // Adjust session_start so that elapsed() continues from the
-                    // persisted duration rather than restarting from 0.
-                    // Use checked_sub to avoid panic on Windows where Instant is
-                    // based on QueryPerformanceCounter (time since boot). If the
-                    // restored duration exceeds uptime the subtraction would
-                    // underflow — fall back to now (resets elapsed to 0).
+                    // Adjust session_start so that elapsed() continues from the persisted duration rather than restarting from 0
+                    // Use checked_sub to avoid panic on Windows where Instant is based on QueryPerformanceCounter (time since boot)
+                    // If the restored duration exceeds uptime the subtraction would underflow; fall back to now (resets elapsed to 0)
                     let duration = Duration::from_secs(restored.session_duration_seconds);
                     self.session_start = match Instant::now().checked_sub(duration) {
                         Some(t) => t,
@@ -1644,23 +1540,19 @@ impl SessionSignalsActor {
                         }
                     };
 
-                    // Set previous_turn_snapshot so the first turn-end delta after
-                    // restore is computed correctly (not against baseline 0).
+                    // Set previous_turn_snapshot so the first turn-end delta after restore is computed correctly (not against baseline 0)
                     self.previous_turn_snapshot = Some(restored.clone());
                     self.signals = restored;
 
-                    // Reset transient per-session-run state that shouldn't carry over.
-                    // consecutive_cancellations tracks an in-progress frustration streak;
-                    // restoring a non-zero value from a prior session would incorrectly
-                    // inflate frustration heuristics before the user has cancelled anything.
+                    // consecutive_cancellations tracks an in-progress frustration streak
+                    // Restoring a non-zero value from a prior session would inflate frustration heuristics before the user has cancelled anything
                     self.signals.consecutive_cancellations = 0;
                 }
                 SignalEvent::GetSnapshot(respond_to) => {
                     // Update duration before sending snapshot
                     self.signals.session_duration_seconds = self.session_start.elapsed().as_secs();
 
-                    // If there are buffered intervals from current turn, merge them temporarily
-                    // to get accurate percentiles (without clearing the buffer)
+                    // If the current turn has buffered intervals, merge them temporarily for accurate percentiles (without clearing the buffer)
                     if !self.turn_itl_intervals.is_empty() {
                         let temp_digest = TDigest::from_values(
                             self.turn_itl_intervals.iter().map(|&v| v as f64).collect(),
@@ -1689,7 +1581,6 @@ impl SessionSignalsActor {
                             self.signals.itl_interval_count + self.turn_itl_intervals.len() as u64;
                         self.signals.itl_mean_ms = Some(temp_sum / total_count);
                     } else {
-                        // No buffered data, just compute from digest
                         self.update_session_itl_percentiles();
                     }
 
@@ -1702,7 +1593,6 @@ impl SessionSignalsActor {
                     };
                     if should_sync {
                         self.last_sync = Some(Instant::now());
-                        // Update duration on sync
                         self.signals.session_duration_seconds =
                             self.session_start.elapsed().as_secs();
                     }
@@ -1721,7 +1611,7 @@ impl SessionSignalsActor {
     fn update_latency_stats(&mut self, time_to_first_token_ms: u64, total_response_time_ms: u64) {
         // Track min/max
         if self.signals.latency_sample_count == 0 {
-            // First sample - initialize min/max
+            // First sample: initialize min/max
             self.signals.min_time_to_first_token_ms = time_to_first_token_ms;
             self.signals.max_time_to_first_token_ms = time_to_first_token_ms;
         } else {
@@ -1748,11 +1638,6 @@ impl SessionSignalsActor {
 
     /// Compute and merge inter-token latency stats for the current turn.
     ///
-    /// 1. Compute exact percentiles from this turn's intervals (for TurnDelta)
-    /// 2. Update session-level max and sum/mean
-    /// 3. Merge intervals into TDigest (for session-level percentiles)
-    /// 4. Clear the turn buffer
-    ///
     /// Returns (p50, p99, max, mean) for this turn only.
     fn compute_and_merge_turn_itl(
         &mut self,
@@ -1777,7 +1662,6 @@ impl SessionSignalsActor {
         self.signals.itl_sum_ms += turn_sum;
         self.signals.itl_interval_count += len as u64;
 
-        // Compute exact mean from sum and count
         self.signals.itl_mean_ms = Some(self.signals.itl_sum_ms / self.signals.itl_interval_count);
 
         // Merge turn intervals into session TDigest
@@ -1789,7 +1673,6 @@ impl SessionSignalsActor {
             Some(existing) => existing.merge(&turn_digest),
         });
 
-        // Clear turn buffer
         self.turn_itl_intervals.clear();
 
         (
@@ -1803,22 +1686,15 @@ impl SessionSignalsActor {
     /// Compute session-level ITL percentiles from TDigest.
     ///
     /// Called when syncing session signals or taking a snapshot.
-    /// Updates itl_p50_ms and itl_p99_ms fields.
-    ///
-    /// When `itl_digest` is `None` (e.g. after a session restore where the
-    /// non-serializable TDigest couldn't be persisted), we preserve the
-    /// existing `itl_p50_ms`/`itl_p99_ms` values — they may have been
-    /// faithfully restored from a persisted snapshot.  Clearing them to
-    /// `None` would silently discard historical ITL telemetry.
+    /// When `itl_digest` is `None`, the existing `itl_p50_ms`/`itl_p99_ms` values are kept.
+    /// They may have been restored from a persisted snapshot; clearing them would silently discard historical ITL telemetry.
     fn update_session_itl_percentiles(&mut self) {
         if let Some(digest) = &self.signals.itl_digest {
             self.signals.itl_p50_ms = Some(digest.estimate_quantile(0.50) as u64);
             self.signals.itl_p99_ms = Some(digest.estimate_quantile(0.99) as u64);
         }
-        // else: keep existing values (may be restored from persisted snapshot)
     }
 
-    /// Get a snapshot of current signals (for testing).
     #[cfg(test)]
     pub fn snapshot(&self) -> SessionSignals {
         self.signals.clone()
@@ -1826,14 +1702,10 @@ impl SessionSignalsActor {
 }
 
 /// Spawn a new signals actor and return its handle.
-///
-/// This is a convenience function that creates and spawns the actor
-/// in one step using `tokio::spawn`.
 pub fn spawn_signals_actor() -> SessionSignalsHandle {
     spawn_signals_actor_with_interval(Duration::from_secs(30))
 }
 
-/// Spawn a new signals actor with a custom sync interval.
 pub fn spawn_signals_actor_with_interval(sync_interval: Duration) -> SessionSignalsHandle {
     let (handle, actor) = SessionSignalsActor::with_sync_interval(sync_interval);
     tokio::spawn(actor.run());

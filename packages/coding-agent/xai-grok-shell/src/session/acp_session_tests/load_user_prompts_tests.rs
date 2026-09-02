@@ -75,7 +75,7 @@ fn test_rewind_marker_truncates_dead_branch() {
             agent_chunk("R1"),
             user_chunk("P2-old"),
             agent_chunk("R2-old"),
-            rewind_marker(1), // rewind to before P1, keeps P0 only
+            rewind_marker(1), // Rewind to before P1, keeps P0 only
             user_chunk("P1-new"),
             agent_chunk("R1-new"),
         ],
@@ -97,10 +97,10 @@ fn test_multiple_rewind_markers() {
             agent_chunk("R1"),
             user_chunk("P2"),
             agent_chunk("R2"),
-            rewind_marker(1), // rewind to before P1: keeps P0
+            rewind_marker(1), // Rewind to before P1: keeps P0
             user_chunk("P1v2"),
             agent_chunk("R1v2"),
-            rewind_marker(0), // rewind to before P0: keeps nothing
+            rewind_marker(0), // Rewind to before P0: keeps nothing
             user_chunk("P0v3"),
             agent_chunk("R0v3"),
         ],

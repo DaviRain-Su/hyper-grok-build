@@ -1,8 +1,6 @@
-//! GrokDay theme — neutral gray base (light) with deepened accent colors.
-//!
-//! Light counterpart to GrokNight. Backgrounds and text use a neutral
-//! grayscale ramp (no blue/warm tint). Accent colors are the same hue
-//! family as GrokNight but deepened for contrast on light backgrounds.
+//! GrokDay is the light counterpart to GrokNight.
+//! Backgrounds and text use a neutral grayscale ramp (no blue/warm tint).
+//! Accent colors are the same hue family as GrokNight but deepened for contrast on light backgrounds.
 
 use ratatui::style::{Color, Modifier};
 

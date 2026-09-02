@@ -1,8 +1,8 @@
 # Custom Hooks Guide
 
-Hooks let you run custom scripts or HTTP requests at key moments during a Grok session — for example, before or after a tool runs, when a session starts or ends, or when the agent sends a notification.
+Hooks let you run custom scripts or HTTP requests at key moments during a Grok session, for example before or after a tool runs, when a session starts or ends, or when the agent sends a notification.
 
-They are perfect for automation, safety checks, logging, notifications, and integrating with your own tools.
+Use them for automation, safety checks, logging, notifications, and integrating with your own tools.
 
 ## Why Use Hooks?
 
@@ -39,7 +39,7 @@ Common use cases:
 
 3. Start (or restart) a Grok session. The hook runs automatically on `SessionStart`.
 
-   Try it: press `Ctrl+L` on non–VS Code family (or run `/hooks` anywhere — preferred on VS Code / Cursor / Windsurf / Zed) and check the Hooks tab to confirm it's loaded.
+   To confirm it loaded, open the Hooks tab: press `Ctrl+L` outside the VS Code family, or run `/hooks` anywhere (preferred on VS Code, Cursor, Windsurf, and Zed).
 
 ## Hook Locations
 
@@ -56,7 +56,7 @@ Hooks are discovered from several places (all are merged):
 
 Config-file hooks use the same schema in TOML form; see the [Hooks user guide](user-guide/10-hooks.md#hooks-in-config-files) for details.
 
-**Trusting a project**: Open the hooks modal (`Ctrl+L` on non–VS Code family, or `/hooks` on any terminal including VS Code family) or run `/hooks-trust` (the same folder-trust gate as `--trust`, recorded in `~/.grok/trusted_folders.toml`) the first time you open a project with hooks. This prevents untrusted repos from running arbitrary code.
+**Trusting a project**: The first time you open a project with hooks, open the hooks modal (`Ctrl+L` outside the VS Code family, or `/hooks` on any terminal) or run `/hooks-trust`. This is the same folder-trust gate as `--trust`, recorded in `~/.grok/trusted_folders.toml`. Trust prevents untrusted repos from running arbitrary code.
 
 ## The Hook JSON Format
 
@@ -87,10 +87,10 @@ Each `.json` file can define multiple hooks:
 Key fields:
 
 - **Event name** (top-level key): `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `Notification`, `SessionEnd`, etc.
-- **matcher** (optional): Regex tested against the event's match value — the tool name on tool events, and per-event values elsewhere (see the user guide's Hooks chapter). Empty = match everything.
+- **matcher** (optional): Regex tested against the event's match value: the tool name on tool events, and per-event values elsewhere (see the user guide's Hooks chapter). Empty matches everything.
 - **type**: `"command"` (run a script or shell one-liner) or `"http"` (POST the event to a URL).
 - **command**: Path to executable (relative to the JSON file) or inline shell command.
-- **timeout**: Seconds before killing the hook (default: 5, or 600 for `Stop`/`SubagentStop` gates). Hooks fail open on timeout.
+- **timeout**: Seconds before killing the hook (default: 5, or 600 for `Stop`/`SubagentStop`/`PostToolUse` gates). Hooks fail open on timeout.
 
 **Tool name aliases**: Claude-style names like `Bash`, `Edit`, `Read` automatically match Grok's internal names (`run_terminal_cmd`, `search_replace`, `read_file`).
 
@@ -102,6 +102,7 @@ The full event is sent as JSON on **stdin**. Example for a `PreToolUse` hook:
 ```json
 {
   "hookEventName": "pre_tool_use",
+  "hook_event_name": "PreToolUse",
   "sessionId": "abc-123",
   "cwd": "/Users/you/project",
   "workspaceRoot": "/Users/you/project",
@@ -111,6 +112,8 @@ The full event is sent as JSON on **stdin**. Example for a `PreToolUse` hook:
 }
 ```
 
+The `hook_event_name` (snake_case key) carries Claude's PascalCase value; `hookEventName` (camelCase key) carries grok's snake_case value.
+
 ### Output (for blocking hooks like PreToolUse)
 Write JSON to **stdout**:
 
@@ -118,26 +121,29 @@ Write JSON to **stdout**:
 - Deny: `{"decision": "deny", "reason": "Unsafe command detected"}`
 
 **Exit codes** (behavior differs by hook type):
-- `0` — success / allow (for blocking hooks)
-- `2` — explicit deny (`PreToolUse`) or block-stop with stderr as feedback (`Stop`/`SubagentStop`; see Stop Decision Control in the user guide)
-- Any other (including timeout/crash/missing env var) — **fail-open**: the failure is logged and shown in the hook scrollback, but the tool call is not blocked. To block a tool call, return JSON `{"decision":"deny","reason":"..."}` on stdout.
+- `0`: success / allow (for blocking hooks).
+- `2`: explicit deny (`PreToolUse`), block-stop with stderr as feedback (`Stop`/`SubagentStop`; see Stop Decision Control in the user guide), or feedback to the model (`PostToolUse`, whose stderr reaches the model even though the tool has already run).
+- Any other (including timeout, crash, or a missing env var): **fail-open**. The failure is logged and shown in the hook scrollback, but the tool call is not blocked. To block a tool call, return JSON `{"decision":"deny","reason":"..."}` on stdout.
+
+### PostToolUse output
+`PostToolUse` runs after the tool finished, so it blocks nothing, but its stdout decides what the model sees next. `{"decision":"block","reason":"..."}` feeds the reason to the model alongside the result. `hookSpecificOutput.additionalContext` adds a note. `hookSpecificOutput.updatedToolOutput` (built-in tools; must match the tool's own output shape) or `hookSpecificOutput.updatedMCPToolOutput` (MCP tools; not shape-checked) replaces the output the model reads, while the scrollback and telemetry keep the original. Every hook's block reason and context are delivered in call order, each naming its hook. Only the replacements are last-writer-wins, and a hook that exits non-zero keeps only its block reason. Output replacement is settings-file only: an SDK-registered `PostToolUse` hook can contribute a `block` reason and `additionalContext` but cannot replace the tool output. See PostToolUse Output in the user guide.
 
 ### Passive hooks
-For events like `SessionStart` or `PostToolUse`, stdout is ignored. Just exit 0 on success.
+For events like `SessionStart` or `Notification`, stdout is ignored. Just exit 0 on success.
 
 ### Useful Environment Variables
 
 Grok injects the following variables into every hook process:
 
-- `GROK_HOOK_EVENT` — the event name (e.g. `pre_tool_use`, `session_start`, `post_tool_use`)
-- `GROK_HOOK_NAME` — the full configured name of this hook
-- `GROK_SESSION_ID` — the current session identifier
-- `GROK_WORKSPACE_ROOT` — absolute path to the workspace root
+- `GROK_HOOK_EVENT`: the event name (e.g. `pre_tool_use`, `session_start`, `post_tool_use`).
+- `GROK_HOOK_NAME`: the full configured name of this hook.
+- `GROK_SESSION_ID`: the current session identifier.
+- `GROK_WORKSPACE_ROOT`: absolute path to the workspace root.
 
 For hooks provided by plugins, the following are also set:
 
-- `GROK_PLUGIN_ROOT` — absolute path to the plugin's installation directory
-- `GROK_PLUGIN_DATA` — absolute path to the plugin's writable data directory
+- `GROK_PLUGIN_ROOT`: absolute path to the plugin's installation directory.
+- `GROK_PLUGIN_DATA`: absolute path to the plugin's writable data directory.
 
 These runner- and plugin-injected variables always take precedence. Attempts to override the reserved runner keys via the `env` field are stripped at load time (with a warning logged). For plugin hooks, `GROK_PLUGIN_ROOT` and `GROK_PLUGIN_DATA` similarly override any user-supplied values for those keys.
 
@@ -156,8 +162,8 @@ Each handler can declare additional env vars to inject into the child process:
 }
 ```
 
-Values must be **strings** — JSON numbers and bools currently fail to parse
-(wrap them in quotes if you need them).
+Values must be **strings**. JSON numbers and bools currently fail to parse; wrap
+them in quotes if you need them.
 
 For plugin hooks, the plugin adapter additionally injects
 `GROK_PLUGIN_ROOT` and `GROK_PLUGIN_DATA`. These keys override any user-declared
@@ -194,41 +200,41 @@ For HTTP hooks specifically, `url` is also re-expanded **at request time**
 
 #### Parameter-expansion modifiers
 
-POSIX parameter-expansion forms — `${VAR:-default}`, `${VAR-default}`,
-`${VAR:=x}`, `${VAR:?msg}`, `${VAR:+x}`, `${VAR%pat}`, `${VAR#pat}`,
-`${VAR/pat/repl}`, `${VAR:N:M}` — are **never** expanded at load time and are
-left verbatim for the runtime `sh -c` branch to handle. This avoids subtle
-divergences between the load-time expander and POSIX shell semantics
-(notably, the empty-string behaviour of `:-`).
+POSIX parameter-expansion forms are **never** expanded at load time. They are
+left verbatim for the runtime `sh -c` branch to handle: `${VAR:-default}`,
+`${VAR-default}`, `${VAR:=x}`, `${VAR:?msg}`, `${VAR:+x}`, `${VAR%pat}`,
+`${VAR#pat}`, `${VAR/pat/repl}`, `${VAR:N:M}`. This avoids subtle divergences
+between the load-time expander and POSIX shell semantics (notably, the
+empty-string behaviour of `:-`).
 
 If your hook command contains shell metacharacters (spaces, pipes, `&&`,
 redirects, `$`, etc.), the runner routes it through `sh -c` and you get full
 shell-expansion semantics. If your command is a bare path with no metachars,
-the runner spawns it directly — but `$VAR` / `${VAR}` references in the path
-are still resolved at load time so direct-exec paths like
-`${HOME}/bin/check.sh` work without needing to be wrapped in `sh -c`.
+the runner spawns it directly. Even then, `$VAR` / `${VAR}` references in the
+path are still resolved at load time, so direct-exec paths like
+`${HOME}/bin/check.sh` work without being wrapped in `sh -c`.
 
 #### What is NOT expanded
 
 - **`matcher`** is a regex (`$` is the regex anchor for end-of-line). It is
-  never env-expanded — substituting `$VAR` would silently change the regex's
+  never env-expanded. Substituting `$VAR` would silently change the regex's
   semantics and likely produce an invalid pattern. If you need a dynamic
   matcher, generate the JSON file at write time.
 - **`timeout`** is numeric, so there is nothing to expand.
-- **The values of the `env` map itself** — these are stored verbatim and
+- **The values of the `env` map itself**: these are stored verbatim and
   passed to the child as-is, so `"BAR": "${HOME}/x"` injects the literal
   string `${HOME}/x` into the child's environment.
 
 ## Managing Hooks in the TUI
 
-Press `Ctrl+L` on non–VS Code family (or run `/hooks` anywhere) to open the Hooks & Plugins modal.
+Press `Ctrl+L` outside the VS Code family (or run `/hooks` anywhere) to open the Hooks & Plugins modal.
 
 In the **Hooks** tab you can:
-- `l` — Reload all hooks
-- `a` — Add a custom hook by path (great for testing)
-- `e` — Enable/disable
-- `r` — Remove
-- `Space` — Expand groups
+- `l`: Reload all hooks.
+- `a`: Add a custom hook by path (great for testing).
+- `e`: Enable or disable.
+- `r`: Remove.
+- `Space`: Expand groups.
 
 Hooks from `~/.grok/hooks/` appear under **Global**, project ones under **Project**, etc.
 
@@ -244,32 +250,32 @@ The full event envelope is POSTed as JSON. Useful for webhooks, analytics, or se
 
 ## Best Practices
 
-1. **Keep hooks fast** — long-running hooks block the UI (use background `&` or async where possible).
-2. **Use explicit `deny` to block** — hooks fail-open on any error (timeout, crash, missing env var, etc.), so a hook that crashes will not block the tool call. To enforce policy, your hook must run to completion and emit `{"decision":"deny","reason":"..."}` on stdout.
-3. **Use absolute paths or relative to hook file** — scripts in `bin/` next to the JSON are portable.
-4. **Test with `Ctrl+L` (non–VS Code family) / `/hooks`** — verify loading and matching before relying on them.
-5. **Version control project hooks** — commit `.grok/hooks/` (but never secrets).
+1. **Keep hooks fast**: long-running hooks block the UI. Use background `&` or async where possible.
+2. **Use explicit `deny` to block**: hooks fail-open on any error (timeout, crash, missing env var, etc.), so a hook that crashes will not block the tool call. To enforce policy, your hook must run to completion and emit `{"decision":"deny","reason":"..."}` on stdout.
+3. **Use absolute paths or paths relative to the hook file**: scripts in `bin/` next to the JSON are portable.
+4. **Test with the Hooks tab**: press `Ctrl+L` outside the VS Code family, or run `/hooks`, to verify loading and matching before relying on them.
+5. **Version control project hooks**: commit `.grok/hooks/` (but never secrets).
 
 ## Security Notes
 
-- Global hooks (`~/.grok/...`) run with your user permissions — treat them like shell scripts.
+- Global hooks (`~/.grok/...`) run with your user permissions. Treat them like shell scripts.
 - Project hooks require explicit trust (run `/hooks-trust` or use the modal) to prevent supply-chain attacks from malicious repos.
-- HTTP hooks send session data — only use trusted endpoints.
+- HTTP hooks send session data. Only use trusted endpoints.
 
 ## Troubleshooting
 
-- **Hook not running?** → Press `Ctrl+L` on non–VS Code family (or run `/hooks` anywhere) to see if it's loaded and matched.
-- **Project hooks ignored?** → Trust the project first.
-- **Script not found?** → Check the path is relative to the `.json` file and executable (`chmod +x`).
-- **`The argument '/.claude/hooks/….ps1' to the -File parameter does not exist`?** → PowerShell treated `$CLAUDE_PROJECT_DIR` as empty. Grok rewrites it to `$env:CLAUDE_PROJECT_DIR` unless `GROK_SHELL=cmd`.
-- **See errors?** → Check the pager logs (usually in the tracing pane or `~/.grok/logs`).
+- **Hook not running?** Press `Ctrl+L` outside the VS Code family (or run `/hooks` anywhere) to see if it's loaded and matched.
+- **Project hooks ignored?** Trust the project first.
+- **Script not found?** Check the path is relative to the `.json` file and executable (`chmod +x`).
+- **`The argument '/.claude/hooks/….ps1' to the -File parameter does not exist`?** PowerShell treated `$CLAUDE_PROJECT_DIR` as empty. Grok rewrites it to `$env:CLAUDE_PROJECT_DIR` unless `GROK_SHELL=cmd`.
+- **See errors?** Check the pager logs (usually in the tracing pane or `~/.grok/logs`).
 
 ## More Examples
 
 See the built-in examples in the `xai-grok-hooks` crate:
 
 - [Safe Shell Guard](../../../xai-grok-hooks/examples/hooks/safe-shell.json)
-- [No Recursive Grep](../../../xai-grok-hooks/examples/hooks/no-recursive-grep.json) — hard-blocks `grep -r`/`grep -R`/`rgrep` (OOM guard)
+- [No Recursive Grep](../../../xai-grok-hooks/examples/hooks/no-recursive-grep.json): hard-blocks `grep -r`/`grep -R`/`rgrep` (OOM guard)
 - [Session Audit Log](../../../xai-grok-hooks/examples/hooks/session-log.json)
 - [Tool Activity Logger](../../../xai-grok-hooks/examples/hooks/tool-logger.json)
 

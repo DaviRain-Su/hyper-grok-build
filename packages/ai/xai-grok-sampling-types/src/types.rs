@@ -9,21 +9,18 @@ use std::num::NonZeroU64;
 /// Object-safe trait for opaque tracing context attached to requests.
 ///
 /// `Clone` is not object-safe, so we use a `clone_box` method instead.
-/// Any concrete type that is `Clone + Send + Sync + Debug + 'static` gets a
-/// blanket impl, so callers just do:
+/// Any concrete type that is `Clone + Send + Sync + Debug + 'static` gets a blanket impl, so callers just do:
 ///
 /// ```ignore
 /// request.trace = Some(Box::new(my_concrete_trace));
 /// ```
 pub trait TraceContext: std::any::Any + Send + Sync + std::fmt::Debug {
-    /// Clone this trace context into a new `Box`.
     fn clone_box(&self) -> Box<dyn TraceContext>;
 
     /// Upcast to `&dyn Any` for downcasting back to the concrete type.
     fn as_any(&self) -> &dyn std::any::Any;
 }
 
-/// Blanket impl: any `T: Clone + Send + Sync + Debug + 'static` is a `TraceContext`.
 impl<T> TraceContext for T
 where
     T: Clone + Send + Sync + std::fmt::Debug + 'static,
@@ -39,19 +36,16 @@ where
 
 impl Clone for Box<dyn TraceContext> {
     fn clone(&self) -> Self {
-        // Explicitly dereference to `&dyn TraceContext` so `clone_box()` dispatches
-        // through the vtable to the concrete type's implementation.
+        // Explicitly dereference to `&dyn TraceContext` so `clone_box()` dispatches through the vtable to the concrete type's implementation
         //
-        // Without this, `self.clone_box()` resolves via auto-deref to
-        // `<Box<dyn TraceContext> as TraceContext>::clone_box()` (from the blanket impl),
-        // which calls `self.clone()` → `self.clone_box()` → infinite recursion.
+        // Without the deref, `self.clone_box()` resolves via auto-deref to the blanket impl on `Box<dyn TraceContext>` itself
+        // That impl calls `self.clone()`, which calls `clone_box()` again, recursing forever
         let inner: &dyn TraceContext = &**self;
         inner.clone_box()
     }
 }
 
-/// Deserialize a field that may be `null` as the default value.
-/// This is useful for fields like `Vec<T>` where `null` should become `vec![]`.
+/// `null` deserializes to the default value, so a `null` `Vec<T>` field becomes `vec![]`.
 fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
@@ -165,7 +159,6 @@ pub struct ChatCompletionRequest {
     pub x_grok_user_id: Option<String>,
 
     /// Optional opaque tracing context (e.g., where to persist the finalized request payload).
-    /// This is intentionally not serialized or deserialized.
     /// Consumers downcast via `trace.as_ref().unwrap().as_any().downcast_ref::<T>()`.
     #[serde(skip)]
     pub trace: Option<Box<dyn TraceContext>>,
@@ -380,7 +373,6 @@ impl ChatRequestMessage {
         self.role == Role::System
     }
 
-    /// Extract text content from the message content blocks
     pub fn text_content(&self) -> String {
         self.content
             .blocks()
@@ -398,7 +390,6 @@ impl ChatRequestMessage {
         self.content = MessageContent::Text(text.into());
     }
 
-    /// Append text content to existing content
     pub fn append_text_content(&mut self, text: impl Into<String>) {
         if self.content.is_empty() {
             self.set_text_content(text);
@@ -438,7 +429,6 @@ pub fn chat_truncate_for_prompt(
     for (i, msg) in chat_history.iter().enumerate() {
         if matches!(msg.role, Role::User) {
             user_count += 1;
-            // If we've seen more user messages than target + 1, stop here
             if user_count > target_prompt_index + 1 {
                 keep_count = i;
                 break;
@@ -456,9 +446,7 @@ pub enum ToolType {
     Function,
 }
 
-// Re-export ToolDefinition and FunctionTool from xai-grok-tools.
-// The canonical definitions now live there; this re-export keeps
-// all existing `crate::sampling::types::ToolDefinition` imports working.
+// The canonical definitions live in xai-grok-tools; the re-export keeps existing `crate::sampling::types::ToolDefinition` imports working
 pub use xai_grok_tools::types::definition::{FunctionTool, ToolDefinition};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -608,8 +596,7 @@ pub struct Usage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_tokens_details: Option<CompletionTokensDetails>,
     /// xAI extension: request price in USD ticks (1 USD = 1e10 ticks).
-    /// The REST mapper backfills `0` for unbilled requests; capture sites
-    /// normalize `0` to "unreported" (see `stream/chat_completions.rs`).
+    /// The REST mapper backfills `0` for unbilled requests; capture sites normalize `0` to "unreported" (see `stream/chat_completions.rs`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_in_usd_ticks: Option<i64>,
 }
@@ -664,17 +651,14 @@ pub struct ChatChunkChoice {
     pub finish_reason: Option<FinishReason>,
 }
 
-/// Streaming delta for a tool call.
-///
 /// In OpenAI-compatible streaming, tool calls arrive across multiple chunks:
-/// - The first chunk carries `id`, `type`, `index`, and the `function.name` + start of `arguments`.
+/// - The first chunk carries `id`, `type`, `index`, `function.name`, and the start of `arguments`.
 /// - Subsequent chunks only carry `index` and a `function.arguments` fragment (no `id`, no `name`).
 ///
 /// All fields except `index` are therefore optional so we can deserialize every chunk.
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct ToolCallDelta {
-    /// The positional index of the tool call being streamed.
-    /// Used to correlate delta chunks belonging to the same tool call.
+    /// The positional index that correlates delta chunks of the same tool call.
     #[serde(default)]
     pub index: u32,
     /// Only present in the first chunk for this tool call.
@@ -688,8 +672,6 @@ pub struct ToolCallDelta {
     pub function: Option<ToolCallFunctionDelta>,
 }
 
-/// Streaming delta for function name/arguments within a tool call.
-///
 /// `name` is only present in the first chunk; `arguments` may arrive across many chunks.
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct ToolCallFunctionDelta {
@@ -708,7 +690,7 @@ pub struct ChatChunkDelta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
     pub reasoning_content: Option<String>,
-    /// Tool call deltas. Handles `null` in JSON as empty vec.
+    /// A JSON `null` deserializes as an empty vec.
     #[serde(
         default,
         skip_serializing_if = "Vec::is_empty",
@@ -723,7 +705,7 @@ pub struct ChatChunkDelta {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SearchParameters {
     /// Choose the mode to query realtime data:
-    /// * `off`: no search performed and no external will be considered.
+    /// * `off`: no search performed and no external sources will be considered.
     /// * `on` (default): the model will search in every source for relevant data.
     /// * `auto`: the model chooses whether to search data or not and where to search the data.
     pub mode: Option<String>,
@@ -746,7 +728,7 @@ pub enum SearchSource {
     X {
         /// X Handles of the users from whom to consider the posts.
         included_x_handles: Option<Vec<String>>,
-        /// DEPRECATED in favor of `included_x_handles`. Use `included_x_handles` instead.
+        /// DEPRECATED in favor of `included_x_handles`.
         x_handles: Option<Vec<String>>,
         /// List of X handles to exclude from the search results.
         excluded_x_handles: Option<Vec<String>>,
@@ -784,8 +766,7 @@ pub enum SearchSource {
 
 /// Per-model config for the `x-compaction-at` request header (a token count).
 ///
-/// Deserialized from a polymorphic remote-config value: `true` enables the
-/// header with a value computed as `context_window * auto_compact_threshold_percent / 100`;
+/// The remote-config value is polymorphic: `true` enables the header with the value `context_window * auto_compact_threshold_percent / 100`.
 /// `false` (or absent) disables it; an integer `N` sends the constant `N`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
@@ -809,7 +790,7 @@ impl CompactionAtTokens {
 
 /// Per-model config for the `x-compactions-remaining` request header.
 ///
-/// `true` sends the dynamic value (1 on the uncompacted prefix, 0 once the session compacts);
+/// `true` sends the dynamic value (1 on the uncompacted prefix, 0 once the session compacts).
 /// `false`/absent disables the header; an integer `N` sends the constant `N`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
@@ -898,8 +879,7 @@ impl ReasoningEffort {
         }
     }
 
-    /// Inverse of [`to_responses_api`](Self::to_responses_api): the effort the
-    /// Responses API echoes back on `response.reasoning.effort`.
+    /// Inverse of [`to_responses_api`](Self::to_responses_api): the effort the Responses API echoes back on `response.reasoning.effort`.
     pub fn from_responses_api(effort: crate::rs::ReasoningEffort) -> Self {
         match effort {
             crate::rs::ReasoningEffort::None => Self::None,
@@ -976,8 +956,7 @@ pub fn supports_reasoning_effort_meta(
         .unwrap_or(false)
 }
 
-/// Returns `None` on type-mismatch or unknown variant (logs a warn so we don't
-/// overwrite the user's persisted pref on the next save).
+/// Returns `None` on type-mismatch or unknown variant (logs a warn so we don't overwrite the user's persisted pref on the next save).
 pub fn parse_reasoning_effort_meta(
     meta: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Option<ReasoningEffort> {
@@ -1004,8 +983,8 @@ pub fn reasoning_effort_meta_value(effort: ReasoningEffort) -> serde_json::Value
 
 pub const REASONING_EFFORTS_META_KEY: &str = "reasoningEfforts";
 
-/// A single selectable reasoning-effort option for a model. `id`/`label` are
-/// presentation and input; `value` is the canonical value sent on the wire.
+/// A single selectable reasoning-effort option for a model.
+/// `id`/`label` are presentation and input; `value` is the canonical value sent on the wire.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct ReasoningEffortOption {
     pub id: String,
@@ -1015,8 +994,7 @@ pub struct ReasoningEffortOption {
     pub default: bool,
 }
 
-/// Deserialization shape accepting either a bare canonical value string
-/// (`"xhigh"`) or a table with `value` required and everything else optional.
+/// Deserialization shape accepting either a bare canonical value string (`"xhigh"`) or a table with `value` required and everything else optional.
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum RawReasoningEffortOption {
@@ -1031,8 +1009,7 @@ enum RawReasoningEffortOption {
     },
 }
 
-/// Uppercase the first character of an id for a default label; `"xhigh"` becomes
-/// `"Xhigh"`, `"deep"` becomes `"Deep"`.
+/// Uppercase the first character of an id for a default label; `"xhigh"` becomes `"Xhigh"`, `"deep"` becomes `"Deep"`.
 fn humanize_effort_id(id: &str) -> String {
     let mut chars = id.chars();
     match chars.next() {
@@ -1082,10 +1059,9 @@ impl<'de> serde::Deserialize<'de> for ReasoningEffortOption {
     }
 }
 
-/// Parse a JSON array of reasoning-effort options element-by-element, skipping
-/// (and warning on) any entry whose `value` fails to parse (forward-compat for
-/// tiers a newer server introduces). The single home for the skip-invalid rule,
-/// shared by the meta reader and the remote `/models` parser.
+/// Parse a JSON array of reasoning-effort options element-by-element, skipping and warning on any entry whose `value` fails to parse.
+/// That keeps tiers a newer server introduces from breaking the whole list.
+/// The meta reader and the remote `/models` parser both call this, so the skip rule lives in one place.
 pub fn parse_reasoning_effort_options(arr: &[serde_json::Value]) -> Vec<ReasoningEffortOption> {
     arr.iter()
         .filter_map(
@@ -1100,10 +1076,9 @@ pub fn parse_reasoning_effort_options(arr: &[serde_json::Value]) -> Vec<Reasonin
         .collect()
 }
 
-/// Parse the per-model reasoning-effort menu from a model's ACP `meta`. Returns
-/// `None` when the key is absent, is not an array, or yields no usable options
-/// after skip-invalid — so "absent" and "present-but-unusable" collapse to the
-/// same fallback path in every consumer.
+/// Parse the per-model reasoning-effort menu from a model's ACP `meta`.
+/// Returns `None` when the key is absent, is not an array, or yields no usable options.
+/// An absent key and an unusable one therefore collapse to the same fallback path in every consumer.
 pub fn parse_reasoning_efforts_meta(
     meta: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Option<Vec<ReasoningEffortOption>> {
@@ -1232,9 +1207,8 @@ pub enum ApiBackend {
 }
 
 impl ApiBackend {
-    /// Whether the backend enforces a response JSON schema natively alongside
-    /// tool calls. The Messages API does not (a schema there blocks tool use),
-    /// so structured output there goes through the StructuredOutput tool.
+    /// Whether the backend enforces a response JSON schema natively alongside tool calls.
+    /// The Messages API does not (a schema there blocks tool use), so structured output there goes through the StructuredOutput tool.
     pub fn supports_native_schema(&self) -> bool {
         matches!(
             self,
@@ -1282,7 +1256,7 @@ impl ApiBackend {
     }
 }
 
-/// Sampling client configuration (API key excluded — that stays in the client).
+/// Sampling client configuration (API key excluded; that stays in the client).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SamplingConfig {
     pub base_url: String,
@@ -1309,26 +1283,23 @@ pub struct SamplingConfig {
     /// Query parameters folded into every request URL (percent-encoded).
     #[serde(default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
     pub query_params: indexmap::IndexMap<String, String>,
-    /// Header name to environment variable; only the mapping persists, not the
-    /// resolved secret.
+    /// Header name to environment variable; only the mapping persists, not the resolved secret.
     #[serde(default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
     pub env_http_headers: indexmap::IndexMap<String, String>,
-    /// Total context window size in tokens. Used for auto-compact thresholds.
+    /// Total context window size in tokens; auto-compact thresholds derive from it.
     pub context_window: NonZeroU64,
     /// Reasoning effort level for reasoning models.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
-    /// When true, inject `stream_tool_calls: true` into the Responses
-    /// API request body so the upstream emits per-chunk argument deltas.
+    /// When true, inject `stream_tool_calls: true` into the Responses API request body so the upstream emits per-chunk argument deltas.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_tool_calls: Option<bool>,
 }
 
 // ============ Responses API wrapper ============
 
-/// Wrapper around `async_openai::types::responses::CreateResponse` that adds
-/// custom header fields for xAI request tracking, similar to
-/// `ChatCompletionRequest`.
+/// Wrapper around `async_openai::types::responses::CreateResponse` that adds custom header fields for xAI request tracking.
+/// It mirrors the header fields on `ChatCompletionRequest`.
 #[derive(Debug, Clone, Default)]
 pub struct CreateResponseWrapper {
     /// The inner Responses API request.
@@ -1350,14 +1321,12 @@ pub struct CreateResponseWrapper {
     /// Optional tracing context (e.g., where to persist the finalized request payload).
     pub trace: Option<Box<dyn TraceContext>>,
 
-    /// xAI-specific tool definitions that can't be expressed via
-    /// `async_openai`'s `rs::Tool` enum (e.g., `x_search`). Injected
-    /// as raw JSON into the serialized request body's `tools` array.
+    /// xAI-specific tool definitions that can't be expressed via `async_openai`'s `rs::Tool` enum (e.g., `x_search`).
+    /// They are injected as raw JSON into the serialized request body's `tools` array.
     pub extra_tool_entries: Vec<serde_json::Value>,
 }
 
 impl CreateResponseWrapper {
-    /// Create a new wrapper from an existing `CreateResponse`.
     pub fn new(inner: crate::rs::CreateResponse) -> Self {
         Self {
             inner,
@@ -1374,19 +1343,16 @@ impl CreateResponseWrapper {
         }
     }
 
-    /// Set the conversation ID header.
     pub fn with_conv_id(mut self, conv_id: impl Into<String>) -> Self {
         self.x_grok_conv_id = Some(conv_id.into());
         self
     }
 
-    /// Set the request ID header.
     pub fn with_req_id(mut self, req_id: impl Into<String>) -> Self {
         self.x_grok_req_id = Some(req_id.into());
         self
     }
 
-    /// Set the trace context for request logging.
     pub fn with_trace(mut self, trace: impl TraceContext + 'static) -> Self {
         self.trace = Some(Box::new(trace));
         self
@@ -1401,8 +1367,7 @@ impl From<crate::rs::CreateResponse> for CreateResponseWrapper {
 
 // ============ Messages API wrapper ============
 
-/// Wrapper around `MessagesRequest` that adds custom header fields for xAI
-/// request tracking, analogous to `CreateResponseWrapper`.
+/// Wrapper around `MessagesRequest` that adds custom header fields for xAI request tracking, analogous to `CreateResponseWrapper`.
 #[derive(Debug, Clone, Default)]
 pub struct MessagesRequestWrapper {
     /// The inner Messages API request.
@@ -1426,7 +1391,6 @@ pub struct MessagesRequestWrapper {
 }
 
 impl MessagesRequestWrapper {
-    /// Create a new wrapper from an existing `MessagesRequest`.
     pub fn new(inner: crate::messages::MessagesRequest) -> Self {
         Self {
             inner,
@@ -1442,19 +1406,16 @@ impl MessagesRequestWrapper {
         }
     }
 
-    /// Set the conversation ID header.
     pub fn with_conv_id(mut self, conv_id: impl Into<String>) -> Self {
         self.x_grok_conv_id = Some(conv_id.into());
         self
     }
 
-    /// Set the request ID header.
     pub fn with_req_id(mut self, req_id: impl Into<String>) -> Self {
         self.x_grok_req_id = Some(req_id.into());
         self
     }
 
-    /// Set the trace context for request logging.
     pub fn with_trace(mut self, trace: impl TraceContext + 'static) -> Self {
         self.trace = Some(Box::new(trace));
         self
@@ -1636,8 +1597,8 @@ mod tests {
 
     #[test]
     fn parse_reasoning_efforts_meta_present_but_unusable_is_none() {
-        // Explicit empty, non-array, and all-entries-skip-invalidated all collapse
-        // to `None` so consumers fall back exactly as they do for an absent key.
+        // An empty array, a non-array, and an array whose every entry fails to parse all collapse to `None`
+        // Consumers then fall back exactly as they do for an absent key
         for meta in [
             json!({ REASONING_EFFORTS_META_KEY: [] }),
             json!({ REASONING_EFFORTS_META_KEY: "nope" }),
@@ -1794,11 +1755,9 @@ mod tests {
 
     /// Regression test: cloning `Box<dyn TraceContext>` must not infinitely recurse.
     ///
-    /// The blanket `impl<T: Clone + ...> TraceContext for T` applies to
-    /// `Box<dyn TraceContext>` itself. Without the explicit dereference in
-    /// `Clone for Box<dyn TraceContext>`, `self.clone_box()` resolves to the
-    /// blanket impl's method (via auto-deref) instead of dispatching through
-    /// the vtable, causing `clone()` → `clone_box()` → `clone()` → stack overflow.
+    /// The blanket `impl<T: Clone + ...> TraceContext for T` applies to `Box<dyn TraceContext>` itself.
+    /// Without the dereference in `Clone for Box<dyn TraceContext>`, `self.clone_box()` resolves to the blanket impl's method via auto-deref.
+    /// That skips vtable dispatch, so `clone()` calls `clone_box()` calls `clone()` until the stack overflows.
     #[test]
     fn clone_box_dyn_trace_context_does_not_recurse() {
         #[derive(Debug, Clone)]
@@ -1808,8 +1767,7 @@ mod tests {
         let cloned = trace.clone();
 
         // Verify the clone produced a valid TraceContext with the same data.
-        // Note: `as_any()` must be called through `&dyn TraceContext` (not on the Box
-        // directly) to use vtable dispatch rather than the blanket impl.
+        // `as_any()` must be called through `&dyn TraceContext` (not on the Box directly) to use vtable dispatch rather than the blanket impl
         let inner: &dyn TraceContext = &*trace;
         let original = inner.as_any().downcast_ref::<TestTrace>().unwrap();
 

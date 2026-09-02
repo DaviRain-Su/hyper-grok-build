@@ -1,7 +1,6 @@
-//! grok.com chat-product model catalog: caches `/rest/modes` and maps modes to
-//! the `SessionModelState` returned by `load_chat_session` (the chat analogue of
-//! [`crate::agent::models::ModelsManager`]). NB: these "modes" populate the
-//! desktop MODEL picker, not the ACP session plan-modes in `LoadSessionResponse.modes`.
+//! grok.com chat-product model catalog: caches `/rest/modes` and maps modes to the `SessionModelState` returned by `load_chat_session`
+//! (the chat analogue of [`crate::agent::models::ModelsManager`]).
+//! These "modes" populate the desktop MODEL picker, not the ACP session plan-modes in `LoadSessionResponse.modes`.
 use crate::auth::AuthManager;
 use crate::remote::chat_models_client::{
     ChatModelsClient, ChatModelsError, ListModesResponse, Mode,
@@ -15,8 +14,8 @@ const CACHE_TTL: Duration = Duration::from_secs(54 * 60);
 /// Cold-miss budget on the `session/load` critical path (warm/stale served instantly).
 const COLD_FETCH_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_LOCALE: &str = "en";
-/// Process-wide flag set by the pager when started with `--chat` so initialize
-/// and early UI seed the chat `/rest/modes` catalog instead of build models.
+/// Process-wide flag set by the pager when started with `--chat`.
+/// Initialize and early UI then seed the chat `/rest/modes` catalog instead of build models.
 pub const GROK_CHAT_MODE_ENV: &str = "GROK_CHAT_MODE";
 /// True when the process is a gateway light-frontend (`--chat`) agent.
 /// Hard-off in release builds so it can't be enabled via env.
@@ -52,13 +51,13 @@ impl ChatModesManager {
             }),
         }
     }
-    /// The active grok.com identity, or `None` when unauthenticated. Modes are
-    /// per-identity (tier/ACL), so every cache key and store is gated on it.
+    /// The active grok.com identity, or `None` when unauthenticated.
+    /// Modes are per-identity (tier/ACL), so every cache key and store is gated on it.
     fn current_user_id(&self) -> Option<String> {
         self.inner.auth.current_or_expired().map(|a| a.user_id)
     }
-    /// Chat model state for a `session/load` response. On missing auth or fetch
-    /// failure, serves last-good cache else empty — never the build catalog.
+    /// Chat model state for a `session/load` response.
+    /// On missing auth or fetch failure, serves last-good cache else empty, never the build catalog.
     pub(crate) async fn model_state(&self) -> acp::SessionModelState {
         let Some(user_id) = self.current_user_id() else {
             return empty_state();
@@ -149,8 +148,7 @@ impl ChatModesManager {
             }
         });
     }
-    /// Kick a background `/rest/modes` fill when auth is already present so
-    /// `--chat` initialize / first `session/new` hit a warm cache.
+    /// Kick a background `/rest/modes` fill when auth is already present so `--chat` initialize / first `session/new` hit a warm cache.
     pub(crate) fn warm_in_background(&self) {
         let Some(user_id) = self.current_user_id() else {
             return;
@@ -161,9 +159,8 @@ impl ChatModesManager {
 fn empty_state() -> acp::SessionModelState {
     acp::SessionModelState::new(acp::ModelId::from(String::new()), Vec::new())
 }
-/// Maps grok.com modes → `SessionModelState`: keeps only `available` modes,
-/// reconciles `current_model_id` (default → first available → empty, never
-/// out-of-set), and stashes `badgeText`/`iconHint`/`tags` in `_meta`.
+/// Maps grok.com modes to `SessionModelState`: keeps only `available` modes and stashes `badgeText`/`iconHint`/`tags` in `_meta`.
+/// Reconciles `current_model_id` (default, else first available, else empty, never out-of-set).
 pub(crate) fn modes_to_model_state(resp: &ListModesResponse) -> acp::SessionModelState {
     let available_models: Vec<acp::ModelInfo> = resp
         .modes

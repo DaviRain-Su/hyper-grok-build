@@ -13,11 +13,11 @@ pub(crate) struct StallActivity {
 
 impl StallActivity {
     pub(crate) fn read() -> Self {
-        use xai_grok_telemetry::activity;
+        use xai_grok_telemetry::activity::{self, gauge_value};
         Self {
-            compaction_active: activity::COMPACTIONS_ACTIVE.get() > 0,
-            subagents_active: activity::SUBAGENTS_ACTIVE.get(),
-            mcp_servers_connected: activity::MCP_SERVERS_CONNECTED.get(),
+            compaction_active: gauge_value(activity::COMPACTIONS_ACTIVE_KEY) > 0,
+            subagents_active: gauge_value(activity::SUBAGENTS_ACTIVE_KEY),
+            mcp_servers_connected: gauge_value(activity::MCP_SERVERS_CONNECTED_KEY),
         }
     }
 }

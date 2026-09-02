@@ -109,7 +109,7 @@ impl MarketplaceRelativePath {
 
         let canonical_existing =
             dunce::canonicalize(current).map_err(|_| MarketplacePathError::EscapesRoot)?;
-        // Fail-closed >MAX_PATH caveat: see workspace clippy.toml.
+        // On Windows, dunce keeps the verbatim form for paths over MAX_PATH, so this check fails closed (see crates/codegen/clippy.toml)
         if !canonical_existing.starts_with(&canonical_root) {
             return Err(MarketplacePathError::EscapesRoot);
         }
@@ -127,7 +127,6 @@ impl MarketplaceRelativePath {
 pub struct MarketplaceSource {
     /// User-facing display name.
     pub name: String,
-    /// How to access the marketplace.
     pub kind: SourceKind,
 }
 
@@ -137,7 +136,7 @@ pub struct MarketplaceSource {
 pub enum SourceKind {
     /// A local directory containing a `plugins/` subdirectory.
     Local { path: PathBuf },
-    /// A git repo. Cloned/pulled to a persistent cache on refresh.
+    /// A git repo, cloned or pulled to a persistent cache on refresh.
     Git { url: String, branch: Option<String> },
 }
 
@@ -148,11 +147,9 @@ pub struct MarketplaceEntry {
     pub name: String,
     /// Version string (from manifest).
     pub version: Option<String>,
-    /// Human-readable description.
     pub description: Option<String>,
     /// Category (from index, e.g., "development", "productivity").
     pub category: Option<String>,
-    /// Author name.
     pub author: Option<String>,
     /// Tags/keywords (from index).
     #[serde(default)]
@@ -167,18 +164,14 @@ pub struct MarketplaceEntry {
     pub homepage: Option<String>,
     /// Relative path within marketplace (e.g., "plugins/xai-code-review").
     pub relative_path: String,
-    /// Number of skills discovered.
     pub skill_count: usize,
-    /// Whether the plugin has hooks.
     pub has_hooks: bool,
-    /// Whether the plugin has agents.
     pub has_agents: bool,
-    /// Whether the plugin has MCP configuration.
     pub has_mcp: bool,
     /// Remote git URL for URL-sourced plugins (not present for local plugins).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_url: Option<String>,
-    /// Git ref (branch/tag) for remote URL sources.
+    /// Git ref (branch or tag) for remote URL sources.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -186,12 +179,11 @@ pub struct MarketplaceEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_subdir: Option<String>,
     /// Structured inventory from the marketplace catalog (`plugin-index.json`).
-    /// `None` = no catalog data for this plugin.
+    /// `None` means the catalog has no data for this plugin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub components: Option<xai_hooks_plugins_types::PluginComponents>,
 }
 
-/// Result of a marketplace scan, with catalog telemetry.
 #[derive(Debug, Clone)]
 pub struct MarketplaceScan {
     pub entries: Vec<MarketplaceEntry>,

@@ -1,24 +1,22 @@
 //! Pure builders for prefire two-pass compaction (shell-only).
 //!
-//! Pass1 summarizes ~95% of history (by estimated-token weight) → NOTE₁.
-//! Pass2 rewrites NOTE₁ + the ~5% tail into the successor-visible NOTE₂.
+//! Pass1 summarizes ~95% of history (by estimated-token weight) into NOTE₁.
+//! Pass2 rewrites NOTE₁ and the ~5% tail into NOTE₂, the note the successor sees.
 //! Sampling lives in [`super::compaction`]; this module has no I/O.
 
 use xai_chat_state::estimate_item_tokens;
 use xai_grok_sampling_types::ConversationItem;
 
-/// Default history fraction covered by pass1; the remainder is the blocking
-/// pass2 tail, so keep it small (prod pass2 latency is dominated by tail prefill).
+/// Default history fraction covered by pass1.
+/// The remainder is the blocking pass2 tail, so keep it small (prod pass2 latency is dominated by tail prefill).
 pub(crate) const TWO_PASS_DEFAULT_SPLIT_FRACTION: f64 = 0.95;
 
-/// Minimum char length for a closed `<summary>` block to be preferred as NOTE₁
-/// over the full pass1 response.
+/// Minimum char length for a closed `<summary>` block to be preferred as NOTE₁ over the full pass1 response.
 const TWO_PASS_MIN_SUMMARY_BLOCK_CHARS: usize = 1000;
 
-/// Cap on NOTE₁ text embedded in pass2 (carrier + special turn).
+/// Cap on NOTE₁ text embedded in pass2 (carrier and special turn).
 const TWO_PASS_MAX_NOTE1_CHARS: usize = 12_000;
 
-/// Result of splitting a conversation for two-pass compaction.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TwoPassSplit<'a> {
     pub prefix: &'a [ConversationItem],
@@ -99,7 +97,7 @@ fn snap_split_idx_to_tool_boundaries(
             && let ConversationItem::Assistant(a) = &conversation[candidate]
             && !a.tool_calls.is_empty()
         {
-            // candidate at assistant — good for tail start.
+            // The candidate already sits on an assistant `tool_calls` turn, a valid tail start
         } else if candidate > 0
             && matches!(conversation[candidate], ConversationItem::ToolResult(_))
         {
@@ -226,7 +224,7 @@ fn format_two_pass_special_pass2_user(note1: &str, compaction_prompt: &str) -> S
     )
 }
 
-/// Pass1 sample history: `prefix` + compaction instruction user turn.
+/// Pass1 sample history: `prefix` followed by the compaction instruction as a user turn.
 pub(crate) fn build_two_pass_pass1_history(
     prefix: &[ConversationItem],
     compaction_prompt: &str,
@@ -236,9 +234,9 @@ pub(crate) fn build_two_pass_pass1_history(
     history
 }
 
-/// Pass2 sample history: system (from prefix) + NOTE₁ carrier + tail + special turn.
+/// Pass2 sample history: the system turns from `prefix`, then the NOTE₁ carrier, the tail, and the special turn.
 ///
-/// Successor-visible artifact is the model output of *this* history only (NOTE₂).
+/// The successor sees only the model output of *this* history (NOTE₂).
 pub(crate) fn build_two_pass_pass2_history(
     prefix: &[ConversationItem],
     tail: &[ConversationItem],
@@ -283,8 +281,7 @@ mod tests {
     #[test]
     fn default_split_fraction_leaves_five_percent_tail() {
         assert_eq!(TWO_PASS_DEFAULT_SPLIT_FRACTION, 0.95);
-        // With the default fraction a non-empty tail must always survive the
-        // split (pass2 needs recent turns to rewrite against NOTE₁).
+        // Pass2 needs recent turns to rewrite against NOTE₁
         let weights = vec![10u64; 40];
         let idx = split_index_by_token_fraction(&weights, TWO_PASS_DEFAULT_SPLIT_FRACTION);
         assert_eq!(idx, 38); // 38/40 = 95% by weight

@@ -42,8 +42,7 @@ fn returns_none_for_different_parent() {
     assert!(found.is_none());
 }
 
-/// Regression: a second `grok -r <remote_id>` must return the existing child
-/// without creating a new restore, not return `None`.
+/// Regression: a second `grok -r <remote_id>` must return the existing child without creating a new restore, not return `None`.
 #[test]
 fn repeated_resume_returns_existing_child() {
     let tmp = TempDir::new().unwrap();
@@ -56,8 +55,7 @@ fn repeated_resume_returns_existing_child() {
     assert_eq!(first.as_deref(), Some("child-1"));
 }
 
-/// With multiple pre-existing children, the function must return the newest
-/// one deterministically rather than picking an arbitrary filesystem order.
+/// With multiple pre-existing children, the function must return the newest one deterministically rather than picking an arbitrary filesystem order.
 #[test]
 fn duplicate_children_returns_newest_by_updated_at() {
     let tmp = TempDir::new().unwrap();
@@ -65,7 +63,7 @@ fn duplicate_children_returns_newest_by_updated_at() {
     let cwd = "/project";
     let encoded = crate::util::grok_home::encode_cwd_dirname(cwd);
 
-    // Older child — earlier timestamp.
+    // Older child, earlier timestamp
     let old_dir = root.join(&encoded).join("old-child");
     fs::create_dir_all(&old_dir).unwrap();
     fs::write(
@@ -74,7 +72,7 @@ fn duplicate_children_returns_newest_by_updated_at() {
     )
     .unwrap();
 
-    // Newer child — later timestamp.
+    // Newer child, later timestamp
     let new_dir = root.join(&encoded).join("new-child");
     fs::create_dir_all(&new_dir).unwrap();
     fs::write(
@@ -91,8 +89,7 @@ fn duplicate_children_returns_newest_by_updated_at() {
     );
 }
 
-/// When two children share the same `updated_at` the tie must be broken
-/// deterministically, not by filesystem enumeration order.
+/// When two children share the same `updated_at` the tie must be broken deterministically, not by filesystem enumeration order.
 /// The lexicographically largest session id is the final stable tie-breaker.
 #[test]
 fn duplicate_children_equal_timestamps_stable_tiebreak() {
@@ -114,8 +111,7 @@ fn duplicate_children_equal_timestamps_stable_tiebreak() {
         dirs.push(dir);
     }
 
-    // Force all directories to have *exactly* the same mtime so the
-    // lexicographic session_id comparison is the actual tie-breaker.
+    // Force all directories to have *exactly* the same mtime so the lexicographic session_id comparison is the actual tie-breaker
     // Without this, nanosecond-precision filesystem mtimes can differ.
     let fixed_mtime = FileTime::from_unix_time(1700000000, 0);
     for dir in &dirs {
@@ -123,8 +119,6 @@ fn duplicate_children_equal_timestamps_stable_tiebreak() {
     }
 
     let found = find_local_child_for_remote_in_root("remote-tie", cwd, &root);
-    // All share the same updated_at and mtime.
-    // The lexicographic tie-breaker must always pick "zzzz-uuid".
     assert_eq!(
         found.as_deref(),
         Some("zzzz-uuid"),

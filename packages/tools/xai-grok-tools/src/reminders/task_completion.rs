@@ -412,6 +412,22 @@ pub async fn resolve_read_tool_name(bridge: &ToolBridge) -> Option<String> {
 pub async fn resolve_scheduler_delete_tool_name(bridge: &ToolBridge) -> Option<String> {
     bridge.tool_for_registry_id("scheduler_delete")
 }
+fn append_loop_remediation_hint(
+    out: &mut String,
+    completion: &SubagentCompletionSummary,
+    prefix: &str,
+) {
+    if completion
+        .loop_task_id
+        .as_deref()
+        .is_some_and(|task_id| !task_id.is_empty())
+    {
+        out.push_str(prefix);
+        out.push_str(
+            "Read through the subagent output. Fix reported issues with monitored jobs, and kill or restart jobs with fatal errors.",
+        );
+    }
+}
 /// Format a model-facing message from a [`SubagentCompletionSummary`] for
 /// the next-tool-call reminder surface.
 ///
@@ -456,6 +472,7 @@ pub fn format_subagent_completion(
         None,
     );
     append_scheduler_cleanup_hint(&mut out, c, scheduler_delete_name, "\n");
+    append_loop_remediation_hint(&mut out, c, "\n\n");
     out
 }
 fn append_scheduler_cleanup_hint(
@@ -517,6 +534,7 @@ pub fn format_between_turn_completions(
             None,
         );
         append_scheduler_cleanup_hint(&mut buf, c, scheduler_delete_name, "\n  ");
+        append_loop_remediation_hint(&mut buf, c, "\n\n");
         buf.push('\n');
     }
     buf
@@ -1865,7 +1883,8 @@ mod tests {
             "Background subagent \"sub-loop\" (general-purpose: \"test task\") completed successfully.\n\
              Duration: 5.0s | Tool calls: 3 | Turns: 2\n\
              Use get_task_output(\"sub-loop\") to see the full output.\n\
-             If the monitored work is complete, call `renamed_scheduler_delete(\"loop-123\")` to stop the monitor."
+             If the monitored work is complete, call `renamed_scheduler_delete(\"loop-123\")` to stop the monitor.\n\n\
+             Read through the subagent output. Fix reported issues with monitored jobs, and kill or restart jobs with fatal errors."
         );
     }
     #[test]

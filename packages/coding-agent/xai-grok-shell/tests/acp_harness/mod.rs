@@ -1,8 +1,7 @@
-//! Drives a real in-process `MvpAgent` over ACP on duplex pipes. Outside
-//! `tests/common/` because that compiles into every integration binary and
-//! would pull the transport stack into all of them.
+//! Drives a real in-process `MvpAgent` over ACP on duplex pipes.
+//! This lives outside `tests/common/` because that compiles into every integration binary and would pull the transport stack into all of them.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use agent_client_protocol::{self as acp, Agent as _};
@@ -20,8 +19,7 @@ pub const DUPLEX_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 
 pub const RPC_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Compiled into each including binary, so a client only one uses is dead code
-/// in the others.
+/// This is compiled into each including binary, so a client only one uses is dead code in the others.
 #[allow(dead_code)]
 pub struct AutoApproveClient;
 
@@ -58,9 +56,8 @@ pub struct AgentPipes {
     pub from_agent: tokio::io::DuplexStream,
 }
 
-/// Stand up `MvpAgent` plus its ACP plumbing on the current `LocalSet`;
-/// callers wanting another topology build the same pieces elsewhere and hand
-/// [`connect_client`] the pipes.
+/// Stand up `MvpAgent` plus its ACP connection and IO tasks on the current `LocalSet`.
+/// Callers wanting another topology build the same pieces elsewhere and hand [`connect_client`] the pipes.
 pub fn spawn_agent_local() -> AgentPipes {
     let (c2a_a, c2a_b) = tokio::io::duplex(DUPLEX_BUFFER_BYTES);
     let (a2c_a, a2c_b) = tokio::io::duplex(DUPLEX_BUFFER_BYTES);
@@ -101,8 +98,7 @@ where
     connect_client(client, client_type, pipes).await
 }
 
-/// Initialize plus API-key auth over `pipes`; the one handshake every
-/// harness topology shares.
+/// Initialize plus API-key auth over `pipes`; the one handshake every harness topology shares.
 pub async fn connect_client<C>(
     client: C,
     client_type: &str,
@@ -170,8 +166,7 @@ where
     (client_conn, init)
 }
 
-// Dead-code allows below: same per-binary compilation as `AutoApproveClient`
-// above — each helper is used by some including test binaries, not all.
+// Dead-code allows below: same per-binary compilation as `AutoApproveClient` above; each helper is used by some including test binaries, not all
 #[allow(dead_code)]
 pub async fn ext_method(
     conn: &acp::ClientSideConnection,
@@ -208,6 +203,7 @@ pub async fn new_session(
     .session_id
 }
 
+#[allow(dead_code)]
 pub async fn prompt_turn(
     conn: &acp::ClientSideConnection,
     session_id: &acp::SessionId,
@@ -243,21 +239,36 @@ fn set_test_env(grok_home: &std::path::Path, server_url: &str) {
         std::env::set_var("GROK_TELEMETRY_ENABLED", "false");
         std::env::set_var("GROK_FEEDBACK_ENABLED", "false");
         std::env::set_var("GROK_TRACE_UPLOAD", "false");
-        // Turn summaries fire a post-turn side-call to the same mock endpoint
-        // on a spawned task; the race makes request-count assertions flaky.
+        // Turn summaries fire one more request to the same mock endpoint after the turn, on a spawned task
+        // The race makes request-count assertions flaky
         std::env::set_var("GROK_TURN_SUMMARY", "false");
     }
 }
 
 /// Runs `body` against a mock inference server with `GROK_HOME` isolated to a
 /// temp dir. `body` gets the cwd and the mock, and opens its own connection,
-/// since each test wants a different `acp::Client`. One `#[test]` per binary:
-/// the env is global.
+/// since each test wants a different `acp::Client`.
 pub fn run_agent_test<F, Fut>(body: F)
 where
     F: FnOnce(std::path::PathBuf, std::rc::Rc<xai_grok_test_support::MockInferenceServer>) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
+    run_agent_test_with_models(
+        vec![xai_grok_test_support::MockModelEntry::new("test-model")],
+        body,
+    )
+}
+
+/// [`run_agent_test`] with a custom `/v1/models` catalog.
+#[allow(dead_code)]
+pub fn run_agent_test_with_models<F, Fut>(
+    models: Vec<xai_grok_test_support::MockModelEntry>,
+    body: F,
+) where
+    F: FnOnce(std::path::PathBuf, std::rc::Rc<xai_grok_test_support::MockInferenceServer>) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let _env_guard = hold_global_env();
     xai_grok_extra_ca::ensure_default_crypto_provider();
 
     // Own thread: agent startup blocks on a models prefetch and would starve the mock.
@@ -268,7 +279,7 @@ where
         .expect("mock runtime");
     let server = std::rc::Rc::new(
         mock_rt
-            .block_on(xai_grok_test_support::MockInferenceServer::start())
+            .block_on(xai_grok_test_support::MockInferenceServer::start_with_models(models))
             .expect("mock server"),
     );
     let grok_home = tempfile::TempDir::new().expect("grok home");
@@ -284,4 +295,12 @@ where
         workdir.path().to_path_buf(),
         std::rc::Rc::clone(&server),
     )));
+}
+
+fn hold_global_env() -> MutexGuard<'static, ()> {
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

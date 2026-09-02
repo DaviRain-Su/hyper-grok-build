@@ -1,9 +1,8 @@
-//! Verifies that a profile's read-deny enforcement is durable in this mount
-//! namespace. The `__GROK_INSIDE_BWRAP` marker and sentinel are reproducible by
-//! a caller, so neither proves identity. Strict deny targets must instead be
-//! exact read-only mountpoints, and namespace seccomp prevents those mounts
-//! from being changed after verification. The sentinel only makes an empty
-//! dynamic deny set fail closed outside the expected mount-namespace shape.
+//! Verifies that a profile's read-deny enforcement is durable in this mount namespace.
+//! The `__GROK_INSIDE_BWRAP` marker and sentinel are reproducible by a caller, so neither proves identity.
+//! Strict deny targets must instead be exact read-only mountpoints.
+//! Namespace seccomp prevents those mounts from being changed after verification.
+//! The sentinel only makes an empty dynamic deny set fail closed outside the expected mount-namespace shape.
 
 use std::path::Path;
 #[cfg(target_os = "linux")]
@@ -37,11 +36,9 @@ struct LinuxStatxMountId {
     _after_mount_id: [u8; 104],
 }
 
-/// Create the sentinel directory on the host before the re-exec, replacing a
-/// hostile non-directory or symlink entry (`create_dir_all` would silently
-/// accept a symlink-to-directory, and bwrap would then mount onto its target).
-/// The re-exec must not proceed without it: the inner verification requires
-/// the read-only sentinel mount unconditionally.
+/// Create the sentinel directory on the host before the re-exec, replacing a hostile non-directory or symlink entry.
+/// `create_dir_all` would silently accept a symlink-to-directory, and bwrap would then mount onto its target.
+/// The re-exec must not proceed without it: the inner verification requires the read-only sentinel mount unconditionally.
 #[cfg(target_os = "linux")]
 pub(crate) fn ensure_bwrap_sentinel_dir() -> Result<PathBuf, String> {
     let parent = crate::paths::grok_home();
@@ -53,8 +50,7 @@ pub(crate) fn ensure_bwrap_sentinel_dir() -> Result<PathBuf, String> {
 #[cfg(target_os = "linux")]
 fn ensure_sentinel_dir_under(parent: &Path) -> Result<PathBuf, String> {
     let path = parent.join(SENTINEL_DIR_NAME);
-    // symlink_metadata does not follow: a symlink (even to a directory) is
-    // replaced by a real directory.
+    // symlink_metadata does not follow: a symlink (even to a directory) is replaced by a real directory
     match std::fs::symlink_metadata(&path) {
         Ok(meta) if meta.file_type().is_dir() => {}
         Ok(_) => {
@@ -78,8 +74,7 @@ fn ensure_sentinel_dir_under(parent: &Path) -> Result<PathBuf, String> {
             ));
         }
     }
-    // Fail closed on a swap race; the inner O_NOFOLLOW verification is the
-    // authoritative gate either way.
+    // Fail closed on a swap race; the inner O_NOFOLLOW verification is the authoritative gate either way
     match std::fs::symlink_metadata(&path) {
         Ok(meta) if meta.file_type().is_dir() => Ok(path),
         _ => Err(format!(
@@ -91,11 +86,10 @@ fn ensure_sentinel_dir_under(parent: &Path) -> Result<PathBuf, String> {
 
 /// Verify the sentinel's expected read-only self-bind shape.
 ///
-/// This is an empty-set fail-closed gate, not an identity proof: an
-/// unprivileged caller can reproduce it with a mount namespace. `statvfs` on
-/// the path would also follow a symlink, so this opens the writable parent and
-/// the child relative to it with `O_NOFOLLOW`, then requires `ST_RDONLY` and a
-/// shared `st_dev`. Strict deny targets carry the durable containment proof.
+/// This is an empty-set fail-closed gate, not an identity proof: an unprivileged caller can reproduce it with a mount namespace.
+/// `statvfs` on the path would also follow a symlink, so this opens the writable parent and the child relative to it with `O_NOFOLLOW`.
+/// It then requires `ST_RDONLY` and a shared `st_dev`.
+/// Strict deny targets carry the durable containment proof.
 #[cfg(all(feature = "enforce", target_os = "linux"))]
 pub(crate) fn verify_bwrap_sentinel() -> Result<(), String> {
     verify_sentinel_under(&crate::paths::grok_home())
@@ -272,8 +266,8 @@ fn read_mountinfo() -> Result<Vec<MountInfoEntry>, String> {
 #[cfg(target_os = "linux")]
 fn fd_mount_id(fd: std::os::fd::RawFd, path: &Path) -> Result<u64, String> {
     let empty = c"";
-    // Linux statx is a fixed 256-byte ABI structure. This private definition
-    // keeps the fd-pinned query available on older musl libc headers.
+    // Linux statx is a fixed 256-byte ABI structure
+    // This private definition keeps the fd-pinned query available on older musl libc headers
     // SAFETY: all-zero bytes are a valid initial state for the kernel output struct.
     let mut statx: LinuxStatxMountId = unsafe { std::mem::zeroed() };
     // SAFETY: fd is open, AT_EMPTY_PATH addresses that fd, and statx is a valid
@@ -354,14 +348,12 @@ fn verify_exact_read_only_mount_entry(
 
 /// Verify read-deny enforcement is durable in the current namespace.
 ///
-/// Installs namespace lockdown before inspecting mounts, requires the
-/// unconditional sentinel so an empty deny set fails closed, then checks every
-/// resolved strict deny path via [`verify_resolved_read_deny_masks`].
+/// Installs namespace lockdown before inspecting mounts and requires the unconditional sentinel so an empty deny set fails closed.
+/// Then it checks every resolved strict deny path via [`verify_resolved_read_deny_masks`].
 ///
 /// # Errors
-/// Returns a message naming the missing sentinel, the first unmasked path, or
-/// the resolve/expansion failure when the deny set cannot be recomputed — all
-/// of which must refuse startup.
+/// Returns a message naming the missing sentinel, the first unmasked path, or the resolve/expansion failure when the deny set cannot be recomputed.
+/// All of them must refuse startup.
 #[cfg(all(feature = "enforce", target_os = "linux"))]
 pub fn verify_read_deny_enforced(
     profile: &crate::ProfileName,
@@ -374,12 +366,10 @@ pub fn verify_read_deny_enforced(
 
 /// Verify an applicable Devbox `/data` write-deny in the current namespace.
 ///
-/// This does not require the read-deny sentinel: profiles without read-deny
-/// only need the exact read-only `/data` mount plus namespace lockdown.
+/// This does not require the read-deny sentinel: profiles without read-deny only need the exact read-only `/data` mount plus namespace lockdown.
 ///
 /// # Errors
-/// Returns a message when namespace lockdown fails or `/data` is not an exact
-/// read-only mountpoint while the profile requires that bind.
+/// Returns a message when namespace lockdown fails or `/data` is not an exact read-only mountpoint while the profile requires that bind.
 #[cfg(target_os = "linux")]
 pub fn verify_data_write_deny_enforced(
     profile: &crate::ProfileName,
@@ -395,11 +385,9 @@ pub fn verify_data_write_deny_enforced(
 
 /// Verify every resolved read-deny path is durably masked in this namespace.
 ///
-/// Recomputes the read-deny arm of the bwrap deny plan (the hook write-deny
-/// mounts have their own verification, and their plan cannot be rebuilt inside
-/// the read-only mounts) and requires each strict path to be a no-access,
-/// read-only mountpoint. Devbox `/data` is verified independently without
-/// forcing the read-deny sentinel onto profiles that do not otherwise need it.
+/// Recomputes the read-deny arm of the bwrap deny plan and requires each strict path to be a no-access, read-only mountpoint.
+/// The hook write-deny mounts have their own verification, and their plan cannot be rebuilt inside the read-only mounts.
+/// Devbox `/data` is verified independently without forcing the read-deny sentinel onto profiles that do not otherwise need it.
 #[cfg(all(feature = "enforce", target_os = "linux"))]
 fn verify_resolved_read_deny_masks(
     profile: &crate::ProfileName,
@@ -409,8 +397,7 @@ fn verify_resolved_read_deny_masks(
     let (resolved, auto_sockets) = profile
         .resolve_profile_with_runtime_sockets(workspace, &config)
         .map_err(|e| format!("read-deny verification could not resolve the profile: {e}"))?;
-    // Provenance comes from the outer plan handoff; static path membership
-    // alone must never make an explicit user deny lenient.
+    // Provenance comes from the outer plan handoff; static path membership alone must never make an explicit user deny lenient
     let (exact, globs) = crate::deny::partition_deny_entries(&resolved.deny);
     let mut paths = crate::deny::exact_deny_path_strings(workspace, &exact);
     if !globs.is_empty() {
@@ -432,11 +419,11 @@ fn verify_resolved_read_deny_masks(
     Ok(())
 }
 
-/// Auto runtime-socket denials are existence-gated at launch. A live socket
-/// here can have appeared after the plan (daemon start or unlink/recreate),
-/// where the per-spawn child network filter is the session-long control;
-/// refusing startup would not add protection. A vanished endpoint is likewise
-/// safe. Only exposed non-socket content at these paths still fails.
+/// Auto runtime-socket denials are existence-gated at launch.
+/// A live socket here can have appeared after the plan (daemon start or unlink/recreate).
+/// The per-spawn child network filter is the session-long control; refusing startup would not add protection.
+/// A vanished endpoint is likewise safe.
+/// Only exposed non-socket content at these paths still fails.
 #[cfg(all(feature = "enforce", target_os = "linux"))]
 fn verify_runtime_socket_deny(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::{FileTypeExt, PermissionsExt};
@@ -460,10 +447,8 @@ fn verify_runtime_socket_deny(path: &Path) -> Result<(), String> {
     }
 }
 
-/// A strict mask is the bwrap placeholder: an exact read-only mountpoint whose
-/// target has no permission bits and is not a live socket. Type/mode checks are
-/// defense in depth; the mountpoint and per-mount `ro` flag make chmod unable
-/// to restore access after startup.
+/// A strict mask is the bwrap placeholder: an exact read-only mountpoint whose target has no permission bits and is not a live socket.
+/// Type/mode checks are defense in depth; the mountpoint and per-mount `ro` flag make chmod unable to restore access after startup.
 #[cfg(all(feature = "enforce", target_os = "linux"))]
 fn verify_path_masked(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::{FileTypeExt, PermissionsExt};
@@ -495,9 +480,8 @@ fn verify_path_masked(path: &Path) -> Result<(), String> {
     verify_exact_read_only_mount(path)
 }
 
-/// Without `enforce` on Linux nothing is kernel-read-denied (and the shell
-/// never requires read-deny); non-Linux enforces deny paths in-process via
-/// Seatbelt, not through a spoofable re-exec marker.
+/// Without `enforce` on Linux nothing is kernel-read-denied (and the shell never requires read-deny).
+/// Non-Linux enforces deny paths in-process via Seatbelt, not through a spoofable re-exec marker.
 #[cfg(not(all(feature = "enforce", target_os = "linux")))]
 pub fn verify_read_deny_enforced(
     _profile: &crate::ProfileName,

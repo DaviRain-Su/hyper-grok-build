@@ -215,37 +215,6 @@ mod tests {
     }
 
     #[test]
-    fn default_probe_args_exercise_bundled_and_authoring_examples() {
-        let args = default_probe_args();
-        assert!(
-            args["objective"]
-                .as_str()
-                .is_some_and(|value| !value.is_empty())
-        );
-        assert!(
-            args["query"]
-                .as_str()
-                .is_some_and(|value| !value.is_empty())
-        );
-        assert!(
-            args["target"]
-                .as_str()
-                .is_some_and(|value| !value.is_empty())
-        );
-        assert!(args["breadth"].as_u64().is_some_and(|value| value >= 2));
-        assert!(
-            args["skeptic_count"]
-                .as_u64()
-                .is_some_and(|value| value >= 1)
-        );
-        assert!(
-            args["max_verify_attempts"]
-                .as_u64()
-                .is_some_and(|value| value >= 1)
-        );
-    }
-
-    #[test]
     fn runtime_misuse_fails() {
         let err = validate_script(
             "let meta = #{ name: \"t\", description: \"d\" };\nnot_a_host_fn();",

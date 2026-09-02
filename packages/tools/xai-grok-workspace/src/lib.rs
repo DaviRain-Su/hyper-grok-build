@@ -48,14 +48,14 @@ pub mod worktree;
 pub use capability::CapabilityMode;
 pub use channel::{TransportCallResult, TransportContext, TransportError, TransportNotification};
 pub use config::{
-    AgentSessionConfig, DEFAULT_EVENT_BUFFER_CAPACITY, HookSourceConfig, IsolationMode,
-    MemoryConfig, SessionContextFactory, SessionTerminalBackend, WorkspaceConfig,
+    AgentSessionConfig, BindMcpConfig, DEFAULT_EVENT_BUFFER_CAPACITY, HookSourceConfig,
+    IsolationMode, MemoryConfig, SessionContextFactory, SessionTerminalBackend, WorkspaceConfig,
 };
 pub use error::{WorkspaceError, WorkspaceResult};
 pub use file_system::*;
 pub use handle::{
-    DrainOutcome, DrainReason, WorkspaceHandle, connect_local_workspace, resolve_workspace_home,
-    termination_grace_from_env,
+    DrainOutcome, DrainReason, LocalWorkspaceConnectOptions, WorkspaceHandle,
+    connect_local_workspace, resolve_workspace_home, termination_grace_from_env,
 };
 pub use hub::HubConfig;
 pub use path_virtualization::{
@@ -70,8 +70,8 @@ pub use workspace_ops::{WorkspaceOp, WorkspaceOps};
 pub use xai_grok_workspace_client::WorkspaceClient;
 pub use xai_grok_workspace_types::WorkspaceEvent;
 pub use xai_hunk_tracker::HunkTrackerHandle;
-/// Zero-init every workspace metric family so idle panels render a `0` baseline
-/// instead of "No data". Idempotent; call once at workspace-server startup.
+/// Zero-init every workspace metric family so idle panels render a `0` baseline instead of "No data".
+/// Idempotent; call once at workspace-server startup.
 pub fn init_metrics() {
     handle::init_metrics();
     recovery::init_metrics();
@@ -81,22 +81,14 @@ pub fn init_metrics() {
     hub_server::init_metrics();
     hub_auth::init_metrics();
 }
-/// Crate-wide lock serializing every test that mutates the process-global
-/// environment (`GROK_HOME`, `HOME`, …). nextest isolates each test in its own
-/// process, but `cargo test --lib` shares ONE process across threads, so
-/// per-module locks don't serialize cross-module — a peer test in another module
-/// can clobber `GROK_HOME` mid-test. A single shared lock (used by every
-/// env-mutating test module) is required for that single-process run to be
-/// race-free.
+/// Crate-wide lock serializing every test that mutates the process-global environment (`GROK_HOME`, `HOME`, …).
+/// nextest isolates each test in its own process, but `cargo test --lib` shares ONE process across threads.
+/// A per-module lock can't stop a peer test in another module clobbering `GROK_HOME` mid-test, so every env-mutating test module uses this one.
 #[cfg(test)]
 pub(crate) static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-/// Crate-shared RAII guard for a single process env var in tests: sets (or
-/// unsets) it on construction and restores the prior value on drop. The ONE
-/// generic env-var guard for the whole crate (replaces the per-module copies).
-///
-/// Hold it together with [`ENV_TEST_LOCK`] for the test's lifetime, acquiring
-/// the lock FIRST so it drops LAST — the env restore (this guard) then runs
-/// before the lock releases, so no peer test observes the temporary value.
+/// Crate-shared RAII guard for a single process env var in tests: sets (or unsets) it on construction and restores the prior value on drop.
+/// Hold it together with [`ENV_TEST_LOCK`] for the test's lifetime, acquiring the lock FIRST so it drops LAST.
+/// The env restore (this guard) then runs before the lock releases, so no peer test observes the temporary value.
 #[cfg(test)]
 pub(crate) struct TestEnvGuard {
     key: &'static str,
@@ -126,16 +118,9 @@ impl Drop for TestEnvGuard {
         }
     }
 }
-/// Holds [`ENV_TEST_LOCK`] AND a set of [`TestEnvGuard`]s as ONE value, so a
-/// test (or fixture) can return/bind it however it likes and still be correct.
-///
-/// Struct fields drop in DECLARATION order, so `_env` (declared first) restores
-/// every env var BEFORE `_lock` (declared last) releases the lock — making the
-/// "restore before unlock" invariant compile-enforced, not convention-dependent
-/// (a single `let _ = LockedTestEnv::lock()…;` binding can't reorder it).
-///
-/// Acquire the lock first via [`lock`](Self::lock), then mutate env under it with
-/// the chained [`set`](Self::set) builder.
+/// Holds [`ENV_TEST_LOCK`] AND a set of [`TestEnvGuard`]s as ONE value; a test or fixture can return/bind it any way and stay correct.
+/// Struct fields drop in declaration order, so `_env` restores every env var BEFORE `_lock` releases the lock; no call site can reorder that.
+/// Acquire the lock first via [`lock`](Self::lock), then mutate env under it with the chained [`set`](Self::set) builder.
 #[cfg(test)]
 pub(crate) struct LockedTestEnv {
     _env: Vec<TestEnvGuard>,
@@ -151,9 +136,7 @@ impl LockedTestEnv {
         }
     }
     /// Set `key` to `val` under the held lock, restoring the prior value on drop.
-    ///
-    /// Intended for DISTINCT keys; the restore order across repeated `set`s of
-    /// the SAME key is unspecified (guards restore in insertion order).
+    /// Intended for DISTINCT keys; the restore order across repeated `set`s of the SAME key is unspecified (guards restore in insertion order).
     pub(crate) fn set(mut self, key: &'static str, val: &std::path::Path) -> Self {
         self._env.push(TestEnvGuard::set(key, val));
         self
@@ -161,9 +144,6 @@ impl LockedTestEnv {
 }
 #[cfg(test)]
 mod init_metrics_tests {
-    /// `init_metrics()` is idempotent (a double call must not panic on
-    /// re-register) and populates a `0` baseline series for each family so
-    /// panels render `0` instead of "No data".
     #[test]
     fn init_metrics_is_idempotent_and_registers_baselines() {
         super::init_metrics();

@@ -1,23 +1,16 @@
-//! `paste-latency` — clipboard paste latency benchmark for `xai-grok-pager`.
+//! Spawns the real pager binary in a PTY and measures the Ctrl+V (raw 0x16) paste path against the REAL macOS pasteboard (`pbcopy` / `osascript`):
 //!
-//! Spawns the real pager binary in a PTY and measures the Ctrl+V (raw 0x16)
-//! paste path against the REAL macOS pasteboard (`pbcopy` / `osascript`):
+//! - `text` mode: `pbcopy` a sentinel, inject 0x16, and measure from inject until the sentinel is visible on screen.
+//! - `image` mode (agent surface only): put a PNG on the pasteboard, inject 0x16 followed immediately by a typed burst, and measure two latencies.
+//!   Responsiveness runs from inject until the burst is visible; it stays flat when the clipboard read/persist is off the UI thread.
+//!   Chip latency runs from inject until the `Image #` chip is visible.
 //!
-//! - `text` mode: `pbcopy` a sentinel, inject 0x16, measure inject → sentinel
-//!   visible on screen.
-//! - `image` mode (agent surface only): put a PNG on the pasteboard, inject
-//!   0x16 followed immediately by a typed burst, and measure both
-//!   responsiveness (inject → burst visible; stays flat when the clipboard
-//!   read/persist is off the UI thread) and chip latency (inject →
-//!   `Image #` chip visible).
+//! The bench is macOS-only at runtime (the real-clipboard Ctrl+V path only exists there).
+//! It compiles everywhere so `cargo bench --no-run` stays green on CI hosts.
+//! Only PTY input injection and screen scraping are used, so `--binary` can point at OLD pager artifacts for before/after comparisons.
 //!
-//! macOS-only at runtime (the real-clipboard Ctrl+V path only exists there);
-//! it compiles everywhere so `cargo bench --no-run` stays green on CI hosts.
-//! Only PTY input injection + screen scraping are used, so `--binary` can
-//! point at OLD pager artifacts for before/after comparisons.
-//!
-//! WARNING: overwrites the host clipboard. Prior TEXT contents are restored
-//! best-effort on exit; a prior image clipboard cannot be restored.
+//! WARNING: overwrites the host clipboard.
+//! Prior TEXT contents are restored best-effort on exit; a prior image clipboard cannot be restored.
 //!
 //! ## Typical use
 //!
@@ -45,7 +38,7 @@ use xai_grok_pager_pty_harness::{
 /// Ctrl+V byte; a plain PTY delivers it as the Ctrl+V paste chord.
 const CTRL_V: u8 = 0x16;
 
-/// Ctrl+\ as CSI-u (code 92, modifier 5) — opens the dashboard.
+/// Ctrl+\ as CSI-u (code 92, modifier 5); opens the dashboard.
 const CTRL_BACKSLASH: &[u8] = b"\x1b[92;5u";
 
 /// Response sentinel for the initial session turn each surface needs.
@@ -58,8 +51,9 @@ const TURN_SENTINEL: &str = "PASTEBENCHTURNDONE";
     long_about = None,
 )]
 struct Cli {
-    /// Path to the pager binary. Defaults to auto-resolve (PAGER_BINARY env
-    /// or a locally-built debug binary). Works against old artifacts too.
+    /// Path to the pager binary.
+    /// Defaults to auto-resolve (PAGER_BINARY env or a locally-built debug binary).
+    /// Works against old artifacts too.
     #[arg(long)]
     binary: Option<PathBuf>,
 
@@ -83,13 +77,12 @@ struct Cli {
     #[arg(long, default_value_t = 120)]
     cols: u16,
 
-    /// Also write the results JSON to this path (pretty JSON always goes to
-    /// stdout).
+    /// Also write the results JSON to this path (pretty JSON always goes to stdout).
     #[arg(long, value_name = "PATH")]
     json: Option<PathBuf>,
 
     /// Accepted for `cargo bench` compatibility (libtest-style argument).
-    /// We ignore it — this isn't a libtest harness.
+    /// We ignore it; this isn't a libtest harness.
     #[arg(long, hide = true)]
     #[allow(dead_code)]
     bench: bool,
@@ -119,9 +112,9 @@ impl Surface {
     }
 }
 
-/// Aggregated latency stats for one (surface, mode) cell. For `image` the
-/// primary p50/p95/max track the chip (end-to-end attach) latency; the burst
-/// responsiveness and chip p50s are also broken out explicitly.
+/// Aggregated latency stats for one (surface, mode) cell.
+/// For `image` the primary p50/p95/max track the chip (end-to-end attach) latency.
+/// The burst responsiveness and chip p50s are also broken out explicitly.
 #[derive(Debug, serde::Serialize)]
 struct PasteLatencyResult {
     surface: &'static str,
@@ -190,8 +183,7 @@ async fn run() -> Result<ExitCode> {
     for &surface in &surfaces {
         for &mode in &modes {
             if surface == Surface::DashboardDispatch && mode == Mode::Image {
-                // Image pastes are an agent-prompt workflow; the dashboard cell
-                // only tracks text latency.
+                // Image pastes are an agent-prompt workflow; the dashboard cell only tracks text latency
                 tracing::info!("skipping dashboard-dispatch image cell (text-only surface)");
                 continue;
             }
@@ -207,8 +199,7 @@ async fn run() -> Result<ExitCode> {
         }
     }
 
-    // An all-skipped/dropped run measured nothing; fail loudly instead of
-    // handing downstream tooling an empty [] with exit 0.
+    // An all-skipped/dropped run measured nothing; fail loudly instead of handing downstream tooling an empty [] with exit 0
     if results.is_empty() {
         eprintln!(
             "paste-latency: no cells ran — every requested surface/mode combination was skipped or dropped"
@@ -227,9 +218,8 @@ async fn run() -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Run one (surface, mode) cell: one spawned pager + session reused across all
-/// iterations, cleared between pastes (with a respawn fallback if a clear
-/// fails to take).
+/// Run one (surface, mode) cell: one spawned pager and session serves all iterations, cleared between pastes.
+/// If a clear fails to take, the harness respawns.
 async fn bench_cell(
     binary: &Path,
     rows: u16,
@@ -251,8 +241,7 @@ async fn bench_cell(
     content.set_response(format!("{TURN_SENTINEL} initial bench turn."));
     let mut harness = spawn_ready(binary, rows, cols, &content, surface)?;
 
-    // Image mode keeps one PNG on the pasteboard for the whole cell (the
-    // pager re-reads the unchanged clipboard on every Ctrl+V).
+    // Image mode keeps one PNG on the pasteboard for the whole cell (the pager re-reads the unchanged clipboard on every Ctrl+V)
     let tmp = tempfile::tempdir().context("tempdir for the clipboard PNG")?;
     if mode == Mode::Image {
         let png = write_fixture_png(tmp.path())?;
@@ -349,8 +338,8 @@ async fn bench_cell(
     Ok(result)
 }
 
-/// Spawn the pager and drive it to a ready paste surface: welcome → one
-/// completed turn (idle session prompt); for the dashboard, Ctrl+\ on top.
+/// Spawn the pager and drive it to a ready paste surface: past the welcome screen and through one completed turn (idle session prompt).
+/// For the dashboard, Ctrl+\ opens it on top.
 fn spawn_ready(
     binary: &Path,
     rows: u16,
@@ -379,9 +368,9 @@ fn spawn_ready(
         harness
             .wait_for_text("+ New Agent", Duration::from_secs(10))
             .context("dashboard list")?;
-        // Opening from a session lands with the LIST focused (footer offers
-        // "Tab:input"); Tab moves focus to the dispatch input so the clear
-        // keys between iterations reach it. Ctrl+V itself is focus-agnostic.
+        // Opening from a session lands with the LIST focused (footer offers "Tab:input")
+        // Tab moves focus to the dispatch input so the clear keys between iterations reach it
+        // Ctrl+V itself is focus-agnostic
         harness.update(Duration::from_millis(300));
         if harness.contains_text("Tab:input") {
             harness
@@ -398,9 +387,8 @@ fn spawn_ready(
     Ok(harness)
 }
 
-/// Clear the pasted content between iterations; if the input refuses to clear
-/// (needles still on screen), fall back to a full respawn so the next
-/// iteration starts clean.
+/// Clear the pasted content between iterations.
+/// If the input refuses to clear (needles still on screen), fall back to a full respawn so the next iteration starts clean.
 fn clear_input_or_respawn(
     binary: &Path,
     rows: u16,
@@ -415,9 +403,8 @@ fn clear_input_or_respawn(
     if wait_absent(harness, stale, Duration::from_secs(2)) {
         return Ok(());
     }
-    // Backspace spam (the dashboard consumes Ctrl+U as half-page scroll
-    // before its dispatch input sees it); chips delete atomically, so 64
-    // presses cover any bench payload.
+    // Backspace spam (the dashboard consumes Ctrl+U as half-page scroll before its dispatch input sees it)
+    // Chips delete atomically, so 64 presses cover any bench payload
     harness
         .inject_keys(&[0x7f; 64])
         .context("Backspace clear")?;
@@ -425,9 +412,8 @@ fn clear_input_or_respawn(
         return Ok(());
     }
     if surface == Surface::Agent {
-        // Drafted-prompt Esc arms press-again-to-clear; the second press wipes
-        // the whole input. Only safe while a draft remains (an empty-prompt
-        // Esc-Esc opens the rewind picker), which the absent-checks ruled out.
+        // With a draft present, the first Esc offers press-again-to-clear and the second Esc wipes the whole input
+        // This is only safe while a draft remains (Esc-Esc on an empty prompt opens the rewind picker), which the absent-checks ruled out
         harness.inject_keys(b"\x1b").context("Esc arm clear")?;
         harness.update(Duration::from_millis(250));
         harness.inject_keys(b"\x1b").context("Esc confirm clear")?;
@@ -444,8 +430,7 @@ fn clear_input_or_respawn(
     Ok(())
 }
 
-/// Tight-poll (5 ms slices, vs `wait_for_text`'s 50 ms) until `needle` is on
-/// screen, for low measurement quantization.
+/// Tight-poll (5 ms slices, vs `wait_for_text`'s 50 ms) until `needle` is on screen, for low measurement quantization.
 fn wait_visible(harness: &mut PtyHarness, needle: &str, timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -476,7 +461,7 @@ fn wait_absent(harness: &mut PtyHarness, needles: &[&str], timeout: Duration) ->
     }
 }
 
-/// (p50, p95, max) over `samples`, reusing the shared percentile helper.
+/// (p50, p95, max) over `samples`.
 fn stats(samples: &mut [f64]) -> (f64, f64, f64) {
     samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     (

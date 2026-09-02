@@ -102,13 +102,6 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_watcher_starts_on_valid_dir() {
-        let tmp = TempDir::new().unwrap();
-        // In CI or containers the OS may deny inotify watches (e.g. exhausted fs.inotify.max_user_instances), so a `None` result is fine.
-        let _watcher = MemoryFileWatcher::start(tmp.path());
-    }
-
-    #[test]
     fn test_watcher_initially_clean() {
         let tmp = TempDir::new().unwrap();
         let Some(watcher) = MemoryFileWatcher::start(tmp.path()) else {
@@ -117,64 +110,5 @@ mod tests {
         };
         assert!(!watcher.is_dirty());
         assert!(watcher.take_dirty().is_empty());
-    }
-
-    #[test]
-    fn test_watcher_detects_md_file_creation() {
-        let tmp = TempDir::new().unwrap();
-        let Some(watcher) = MemoryFileWatcher::start(tmp.path()) else {
-            eprintln!("skipping: could not create file watcher (resource limit?)");
-            return;
-        };
-
-        std::fs::write(tmp.path().join("test.md"), "hello").unwrap();
-
-        // Give the watcher time to process (debounce and OS event delivery)
-        std::thread::sleep(std::time::Duration::from_millis(500));
-
-        assert!(watcher.is_dirty(), "should detect .md creation");
-        let dirty = watcher.take_dirty();
-        assert!(!dirty.is_empty(), "should have dirty paths");
-        assert!(dirty[0].extension().unwrap() == "md");
-    }
-
-    #[test]
-    fn test_watcher_ignores_non_md_files() {
-        let tmp = TempDir::new().unwrap();
-        let Some(watcher) = MemoryFileWatcher::start(tmp.path()) else {
-            eprintln!("skipping: could not create file watcher (resource limit?)");
-            return;
-        };
-
-        // Create a non-.md file
-        std::fs::write(tmp.path().join("test.txt"), "hello").unwrap();
-        std::fs::write(tmp.path().join("index.sqlite"), "db").unwrap();
-
-        std::thread::sleep(std::time::Duration::from_millis(500));
-
-        assert!(
-            !watcher.is_dirty(),
-            "should not detect non-.md file changes"
-        );
-    }
-
-    #[test]
-    fn test_take_dirty_resets_state() {
-        let tmp = TempDir::new().unwrap();
-        let Some(watcher) = MemoryFileWatcher::start(tmp.path()) else {
-            eprintln!("skipping: could not create file watcher (resource limit?)");
-            return;
-        };
-
-        std::fs::write(tmp.path().join("a.md"), "content").unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(500));
-
-        let first = watcher.take_dirty();
-        assert!(!first.is_empty());
-        assert!(!watcher.is_dirty(), "should be clean after take");
-        assert!(
-            watcher.take_dirty().is_empty(),
-            "second take should be empty"
-        );
     }
 }

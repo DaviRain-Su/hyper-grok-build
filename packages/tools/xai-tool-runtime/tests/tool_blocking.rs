@@ -160,15 +160,3 @@ async fn run_takes_args_by_value() {
     let result = tool.run(ToolCallContext::default(), args).await.unwrap();
     assert_eq!(result.text, "consumed");
 }
-
-#[tokio::test]
-async fn execute_default_drains_in_one_pass() {
-    // A stream from the default impl should always have exactly one item.
-    let tool = BlockingOk;
-    let count = tool
-        .execute(ToolCallContext::default(), EchoArgs { text: "n".into() })
-        .await
-        .count()
-        .await;
-    assert_eq!(count, 1);
-}

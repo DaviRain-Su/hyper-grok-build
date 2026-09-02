@@ -1,18 +1,15 @@
-//! Blitz harness: hammer the download + install lifecycle while injecting a
-//! truncation / corruption / cancel at every point, and after every iteration
-//! assert the single invariant that makes the brick impossible:
+//! Blitz harness: hammer the download and install path while injecting a truncation / corruption / cancel at every point.
+//! After every iteration, assert the single invariant that makes the brick impossible:
 //!
 //! > `~/.grok/bin/grok` resolves to a binary that passes the smoke-test, OR it
 //! > is still the previous-good binary. It is never a broken/partial binary,
 //! > and a `.tmp` never masquerades as the active binary.
 //!
-//! The invariant is checked by RE-RESOLVING the symlink and RE-RUNNING the
-//! binary from disk every time — never by re-reading a value the harness set.
+//! The invariant is checked by RE-RESOLVING the symlink and RE-RUNNING the binary from disk every time, never by re-reading a value the harness set.
 //!
-//! A controllable raw HTTP/1.1 server serves a real executable ("good")
-//! artifact and can truncate the body, close the connection early, serve a
-//! right-length-but-garbage body, or hang mid-transfer — for both the parallel
-//! byte-range path and the single-connection path.
+//! A controllable raw HTTP/1.1 server serves a real executable ("good") artifact.
+//! It can truncate the body, close the connection early, serve a right-length-but-garbage body, or hang mid-transfer.
+//! Each failure mode applies to both the parallel byte-range path and the single-connection path.
 
 #![cfg(all(unix, not(feature = "community-build")))]
 
@@ -35,18 +32,16 @@ use xai_grok_update::auto_update::install_internal_from_base;
 // Artifacts + fixtures
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A real executable larger than the 16 MiB parallel threshold (at least 2
-/// chunks), so the parallel byte-range path is exercised. The shell exits on
-/// line 2, never reading the newline padding.
+/// A real executable larger than the 16 MiB parallel threshold (at least 2 chunks), so the parallel byte-range path is exercised.
+/// The shell exits on line 2, never reading the newline padding.
 fn large_good_artifact() -> Vec<u8> {
     let mut v = b"#!/bin/sh\nexit 0\n".to_vec();
     v.resize(33 * 1024 * 1024, b'\n');
     v
 }
 
-/// Seed a previous-good versioned binary + both managed symlinks
-/// (`grok` and `agent` — see `swap_managed_bin_links`). Returns the
-/// absolute path of the seeded binary.
+/// Seed a previous-good versioned binary and both managed symlinks (`grok` and `agent`; see `swap_managed_bin_links`).
+/// Returns the absolute path of the seeded binary.
 fn seed_previous_good(home: &Path, version: &str, platform: &str) -> PathBuf {
     let downloads = home.join("downloads");
     let bin = home.join("bin");
@@ -75,10 +70,9 @@ enum Expect {
     PreviousGood,
 }
 
-/// THE invariant. Re-resolves the on-disk symlink and RE-EXECUTES the resolved
-/// binary; never inspects a harness-held value. Guarantees the active managed
-/// link is always runnable and is never a `.tmp` or a partial file. Applied
-/// to both `grok` and `agent` — `swap_managed_bin_links` moves them together.
+/// THE invariant. Re-resolves the on-disk symlink and RE-EXECUTES the resolved binary; never inspects a harness-held value.
+/// Guarantees the active managed link is always runnable and is never a `.tmp` or a partial file.
+/// Applied to both `grok` and `agent`; `swap_managed_bin_links` moves them together.
 fn assert_invariant(home: &Path, prev_good: &Path, new_binary: &Path, expect: Expect) {
     for name in ["grok", "agent"] {
         assert_link_invariant(home, name, prev_good, new_binary, expect);
@@ -95,8 +89,7 @@ fn assert_link_invariant(
     let link = home.join("bin").join(name);
     assert!(link.is_symlink(), "{name} must remain a symlink");
 
-    // Resolve from disk. canonicalize fails on a dangling link — that alone
-    // would be a brick.
+    // Resolve from disk. canonicalize fails on a dangling link; that alone would be a brick.
     let resolved = dunce::canonicalize(&link)
         .unwrap_or_else(|e| panic!("active {name} symlink does not resolve: {e}"));
 
@@ -135,8 +128,7 @@ fn assert_link_invariant(
     }
 }
 
-/// Run one install attempt against `server` in `mode`, optionally cancelling it
-/// after `cancel_after`, then assert the invariant.
+/// Run one install attempt against `server` in `mode`, optionally cancelling it after `cancel_after`, then assert the invariant.
 async fn run_one(
     server: &ArtifactServer,
     mode: Mode,
@@ -196,16 +188,15 @@ async fn blitz_single_connection_matrix() {
     // Happy path first so we know the symlink CAN move to the new binary.
     run_one(&server, Mode::Full, "0.1.181", None).await;
 
-    // Right-length garbage — caught by the smoke-test (Layer 2).
+    // Right-length garbage, caught by the smoke-test
     run_one(&server, Mode::Garbage, "0.1.181", None).await;
 
-    // Premature EOF at several offsets — caught by the length/transport checks.
+    // Premature EOF at several offsets, caught by the length/transport checks
     for k in [0usize, 1, len / 2, len.saturating_sub(1)] {
         run_one(&server, Mode::Truncate(k), "0.1.181", None).await;
     }
 
-    // Cancel mid-transfer at several offsets (incl. before any byte and before
-    // the HEAD completes), each dropping the in-flight future.
+    // Cancel mid-transfer at several offsets (incl. before any byte and before the HEAD completes), each dropping the in-flight future.
     for k in [0usize, len / 2, len.saturating_sub(1)] {
         run_one(
             &server,
@@ -216,11 +207,9 @@ async fn blitz_single_connection_matrix() {
         .await;
     }
 
-    // A clean serve still succeeds after the failure matrix. NOTE: run_one
-    // calls reset_home() at the start of every case, so this checks the happy
-    // path stays reachable — not recovery over a dirty dir. The genuine
-    // recovery-without-reset assertion lives in
-    // integrity_failure_is_clean_keeps_previous_good_and_emits_telemetry.
+    // A clean serve still succeeds after the failure matrix
+    // NOTE: run_one calls reset_home() at the start of every case, so this checks the happy path stays reachable, not recovery over a dirty dir
+    // The genuine recovery-without-reset assertion lives in integrity_failure_is_clean_keeps_previous_good_and_emits_telemetry
     run_one(&server, Mode::Full, "0.1.182", None).await;
 }
 
@@ -242,15 +231,13 @@ async fn blitz_parallel_path_matrix() {
     // Happy path through the parallel reassembly.
     run_one(&server, Mode::Full, "0.1.181", None).await;
 
-    // Right-length garbage reassembled from range chunks — smoke-test catches.
+    // Right-length garbage reassembled from range chunks; the smoke-test catches it
     run_one(&server, Mode::Garbage, "0.1.181", None).await;
 
-    // Short chunk inside the range / set_len zero region. With Content-Length
-    // present (the blitz server always sends it), a premature close surfaces as
-    // a reqwest stream error that rejects the chunk; the download_range
-    // byte-count check is the belt-and-suspenders for the rarer close-delimited
-    // (Content-Length-absent) case. The parallel path falls back to single-
-    // connection, which classifies the same truncation as DownloadIncomplete.
+    // Short chunk inside the range / set_len zero region
+    // With Content-Length present (the blitz server always sends it), a premature close surfaces as a reqwest stream error that rejects the chunk
+    // The download_range byte-count check covers the rarer close-delimited (Content-Length-absent) case
+    // The parallel path falls back to single-connection, which classifies the same truncation as DownloadIncomplete
     for k in [0usize, 1024, len / 3, len - 4096] {
         run_one(&server, Mode::Truncate(k), "0.1.181", None).await;
     }
@@ -338,9 +325,8 @@ async fn fuzz_loop(iterations: usize, seed: u64) {
 
     for i in 0..iterations {
         let version = if i % 2 == 0 { "0.1.181" } else { "0.1.182" };
-        // Periodically verify a clean serve still installs (recovery), but keep
-        // the bulk on the fast corruption/cancel paths so the loop stays cheap
-        // enough for high iteration counts.
+        // Periodically verify a clean serve still installs (recovery)
+        // Keep the bulk on the fast corruption/cancel paths so the loop stays cheap enough for high iteration counts
         if i % 10 == 9 {
             run_one(&server, Mode::Full, version, None).await;
             continue;
@@ -348,18 +334,14 @@ async fn fuzz_loop(iterations: usize, seed: u64) {
         match rng.below(3) {
             0 => run_one(&server, Mode::Garbage, version, None).await,
             1 => {
-                // k in [0, len): always strictly truncating (k == len would be
-                // a complete transfer).
+                // k in [0, len): always strictly truncating (k == len would be a complete transfer)
                 let k = rng.below(len);
                 run_one(&server, Mode::Truncate(k), version, None).await;
             }
             _ => {
-                // k in [0, len): Hang holds the socket after k bytes without
-                // ever meeting Content-Length, so the client always cancels
-                // mid-flight. k == len would transmit the whole body, letting
-                // the install complete and the swap land before the deadline —
-                // contradicting run_one's PreviousGood expectation (the same
-                // reason the Truncate branch above uses rng.below(len)).
+                // k in [0, len): Hang holds the socket after k bytes without ever meeting Content-Length, so the client always cancels mid-flight
+                // k == len would transmit the whole body, letting the install complete and the swap land before the deadline
+                // That contradicts run_one's PreviousGood expectation (the same reason the Truncate branch above uses rng.below(len))
                 let k = rng.below(len);
                 run_one(
                     &server,
@@ -380,14 +362,13 @@ async fn blitz_fuzz_bounded() {
         eprintln!("skipping: shell scripts cannot execute in this sandbox");
         return;
     }
-    // Kept bounded so CI stays fast; the exhaustive run is the ignored test
-    // below. Every iteration still re-resolves and re-runs the on-disk binary.
+    // Kept bounded so CI stays fast; the exhaustive run is the ignored test below
+    // Every iteration still re-resolves and re-runs the on-disk binary
     fuzz_loop(120, 0x9E3779B97F4A7C15).await;
 }
 
-/// The "test it a million times, cancelling at every point" stress run. Gated
-/// behind `#[ignore]`; invoke via `just blitz-stress` or
-/// `cargo nextest run -p xai-grok-update --run-ignored all`.
+/// The "test it a million times, cancelling at every point" stress run.
+/// Gated behind `#[ignore]`; invoke via `just blitz-stress` or `cargo nextest run -p xai-grok-update --run-ignored all`.
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 #[ignore = "stress: 100k iterations, run via `just blitz-stress`"]

@@ -1523,6 +1523,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "contextual_hints.word_select" => {
             let _ = dispatch(Action::SetContextualHintWordSelect(false), app);
         }
+        "contextual_hints.export_copy" => {
+            let _ = dispatch(Action::SetContextualHintExportCopy(false), app);
+        }
         "contextual_hints.ssh_wrap" => {
             let _ = dispatch(Action::SetContextualHintSshWrap(false), app);
         }

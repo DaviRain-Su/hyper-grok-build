@@ -1,7 +1,7 @@
 //! Integration tests for xai-crash-handler.
 //!
 //! These tests verify that installing the crash handler does not interfere
-//! with normal program operation (tokio runtime, signal handling, I/O),
+//! with normal program operation (tokio runtime, signal handling),
 //! and that it correctly captures crash data when a fatal signal fires.
 //!
 //! Tests that send fatal signals use subprocess isolation: the test process
@@ -165,20 +165,6 @@ fn handler_does_not_interfere_with_tokio_runtime() {
                 .map(|m| m.len() == 0)
                 .unwrap_or(true),
         "crash file should not contain data after clean exit"
-    );
-}
-
-#[test]
-fn handler_does_not_interfere_with_sync_io() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (status, _stdout, stderr) = run_scenario("sync_normal", tmp.path());
-    assert!(
-        status.success(),
-        "sync_normal should exit 0, got {status:?}\nstderr: {stderr}"
-    );
-    assert!(
-        stderr.contains("50 files written"),
-        "should see completion message\nstderr: {stderr}"
     );
 }
 

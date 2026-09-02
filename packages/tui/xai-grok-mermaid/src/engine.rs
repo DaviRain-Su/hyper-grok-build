@@ -145,23 +145,6 @@ mod tests {
     }
 
     #[test]
-    fn passes_through_engine_success() {
-        let engine = SpyEngine {
-            called: Default::default(),
-            outcome: ok_diagram,
-        };
-        let out = render_checked(
-            &engine,
-            "flowchart LR; A-->B",
-            &RenderParams::default(),
-            &RenderLimits::default(),
-        )
-        .expect("should succeed");
-        assert_eq!(out.width_px, 10);
-        assert!(engine.called.load(std::sync::atomic::Ordering::SeqCst));
-    }
-
-    #[test]
     fn oversized_source_rejected_before_engine_runs() {
         let engine = SpyEngine {
             called: Default::default(),

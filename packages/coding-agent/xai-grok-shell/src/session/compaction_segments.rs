@@ -1,13 +1,8 @@
-//! Shell-side dispatch on [`CompactionMode`]. Split into two methods so the
-//! write isn't hidden behind a text-producing name:
-//! - [`SessionActor::persist_compaction_segment`] — the write (offload modes).
-//! - [`SessionActor::transcript_hint`] — the summary pointer text (no writes).
+//! Shell-side dispatch on [`CompactionMode`].
+//! Split into two methods so the write isn't hidden behind a text-producing name.
 //!
-//! Layering (do NOT collapse): mode decision + hint text in [`CompactionMode`],
-//! markdown render in `xai-compaction-transcript`, disk I/O in `StorageAdapter`.
-//!
-//! To add a mode: add the variant + hint to [`CompactionMode`], extend the match
-//! in both methods, and add a `StorageAdapter` writer for any new artifact.
+//! Layering (do NOT collapse): the mode decision and hint text sit in [`CompactionMode`].
+//! The markdown render sits in `xai-compaction-transcript`, disk I/O in `StorageAdapter`.
 use super::SessionActor;
 use crate::extensions::notification::CompactionSegmentFile;
 use crate::session::persistence::PersistenceMsg;
@@ -16,11 +11,9 @@ use xai_chat_state::compaction_utils::format_compact_summary;
 use xai_compaction_transcript::COMPACTION_DIR;
 use xai_grok_sampling_types::ConversationItem;
 impl SessionActor {
-    /// Persist the per-segment store (`Segments` only; no-op for `Summary`
-    /// and `Transcript`). Queues a write on the persistence channel;
-    /// storage assigns the index and renders the markdown.
-    ///
-    /// Returns `true` iff a `CompactionSegmentFile` was queued. Does not wait on disk.
+    /// Persist the per-segment store (`Segments` only; no-op for `Summary` and `Transcript`).
+    /// Queues a write on the persistence channel; storage assigns the index and renders the markdown.
+    /// Returns `true` iff a `CompactionSegmentFile` was queued.
     pub(crate) fn persist_compaction_segment(
         &self,
         simplified_messages: &[ConversationItem],
@@ -41,9 +34,8 @@ impl SessionActor {
             }))
             .is_ok()
     }
-    /// Pointer text appended to the summary — where pre-compaction history lives
-    /// (`updates.jsonl` for `Transcript`, the `compaction/` store otherwise). No
-    /// writes; pair with [`SessionActor::persist_compaction_segment`].
+    /// Pointer appended to the summary: where pre-compaction history lives (`updates.jsonl` for `Transcript`, the `compaction/` store otherwise).
+    /// No writes; pair with [`SessionActor::persist_compaction_segment`].
     pub(crate) fn transcript_hint(&self) -> Option<String> {
         let mode = self.compaction.compaction_mode;
         let location = match mode {

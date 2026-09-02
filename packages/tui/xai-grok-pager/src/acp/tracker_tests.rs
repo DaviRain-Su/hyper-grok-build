@@ -2565,6 +2565,7 @@ fn writing_tool_call_delta_clears_retry_activity() {
         attempt: 2,
         max_retries: 5,
         reason: "overloaded".into(),
+        error_type: None,
     };
     let mut tracker = AcpUpdateTracker::new();
     tracker.set_retry_activity(Some(retrying.clone()));
@@ -3604,12 +3605,213 @@ fn pascal_case_task_tool_call_is_suppressed_from_scrollback() {
         &mut sb,
     );
     assert_eq!(sb.len(), 0, "PascalCase Task tool must be suppressed");
-    assert!(tracker.suppressed_tools.contains("tc1"));
+    assert!(tracker.suppressed_tools.contains_key("tc1"));
     tracker.handle_update(tool_update_completed("tc1"), &meta(), &mut sb);
     assert_eq!(
         sb.len(),
         0,
         "PascalCase Task updates must also be suppressed"
+    );
+}
+#[test]
+fn failed_task_tool_renders_despite_suppression() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(
+        tool_call("tc1", acp::ToolKind::Other, "spawn_subagent"),
+        &meta(),
+        &mut sb,
+    );
+    assert_eq!(sb.len(), 0, "running spawn stays suppressed");
+    let failed = acp::SessionUpdate::ToolCallUpdate(
+        acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(Arc::from("tc1")),
+            acp::ToolCallUpdateFields::new()
+                .status(Some(acp::ToolCallStatus::Failed))
+                .content(
+                    Some(
+                        vec![acp::ToolCallContent::from(
+                acp::ContentBlock::Text(acp::TextContent::new(
+                    "Cannot validate subagent type 'explore': the subagent coordinator did not respond."
+                        .to_string(),
+                )),
+            )],
+                    ),
+                ),
+        ),
+    );
+    assert!(tracker.handle_update(failed, &meta(), &mut sb));
+    assert_eq!(sb.len(), 1, "failed spawn must render in scrollback");
+    assert!(
+        !tracker.suppressed_tools.contains_key("tc1"),
+        "failure consumes the suppression stash"
+    );
+    assert!(
+        tracker.blocking_waits.is_empty(),
+        "failed spawn must not leave a Subagent wait behind"
+    );
+}
+#[test]
+fn failed_bg_plumbing_tool_stays_hidden() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(
+        tool_call(
+            "tc1",
+            acp::ToolKind::Other,
+            "get_command_or_subagent_output",
+        ),
+        &meta(),
+        &mut sb,
+    );
+    let failed = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+        acp::ToolCallId::new(Arc::from("tc1")),
+        acp::ToolCallUpdateFields::new().status(Some(acp::ToolCallStatus::Failed)),
+    ));
+    assert!(!tracker.handle_update(failed, &meta(), &mut sb));
+    assert_eq!(sb.len(), 0, "failed bg poll must stay suppressed");
+    assert!(
+        !tracker.suppressed_tools.contains_key("tc1"),
+        "terminal status must still clear the stash"
+    );
+    let pre_failed = acp::SessionUpdate::ToolCall(
+        acp::ToolCall::new(
+            acp::ToolCallId::new(Arc::from("tc2")),
+            "wait_tasks".to_string(),
+        )
+        .kind(acp::ToolKind::Other)
+        .status(acp::ToolCallStatus::Failed),
+    );
+    assert!(!tracker.handle_update(pre_failed, &meta(), &mut sb));
+    assert_eq!(sb.len(), 0, "pre-failed bg poll must stay suppressed");
+}
+#[test]
+fn pre_failed_task_tool_renders_despite_suppression() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let failed_call = acp::SessionUpdate::ToolCall(
+        acp::ToolCall::new(
+            acp::ToolCallId::new(Arc::from("tc1")),
+            "spawn_subagent".to_string(),
+        )
+        .kind(acp::ToolKind::Other)
+        .status(acp::ToolCallStatus::Failed),
+    );
+    assert!(tracker.handle_update(failed_call, &meta(), &mut sb));
+    assert_eq!(sb.len(), 1, "pre-failed spawn must render in scrollback");
+    assert!(
+        !tracker.suppressed_tools.contains_key("tc1"),
+        "pre-failed spawn is never stashed"
+    );
+    assert!(
+        tracker.blocking_waits.is_empty(),
+        "pre-failed spawn must not register a Subagent wait"
+    );
+}
+#[test]
+fn failed_update_racing_ahead_of_suppressed_call_renders() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let failed = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+        acp::ToolCallId::new(Arc::from("tc1")),
+        acp::ToolCallUpdateFields::new()
+            .status(Some(acp::ToolCallStatus::Failed))
+            .content(Some(vec![acp::ToolCallContent::from(
+                acp::ContentBlock::Text(acp::TextContent::new(
+                    "the subagent coordinator did not respond".to_string(),
+                )),
+            )])),
+    ));
+    assert!(!tracker.handle_update(failed, &meta(), &mut sb));
+    assert_eq!(sb.len(), 0, "orphan update alone renders nothing");
+    assert!(tracker.handle_update(
+        tool_call("tc1", acp::ToolKind::Other, "spawn_subagent"),
+        &meta(),
+        &mut sb,
+    ));
+    assert_eq!(sb.len(), 1, "orphan-merged failed spawn must render");
+    assert!(
+        tracker.orphan_updates.is_empty(),
+        "the orphan must be consumed"
+    );
+    assert!(
+        !tracker.suppressed_tools.contains_key("tc1"),
+        "an already-failed spawn is never stashed"
+    );
+    assert!(
+        tracker.blocking_waits.is_empty(),
+        "an already-failed spawn must not register a Subagent wait"
+    );
+}
+#[test]
+fn completed_update_racing_ahead_of_suppressed_call_stays_hidden() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(tool_update_completed("tc1"), &meta(), &mut sb);
+    assert!(!tracker.handle_update(
+        tool_call("tc1", acp::ToolKind::Other, "spawn_subagent"),
+        &meta(),
+        &mut sb,
+    ));
+    assert_eq!(sb.len(), 0, "completed spawn stays suppressed");
+    assert!(
+        tracker.orphan_updates.is_empty(),
+        "the orphan must be consumed"
+    );
+    assert!(
+        !tracker.suppressed_tools.contains_key("tc1"),
+        "a terminal call is never stashed"
+    );
+    assert!(
+        tracker.blocking_waits.is_empty(),
+        "a completed spawn must not register a Subagent wait"
+    );
+}
+#[test]
+fn failed_task_tool_render_carries_stashed_title_and_final_error() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(
+        tool_call("tc1", acp::ToolKind::Other, "spawn_subagent"),
+        &meta(),
+        &mut sb,
+    );
+    let in_progress = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+        acp::ToolCallId::new(Arc::from("tc1")),
+        acp::ToolCallUpdateFields::new()
+            .status(Some(acp::ToolCallStatus::InProgress))
+            .raw_input(Some(serde_json::json!({
+                "variant": "Task",
+                "subagent_type": "explore",
+                "run_in_background": false,
+            }))),
+    ));
+    assert!(!tracker.handle_update(in_progress, &meta(), &mut sb));
+    assert_eq!(sb.len(), 0, "InProgress update stays suppressed");
+    let failed = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+        acp::ToolCallId::new(Arc::from("tc1")),
+        acp::ToolCallUpdateFields::new()
+            .status(Some(acp::ToolCallStatus::Failed))
+            .content(Some(vec![acp::ToolCallContent::from(
+                acp::ContentBlock::Text(acp::TextContent::new(
+                    "the subagent coordinator did not respond".to_string(),
+                )),
+            )])),
+    ));
+    assert!(tracker.handle_update(failed, &meta(), &mut sb));
+    assert_eq!(sb.len(), 1, "failed spawn must render in scrollback");
+    let entry = sb.entry(0).expect("rendered entry");
+    let RenderBlock::ToolCall(tool_block) = &entry.block else {
+        panic!("expected a tool-call block, got {:?}", entry.block);
+    };
+    let rendered = format!("{tool_block:?}");
+    assert!(
+        rendered.contains("spawn_subagent"),
+        "render must keep the stashed title: {rendered}"
+    );
+    assert!(
+        rendered.contains("coordinator did not respond"),
+        "render must carry the error content from the Failed update: {rendered}"
     );
 }
 #[test]

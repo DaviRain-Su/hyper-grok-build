@@ -188,6 +188,68 @@ pub fn is_task_tool_id(name: &str) -> bool {
     matches!(name, TASK_TOOL_NAME | "Task" | "spawn_subagent")
 }
 
+fn flatten_spawn_join(
+    joined: Result<Result<SubagentResult, xai_tool_runtime::ToolError>, tokio::task::JoinError>,
+) -> Result<SubagentResult, xai_tool_runtime::ToolError> {
+    match joined {
+        Ok(result) => result,
+        Err(_) => Err(xai_tool_runtime::ToolError::custom(
+            "channel_closed",
+            "background spawn task failed before registration",
+        )),
+    }
+}
+
+fn background_spawn_reject_error(
+    id: &str,
+    subagent_type: &str,
+    result: Result<SubagentResult, xai_tool_runtime::ToolError>,
+) -> xai_tool_runtime::ToolError {
+    match result {
+        Err(e) => {
+            tracing::error!(
+                subagent_id = %id,
+                subagent_type = %subagent_type,
+                "background spawn transport error: {e:#}",
+            );
+            e
+        }
+        Ok(r) => {
+            tracing::error!(
+                subagent_id = %id,
+                subagent_type = %subagent_type,
+                error = ?r.error,
+                "background spawn rejected by coordinator",
+            );
+            xai_tool_runtime::ToolError::custom(
+                "spawn_rejected",
+                r.error.unwrap_or_else(|| {
+                    "background spawn was rejected by the coordinator".to_owned()
+                }),
+            )
+        }
+    }
+}
+
+fn log_background_spawn_after_start(
+    id: &str,
+    subagent_type: &str,
+    joined: Result<Result<SubagentResult, xai_tool_runtime::ToolError>, tokio::task::JoinError>,
+) {
+    match flatten_spawn_join(joined) {
+        // Child-result failures are logged once by the coordinator. This
+        // waiter only owns join/transport errors the coordinator never sees.
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!(
+                subagent_id = %id,
+                subagent_type = %subagent_type,
+                "background spawn transport error after start: {e:#}",
+            );
+        }
+    }
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // Tests
 // ───────────────────────────────────────────────────────────────────────────
@@ -437,6 +499,10 @@ impl xai_tool_runtime::Tool for TaskTool {
             }
         }
 
+        // The wait window must cover eager validation too: a user prompt
+        // should interject if the coordinator stalls.
+        let foreground_wait = foreground_wait.map(|wait| wait.enter());
+
         // 2. Eager validation — catch unknown / disabled / not-allowed
         //    types before the fire-and-forget background spawn.
         match backend
@@ -469,14 +535,24 @@ impl xai_tool_runtime::Tool for TaskTool {
                     input.subagent_type
                 )));
             }
-            SubagentValidateTypeOutcome::ValidationUnavailable => {
-                // `custom` (not `invalid_arguments`) so the model doesn't
-                // retry with a different name on transport faults.
+            // `custom` (not `invalid_arguments`) so the model doesn't
+            // retry with a different name on transport faults.
+            SubagentValidateTypeOutcome::CoordinatorGone => {
                 return Err(xai_tool_runtime::ToolError::custom(
                     "validation_unavailable",
                     format!(
-                        "Cannot validate subagent type '{}': the subagent coordinator is \
-                         unreachable. Retry shortly or notify ops.",
+                        "Cannot validate subagent type '{}': the subagent coordinator \
+                         has shut down. Retrying will not help.",
+                        input.subagent_type
+                    ),
+                ));
+            }
+            SubagentValidateTypeOutcome::ValidationUnavailable => {
+                return Err(xai_tool_runtime::ToolError::custom(
+                    "validation_unavailable",
+                    format!(
+                        "Cannot validate subagent type '{}': the subagent coordinator did \
+                         not respond (it may be busy). Retry shortly.",
                         input.subagent_type
                     ),
                 ));
@@ -567,34 +643,53 @@ impl xai_tool_runtime::Tool for TaskTool {
             cancel_token: child_cancellation,
         };
 
-        // 4. Background mode: fire-and-forget via backend.spawn().
-        // Coordinator stores the result for TaskOutputTool polling.
-        // Both transport errors and coordinator rejections are logged so
-        // late failures (worktree creation, etc.) remain visible.
+        // 4. Background mode: await registration (pending/queued), not the
+        // child session. `spawn()` stays the terminal result; late failures
+        // are logged from a detached waiter.
         if input.run_in_background {
-            let bg_backend = backend.clone();
-            let bg_id = id.clone();
-            let bg_type = input.subagent_type.clone();
-            tokio::spawn(async move {
-                match bg_backend.backend().spawn(request).await {
-                    Err(e) => {
-                        tracing::error!(
-                            subagent_id = %bg_id,
-                            subagent_type = %bg_type,
-                            "background spawn transport error: {e:#}",
-                        );
-                    }
-                    Ok(r) if !r.success => {
-                        tracing::error!(
-                            subagent_id = %bg_id,
-                            subagent_type = %bg_type,
-                            error = ?r.error,
-                            "background spawn rejected by coordinator",
-                        );
-                    }
-                    Ok(_) => {}
-                }
+            drop(foreground_wait);
+            let (registered_tx, mut registered_rx) = tokio::sync::oneshot::channel();
+            let spawn_backend = backend.clone();
+            let mut spawn_task = tokio::spawn(async move {
+                spawn_backend
+                    .backend()
+                    .spawn(request, Some(registered_tx))
+                    .await
             });
+
+            let mut terminal_already_logged = false;
+            let registered = tokio::select! {
+                biased;
+                reg = &mut registered_rx => matches!(reg, Ok(())),
+                joined = &mut spawn_task => {
+                    if registered_rx.try_recv().is_ok() {
+                        log_background_spawn_after_start(&id, &input.subagent_type, joined);
+                        terminal_already_logged = true;
+                        true
+                    } else {
+                        return Err(background_spawn_reject_error(
+                            &id,
+                            &input.subagent_type,
+                            flatten_spawn_join(joined),
+                        ));
+                    }
+                }
+            };
+            if !registered {
+                return Err(background_spawn_reject_error(
+                    &id,
+                    &input.subagent_type,
+                    flatten_spawn_join(spawn_task.await),
+                ));
+            }
+            if !terminal_already_logged {
+                let log_id = id.clone();
+                let log_type = input.subagent_type.clone();
+                // Detached: started text is the model reply; `spawn()` is terminal.
+                tokio::spawn(async move {
+                    log_background_spawn_after_start(&log_id, &log_type, spawn_task.await);
+                });
+            }
 
             let (task_output_tool, task_ids_param, timeout_ms_param) =
                 resolve_background_notice_names(&resources).await;
@@ -619,8 +714,7 @@ impl xai_tool_runtime::Tool for TaskTool {
         }
 
         // 5. Blocking mode (default): spawn via backend and await result
-        let _foreground_wait = foreground_wait.map(|wait| wait.enter());
-        let result = backend.backend().spawn(request).await;
+        let result = backend.backend().spawn(request, None).await;
         if let Some(forwarder) = cancellation_forwarder {
             forwarder.abort();
         }
@@ -799,6 +893,12 @@ mod tests {
         resources.insert(SessionIdResource("child-session".to_string()));
         resources.insert(CurrentPromptIdResource("prompt-nested".to_string()));
 
+        let drain = tokio::spawn(async move {
+            if let Some(SubagentEvent::Spawn(mut req)) = rx.recv().await {
+                req.notify_registered();
+            }
+        });
+
         let result = xai_tool_runtime::Tool::run(
             &TaskTool,
             test_ctx(resources.into_shared()),
@@ -821,7 +921,7 @@ mod tests {
             result.is_ok(),
             "expected Ok at depth 1 with max 2: {result:?}"
         );
-        let _ = rx.try_recv();
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), drain).await;
     }
 
     #[tokio::test]
@@ -1404,14 +1504,8 @@ mod tests {
             resources_with_parent_exec(backend, "CI still fails, fix and gt submit /pr-babysit");
 
         let drain = tokio::spawn(async move {
-            if let Some(SubagentEvent::Spawn(boxed)) = rx.recv().await {
-                let _ = boxed.respond_with(|boxed| SubagentResult {
-                    success: true,
-                    output: std::sync::Arc::from(""),
-                    subagent_id: boxed.id.clone(),
-                    child_session_id: boxed.id.clone(),
-                    ..Default::default()
-                });
+            if let Some(SubagentEvent::Spawn(mut boxed)) = rx.recv().await {
+                boxed.notify_registered();
             }
         });
 
@@ -1446,14 +1540,8 @@ mod tests {
             resources_with_parent_exec(backend, "review this PR https://github.com/x/y/pull/1");
 
         let drain = tokio::spawn(async move {
-            if let Some(SubagentEvent::Spawn(boxed)) = rx.recv().await {
-                let _ = boxed.respond_with(|boxed| SubagentResult {
-                    success: true,
-                    output: std::sync::Arc::from(""),
-                    subagent_id: boxed.id.clone(),
-                    child_session_id: boxed.id.clone(),
-                    ..Default::default()
-                });
+            if let Some(SubagentEvent::Spawn(mut boxed)) = rx.recv().await {
+                boxed.notify_registered();
             }
         });
 
@@ -1506,14 +1594,8 @@ mod tests {
         );
 
         let drain = tokio::spawn(async move {
-            if let Some(SubagentEvent::Spawn(boxed)) = rx.recv().await {
-                let _ = boxed.respond_with(|boxed| SubagentResult {
-                    success: true,
-                    output: std::sync::Arc::from(""),
-                    subagent_id: boxed.id.clone(),
-                    child_session_id: boxed.id.clone(),
-                    ..Default::default()
-                });
+            if let Some(SubagentEvent::Spawn(mut boxed)) = rx.recv().await {
+                boxed.notify_registered();
             }
         });
 
@@ -1568,19 +1650,14 @@ mod tests {
             test_ctx(resources.into_shared()),
             task_input("general-purpose", true),
         )
-        .await
-        .expect("background tool call returns Ok regardless of coordinator outcome");
-        let text = match result {
-            ToolOutput::Text(t) => t.text,
-            other => panic!("expected text output, got {other:?}"),
-        };
-        assert!(text.contains("Subagent started in background"));
+        .await;
+        let err = result.expect_err("definite coordinator reject is a tool error");
+        assert!(
+            err.to_string().contains("worktree creation failed"),
+            "{err}"
+        );
 
-        // Let the fire-and-forget bg task advance past `.await` on spawn.
         let _ = tokio::time::timeout(std::time::Duration::from_millis(500), done_rx).await;
-        for _ in 0..20 {
-            tokio::task::yield_now().await;
-        }
 
         let mut events_rx = captured.events_rx;
         let mut saw_error = false;
@@ -1616,18 +1693,15 @@ mod tests {
             test_ctx(resources.into_shared()),
             task_input("general-purpose", true),
         )
-        .await
-        .expect("transport error must not break the fire-and-forget contract");
-        match result {
-            ToolOutput::Text(t) => {
-                assert!(
-                    t.text.contains("Subagent started in background"),
-                    "{}",
-                    t.text,
-                );
-            }
-            other => panic!("expected text output, got {other:?}"),
-        }
+        .await;
+        let err = result.expect_err("closed coordinator channel is a tool error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("channel closed")
+                || msg.contains("cannot spawn")
+                || msg.contains("result channel dropped"),
+            "{err}"
+        );
     }
 
     #[tokio::test]
@@ -1642,18 +1716,116 @@ mod tests {
             task_input("explore", true),
         )
         .await;
-        let msg = result.expect_err("must error").to_string();
+        let err = result.expect_err("must error");
         assert!(
-            msg.contains("subagent coordinator is unreachable")
+            matches!(err.kind, xai_tool_runtime::ToolErrorKind::Custom),
+            "transport faults must not be invalid_arguments (the model would \
+             retry with a mutated name): {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("subagent coordinator did not respond")
                 && msg.contains("Cannot validate subagent type"),
         );
         assert!(!msg.contains("Unknown subagent type"));
     }
 
+    /// The send-now wait window must already be open during the eager
+    /// validation await in both modes — a busy coordinator can hold it for
+    /// seconds, and a user prompt in that window should interject, not queue.
+    #[tokio::test]
+    async fn foreground_wait_covers_eager_validation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct DepthGuard(Arc<AtomicUsize>);
+        impl Drop for DepthGuard {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+
+        for run_in_background in [false, true] {
+            let wait_depth = Arc::new(AtomicUsize::new(0));
+            let depth_seen_by_validation = Arc::new(AtomicUsize::new(usize::MAX));
+
+            let depth_for_validation = Arc::clone(&wait_depth);
+            let seen = Arc::clone(&depth_seen_by_validation);
+            let (backend, mut rx) = make_backend_with_validation_fn(move |_, _| {
+                seen.store(
+                    depth_for_validation.load(Ordering::SeqCst),
+                    Ordering::SeqCst,
+                );
+                SubagentValidateTypeOutcome::Ok
+            });
+
+            let mut resources = resources_for_task(backend);
+            let depth_for_factory = Arc::clone(&wait_depth);
+            resources.insert(SubagentForegroundWait::new(move || {
+                depth_for_factory.fetch_add(1, Ordering::SeqCst);
+                Box::new(DepthGuard(Arc::clone(&depth_for_factory)))
+            }));
+
+            let drain = tokio::spawn(async move {
+                if let Some(SubagentEvent::Spawn(mut boxed)) = rx.recv().await {
+                    boxed.notify_registered();
+                    // Foreground mode still awaits the terminal `spawn()` result.
+                    let _ = boxed.respond_with(|req| SubagentResult {
+                        success: true,
+                        subagent_id: req.id.clone(),
+                        child_session_id: req.id.clone(),
+                        ..Default::default()
+                    });
+                }
+            });
+
+            let result = xai_tool_runtime::Tool::run(
+                &TaskTool,
+                test_ctx(resources.into_shared()),
+                task_input("explore", run_in_background),
+            )
+            .await;
+            assert!(result.is_ok(), "bg={run_in_background}: {result:?}");
+            assert_eq!(
+                depth_seen_by_validation.load(Ordering::SeqCst),
+                1,
+                "bg={run_in_background}: wait window must be open while validation is in flight"
+            );
+            assert_eq!(
+                wait_depth.load(Ordering::SeqCst),
+                0,
+                "bg={run_in_background}: guard must be released after the run"
+            );
+            drain.await.unwrap();
+        }
+    }
+
+    /// A closed coordinator channel is terminal — every retry fails
+    /// instantly, so the error must not invite one.
+    #[tokio::test]
+    async fn coordinator_gone_error_does_not_invite_retry() {
+        let (tx, rx) = mpsc::unbounded_channel::<SubagentEvent>();
+        drop(rx);
+        let backend = SubagentBackendResource(Arc::new(ChannelBackend::new(tx)));
+        let resources = resources_for_task(backend);
+
+        let result = xai_tool_runtime::Tool::run(
+            &TaskTool,
+            test_ctx(resources.into_shared()),
+            task_input("explore", true),
+        )
+        .await;
+        let msg = result.expect_err("must error").to_string();
+        assert!(msg.contains("has shut down"), "{msg}");
+        assert!(
+            !msg.contains("Retry shortly"),
+            "terminal fault must not invite a retry: {msg}"
+        );
+    }
+
     #[tokio::test]
     async fn validate_request_threads_session_id_to_coordinator() {
         let (capture_tx, mut capture_rx) = mpsc::unbounded_channel::<String>();
-        let (backend, _rx) = make_backend_with_validation_fn(move |_t, parent_session_id| {
+        let (backend, mut rx) = make_backend_with_validation_fn(move |_t, parent_session_id| {
             let _ = capture_tx.send(parent_session_id.to_string());
             SubagentValidateTypeOutcome::Ok
         });
@@ -1663,12 +1835,19 @@ mod tests {
         resources.insert(SessionIdResource("special-session-id".to_string()));
         resources.insert(CurrentPromptIdResource("prompt-x".to_string()));
 
+        let drain = tokio::spawn(async move {
+            if let Some(SubagentEvent::Spawn(mut req)) = rx.recv().await {
+                req.notify_registered();
+            }
+        });
+
         let _ = xai_tool_runtime::Tool::run(
             &TaskTool,
             test_ctx(resources.into_shared()),
             task_input("explore", true),
         )
         .await;
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), drain).await;
 
         let seen = capture_rx.try_recv().expect("must fire at least once");
         assert_eq!(seen, "special-session-id");

@@ -13,9 +13,8 @@ const REDACTED: &str = "<redacted>";
 
 /// One test's isolated filesystem tree and canonical child environment.
 ///
-/// Construction never mutates the process environment. Child commands start
-/// from `env_clear()` and receive only platform essentials, sandbox paths,
-/// grok network kill switches, and explicit overrides.
+/// Construction never mutates the process environment.
+/// Child commands start from `env_clear()` and receive only platform essentials, sandbox paths, grok network kill switches, and explicit overrides.
 pub struct TestSandbox {
     root: TempDir,
     home: PathBuf,
@@ -51,8 +50,8 @@ impl TestSandbox {
         &self.grok_home
     }
 
-    /// Isolated working directory. When built with [`TestSandboxBuilder::git`],
-    /// this contains a repository with one committed `README.md`.
+    /// Isolated working directory.
+    /// When built with [`TestSandboxBuilder::git`], this contains a repository with one committed `README.md`.
     pub fn workspace(&self) -> &Path {
         &self.workspace
     }
@@ -62,8 +61,8 @@ impl TestSandbox {
         &self.temp
     }
 
-    /// Override one child variable after the hermetic baseline. This is the
-    /// supported seam for feature flags and simulated terminal brands.
+    /// Override one child variable after the hermetic baseline.
+    /// Use this for feature flags and simulated terminal brands.
     pub fn set_env(&mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> &mut Self {
         self.env
             .insert(key.as_ref().to_owned(), value.as_ref().to_owned());
@@ -105,8 +104,8 @@ impl TestSandbox {
             .collect()
     }
 
-    /// Apply the effective environment to a Tokio child command. Explicit
-    /// command-level `.env(...)` calls made afterward have final precedence.
+    /// Apply the effective environment to a Tokio child command.
+    /// Explicit command-level `.env(...)` calls made afterward have final precedence.
     pub fn apply_to_tokio_command(&self, cmd: &mut tokio::process::Command) {
         cmd.env_clear().envs(self.env());
     }
@@ -119,14 +118,13 @@ impl TestSandbox {
         }
     }
 
-    /// Apply the effective environment to a standard child command. Explicit
-    /// command-level `.env(...)` calls made afterward have final precedence.
+    /// Apply the effective environment to a standard child command.
+    /// Explicit command-level `.env(...)` calls made afterward have final precedence.
     pub fn apply_to_std_command(&self, cmd: &mut Command) {
         cmd.env_clear().envs(self.env());
     }
 
-    /// Build a detached, non-interactive Git command using this sandbox's
-    /// selected binary and cleared child environment.
+    /// Build a detached, non-interactive Git command using this sandbox's selected binary and cleared child environment.
     pub fn git_command(&self) -> Command {
         let git = self
             .env
@@ -145,9 +143,9 @@ impl TestSandbox {
 
     /// Values that must be removed from captured child-output diagnostics.
     ///
-    /// This intentionally returns values only, never keys. Endpoint URLs,
-    /// credentials, and sandbox-owned private paths can be echoed by a failing
-    /// child even though process diagnostics never print its environment.
+    /// This intentionally returns values only, never keys.
+    /// Process diagnostics never print the child's environment.
+    /// A failing child can still echo endpoint URLs, credentials, and sandbox-owned private paths.
     pub(crate) fn diagnostic_redactions(&self) -> Vec<String> {
         self.env
             .iter()
@@ -189,8 +187,8 @@ impl Default for TestSandbox {
     }
 }
 
-/// Minimal construction-time choices for [`TestSandbox`]. Runtime feature
-/// variables belong on [`TestSandbox::set_env`] instead of a growing config.
+/// Minimal construction-time choices for [`TestSandbox`].
+/// Runtime feature variables belong on [`TestSandbox::set_env`] instead of a growing config.
 #[derive(Default)]
 pub struct TestSandboxBuilder {
     mock_url: Option<String>,
@@ -198,8 +196,7 @@ pub struct TestSandboxBuilder {
 }
 
 impl TestSandboxBuilder {
-    /// Wire grok API, models, feedback, trace, conversation, and web traffic to
-    /// a loopback mock endpoint and install the fake CI API key.
+    /// Wire grok API, models, feedback, trace, conversation, and web traffic to a loopback mock endpoint and install the fake CI API key.
     pub fn mock_url(mut self, url: impl Into<String>) -> Self {
         self.mock_url = Some(url.into());
         self
@@ -211,7 +208,7 @@ impl TestSandboxBuilder {
         self
     }
 
-    /// Materialize the filesystem tree and canonical child environment.
+    /// Create the filesystem tree and canonical child environment.
     pub fn build(self) -> TestSandbox {
         let root = TempDir::new().expect("create test sandbox root");
         let home = root.path().join("home");
@@ -345,8 +342,7 @@ fn baseline_env_from_parent(
         ("GROK_PROMPT_SUGGESTIONS", "false"),
         // Pin so a developer-exported override cannot flake empty-home launch tests.
         ("GROK_DEFAULT_PERMISSION_MODE", "ask"),
-        // Post-turn summary side-calls would add unscripted requests to the
-        // mock server and break exact wire-traffic assertions.
+        // The post-turn summary would send unscripted requests to the mock server and break exact wire-traffic assertions
         ("GROK_TURN_SUMMARY", "0"),
         ("NO_PROXY", "127.0.0.1,localhost,::1"),
         ("no_proxy", "127.0.0.1,localhost,::1"),

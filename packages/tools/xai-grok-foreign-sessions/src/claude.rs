@@ -284,8 +284,7 @@ fn collect_candidates(
             continue;
         };
         let mut project_candidates = Vec::with_capacity(limit);
-        // Enumerate every direct entry in these already-scoped directories so
-        // filesystem order cannot decide which sessions receive the read budget.
+        // Enumerate every direct entry in these already-scoped directories so filesystem order cannot decide which sessions receive the read budget
         let complete = project_root.for_each_entry(|name| {
             let path = project_root.join(&name);
             let Some(session_id) = path

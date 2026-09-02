@@ -1,12 +1,9 @@
-//! Shell-specific memory flush conversation window selection.
-
 use xai_grok_sampling_types::ConversationItem;
 
-/// Select a recent typed-history window for the flush model.
+/// Select a recent window of the conversation history for the flush model.
 ///
-/// Starts with the last `recent_message_count` messages, then expands backward
-/// to the nearest `User` message so the window always starts on a user
-/// boundary. The returned window may be larger than `recent_message_count`.
+/// Starts with the last `recent_message_count` messages, then expands backward to the nearest `User` message.
+/// The window therefore always starts on a user boundary and may be larger than `recent_message_count`.
 /// System messages are excluded since the flush adds its own system prompt.
 pub fn select_flush_window(
     messages: Vec<ConversationItem>,

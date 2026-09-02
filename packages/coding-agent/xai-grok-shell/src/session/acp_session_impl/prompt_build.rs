@@ -1,31 +1,23 @@
-//! User-message construction concern for `SessionActor`: templated prefix
-//! building, rules partitioning, large-prompt offload/truncation, and image
-//! payload preparation.
+//! User-message construction for `SessionActor`.
+//! Covers the templated prefix, rules partitioning, large-prompt offload and truncation, and image payload preparation.
 #![allow(clippy::items_after_test_module)]
 use super::*;
+use crate::session::repo_status_prefix::RepoStatusSnapshot;
 use xai_grok_telemetry::region;
 use xai_grok_telemetry::region::Parent;
-/// Normalize a free-form name (e.g. an MCP server identifier) into a
-/// single safe filesystem segment.
+/// Normalize a free-form name (e.g. an MCP server identifier) into a single safe filesystem segment.
 ///
-/// Replaces anything outside `[A-Za-z0-9._-]` with `_` so the result is a
-/// portable directory name on macOS/Linux.
-/// Whether `url` is an `http://` or `https://` URL — i.e. a remote URL the
-/// upstream API can fetch directly. `file://` and other local schemes are
-/// rejected by the API and must be inlined as a `data:` URL instead.
+/// Replaces anything outside `[A-Za-z0-9._-]` with `_` so the result is a portable directory name on macOS/Linux.
+/// Whether `url` is an `http://` or `https://` URL, one the upstream API can fetch directly.
+/// `file://` and other local schemes are rejected by the API and must be inlined as a `data:` URL instead.
 pub(super) fn is_remote_image_url(url: &str) -> bool {
     url.starts_with("http://") || url.starts_with("https://")
 }
 /// Pick the URL value sent to the upstream API for a user-attached image.
 ///
-/// The remote API accepts a base64 `data:` URL or an HTTP(S) URL only;
-/// `file://` and other local schemes return 400. Inline bytes win when
-/// present (the canonical payload); `uri` is forwarded directly only
-/// when it is a remote URL with no inline bytes available.
-///
-/// Extracted so production and the regression tests assert against the
-/// same selector — a future change to the production rule cannot drift
-/// past the tests.
+/// The remote API accepts only a base64 `data:` URL or an HTTP(S) URL; `file://` and other local schemes return 400.
+/// Inline bytes win when present (the canonical payload); `uri` is forwarded directly only when it is a remote URL with no inline bytes.
+/// Extracted so production and the regression tests assert against the same selector, and a rule change cannot drift past the tests.
 pub(super) fn pick_user_image_url(image: &agent_client_protocol::ImageContent) -> String {
     if let Some(uri) = image.uri.as_deref()
         && image.data.is_empty()
@@ -268,18 +260,14 @@ mod partition_rules_by_scope_tests {
         assert_eq!(paths(&user), vec!["/home/user/.grok/AGENTS.md"]);
     }
 }
-/// True iff `conversation` already contains a project-instructions reminder,
-/// either tagged [`SyntheticReason::ProjectInstructions`] or a legacy untagged
-/// copy whose first text part starts with [`LEGACY_AGENTS_MD_REMINDER_PREFIX`].
-/// Read-only; used by `spawn_session_actor` for idempotent AGENTS.md injection
-/// so resumed sessions and forks don't duplicate the message.
+/// True iff `conversation` already contains a project-instructions reminder (see [`is_project_instructions`]).
+/// `spawn_session_actor` uses this for idempotent AGENTS.md injection, so resumed sessions and forks don't duplicate the message.
 pub(super) fn conversation_has_project_instructions(conversation: &[ConversationItem]) -> bool {
     conversation.iter().any(is_project_instructions)
 }
-/// A project-instructions (AGENTS.md) reminder: a `User` item tagged
-/// [`SyntheticReason::ProjectInstructions`], or a legacy untagged copy whose first
-/// text part starts with [`LEGACY_AGENTS_MD_REMINDER_PREFIX`]. Single source of
-/// truth for both spawn-time idempotent injection and the compaction de-dup.
+/// A project-instructions (AGENTS.md) reminder is a `User` item tagged [`SyntheticReason::ProjectInstructions`], or a legacy untagged copy.
+/// The legacy copy's first text part starts with [`LEGACY_AGENTS_MD_REMINDER_PREFIX`].
+/// Single source of truth for both spawn-time idempotent injection and the compaction de-dup.
 pub(super) fn is_project_instructions(item: &ConversationItem) -> bool {
     let ConversationItem::User(u) = item else {
         return false;
@@ -295,8 +283,8 @@ pub(super) fn is_project_instructions(item: &ConversationItem) -> bool {
         })
         .is_some_and(|t| t.starts_with(LEGACY_AGENTS_MD_REMINDER_PREFIX))
 }
-/// Subagent spawns (incl. `resume_from`) overwrite the leading System with the fresh
-/// prompt; top-level user-resumed sessions keep theirs. Absent → insert + grow prefix.
+/// Subagent spawns (including `resume_from`) overwrite the leading System with the fresh prompt; top-level user-resumed sessions keep theirs.
+/// When no System is present, insert one and grow the preserved prefix.
 pub(super) fn install_system_prompt(
     conversation: &mut Vec<ConversationItem>,
     inherited_prefix_len: &mut Option<usize>,
@@ -401,10 +389,9 @@ pub(super) const ELISION_MARKER: &str =
     "\n\n…[middle truncated — full text in the offloaded file]…\n\n";
 /// Stable marker opening the offload notice. Single source of truth (for a future strip-on-re-read).
 pub(super) const OFFLOAD_NOTICE_MARKER: &str = "[Full request offloaded to file]";
-/// In-band notice that REPLACES the offload notice when the full request could
-/// not be persisted to the session file (write error or task-join failure).
-/// References no path — there is no file to read — so the model is never told to
-/// `read_file` a file that does not exist. The bounded head+tail excerpt remains.
+/// In-band notice that REPLACES the offload notice when the full request could not be persisted (write error or task-join failure).
+/// It references no path, there is no file to read, so the model is never told to `read_file` a file that does not exist.
+/// The bounded head+tail excerpt remains.
 const OFFLOAD_FAILED_NOTICE: &str = "\n\n[Full request could not be saved to a file — the excerpt above is truncated. Answer from it, and ask the user to resend the full content if anything essential is missing.]";
 /// UTF-8-safe suffix: the last `<= max_bytes` bytes of `s`, on a char boundary.
 pub(super) fn truncate_bytes_suffix(s: &str, max_bytes: usize) -> &str {
@@ -432,7 +419,7 @@ pub(super) fn bound_head_tail(s: &str, budget: usize) -> String {
     let tail = truncate_bytes_suffix(s, tail_len);
     format!("{head}{ELISION_MARKER}{tail}")
 }
-/// Build the offload notice: marker + path to the file with the user's full request.
+/// Build the offload notice: the marker, then the path to the file with the user's full request.
 pub(super) fn build_offload_notice(full_message_len: usize, file_path: &std::path::Path) -> String {
     format!(
         "\n\n{OFFLOAD_NOTICE_MARKER} The text above was truncated ({full_message_len} bytes total). \
@@ -441,8 +428,8 @@ Read this file with read_file before responding; the question you must answer ma
         file_path.display(),
     )
 }
-/// Build the bounded in-band message for an oversized prompt already written to
-/// `file_path`. Pure; preserves message ordering, stays within budget.
+/// Build the bounded in-band message for an oversized prompt already written to `file_path`.
+/// Pure; preserves message ordering, stays within budget.
 pub(super) fn build_truncated_prompt_message(
     context: &str,
     query: &str,
@@ -481,20 +468,16 @@ pub(super) fn build_truncated_prompt_message(
         format!("{query_block}\n\n{context_inline}{notice}")
     }
 }
-/// Replace the file-referencing offload `notice` embedded in `message` with the
-/// no-file [`OFFLOAD_FAILED_NOTICE`]. Position-independent (the notice sits at the
-/// end for grok ordering), so a failed offload never
-/// leaves the model chasing a "read this file" pointer to a file that does not
-/// exist. Returns `message` unchanged if the notice is absent (defensive).
+/// Replace the file-referencing offload `notice` embedded in `message` with the no-file [`OFFLOAD_FAILED_NOTICE`].
+/// A failed offload therefore never leaves the model chasing a "read this file" pointer to a file that does not exist.
+/// Returns `message` unchanged if the notice is absent (defensive).
 pub(super) fn strip_offload_notice(message: &str, notice: &str) -> String {
     message.replacen(notice, OFFLOAD_FAILED_NOTICE, 1)
 }
-/// Write `full_message` via `writer`; return the bounded in-band `message` plus
-/// the file path when the write succeeds. On write failure the bounded message is
-/// still returned (never the oversized original, so a failed offload can't
-/// reintroduce the context-window overflow) but with the file-referencing notice
-/// swapped for [`OFFLOAD_FAILED_NOTICE`], so the model isn't told to read a file
-/// that was never written. The injected `writer` makes this hermetically testable.
+/// Write `full_message` via `writer`; return the bounded in-band `message` plus the file path when the write succeeds.
+/// On write failure the bounded message is still returned (never the oversized original that would re-overflow the context window).
+/// The failure path swaps the file-referencing notice for [`OFFLOAD_FAILED_NOTICE`], so the model isn't told to read a file that was never written.
+/// The injected `writer` makes this testable without touching the filesystem.
 pub(super) fn write_offload_and_build(
     full_message: &str,
     message: String,
@@ -516,8 +499,8 @@ pub(super) fn write_offload_and_build(
 }
 impl SessionActor {
     /// Rewrite the user-message prefix at conversation index 1.
-    /// Caller must guarantee zero turns. When `drop_startup_skill_reminder`
-    /// is true, also strips the synthetic `<system-reminder>` user item.
+    /// Caller must guarantee zero turns.
+    /// When `drop_startup_skill_reminder` is true, also strips the synthetic `<system-reminder>` user item.
     pub(super) fn rewrite_zero_turn_prefix(
         conversation: &mut Vec<ConversationItem>,
         new_prefix: String,
@@ -561,10 +544,11 @@ impl SessionActor {
                 def.include_browser_verification(),
             )
         };
+        let repo_status = self.resolve_repo_status_prefix().await;
         let mut prefix_carries_fallback_date = false;
         let mut out = if !matches!(template, UserMessageTemplate::Default) {
             if let Some(rendered) = self
-                .build_templated_user_message(cwd, template.clone())
+                .build_templated_user_message(cwd, template.clone(), repo_status.as_ref())
                 .await
             {
                 rendered
@@ -573,16 +557,10 @@ impl SessionActor {
                     "templated user message render failed; falling back to legacy prefix"
                 );
                 prefix_carries_fallback_date = !template.surfaces_local_date();
-                if self.startup_hints.skip_git_status {
-                    construct_user_message_minimal(cwd, None)
-                } else {
-                    construct_user_message(cwd, self.vcs_kind, None, None).await
-                }
+                self.construct_legacy_prefix(cwd, repo_status.as_ref())
             }
-        } else if self.startup_hints.skip_git_status {
-            construct_user_message_minimal(cwd, None)
         } else {
-            construct_user_message(cwd, self.vcs_kind, None, None).await
+            self.construct_legacy_prefix(cwd, repo_status.as_ref())
         };
         if matches!(template, UserMessageTemplate::Default) && include_verification {
             let (workspace_rules, mut user_rules) = self.gather_partitioned_rules();
@@ -642,18 +620,21 @@ impl SessionActor {
     }
     /// Build the custom-templated first user message.
     ///
-    /// Gathers session-scoped inputs (today's date, VCS status, AGENTS.md
-    /// rules, skill registry, MCP servers) and dispatches through
-    /// `UserMessageContext::render`.
+    /// Gathers session-scoped inputs: today's date, VCS status, AGENTS.md rules, skill registry, and MCP servers.
+    /// Dispatches through `UserMessageContext::render`.
     async fn build_templated_user_message(
         &self,
         cwd: &std::path::Path,
         template: xai_grok_agent::prompt::user_message::UserMessageTemplate,
+        repo_status: Option<&RepoStatusSnapshot>,
     ) -> Option<String> {
         use xai_grok_agent::prompt::user_message::UserMessageContext;
         self.wait_for_mcp_templated_prefix_ready(&template).await;
         let bridge = self.agent.borrow().tool_bridge().clone();
-        let (vcs_root, vcs_status) = self.gather_vcs_for_prefix(cwd).await;
+        let (vcs_root, vcs_status) = match repo_status {
+            Some(snapshot) => (snapshot.root.clone(), snapshot.templated_status()),
+            None => (None, None),
+        };
         let (workspace_rules, user_rules) = self.gather_partitioned_rules();
         let mut user_rules = user_rules;
         let skills = self.slash_skills_for_resolve().await;
@@ -701,52 +682,67 @@ impl SessionActor {
         };
         ctx.render(&bridge).await
     }
-    /// Gather VCS root + status with the same 2s timeout used by the legacy
-    /// `construct_user_message` path. Returns `(root, status)` -- either may
-    /// be `None` if VCS is absent or the lookup timed out.
-    async fn gather_vcs_for_prefix(
+    fn construct_legacy_prefix(
         &self,
         cwd: &std::path::Path,
-    ) -> (Option<std::path::PathBuf>, Option<String>) {
-        use xai_grok_workspace::file_system::{git_status_short, jj_status};
-        use xai_grok_workspace::session::git::VcsKind;
-        if matches!(self.vcs_kind, VcsKind::None) {
-            return (None, None);
+        repo_status: Option<&RepoStatusSnapshot>,
+    ) -> String {
+        let mut prefix = construct_user_message_minimal(cwd, None);
+        if let Some(status) = repo_status.and_then(|s| s.legacy_status()) {
+            prefix.push_str(&crate::session::user_message::format_vcs_status_block(
+                &status,
+                self.vcs_kind,
+            ));
         }
-        let root = git2::Repository::discover(cwd).ok().and_then(|repo| {
-            repo.workdir().map(|p| {
-                let s = p.to_string_lossy();
-                let trimmed = s.trim_end_matches('/');
-                std::path::PathBuf::from(trimmed)
-            })
-        });
-        let timeout = std::time::Duration::from_secs(5);
-        let status = if self.vcs_kind.is_jj() {
-            tokio::time::timeout(timeout, jj_status(cwd)).await
-        } else {
-            tokio::time::timeout(timeout, git_status_short(cwd)).await
+        prefix
+    }
+    async fn resolve_repo_status_prefix(&self) -> Option<RepoStatusSnapshot> {
+        use crate::session::repo_status_prefix::{
+            REPO_STATUS_WAIT_BUDGET, RepoStatusPlan, gather_repo_status,
         };
-        let status = match status {
-            Ok(Ok(s)) if !s.trim().is_empty() => Some(s.trim_end().to_string()),
-            _ => None,
-        };
-        (root, status)
+        match self.repo_status_prefetch.plan() {
+            RepoStatusPlan::NoRepo => None,
+            RepoStatusPlan::RootOnly { root, vcs_kind } => {
+                Some(RepoStatusSnapshot::root_only(root.clone(), *vcs_kind))
+            }
+            RepoStatusPlan::Gather { inputs, .. } => {
+                use tracing::Instrument;
+                let wait_start = std::time::Instant::now();
+                let snapshot = match self.repo_status_prefetch.take_prefetch() {
+                    Some(mut prefetch) => {
+                        prefetch
+                            .snapshot_within(REPO_STATUS_WAIT_BUDGET)
+                            .instrument(tracing::info_span!("prompt.repo_status_wait"))
+                            .await
+                    }
+                    None => gather_repo_status(inputs).await,
+                };
+                self.log_repo_status_wait(wait_start.elapsed());
+                Some(snapshot.unwrap_or_else(|| inputs.missed_snapshot()))
+            }
+        }
+    }
+    fn log_repo_status_wait(&self, waited: std::time::Duration) {
+        let wait_ms = self.repo_status_prefetch.record_wait(waited);
+        if wait_ms > 0 {
+            tracing::info!(
+                session_id = %self.session_info.id.0,
+                repo_status_wait_ms = wait_ms,
+                "user prefix waited on the repo status prefetch"
+            );
+        }
     }
     /// `None` twin: descriptor materialization is unavailable in this build.
     fn workspace_mcps_root(_cwd: &std::path::Path) -> Option<std::path::PathBuf> {
         None
     }
-    /// Snapshot connected MCP servers (alphabetical) with their server
-    /// instructions and per-server descriptor folder paths.
+    /// Snapshot connected MCP servers (alphabetical) with their server instructions and per-server descriptor folder paths.
     ///
-    /// Side-effect: materializes per-tool / per-resource JSON descriptor
-    /// files under `<mcps_root>/<sanitized_server_name>/{tools,resources}/`
-    /// for any server that exposes them. Models read these
-    /// before issuing `CallMcpTool` / `FetchMcpResource` calls. Errors
-    /// during materialization are logged and tolerated -- the user message
-    /// is still rendered with the server entry, and the model will see an
-    /// empty descriptor directory rather than a missing one. No-op when the
-    /// descriptor root is unavailable (`workspace_mcps_root` is `None`).
+    /// Side-effect: materializes per-tool and per-resource JSON descriptor files under `<mcps_root>/<sanitized_server_name>/{tools,resources}/`.
+    /// Only servers that expose tools or resources get files; models read these before issuing `CallMcpTool` or `FetchMcpResource` calls.
+    /// Errors during materialization are logged and tolerated: the user message still renders the server entry.
+    /// The model then sees an empty descriptor directory rather than a missing one.
+    /// No-op when the descriptor root is unavailable (`workspace_mcps_root` is `None`).
     async fn gather_mcp_servers(
         &self,
         workspace: &std::path::Path,
@@ -851,20 +847,18 @@ impl SessionActor {
     }
     /// Build a `PathRewriter` for sanitizing overlay paths in model-facing text.
     ///
-    /// Returns `None` when `display_cwd` is unset (no rewriting needed). Used
-    /// by tool-result handlers to rewrite prompt_text, error messages, and any
-    /// other model-visible content that may embed the real worktree cwd.
+    /// Returns `None` when `display_cwd` is unset (no rewriting needed).
+    /// Tool-result handlers use it to rewrite prompt_text, error messages, and any other model-visible content that may embed the real worktree cwd.
     pub(super) fn path_rewriter(&self) -> Option<crate::session::acp_conversion::PathRewriter> {
         crate::session::acp_conversion::PathRewriter::new(
             &self.session_info.cwd,
             self.display_cwd.get().map(|s| s.as_str()),
         )
     }
-    /// If the prompt exceeds LARGE_PROMPT_THRESHOLD, write the full content to a file
-    /// and return a truncated version with the local path embedded for the model to read.
+    /// If the prompt exceeds LARGE_PROMPT_THRESHOLD, write the full content to a file.
+    /// Return a truncated version with the local path embedded for the model to read.
     ///
-    /// Takes context and query separately to prioritise the query: kept intact
-    /// when it fits, else bounded head+tail (trailing question survives).
+    /// Takes context and query separately to prioritise the query: kept intact when it fits, else bounded head+tail (trailing question survives).
     ///
     /// Returns `(assembled_message, Some(local_path))` when truncated, or `(assembled, None)`.
     /// Includes skill information in the assembled prompt.
@@ -931,11 +925,9 @@ impl SessionActor {
         )
         .await;
     }
-    /// Run the image-transcription pipeline for a turn that contains
-    /// user-supplied images. Returns the new `user_message` text with the
-    /// `<image>` / `<image_files>` envelopes prepended; on any failure
-    /// returns an `acp::Error` so the entire turn is aborted (per product
-    /// decision -- we never silently drop image context).
+    /// Run the image-transcription pipeline for a turn that contains user-supplied images.
+    /// Returns the new `user_message` text with the `<image>` and `<image_files>` envelopes prepended.
+    /// On any failure returns an `acp::Error` so the entire turn is aborted; we never silently drop image context.
     pub(super) async fn transcribe_user_images(
         &self,
         original_user_message: String,

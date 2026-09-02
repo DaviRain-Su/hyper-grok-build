@@ -1,5 +1,5 @@
-//! Version-aware config layering. A `[[version_overrides]]` array carries
-//! semver-gated patches deep-merged in ascending `minimum_version` order.
+//! Version-aware config layering.
+//! A `[[version_overrides]]` array carries semver-gated patches deep-merged in ascending `minimum_version` order.
 //!
 //! ```toml
 //! [[version_overrides]]
@@ -50,11 +50,10 @@ pub enum VersionOverrideError {
 }
 
 impl VersionOverrideError {
-    /// A log safe summary: entry index, field, and error category only. Never
-    /// the raw user supplied value or the offending source line, either of
-    /// which can carry a secret. Prefer this over the `Display` impl (which
-    /// echoes the value for local `Result` inspection) anywhere the message
-    /// reaches logs. Mirrors the redaction rule in [`crate::loader::toml_error_detail`].
+    /// A log safe summary: entry index, field, and error category only.
+    /// It never includes the raw user supplied value or the offending source line, either of which can carry a secret.
+    /// Prefer this over the `Display` impl (which echoes the value for local `Result` inspection) anywhere the message reaches logs.
+    /// Mirrors the redaction rule in [`crate::loader::toml_error_detail`].
     pub fn redacted(&self) -> String {
         match self {
             Self::Deserialize(_) => {
@@ -70,8 +69,7 @@ impl VersionOverrideError {
     }
 }
 
-/// Strips `version_overrides` (always) and deep-merges each matching
-/// patch in ascending `minimum_version` order.
+/// Strips `version_overrides` (always) and deep-merges each matching patch in ascending `minimum_version` order.
 pub fn apply_version_overrides(
     config: &mut toml::Value,
     version: &Version,
@@ -79,7 +77,7 @@ pub fn apply_version_overrides(
     let entries = take_patch_array::<VersionOverrideMeta>(config, VERSION_OVERRIDES_KEY)?;
 
     // Parse all bounds upfront so an invalid entry fails before any merge.
-    // Missing minimum_version => Version::new(0, 0, 0) (no lower bound).
+    // A missing minimum_version becomes Version::new(0, 0, 0) (no lower bound)
     let mut parsed: Vec<(Version, Option<Version>, toml::Table)> =
         Vec::with_capacity(entries.len());
     for (index, entry) in entries.into_iter().enumerate() {
@@ -106,8 +104,7 @@ pub fn apply_version_overrides(
         parsed.push((min_v, max_v, entry.patch));
     }
 
-    // Stable sort -- ties on minimum_version keep declared order so later
-    // entries win.
+    // Stable sort: ties on minimum_version keep declared order so later entries win
     parsed.sort_by(|a, b| a.0.cmp(&b.0));
 
     let patches = parsed.into_iter().filter_map(|(min_v, max_v, patch)| {
@@ -138,8 +135,7 @@ mod tests {
         Version::parse(s).unwrap()
     }
 
-    /// Helper asserts the section is stripped on every call, so the
-    /// "stripped even on no match" contract is covered across all 8 cases.
+    /// The helper asserts the section is stripped on every call, so the "stripped even on no match" contract is covered across all 8 cases.
     #[test]
     fn version_match_boundaries() {
         fn applies(min: Option<&str>, max: Option<&str>, cli: &str) -> bool {
@@ -171,7 +167,7 @@ mod tests {
         assert!(applies(Some("1.7.0"), None, "99.0.0")); // unbounded above
         assert!(applies(None, Some("2.0.0"), "1.5.0")); // max-only, within
         assert!(!applies(None, Some("2.0.0"), "2.0.1")); // max-only, above
-        assert!(applies(None, None, "1.0.0")); // unbounded both = always
+        assert!(applies(None, None, "1.0.0")); // unbounded both always applies
     }
 
     #[test]

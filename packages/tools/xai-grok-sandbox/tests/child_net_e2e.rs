@@ -1,7 +1,6 @@
-//! E2E: the child network seccomp filter denies connecting to a unix socket
-//! regardless of when the socket was created. The launch-time socket bind
-//! masks only cover endpoints that existed at startup, so this per-spawn
-//! filter is what holds across daemon start and unlink/recreate.
+//! E2E: the child network seccomp filter denies connecting to a unix socket regardless of when the socket was created.
+//! The launch-time socket bind masks only cover endpoints that existed at startup.
+//! So this per-spawn filter is what holds across daemon start and unlink/recreate.
 
 #![cfg(target_os = "linux")]
 
@@ -33,8 +32,7 @@ fn spawn_probe(socket: &Path, filtered: bool) -> std::process::Output {
     cmd.env(SOCKET_ENV, socket)
         .args(["--ignored", "--exact", "--nocapture", "subprocess_entry"]);
     if filtered {
-        // Built in the parent, as production spawns do: the post-fork install
-        // must not allocate.
+        // Built in the parent, as production spawns do: the post-fork install must not allocate
         let filter = xai_grok_sandbox::child_net::prebuilt_child_network_filter();
         // SAFETY: the closure only runs prctl against the parent-built program.
         unsafe {
@@ -59,9 +57,8 @@ fn unique_socket_path() -> PathBuf {
 
 #[test]
 fn filtered_child_cannot_connect_to_socket_created_after_launch() {
-    // The socket appears only now — after this process (the "session") started
-    // — mirroring a daemon that starts or unlink/recreates its endpoint
-    // mid-session, which no launch-time bind mask can cover.
+    // The socket appears only now, after this process (the "session") started
+    // That mirrors a daemon that starts or unlink/recreates its endpoint mid-session, which no launch-time bind mask can cover
     let sock = unique_socket_path();
     let _listener = std::os::unix::net::UnixListener::bind(&sock).expect("bind");
 
@@ -73,8 +70,7 @@ fn filtered_child_cannot_connect_to_socket_created_after_launch() {
         String::from_utf8_lossy(&denied.stderr)
     );
 
-    // Control: without the filter the same connect succeeds, proving the
-    // denial above comes from the filter, not the environment.
+    // Control: without the filter the same connect succeeds, proving the denial above comes from the filter, not the environment
     let allowed = spawn_probe(&sock, false);
     assert_eq!(
         allowed.status.code(),
@@ -86,12 +82,9 @@ fn filtered_child_cannot_connect_to_socket_created_after_launch() {
     let _ = std::fs::remove_dir_all(sock.parent().unwrap());
 }
 
-/// The production wrappers end-to-end: installing a network-restricting
-/// profile WITHOUT a kernel apply must arm `restrict_child_network_std` — the
-/// exact call the LSP client, notification hooks, and `.envrc` evaluators
-/// make — and deny the child's connect. Covers the degraded state (Landlock
-/// unavailable / apply failed) where the per-spawn filter is the only
-/// remaining child-network control.
+/// Installing a network-restricting profile without a kernel apply must enable `restrict_child_network_std` and deny the child's connect.
+/// `restrict_child_network_std` is the exact call the LSP client, notification hooks, and `.envrc` evaluators make.
+/// This covers the degraded state (Landlock unavailable, apply failed) where the per-spawn filter is the only remaining child-network control.
 #[test]
 fn restrict_child_network_std_arms_from_config_without_apply() {
     let manager = xai_grok_sandbox::SandboxManager::new(

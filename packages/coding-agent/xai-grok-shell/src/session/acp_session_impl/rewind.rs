@@ -1,5 +1,4 @@
-//! Rewind concern for `SessionActor`: rewind points, cross-compaction
-//! replay detection, and `handle_rewind`.
+//! Rewind concern for `SessionActor`: rewind points, cross-compaction replay detection, and `handle_rewind`.
 
 use super::*;
 
@@ -9,9 +8,8 @@ impl SessionActor {
         state.rewindable = false;
     }
 
-    /// Returns the `prompt_index → num_file_snapshots` map from the on-disk
-    /// snapshot index (independent of the chat-state prompt index). The bridge
-    /// joins these onto the server's rewind points.
+    /// Returns the `prompt_index → num_file_snapshots` map from the on-disk snapshot index (independent of the chat-state prompt index).
+    /// The bridge joins these onto the server's rewind points.
     pub(super) async fn rewind_file_counts(&self) -> std::collections::HashMap<usize, usize> {
         self.file_state_tracker
             .get_rewind_point_metas()
@@ -23,12 +21,10 @@ impl SessionActor {
 
     /// Get available rewind points for this session.
     ///
-    /// Every prompt is a checkpoint — the list always contains `[0, 1, ..., N-1]`
-    /// where N is the current prompt_index. File snapshots may or may not exist
-    /// for each checkpoint (indicated by `has_file_changes`).
+    /// Every prompt is a checkpoint: the list always contains `[0, 1, ..., N-1]` where N is the current prompt_index.
+    /// File snapshots may or may not exist for each checkpoint (indicated by `has_file_changes`).
     pub(super) async fn get_rewind_points(&self) -> RewindPointsResponse {
-        // Metadata only — don't materialize the (huge) file-content snapshots
-        // just to render the picker.
+        // Metadata only: don't load the (huge) file-content snapshots just to render the picker
         let file_metas = self.file_state_tracker.get_rewind_point_metas().await;
 
         // Query prompt state from the chat state actor.
@@ -86,14 +82,10 @@ impl SessionActor {
     /// Load user prompts from `updates.jsonl` in chronological order.
     ///
     /// Each `UserMessageChunk` sequence is merged into a single prompt string.
-    /// `RewindMarker` entries truncate the list back to the marker's target so
-    /// only prompts from the current timeline are returned.
+    /// `RewindMarker` entries truncate the list back to the marker's target so only prompts from the current timeline are returned.
     ///
-    /// Uses [`PromptExtractIterator`] which peeks at the `update.sessionUpdate`
-    /// discriminant field without fully deserialising every notification.  This
-    /// avoids large `acp::SessionNotification` allocations for the many update
-    /// types (tool calls, assistant chunks, etc.) that are irrelevant to prompt
-    /// extraction.
+    /// Uses [`PromptExtractIterator`] which peeks at the `update.sessionUpdate` discriminant field without fully deserialising every notification.
+    /// This skips large `acp::SessionNotification` allocations for the many update types (tool calls, assistant chunks) prompt extraction ignores.
     pub(super) fn load_user_prompts_from_updates(
         updates_path: &std::path::Path,
     ) -> std::io::Result<Vec<String>> {
@@ -118,22 +110,11 @@ impl SessionActor {
         Ok(prompts)
     }
 
-    /// Check whether rewinding to `target_index` needs replay because a
-    /// compaction has occurred, meaning we need to replay `updates.jsonl`
-    /// to reconstruct the conversation.
+    /// Check whether a rewind must replay `updates.jsonl` to reconstruct the conversation: replay whenever a compaction has occurred.
     ///
-    /// Always use replay when compaction has occurred, regardless of whether
-    /// the target is before, at, or after the compaction point.
-    ///
-    /// Post-compaction, the in-memory conversation has a different number of
-    /// User messages than `prompt_index` implies (compaction collapses N+1
-    /// user messages into ~3). `truncate_to_prompt_index` counts User items
-    /// to find the cut point, so it produces wrong results for ALL
-    /// post-compaction targets — not just at the boundary.
-    ///
-    /// `replay_to_prompt` reads `updates.jsonl` from scratch and handles
-    /// compaction checkpoints correctly, so it always produces the right
-    /// conversation regardless of target position.
+    /// Compaction collapses N+1 user messages into ~3, so the conversation in memory no longer has the User count `prompt_index` implies.
+    /// `truncate_to_prompt_index` counts User items to find the cut point, so it is wrong for ALL post-compaction targets, not just at the boundary.
+    /// `replay_to_prompt` reads `updates.jsonl` from scratch and handles compaction checkpoints correctly, whatever the target position.
     async fn needs_compaction_replay(&self) -> bool {
         let last = self
             .chat_state_handle
@@ -154,17 +135,16 @@ impl SessionActor {
 
     /// Handle a rewind request with mode support.
     ///
-    /// Semantics: "restore state before prompt N ran" — prompts 0..N-1 are kept.
+    /// "Rewind to N" restores the state from before prompt N ran; prompts 0..N-1 are kept.
     ///
     /// Modes:
-    /// - `All`: roll back both conversation and files (full time-travel)
+    /// - `All`: roll back both conversation and files
     /// - `ConversationOnly`: roll back conversation, leave files untouched
     /// - `FilesOnly`: roll back files, leave conversation untouched
     pub(super) async fn handle_rewind(
         &self,
         request: RewindRequest,
     ) -> anyhow::Result<RewindResponse> {
-        // Track revert for feedback signals
         self.signals_handle().mark_reverted();
 
         let target_index = request.target_prompt_index;
@@ -178,10 +158,9 @@ impl SessionActor {
             None
         };
 
-        // Validate: target must be less than current prompt_index. FilesOnly
-        // reverts the on-disk snapshot index (bounded by `get_rewind_points`,
-        // not the conversation), so it is exempt — the chat-state prompt index
-        // is empty in bridge mode, where the conversation lives server-side.
+        // Validate: target must be less than current prompt_index
+        // FilesOnly reverts the on-disk snapshot index (bounded by `get_rewind_points`, not the conversation), so it is exempt
+        // In bridge mode the conversation lives server-side and the chat-state prompt index is empty
         let current_prompt_index = self.chat_state_handle.get_prompt_index().await;
         if mode != RewindMode::FilesOnly && target_index >= current_prompt_index {
             return Ok(RewindResponse {
@@ -206,8 +185,7 @@ impl SessionActor {
         let mut clean_files = Vec::new();
         let mut conflicts = Vec::new();
 
-        // Collect files that would be reverted and detect conflicts.
-        // This is read-only — no mutations happen here.
+        // Collect files that would be reverted and detect conflicts; this is read-only
         let mut files_to_revert: std::collections::HashMap<
             xai_grok_workspace::session::file_state::FlexiblePath,
             Option<String>,
@@ -234,8 +212,7 @@ impl SessionActor {
                     .await
                     .unwrap_or(None);
 
-                // Find the latest after_snapshot for this file (what the agent
-                // most recently left it as) for conflict detection.
+                // Find the latest after_snapshot for this file (what the agent most recently left it as) for conflict detection
                 let after_content = all_points
                     .iter()
                     .rev()
@@ -263,8 +240,7 @@ impl SessionActor {
         }
 
         // ── Preview mode (force=false): pure dry run, no mutations ────
-        // Return what WOULD happen so the TUI can show a confirmation
-        // modal. Nothing is written, deleted, or truncated.
+        // Return what WOULD happen so the TUI can show a confirmation modal
         if !request.force {
             let error = if !conflicts.is_empty() {
                 Some("External modifications detected. Confirm to revert anyway.".to_string())
@@ -333,20 +309,16 @@ impl SessionActor {
                 *pending = prompt_text.clone();
             }
 
-            // Check cross-compaction before rewinding.
             let needs_replay = self.needs_compaction_replay().await;
 
-            // Get conversation from the chat state actor for truncation logic.
             let mut conversation = self.chat_state_handle.get_conversation().await;
 
-            // Cross-compaction replay recomputes whether a compaction summary
-            // survives; `None` keeps the existing marker (standard truncation).
+            // Cross-compaction replay recomputes whether a compaction summary survives; `None` keeps the existing marker (standard truncation)
             let mut replay_compaction_marker: Option<Option<usize>> = None;
 
             if needs_replay {
-                // Cross-compaction rewind: reconstruct conversation from updates.jsonl.
-                // Run on the blocking pool since replay does synchronous file I/O
-                // (reading checkpoint files + scanning updates.jsonl).
+                // Cross-compaction rewind: reconstruct the conversation from updates.jsonl
+                // Run on the blocking pool since replay does synchronous file I/O (reading checkpoint files and scanning updates.jsonl)
                 let replay_updates = updates_path.clone();
                 let replay_session_dir = session_dir.clone();
                 let replay_target = target_index;
@@ -367,28 +339,21 @@ impl SessionActor {
                             conversation_len = replay_result.conversation.len(),
                             "Cross-compaction rewind: conversation reconstructed via replay"
                         );
-                        // The rebuilt conversation drops the summary unless a
-                        // checkpoint survived; carry the recomputed marker to
-                        // the snapshot restore so the stale value isn't reused.
+                        // The rebuilt conversation drops the summary unless a checkpoint survived
+                        // Carry the recomputed marker to the snapshot restore so the stale value isn't reused
                         replay_compaction_marker = Some(replay_result.last_compaction_prompt_index);
-                        // The replay result may or may not include the session
-                        // preamble (System + User(user_info)):
-                        // - Checkpoint loaded (target >= compaction_at): the
-                        //   checkpoint's compacted_history already has System +
-                        //   User prefix. Use directly.
-                        // - Raw updates (target < compaction_at): replay only
-                        //   accumulates user/agent turns from updates.jsonl.
-                        //   Prepend System + original User(user_info) so the
-                        //   model sees the same preamble it originally saw.
+                        // The replay result may or may not include the session preamble (System and User(user_info)):
+                        // - Checkpoint loaded (target >= compaction_at): compacted_history already has the System and User prefix; use it directly
+                        // - Raw updates (target < compaction_at): replay only accumulates user/agent turns from updates.jsonl
+                        //   Prepend System and the original User(user_info) so the model sees the same preamble it originally saw
                         if matches!(
                             replay_result.conversation.first(),
                             Some(ConversationItem::System(_))
                         ) {
                             conversation = replay_result.conversation;
                         } else {
-                            // Keep System (index 0). Replace User(user_info) at
-                            // index 1 with the original from the checkpoint if
-                            // available, otherwise keep the current one.
+                            // Keep System (index 0)
+                            // Replace User(user_info) at index 1 with the original from the checkpoint if available, otherwise keep the current one
                             if let Some(ui0) = replay_result.original_user_info {
                                 conversation.truncate(1); // keep System only
                                 conversation.push(ConversationItem::user(ui0));
@@ -404,12 +369,9 @@ impl SessionActor {
                             target_index,
                             "Cross-compaction replay failed — rewind aborted"
                         );
-                        // Do NOT fall back to truncation: the post-compaction
-                        // conversation has wrong user-message counts, and raw
-                        // replay without a checkpoint produces an oversized
-                        // conversation that will exceed the context window.
-                        // Return a clear error so the user can rewind to a
-                        // different (post-compaction) prompt instead.
+                        // Do NOT fall back to truncation: the post-compaction conversation has wrong user-message counts
+                        // Raw replay without a checkpoint produces an oversized conversation that will exceed the context window
+                        // Return a clear error so the user can rewind to a different (post-compaction) prompt instead
                         return Ok(RewindResponse {
                             success: false,
                             target_prompt_index: target_index,
@@ -428,9 +390,8 @@ impl SessionActor {
                     }
                 }
             } else {
-                // Standard rewind: truncate in-memory conversation. "Rewind
-                // to N" = restore state before prompt N ran, keeping 0..N-1;
-                // target 0 keeps only the session preamble.
+                // Standard rewind: truncate the in-memory conversation
+                // "Rewind to N" means restoring the state from before prompt N ran, keeping prompts 0..N-1; target 0 keeps only the session preamble
                 let keep_count = conversation_truncate_for_prompt(&conversation, target_index);
                 conversation.truncate(keep_count);
             }
@@ -439,25 +400,21 @@ impl SessionActor {
             self.cancel_pending_image_strips_for_rewind();
             self.chat_state_handle.replace_conversation(conversation);
             // Use a snapshot to set the correct prompt_index and truncated prompt_texts.
-            // The actor's TruncateToPromptIndex doesn't apply here because the
-            // conversation was already truncated locally. Instead, snapshot + restore
-            // with the corrected fields.
+            // The actor's TruncateToPromptIndex doesn't apply here because the conversation was already truncated locally
+            // Instead, snapshot and restore with the corrected fields
             if let Some(mut snap) = self.chat_state_handle.snapshot().await {
                 snap.prompt_index = target_index;
                 snap.prompt_texts.truncate(target_index);
-                // Cross-compaction rewind recomputes the marker (the rebuilt
-                // conversation may have dropped the summary); standard
-                // truncation keeps the existing marker.
+                // Cross-compaction rewind recomputes the marker (the rebuilt conversation may have dropped the summary)
+                // Standard truncation keeps the existing marker
                 let new_marker =
                     replay_compaction_marker.unwrap_or(snap.last_compaction_prompt_index);
                 snap.last_compaction_prompt_index = new_marker;
                 self.chat_state_handle.restore_snapshot(snap);
             }
 
-            // Conversation shrank — clear budget-based (size/schema) and stale
-            // per-turn suppression so compaction can run against the smaller context.
-            // Account-state suppression (credit/auth → SUPPRESS_UNTIL_SUCCESS) isn't
-            // budget-related, so it persists until a successful model call.
+            // The conversation shrank: clear budget-based (size/schema) and stale per-turn suppression so compaction can run on the smaller context
+            // Account-state suppression (credit/auth sets SUPPRESS_UNTIL_SUCCESS) isn't budget-related, so it persists until a successful model call
             if self
                 .compaction
                 .auto_compact_suppressed
@@ -470,24 +427,19 @@ impl SessionActor {
                 );
             }
 
-            // The rewind may have dropped failed-server reminders with the
-            // truncated turns; re-arm so still-down servers re-announce
-            // (see rearm_failed_server_announcements for why connected
-            // fingerprints stay latched).
+            // The rewind may have dropped failed-server reminders with the truncated turns, so still-down servers must re-announce
+            // See rearm_failed_server_announcements for why connected fingerprints stay latched
             self.rearm_failed_server_announcements().await;
 
-            // Append a RewindMarker to updates.jsonl so the replay pipeline can
-            // handle timeline branching (updates.jsonl is append-only).
+            // Append a RewindMarker to updates.jsonl so replay can handle a branched timeline (updates.jsonl is append-only)
             self.persist_xai_update_only(XaiSessionUpdate::RewindMarker {
                 target_prompt_index: target_index,
                 created_at: chrono::Utc::now().to_rfc3339(),
             });
 
-            // The turn summary and recap describe turns the rewind just
-            // removed; abort in-flight side-calls and clear the persisted
-            // copies so listing surfaces don't show stale work. Bumping the
-            // recap epoch stops an in-flight recap from committing (and
-            // re-persisting `last_recap`) after the clear below.
+            // The turn summary and recap describe turns the rewind just removed
+            // Abort in-flight side-calls and clear the persisted copies so session lists don't show stale work
+            // Bumping the recap epoch stops an in-flight recap from committing (and re-persisting `last_recap`) after the clear below
             self.recap_epoch.set(self.recap_epoch.get().wrapping_add(1));
             self.abort_turn_summary();
             self.abort_title_refresh();
@@ -500,13 +452,10 @@ impl SessionActor {
                 .persistence_tx
                 .send(PersistenceMsg::LastRecap(None));
 
-            // Re-derive the AUTO title-refresh checkpoint from the shortened
-            // conversation: a rewind below a checkpoint re-opens refreshing,
-            // while one still past the window stays frozen. Persist it so the
-            // reopened state survives resume (unlike compaction, a rewind
-            // genuinely removes the turns those checkpoints described). A
-            // manually-titled session stays frozen — reopening would only spawn
-            // side-calls the manual-title guard rejects anyway.
+            // Re-derive the AUTO title-refresh checkpoint from the shortened conversation
+            // A rewind below a checkpoint re-opens refreshing, while one still past the window stays frozen
+            // Persist it so the reopened state survives resume (unlike compaction, a rewind genuinely removes the turns those checkpoints described)
+            // A manually-titled session stays frozen; reopening would only spawn side-calls the manual-title guard rejects anyway
             let session_dir = crate::session::persistence::session_dir(&self.session_info);
             if !crate::session::persistence::title_is_manual_in_dir(&session_dir) {
                 let post_rewind_turns = crate::session::helpers::session_recap::main_turn_count(
@@ -525,7 +474,7 @@ impl SessionActor {
 
         // Update the file state tracker to reflect the rewind.
         if wants_file_revert {
-            // All/FilesOnly: files were reverted, snapshots are stale — truncate.
+            // All/FilesOnly: files were reverted and the snapshots are now stale, so truncate them
             self.file_state_tracker.truncate_from(target_index).await;
             let _ = self
                 .notifications
@@ -550,20 +499,17 @@ impl SessionActor {
         })
     }
 
-    /// `ConversationOnly` rewind-tracker bookkeeping: merge the discarded
-    /// prompts' file effects (`>= target_index`) into the previous rewind point
-    /// so that (a) `/rewind 0` can still undo all file changes, and (b) a new
-    /// prompt at `target_index` gets a fresh rewind point whose before-snapshots
-    /// reflect current disk state. Files and the conversation are left untouched.
+    /// `ConversationOnly` rewind-tracker bookkeeping: merge the discarded prompts' file effects (`>= target_index`) into the previous rewind point.
+    /// That keeps `/rewind 0` able to undo all file changes.
+    /// A new prompt at `target_index` then gets a fresh rewind point whose before-snapshots reflect current disk state.
+    /// Files and the conversation are left untouched.
     ///
-    /// Updates the in-memory tracker, then persists via a disk-authoritative
-    /// merge so a lazily-unloaded or partial tracker can't truncate history off
-    /// disk. No normalize_to_relative needed: per-turn persistence already
-    /// normalized the on-disk points (turn.rs, before PersistenceMsg::RewindPoint).
+    /// Updates the in-memory tracker, then persists via a disk-authoritative merge.
+    /// The merge means a lazily-unloaded or partial tracker can't truncate history off disk.
+    /// No normalize_to_relative needed: per-turn persistence already normalized the on-disk points (turn.rs, before PersistenceMsg::RewindPoint).
     ///
-    /// Shared by local `handle_rewind` (ConversationOnly) and the bridge-mode
-    /// ConversationOnly path, whose conversation rewind lands server-side
-    /// (SessionCommand::ReconcileRewindTracker).
+    /// Shared by local `handle_rewind` (ConversationOnly) and the bridge-mode ConversationOnly path.
+    /// The bridge path's conversation rewind lands server-side (SessionCommand::ReconcileRewindTracker).
     pub(super) async fn merge_rewind_tracker_from(&self, target_index: usize) {
         self.file_state_tracker
             .merge_and_remove_from(target_index)
@@ -574,24 +520,19 @@ impl SessionActor {
             .send(PersistenceMsg::MergeRewindPointsFrom { target_index });
     }
 
-    /// Out-of-band history repair (`x.ai/session/repair`) for a resident
-    /// session: run `xai_chat_state::compaction_utils::repair_history` inside
-    /// the chat-state actor, then flush persistence so `chat_history.jsonl`
-    /// is rewritten on disk before the caller sees success.
+    /// Out-of-band history repair (`x.ai/session/repair`) for a resident session.
+    /// Runs `xai_chat_state::compaction_utils::repair_history` inside the chat-state actor, then flushes persistence.
+    /// The flush means `chat_history.jsonl` is rewritten on disk before the caller sees success.
     ///
-    /// Refused while a turn is in flight (in-flight tool calls legitimately
-    /// await their results). The refusal is enforced inside the chat-state
-    /// actor's command handler — see `ChatStateCommand::RepairHistory` for
-    /// why a caller-side check alone would race turn start; the check below
-    /// is just a fast path.
+    /// Refused while a turn is in flight (in-flight tool calls legitimately await their results).
+    /// The refusal is enforced inside the chat-state actor's command handler; the check below is just a fast path.
+    /// See `ChatStateCommand::RepairHistory` for why a caller-side check alone would race turn start.
     pub(super) async fn handle_repair_history(
         &self,
         dry_run: bool,
     ) -> anyhow::Result<xai_chat_state::compaction_utils::HistoryRepairReport> {
-        // Per-session flag — NOT `tool_context.is_turn_active`, which is the
-        // agent-wide coordinator flag shared by all sessions (using it would
-        // refuse repair of an idle session while any other session runs a
-        // turn, and another session's turn end could clear it mid-turn).
+        // Per-session flag, NOT `tool_context.is_turn_active`, which is the agent-wide coordinator flag shared by all sessions
+        // Using it refuses repair of an idle session while any other session runs a turn, and another session's turn end could clear it mid-turn
         let turn_flag = self.session_turn_active.clone();
         if turn_flag.load(std::sync::atomic::Ordering::SeqCst) {
             anyhow::bail!(xai_chat_state::commands::RepairHistoryBlocked);

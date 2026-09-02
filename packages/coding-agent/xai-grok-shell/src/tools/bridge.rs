@@ -1,6 +1,3 @@
-//! ToolBridge: re-exported from `xai-grok-tools`.
-//!
-//! The bridge implementation now lives in `xai_grok_tools::bridge`.
-//! This module re-exports everything for backward compatibility.
+//! The bridge implementation lives in `xai_grok_tools::bridge`; this module re-exports it for backward compatibility.
 
 pub use xai_grok_tools::bridge::{ToolBridge, ToolBridgeResult};

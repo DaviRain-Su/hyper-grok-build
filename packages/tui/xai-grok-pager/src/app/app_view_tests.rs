@@ -149,6 +149,7 @@ pub(crate) fn test_app() -> AppView {
         contextual_hints: Default::default(),
         remote_contextual_hints: None,
         tip_seen_counts: Default::default(),
+        export_copy_slash_used: false,
         last_known_terminal_rows: 0,
         small_screen_tip_evaluated: false,
         ssh_wrap_tip_evaluated: false,
@@ -1257,6 +1258,49 @@ fn needs_animation_gates_btw_loading_spinner() {
         error: "boom".into(),
     });
     assert!(!app.needs_animation());
+}
+#[test]
+fn needs_animation_gates_extensions_modal_loading_spinner() {
+    use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab, TabDataState};
+    use crate::views::turn_status::SPINNER_DIVISOR;
+    let mut app = test_app_with_agent();
+    let id = super::super::agent::AgentId(0);
+    assert!(!app.needs_animation(), "idle agent must not request ticks");
+    app.agents.get_mut(&id).unwrap().extensions_modal =
+        Some(ExtensionsModalState::new(ExtensionsTab::McpServers));
+    assert!(
+        app.needs_animation(),
+        "/mcps Loading must keep ticks alive so the picker spinner can advance"
+    );
+    let saw_redraw = (0..SPINNER_DIVISOR).any(|_| app.tick());
+    assert!(
+        saw_redraw,
+        "Loading must redraw at spinner cadence while idle"
+    );
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .extensions_modal
+        .as_mut()
+        .unwrap()
+        .mcps_data = TabDataState::Loaded(Vec::new());
+    assert!(
+        !app.needs_animation(),
+        "loaded /mcps list must not metronome"
+    );
+    let modal = app
+        .agents
+        .get_mut(&id)
+        .unwrap()
+        .extensions_modal
+        .as_mut()
+        .unwrap();
+    modal.pending_action = Some("Installing…".into());
+    modal.pending_entry_index = None;
+    assert!(
+        app.needs_animation(),
+        "tab-wide pending overlay spinner must keep ticks alive"
+    );
 }
 #[test]
 fn needs_animation_gates_pending_acp_command_sync() {

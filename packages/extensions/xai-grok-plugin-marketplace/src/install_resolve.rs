@@ -3,17 +3,15 @@
 use crate::types::{MarketplaceEntry, MarketplaceSource, SourceKind};
 use crate::{canonical_github_owner_repo, is_official_source_url};
 
-/// A parsed marketplace install ref: a plugin `name` with an optional source
-/// `qualifier` (`owner/repo` for git, `local/<slug>` for local sources).
+/// A parsed marketplace install ref: a plugin `name` with an optional source `qualifier` (`owner/repo` for git, `local/<slug>` for local sources).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarketplaceRef {
     pub name: String,
     pub qualifier: Option<String>,
 }
 
-/// Recognize `<name>` / `<name>@<qualifier>` install args, leaving git URLs,
-/// GitHub shorthand, and local paths (including Windows paths) for the existing
-/// parser.
+/// Recognize `<name>` / `<name>@<qualifier>` install args.
+/// Git URLs, GitHub shorthand, and local paths (including Windows paths) are left for the existing parser.
 pub fn parse_marketplace_ref(arg: &str) -> Option<MarketplaceRef> {
     if arg.contains("://") || arg.starts_with("git@") {
         return None;
@@ -58,9 +56,8 @@ pub fn slugify(name: &str) -> String {
         .join("-")
 }
 
-/// The qualifier a user would type to pin this source: `owner/repo` for a
-/// GitHub git source, `git/<slug>` for a non-GitHub git source, `local/<slug>`
-/// for a local source.
+/// The qualifier a user would type to pin this source.
+/// `owner/repo` names a GitHub git source, `git/<slug>` a non-GitHub git source, `local/<slug>` a local source.
 pub fn addressable_qualifier(source: &MarketplaceSource) -> String {
     match &source.kind {
         SourceKind::Git { url, .. } => canonical_github_owner_repo(url)
@@ -78,14 +75,12 @@ pub enum QualifierResolveError {
 
 /// Resolve a qualifier to exactly one registered source index.
 ///
-/// A bare `owner/repo` matches GitHub git sources. `local/<slug>` and
-/// `git/<slug>` match local/git sources by slugified name, and both also keep
-/// the `owner/repo` interpretation so a GitHub source owned by `git`/`local`
-/// still resolves. A qualifier also matches a source's registered `name`
-/// (exactly, or slugified): `<plugin>@<marketplace-name>` is the only pin for
-/// non-github.com hosts (e.g. GitHub Enterprise) that have no `owner/repo`
-/// form. Matches spanning more than one source surface as
-/// [`QualifierResolveError::Ambiguous`].
+/// A bare `owner/repo` matches GitHub git sources.
+/// `local/<slug>` and `git/<slug>` match local/git sources by slugified name.
+/// Both also keep the `owner/repo` interpretation so a GitHub source owned by `git`/`local` still resolves.
+/// A qualifier also matches a source's registered `name`, exactly or slugified.
+/// `<plugin>@<marketplace-name>` is the only pin for non-github.com hosts (e.g. GitHub Enterprise) that have no `owner/repo` form.
+/// When more than one source matches, the result is [`QualifierResolveError::Ambiguous`].
 pub fn resolve_qualified_source(
     qualifier: &str,
     sources: &[MarketplaceSource],
@@ -140,16 +135,14 @@ pub struct ScannedEntry<'a> {
 pub struct BareNameSelection {
     /// Index into the scanned slice of the entry to install.
     pub chosen: usize,
-    /// How many other copies of the name exist (non-zero only when official
-    /// priority broke a tie).
+    /// How many other copies of the name exist (non-zero only when official priority broke a tie).
     pub other_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BareNameError {
     NotFound,
-    /// Several sources provide the name and none is uniquely official; payload
-    /// is the matching indices into the scanned slice.
+    /// Several sources provide the name and none is uniquely official; payload is the matching indices into the scanned slice.
     Ambiguous {
         matched: Vec<usize>,
     },
@@ -157,8 +150,8 @@ pub enum BareNameError {
 
 /// Choose which scanned entry to install for a bare `<name>` (case-insensitive).
 ///
-/// One match wins outright. With several matches, a single official-source copy
-/// wins (reporting the others); otherwise the result is ambiguous.
+/// One match wins outright.
+/// With several matches, a single official-source copy wins (reporting the others); otherwise the result is ambiguous.
 pub fn select_bare_name(
     name: &str,
     scanned: &[ScannedEntry<'_>],

@@ -1,6 +1,6 @@
-//! Adapter-driven session synthesis for benches: appends realistic turns through
-//! the real `JsonlStorageAdapter` until `updates.jsonl` reaches a byte target,
-//! so fork/copy benchmarks measure production-shaped data.
+//! Adapter-driven session synthesis for benches.
+//! Appends realistic turns through the real `JsonlStorageAdapter` until `updates.jsonl` reaches a byte target.
+//! Fork and copy benchmarks thus measure production-shaped data.
 
 use std::path::Path;
 
@@ -10,9 +10,8 @@ use crate::session::info::Info;
 use crate::session::storage::{JsonlStorageAdapter, SessionUpdate, StorageAdapter};
 
 const AGENT_CHUNKS_PER_TURN: usize = 8;
-/// Stands in for a large tool result, the dominant byte source in real
-/// sessions. Emitted as an agent message chunk so the byte and line shape match
-/// production rather than the `ToolCall` kind.
+/// Stands in for a large tool result, the dominant byte source in real sessions.
+/// Emitted as an agent message chunk so the byte and line shape match production rather than the `ToolCall` kind.
 const BULKY_CHUNK_BYTES: usize = 4096;
 
 fn turn_updates(info: &Info, turn: usize) -> Vec<SessionUpdate> {
@@ -34,13 +33,11 @@ fn turn_updates(info: &Info, turn: usize) -> Vec<SessionUpdate> {
     updates
 }
 
-/// Build a session dir under `root` whose `updates.jsonl` reaches *at least*
-/// `target_bytes`, appending realistic mixed updates through the real adapter.
-/// The file overshoots to the next 32-turn stat boundary, so the result is a
-/// floor, not an exact size.
+/// Build a session dir under `root` whose `updates.jsonl` reaches *at least* `target_bytes`.
+/// Realistic mixed updates are appended through the real adapter.
+/// The file overshoots to the next 32-turn stat boundary, so the result is a floor, not an exact size.
 ///
-/// Async callers await this directly; synchronous callers (Criterion benches,
-/// plain `#[test]`s) use [`make_session_with_size_blocking`].
+/// Async callers await this directly; synchronous callers (Criterion benches, plain `#[test]`s) use [`make_session_with_size_blocking`].
 pub async fn make_session_with_size(root: &Path, target_bytes: u64) -> Info {
     let adapter = JsonlStorageAdapter::with_root(root.to_path_buf());
     let info = Info {
@@ -58,8 +55,8 @@ pub async fn make_session_with_size(root: &Path, target_bytes: u64) -> Info {
             adapter.append_update(&info, &update).await.expect("append");
         }
         turn += 1;
-        // Stat every 32 turns; sizes only grow. A persistent stat failure
-        // panics here rather than spinning the append loop forever.
+        // Stat every 32 turns; sizes only grow
+        // A persistent stat failure panics here rather than spinning the append loop forever
         if turn.is_multiple_of(32)
             && std::fs::metadata(&updates_path)
                 .expect("stat updates.jsonl")
@@ -72,9 +69,7 @@ pub async fn make_session_with_size(root: &Path, target_bytes: u64) -> Info {
     info
 }
 
-/// Synchronous wrapper over [`make_session_with_size`] for callers outside an
-/// async context (Criterion benches, plain `#[test]`s). Drives the async core
-/// on a private current-thread runtime.
+/// Synchronous wrapper over [`make_session_with_size`] for callers outside an async context (Criterion benches, plain `#[test]`s).
 pub fn make_session_with_size_blocking(root: &Path, target_bytes: u64) -> Info {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()

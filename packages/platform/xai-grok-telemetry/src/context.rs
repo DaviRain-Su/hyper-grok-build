@@ -1,5 +1,3 @@
-//! Git context collection for telemetry events.
-
 pub struct GitContext {
     pub is_git_repo: bool,
 }

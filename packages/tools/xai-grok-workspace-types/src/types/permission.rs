@@ -1,6 +1,5 @@
-//! Permission flow shapes used by
-//! [`ToolChunk::NeedPermission`](crate::chunks::ToolChunk::NeedPermission)
-//! and [`ToolResponse::Permission`](crate::chunks::ToolResponse::Permission).
+//! Permission flow shapes used by [`ToolChunk::NeedPermission`](crate::chunks::ToolChunk::NeedPermission).
+//! They also appear in [`ToolResponse::Permission`](crate::chunks::ToolResponse::Permission).
 //!
 //! These feed the bidirectional tool-stream flow that consumes these types.
 //!
@@ -9,8 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// A pending permission request emitted to the sampler via
-/// [`ToolChunk::NeedPermission`](crate::chunks::ToolChunk::NeedPermission).
+/// A pending permission request emitted to the sampler via [`ToolChunk::NeedPermission`](crate::chunks::ToolChunk::NeedPermission).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionRequest {
     /// Tool the permission is for (e.g. `"run_terminal_cmd"`).
@@ -26,17 +24,13 @@ pub struct PermissionRequest {
     pub destructive: bool,
 }
 
-/// User decision delivered to the workspace via
-/// [`ToolResponse::Permission`](crate::chunks::ToolResponse::Permission)
-/// on the tool's bidi response sender.
+/// User decision delivered to the workspace via [`ToolResponse::Permission`](crate::chunks::ToolResponse::Permission).
+/// It arrives on the tool's bidi response sender.
 ///
-/// Tagged with `tag = "type", content = "data"` (adjacent tagging) to
-/// match every other wire enum in the crate. See `crate::lib`
-/// doc-comment "# Wire format" for the rationale (adjacent tagging is
-/// the only form that works uniformly across struct, newtype, and unit
-/// variants -- and avoids the historical `{"decision":{"decision":"deny"}}`
-/// nesting hazard when this enum is itself the value of a parent's
-/// `decision` field).
+/// Tagged with `tag = "type", content = "data"` (adjacent tagging) to match every other wire enum in the crate.
+/// See `crate::lib` doc-comment "# Wire format" for the rationale.
+/// Adjacent tagging is the only form that works uniformly across struct, newtype, and unit variants.
+/// It avoids the historical `{"decision":{"decision":"deny"}}` nesting hazard when this enum is itself the value of a parent's `decision` field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum PermissionDecision {

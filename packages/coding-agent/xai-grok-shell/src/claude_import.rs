@@ -1,9 +1,7 @@
-// claude_import.rs
 // Scans Claude settings and generates TOML patches for .grok/config.toml.
 //
-// This module reuses the existing discovery and parsing functions from
-// claude_compat.rs and util/config.rs. It does NOT modify the runtime
-// Claude compat layer — that continues to work as before.
+// This module reuses the existing discovery and parsing functions from claude_compat.rs and util/config.rs
+// It does NOT modify the runtime Claude compat layer; that continues to work as before
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -51,8 +49,7 @@ pub enum ImportableItem {
         name: String,
         config: Box<McpServerConfig>,
     },
-    /// A single hook (one event + matcher + command, derived from a Claude
-    /// `hooks` entry).
+    /// A single hook (one event, matcher, and command, derived from a Claude `hooks` entry).
     Hook {
         event: String,
         matcher: Option<String>,
@@ -167,12 +164,9 @@ fn format_item_summary(items: &[ImportableItem]) -> String {
     if !envs.is_empty() {
         out.push_str(&format!("  - {} environment variable(s)\n", envs.len()));
         for (key, value) in &envs {
-            // Redact the value: even keys like FOO_KEY can hide secrets
-            // (API tokens, credentials). The raw value still flows into
-            // the on-disk config.toml for actual use; only the human-
-            // facing summary suppresses it. We surface a length hint so
-            // the user can recognise their setting without exposing the
-            // contents in terminals, screenshots, or CI logs.
+            // Redact the value: even keys like FOO_KEY can hide secrets (API tokens, credentials)
+            // The raw value still flows into the on-disk config.toml for actual use; only the human-facing summary suppresses it
+            // The length hint lets the user recognise their setting without exposing the contents in terminals, screenshots, or CI logs
             out.push_str(&format!(
                 "      {} = <redacted, {} chars>\n",
                 key,
@@ -265,8 +259,8 @@ fn format_item_summary(items: &[ImportableItem]) -> String {
 /// }
 /// ```
 ///
-/// Each command handler becomes one `ImportableItem::Hook`. HTTP handlers and
-/// other types are skipped (we only import shell commands).
+/// Each command handler becomes one `ImportableItem::Hook`.
+/// HTTP handlers and other types are skipped (we only import shell commands).
 fn extract_hooks_from_settings_file(path: &Path) -> Vec<ImportableItem> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -326,16 +320,15 @@ fn extract_hooks_from_settings_file(path: &Path) -> Vec<ImportableItem> {
 /// Scan all Claude settings sources and build an import plan.
 ///
 /// Discovers:
-/// - Permission rules from `.claude/settings*.json` (global + project)
+/// - Permission rules from `.claude/settings*.json` (global and project)
 /// - Environment variables from `.claude/settings*.json`
-/// - MCP servers from `~/.claude.json` (global + per-project)
+/// - MCP servers from `~/.claude.json` (global and per-project)
 /// - MCP servers from `.mcp.json` files (project)
 pub fn scan_importable_settings(cwd: &Path) -> ImportPlan {
     let mut plan = ImportPlan::default();
 
     let all_paths = find_claude_settings_paths(cwd);
-    // The home used for the is_global split must match the resolution in
-    // config.rs and claude_import_state.rs, or scan and hash tiers disagree.
+    // The home used for the is_global split must match the resolution in config.rs and claude_import_state.rs, or scan and hash tiers disagree
     let home = xai_dirs::home_dir();
 
     for path in &all_paths {
@@ -405,13 +398,12 @@ pub fn scan_importable_settings(cwd: &Path) -> ImportPlan {
     plan
 }
 
-/// Scan for `~/.claude/{skills,rules}` (global) and `<repo>/.claude/{skills,rules}`
-/// (project) and emit `PathEntry` items so they survive the runtime cutoff.
+/// Scan `~/.claude/{skills,rules}` (global) and `<repo>/.claude/{skills,rules}` (project).
+/// Emits `PathEntry` items so the dirs survive the runtime cutoff.
 fn scan_claude_path_dirs(cwd: &Path, plan: &mut ImportPlan) {
-    // Track canonicalised global paths so the project scan below can dedup
-    // against them — e.g. when the user runs `/import-claude` from `~`,
-    // the project root *is* the home directory and the same `.claude/skills`
-    // would otherwise be added to both global and project scopes.
+    // Track canonicalised global paths so the project scan below can dedup against them
+    // When the user runs `/import-claude` from `~`, the project root *is* the home directory
+    // The same `.claude/skills` would otherwise be added to both global and project scopes
     let mut global_added: std::collections::HashSet<std::path::PathBuf> =
         std::collections::HashSet::new();
 
@@ -456,14 +448,9 @@ fn scan_claude_json_mcp_servers(cwd: &Path, plan: &mut ImportPlan) {
         return;
     }
 
-    // TODO(phase-2): `load_claude_json_mcp_servers_as_configs()` merges
-    // user-level servers (top-level `mcpServers` in `~/.claude.json`) with
-    // project-specific servers (`projects.<cwd>.mcpServers`) into a single
-    // map. This means project-specific servers are incorrectly classified
-    // as global here. To fix, we need to call the underlying
-    // `load_claude_json_mcp_servers_from()` twice — once filtering to
-    // user-level entries only (global) and once for project entries — or
-    // expose a split variant of the load function in `config.rs`.
+    // TODO: project-specific servers are incorrectly classified as global here
+    // `load_claude_json_mcp_servers_as_configs()` merges the top-level `mcpServers` in `~/.claude.json` with `projects.<cwd>.mcpServers` into one map
+    // The fix: call `load_claude_json_mcp_servers_from()` twice (user-level entries, then project entries), or expose a split variant in `config.rs`
     for (name, config) in servers {
         plan.global_items.push(ImportableItem::McpServer {
             name,
@@ -500,42 +487,29 @@ pub fn find_project_root(cwd: &Path) -> PathBuf {
 //
 // The marker `[claude_compat] imported = true` in `~/.grok/config.toml` is
 // the signal that runtime fallback paths should stop reading `.claude/`.
-// The reader infrastructure lives here in the base layer so that gates
-// added in subsequent layers (hooks, paths, perms) can all consult the
-// same cached marker. The writer (`mark_claude_imported`) lives in the
-// runtime-cutoff layer that activates the gates.
+// The reader lives here so the hook, path, and permission gates all consult the same cached marker
+// The writer is `mark_claude_imported` below
 
-/// Cached result of [`is_claude_import_marked`]. See its doc for the
-/// caching rationale and trade-offs.
-///
-/// `RwLock<Option<bool>>` rather than `OnceLock<bool>` so tests can reset the
-/// state between cases (and so a future runtime-invalidation hook can flip
-/// it back to `None`). The fast path is a read-lock + cached `bool`, so the
-/// per-call overhead is one atomic CAS — well below the cost of the
-/// uncached `read_to_string` + TOML parse.
+/// Cached result of [`is_claude_import_marked`]; see its doc for the caching rationale and trade-offs.
+/// `RwLock<Option<bool>>` rather than `OnceLock<bool>` so tests can reset the state between cases.
+/// The fast path is a read lock and a cached `bool`, far below the cost of the uncached `read_to_string` and TOML parse.
 static MARKER_CACHE: std::sync::RwLock<Option<bool>> = std::sync::RwLock::new(None);
 
 /// Whether the current user has already imported Claude settings.
 ///
 /// Reads `[claude_compat] imported = true` from `~/.grok/config.toml` once
-/// per process and caches the result. When the marker is set, runtime
-/// fallbacks that read `.claude/` should be skipped — the user has migrated
-/// to native config.
+/// per process and caches the result.
+/// When the marker is set, runtime fallbacks that read `.claude/` should be skipped; the user has migrated to native config.
 ///
-/// Resilient: returns `false` on missing file, missing section, parse error,
-/// or any other failure.
+/// Resilient: returns `false` on missing file, missing section, parse error, or any other failure.
 ///
-/// Caching avoids a `read_to_string` + TOML parse on every gated call
-/// (`load_claude_env_with_project`, MCP loaders, hook discovery, etc.).
-/// Trade-off: a user who manually flips the marker mid-session must restart to
-/// see the change — acceptable because reverting after import is rare. Use
-/// [`is_claude_import_marked_at`] in tests, which bypasses the cache.
+/// Caching avoids a `read_to_string` and TOML parse on every gated call (`load_claude_env_with_project`, MCP loaders, hook discovery, etc.).
+/// Trade-off: a user who manually flips the marker mid-session must restart to see the change, acceptable because reverting after import is rare.
+/// Use [`is_claude_import_marked_at`] in tests, which bypasses the cache.
 ///
-/// **When to call this vs. [`is_claude_import_marked_with_log`]**: prefer the
-/// `_with_log` variant for runtime compat gates that *change behavior* based
-/// on the marker (so users see one log line indicating the cutoff fired).
-/// Use the bare version for read-time display logic that already has its own
-/// path (e.g. UI listings in `extensions/skills.rs` and `inspect.rs`).
+/// Prefer [`is_claude_import_marked_with_log`] for runtime compat gates that change behavior based on the marker.
+/// That variant logs one line so users can see the cutoff fired.
+/// Use the bare version for read-time display logic that already has its own path (e.g. UI listings in `extensions/skills.rs` and `inspect.rs`).
 pub(crate) fn is_claude_import_marked() -> bool {
     if let Some(v) = *MARKER_CACHE.read().expect("MARKER_CACHE poisoned") {
         return v;
@@ -547,10 +521,7 @@ pub(crate) fn is_claude_import_marked() -> bool {
 }
 
 /// Forcibly seed the cache with the freshly written marker value.
-///
-/// Called from the slash command after `apply_import` writes the marker so
-/// that subsequent in-process gate checks reflect the new state without
-/// waiting for restart.
+/// The slash command calls this after `apply_import` writes the marker so gate checks reflect the new state without a restart.
 pub(crate) fn refresh_marker_cache(value: bool) {
     *MARKER_CACHE.write().expect("MARKER_CACHE poisoned") = Some(value);
 }
@@ -561,15 +532,9 @@ pub(crate) fn reset_marker_cache_for_test() {
     *MARKER_CACHE.write().expect("MARKER_CACHE poisoned") = None;
 }
 
-/// Like [`is_claude_import_marked`], but logs a one-time `info!` line on the
-/// first true result per process so users can see the runtime cutoff is active.
-///
-/// `gate_name` identifies which call site fired the cutoff (useful for
-/// debugging which subsystem stopped reading `.claude/`).
-///
-/// Call sites are runtime fallback paths in `claude_compat.rs`,
-/// `util/config.rs`, `util/hooks.rs`, and `agent/config.rs` that previously
-/// read `.claude/`.
+/// Like [`is_claude_import_marked`], but logs a one-time `info!` line on the first true result per process.
+/// `gate_name` identifies which call site fired the cutoff (useful for debugging which subsystem stopped reading `.claude/`).
+/// Call sites are runtime fallback paths in `claude_compat.rs`, `util/config.rs`, `util/hooks.rs`, and `agent/config.rs` that previously read `.claude/`.
 pub(crate) fn is_claude_import_marked_with_log(gate_name: &'static str) -> bool {
     static LOGGED: OnceLock<()> = OnceLock::new();
     let marked = is_claude_import_marked();
@@ -603,14 +568,12 @@ pub(crate) fn is_claude_import_marked_at(config_path: &Path) -> bool {
 
 /// Write `[claude_compat] imported = true` to `~/.grok/config.toml`.
 ///
-/// Uses the same atomic write pattern as `save_mcp_server_config` (write to
-/// `.tmp`, then rename). Creates the file and parent directory if missing.
-/// Existing content in the file is preserved.
+/// Uses the same atomic write pattern as `save_mcp_server_config` (write to `.tmp`, then rename).
+/// Creates the file and parent directory if missing. Existing content in the file is preserved.
 fn write_import_marker(config_path: &Path) -> anyhow::Result<()> {
-    // Surface parse errors instead of silently discarding the file: an atomic
-    // rewrite would otherwise drop unrelated sections ([model], [ui], etc.)
-    // and overwrite a hand-edited config that just happens to have a trailing
-    // comma. The user can fix the TOML and retry.
+    // Report parse errors instead of silently discarding the file
+    // An atomic rewrite would otherwise drop unrelated sections ([model], [ui], etc.) and overwrite a hand-edited config that happens to have a trailing comma
+    // The user can fix the TOML and retry
     let mut root: TomlValue = match std::fs::read_to_string(config_path) {
         Ok(s) => toml::from_str(&s).map_err(|e| {
             anyhow::anyhow!(
@@ -640,10 +603,8 @@ fn write_import_marker(config_path: &Path) -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let tmp = config_path.with_extension("toml.tmp");
-    // Best-effort cleanup of the .tmp file if either write or rename fails so
-    // a failed marker write doesn't leave a stale artefact next to the real
-    // config (otherwise the next attempt would inherit a half-written file
-    // before the rename clobbers it).
+    // Best-effort cleanup of the .tmp file if either write or rename fails
+    // A stale .tmp would otherwise survive next to the real config, and the next attempt would inherit a half-written file before the rename clobbers it
     if let Err(e) = std::fs::write(&tmp, &toml_str) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e.into());
@@ -655,15 +616,9 @@ fn write_import_marker(config_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Public entry point for the slash command: write the marker (always),
-/// log success, and seed the in-process cache so subsequent gate checks
-/// reflect the new state without restart.
-///
-/// Called from `/import-claude` regardless of whether any items were imported
-/// — the marker is the user's opt-in choice, not a side effect of having
-/// imported items. A user who runs `/import-claude` on an empty workspace
-/// still wants the cutoff applied so re-entering a workspace with `.claude/`
-/// content doesn't re-engage the runtime fallbacks.
+/// Public entry point for the slash command: write the marker, log success, and seed the in-process cache so gate checks reflect it without restart.
+/// Called from `/import-claude` even when nothing was imported: the marker is the user's opt-in choice, not a side effect of having imported items.
+/// Re-entering a workspace with `.claude/` content must not re-engage the runtime fallbacks.
 pub fn mark_claude_imported() -> anyhow::Result<()> {
     let path = crate::util::grok_home::grok_home().join("config.toml");
     write_import_marker(&path)?;
@@ -674,14 +629,11 @@ pub fn mark_claude_imported() -> anyhow::Result<()> {
 
 /// Apply an import plan by writing TOML patches to the appropriate config files.
 ///
-/// This is additive-only: existing entries are never removed. New permission
-/// rules are appended, new env vars are added (existing keys are NOT
-/// overwritten), and new MCP servers are added (existing names are NOT
-/// overwritten).
+/// This is additive-only: existing entries are never removed.
+/// New permission rules are appended; new env vars and MCP servers are added without overwriting existing keys or names.
 ///
-/// Project items are written to `<repo_root>/.grok/config.toml` (discovered
-/// via `git2::Repository::discover`), not `cwd/.grok/config.toml`, to avoid
-/// creating config files in unexpected subdirectories.
+/// Project items are written to `<repo_root>/.grok/config.toml` (discovered via `git2::Repository::discover`), not `cwd/.grok/config.toml`.
+/// This avoids creating config files in unexpected subdirectories.
 pub fn apply_import(plan: &ImportPlan, cwd: &Path) -> anyhow::Result<ImportResult> {
     let mut result = ImportResult::default();
 
@@ -733,10 +685,8 @@ pub fn apply_import(plan: &ImportPlan, cwd: &Path) -> anyhow::Result<ImportResul
         }
     }
 
-    // The slash command (`/import-claude`) is responsible for writing the
-    // `[claude_compat] imported = true` marker via `mark_claude_imported()`.
-    // It does so regardless of `result.total()` so a user invocation that
-    // finds nothing to import still records the user's opt-in choice.
+    // The slash command (`/import-claude`) is responsible for writing the `[claude_compat] imported = true` marker via `mark_claude_imported()`
+    // It does so regardless of `result.total()` so a user invocation that finds nothing to import still records the user's opt-in choice
 
     Ok(result)
 }
@@ -760,10 +710,8 @@ impl ImportResult {
 
 /// Apply items to a single config.toml file using atomic write.
 fn apply_items_to_config(config_path: &Path, items: &[ImportableItem]) -> anyhow::Result<usize> {
-    // Read existing TOML. Surface parse errors instead of silently
-    // discarding the file: an atomic rewrite would otherwise drop
-    // unrelated sections ([model], [ui], etc.) and overwrite a hand-edited
-    // config that just happens to have a trailing comma.
+    // Read existing TOML, reporting parse errors instead of silently discarding the file
+    // An atomic rewrite would otherwise drop unrelated sections ([model], [ui], etc.) and overwrite a hand-edited config that happens to have a trailing comma
     let mut root: TomlValue = match std::fs::read_to_string(config_path) {
         Ok(s) => toml::from_str(&s).map_err(|e| {
             anyhow::anyhow!(
@@ -795,8 +743,7 @@ fn apply_items_to_config(config_path: &Path, items: &[ImportableItem]) -> anyhow
             ImportableItem::Permission(rule) => permissions.push(rule),
             ImportableItem::EnvVar { key, value } => env_vars.push((key, value)),
             ImportableItem::McpServer { name, config } => mcp_servers.push((name, config)),
-            // Hooks are written to .grok/hooks/ JSON files in apply_hooks_to_dir,
-            // not into config.toml.
+            // Hooks are written to .grok/hooks/ JSON files in apply_hooks_to_dir, not into config.toml
             ImportableItem::Hook { .. } => {}
             ImportableItem::PathEntry { kind, path } => match kind {
                 PathKind::Skill => skill_dirs.push(path.as_str()),
@@ -844,9 +791,7 @@ fn apply_items_to_config(config_path: &Path, items: &[ImportableItem]) -> anyhow
 }
 
 /// Merge permission rules into `[permission]` using the compact format.
-///
-/// Existing rules are preserved. New rules are appended to the appropriate
-/// action list (`allow`, `deny`, `ask`).
+/// Existing rules are preserved. New rules are appended to the appropriate action list (`allow`, `deny`, `ask`).
 fn merge_permissions(
     table: &mut TomlMap<String, TomlValue>,
     rules: &[&PermissionRule],
@@ -929,7 +874,7 @@ fn format_rule_string(rule: &PermissionRule) -> String {
     };
 
     match (&rule.pattern, &rule.tool) {
-        // Catch-all: any tool, no pattern → "*".
+        // Catch-all: any tool and no pattern formats to "*"
         (None, ToolFilter::Any) => "*".to_string(),
         (Some(pat), ToolFilter::Any) => pat.clone(),
         (None, _) => tool_name.to_string(),
@@ -958,7 +903,6 @@ fn merge_env_vars(table: &mut TomlMap<String, TomlValue>, vars: &[(&str, &str)])
 
     let mut count = 0;
     for (key, value) in vars {
-        // Don't overwrite existing entries.
         if !env_table.contains_key(*key) {
             env_table.insert(key.to_string(), TomlValue::String(value.to_string()));
             count += 1;
@@ -981,7 +925,6 @@ fn merge_mcp_servers(
 
     let mut count = 0;
     for (name, config) in servers {
-        // Don't overwrite existing server entries.
         if !mcp_table.contains_key(*name) {
             let serialized = toml::Value::try_from(*config)
                 .map_err(|e| anyhow::anyhow!("failed to serialize MCP server {name}: {e}"))?;
@@ -993,9 +936,8 @@ fn merge_mcp_servers(
 }
 
 /// Merge a list of path strings into `[paths] <key>` (an array of strings).
-///
-/// Existing entries are preserved; new entries that aren't already present
-/// are appended. Returns the number of newly added entries.
+/// Existing entries are preserved; new entries that aren't already present are appended.
+/// Returns the number of newly added entries.
 fn merge_paths(
     table: &mut TomlMap<String, TomlValue>,
     key: &str,
@@ -1032,11 +974,9 @@ fn merge_paths(
 
 /// Merge `Hook` items into `<hooks_dir>/imported-from-claude.json`.
 ///
-/// The output JSON is the same shape that `xai-grok-hooks` natively understands
-/// (Claude-compatible). The native hooks loader scans `.grok/hooks/*.json`
-/// directly, so this is the cleanest path — no separate config-side parser
-/// is required. Existing entries with the same `(event, matcher, command)`
-/// triple are deduped.
+/// The output JSON is the same shape that `xai-grok-hooks` natively understands (Claude-compatible).
+/// The native hooks loader scans `.grok/hooks/*.json` directly, so no separate config-side parser is required.
+/// Existing entries with the same `(event, matcher, command)` triple are deduped.
 ///
 /// Returns the number of newly added hook entries.
 fn apply_hooks_to_dir(hooks_dir: &Path, items: &[ImportableItem]) -> anyhow::Result<usize> {
@@ -1074,9 +1014,8 @@ fn apply_hooks_to_dir(hooks_dir: &Path, items: &[ImportableItem]) -> anyhow::Res
         .ok_or_else(|| anyhow::anyhow!("{}: hooks is not a JSON object", target.display()))?;
 
     let mut count = 0usize;
-    // `dirty` tracks whether we mutated the JSON in any way (including
-    // in-place timeout refreshes that don't add new entries). The file is
-    // re-written iff dirty, even when count == 0.
+    // `dirty` tracks whether we mutated the JSON in any way (including in-place timeout refreshes that don't add new entries)
+    // The file is re-written only when dirty, even when count == 0
     let mut dirty = false;
     for item in new_hooks {
         let ImportableItem::Hook {
@@ -1097,15 +1036,11 @@ fn apply_hooks_to_dir(hooks_dir: &Path, items: &[ImportableItem]) -> anyhow::Res
                 anyhow::anyhow!("{}: hooks.{} is not a JSON array", target.display(), event)
             })?;
 
-        // Dedup on `(event, matcher, command)`. If a matching entry already
-        // exists, update its `timeout` in place to the new value (so a re-import
-        // with a changed timeout reflects in the output) and skip adding a new
-        // group. Otherwise append a new group below.
+        // Dedup on `(event, matcher, command)`
+        // If a matching entry already exists, update its `timeout` in place and skip adding a new group; otherwise append a new group below
+        // A re-import with a changed timeout therefore reflects in the output
         //
-        // Invariant: `extract_hooks_from_settings_file` filters empty matcher
-        // strings to `None`, so the existing-matcher comparison only needs to
-        // distinguish `None` from `Some(s)`; we no longer need a defensive
-        // `(Some(""), None)` arm.
+        // Invariant: `extract_hooks_from_settings_file` filters empty matcher strings to `None`, so the comparison only distinguishes `None` from `Some(s)`
         let mut updated = false;
         for g in groups.iter_mut() {
             let existing_matcher = g.get("matcher").and_then(|v| v.as_str());
@@ -1223,7 +1158,6 @@ mod tests {
 
     #[test]
     fn format_rule_any_none_is_star() {
-        // Catch-all rule: Any tool, no pattern → "*".
         let rule = PermissionRule {
             action: RuleAction::Allow,
             tool: ToolFilter::Any,
@@ -1268,8 +1202,8 @@ mod tests {
         assert_eq!(parsed.tool, reparsed.tool);
         assert_eq!(parsed.pattern, reparsed.pattern);
 
-        // The Bash `:*` prefix idiom formats to the bare prefix (`Bash(sed)`),
-        // not the original string — reparsing must still yield an equivalent rule.
+        // The Bash `:*` prefix idiom formats to the bare prefix (`Bash(sed)`), not the original string
+        // Reparsing must still yield an equivalent rule
         let parsed = parse_permission_rule("Bash(sed:*)", RuleAction::Deny).unwrap();
         assert_eq!(parsed.pattern.as_deref(), Some("sed"));
         let reparsed =
@@ -1304,7 +1238,7 @@ mod tests {
         };
 
         let count = merge_permissions(&mut table, &[&rule_existing, &rule_new]).unwrap();
-        // Only the new rule should be added (existing is deduped).
+        // Only the new rule is added; the existing one is deduped
         assert_eq!(count, 1);
 
         let arr = table["permission"]["allow"].as_array().unwrap();
@@ -1327,7 +1261,7 @@ mod tests {
             &mut table,
             &[("EXISTING", "new_value"), ("NEW_VAR", "value")],
         );
-        // Only NEW_VAR should be added.
+        // Only NEW_VAR is added
         assert_eq!(count, 1);
 
         let env_table = table["env"].as_table().unwrap();
@@ -1417,20 +1351,16 @@ mod tests {
         assert!(is_claude_import_marked_at(&path));
     }
 
-    //
-    // The MARKER_CACHE is a process-global RwLock so these tests must run
-    // serially. They each set the cache to true / false via the test helper,
-    // then call the gated function and assert on its early-return behavior.
+    // The MARKER_CACHE is a process-global RwLock so these tests must run serially
+    // They each set the cache to true or false via the test helper, then call the gated function and assert on its early-return behavior
     use serial_test::serial;
 
-    /// RAII guard that resets the marker cache when dropped, so tests don't
-    /// leak state into one another.
+    /// RAII guard that resets the marker cache when dropped, so tests don't leak state into one another.
     pub(super) struct MarkerGuard;
     impl Drop for MarkerGuard {
         fn drop(&mut self) {
             reset_marker_cache_for_test();
-            // Also clear the workspace-side env-var override so it doesn't
-            // leak into subsequent tests.
+            // Also clear the workspace-side env-var override so it doesn't leak into subsequent tests
             unsafe { std::env::remove_var("_GROK_CLAUDE_MARKER_OVERRIDE") };
         }
     }
@@ -1730,7 +1660,7 @@ mod tests {
     #[serial]
     fn discover_hook_source_paths_skips_claude_when_compat_disabled() {
         let _g = MarkerGuard;
-        // Do NOT set the marker — test the compat gate in isolation.
+        // Do NOT set the marker: test the compat gate in isolation
         refresh_marker_cache(false);
         let dir = tempfile::tempdir().unwrap();
         let mut compat = xai_grok_tools::types::compat::CompatConfig::default();
@@ -1761,9 +1691,8 @@ mod tests {
     #[test]
     #[serial]
     fn as_sources_gates_project_sources_on_trust() {
-        // Trust gating lives in `HookSourcePaths::as_sources`: project sources are
-        // dropped when untrusted and kept when trusted. Assert on project sources
-        // (git_root-relative) since global sources use the real, non-injectable home.
+        // Trust gating lives in `HookSourcePaths::as_sources`: project sources are dropped when untrusted and kept when trusted
+        // Assert on project sources (git_root-relative) since global sources use the real, non-injectable home
         let _g = MarkerGuard;
         refresh_marker_cache(false);
         let dir = tempfile::tempdir().unwrap();
@@ -1795,17 +1724,14 @@ mod tests {
     #[test]
     #[serial]
     fn discover_hooks_honors_claude_compat_gate() {
-        // Pins the single load entry point every startup/reload site uses: with
-        // `compat.claude.hooks = false` a project `.claude/settings.json` hook must
-        // NOT load, and with it true it MUST. A pager e2e is disproportionate — the
-        // spawn/agent_ops wiring just forwards the resolved compat into this entry point.
+        // Pins the single load entry point every startup/reload site uses
+        // With `compat.claude.hooks = false` a project `.claude/settings.json` hook must NOT load; with it true it MUST
+        // A pager e2e is disproportionate: the spawn/agent_ops wiring just forwards the resolved compat into this entry point
         let _g = MarkerGuard;
-        // Marker unset so the Phase-2 import cutoff doesn't independently skip
-        // `.claude` — isolates the compat gate.
+        // The marker stays unset so the import cutoff doesn't independently skip `.claude`; this isolates the compat gate
         refresh_marker_cache(false);
 
-        // `discover_hooks` takes git_root directly (no git discovery), so a plain
-        // temp dir with a project `.claude/settings.json` suffices.
+        // `discover_hooks` takes git_root directly (no git discovery), so a plain temp dir with a project `.claude/settings.json` suffices
         let git_root = tempfile::tempdir().unwrap();
         let claude_dir = git_root.path().join(".claude");
         std::fs::create_dir_all(&claude_dir).unwrap();
@@ -1883,7 +1809,7 @@ mod tests {
     fn extract_hooks_malformed_hooks_field_is_silent_skip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
-        // `hooks` as a string instead of an object
+        // `hooks` is a string instead of an object
         std::fs::write(&path, r#"{ "hooks": "oops" }"#).unwrap();
         // Function early-returns when `hooks` is not an object.
         assert!(extract_hooks_from_settings_file(&path).is_empty());
@@ -1892,8 +1818,7 @@ mod tests {
     #[test]
     fn extract_hooks_empty_command_string_is_imported_as_is() {
         // Documented behavior: an empty command string is imported verbatim.
-        // Users editing `.claude/settings.json` to debug an empty-command
-        // entry will see it surface in the import summary, not silently disappear.
+        // Users editing `.claude/settings.json` to debug an empty-command entry will see it appear in the import summary, not silently disappear
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         std::fs::write(
@@ -2057,20 +1982,16 @@ extra_rule_dirs = ["/c/rules"]
 
     #[test]
     fn scan_claude_path_dirs_dedupes_global_and_project_when_same() {
-        // Simulate a workspace where project_root canonicalises to the home dir
-        // (i.e. user runs /import-claude from ~ where .claude/ already lives).
+        // Simulate a workspace where project_root canonicalises to the home dir (the user runs /import-claude from ~ where .claude/ already lives)
         // Without dedup, the same .claude/skills would land in both scopes.
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path();
         std::fs::create_dir_all(home.join(".claude").join("skills")).unwrap();
 
-        // Build a plan by directly invoking the scan with a synthetic plan
-        // and a cwd whose `find_project_root` returns the same `home`. We can't
-        // easily mock `xai_dirs::home_dir()`, so this test focuses on the dedup
-        // *logic* by manually populating `global_items` first and then
-        // asserting that calling the project-side branch with the same path
-        // would skip. Direct end-to-end coverage of the home-collision case
-        // requires `GROK_HOME` plumbing which is intentionally out of scope.
+        // Build a plan by directly invoking the scan with a synthetic plan and a cwd whose `find_project_root` returns the same `home`
+        // We can't easily mock `xai_dirs::home_dir()`, so this test focuses on the dedup *logic*
+        // It manually populates `global_items` first, then asserts that the project-side branch with the same path would skip
+        // Direct end-to-end coverage of the home-collision case requires `GROK_HOME` plumbing which is intentionally out of scope
         let global = dunce::canonicalize(home.join(".claude").join("skills")).unwrap();
         let project = dunce::canonicalize(home.join(".claude").join("skills")).unwrap();
         assert_eq!(global, project, "sanity: paths canonicalize to the same");
@@ -2108,12 +2029,10 @@ extra_rule_dirs = ["/c/rules"]
     async fn gate_resolve_permissions_with_provenance_skips_claude_when_marker_set() {
         let _g = MarkerGuard;
         refresh_marker_cache(true);
-        // Also set the env-var override so the workspace-resident marker
-        // reader (which can't see the shell-side cache) honours the gate.
+        // Also set the env-var override so the workspace-resident marker reader (which can't see the shell-side cache) honours the gate
         unsafe { std::env::set_var("_GROK_CLAUDE_MARKER_OVERRIDE", "1") };
         let dir = tempfile::tempdir().unwrap();
-        // Drop a Claude permissions file in the tempdir; with the marker set
-        // the gate should skip reading it.
+        // Drop a Claude permissions file in the tempdir; with the marker set the gate should skip reading it
         let claude_dir = dir.path().join(".claude");
         std::fs::create_dir_all(&claude_dir).unwrap();
         std::fs::write(
@@ -2133,7 +2052,8 @@ extra_rule_dirs = ["/c/rules"]
                 dir.path(),
                 true,
             )
-            .await;
+            .await
+            .resolved;
         if let Some(r) = resolved {
             let tempdir_claude = claude_dir.join("settings.json");
             use xai_grok_workspace::permission::types::RequirementSource;
@@ -2161,7 +2081,7 @@ extra_rule_dirs = ["/c/rules"]
         let mut plugins = crate::agent::config::PluginsConfig::default();
         let before_enabled = plugins.enabled.clone();
         let before_disabled = plugins.disabled.clone();
-        // Pass `None` for cwd — the gate fires before any file IO.
+        // Pass `None` for cwd: the gate fires before any file IO
         plugins.merge_claude_enabled_plugins(None);
         assert_eq!(plugins.enabled, before_enabled);
         assert_eq!(plugins.disabled, before_disabled);
@@ -2170,15 +2090,13 @@ extra_rule_dirs = ["/c/rules"]
     #[test]
     #[serial]
     fn gate_marker_cache_unset_means_uses_disk() {
-        // Sanity test: with the cache reset, `is_claude_import_marked()` must
-        // (a) not panic and (b) populate the cache for subsequent reads.
+        // Sanity test: with the cache reset, `is_claude_import_marked()` must (a) not panic and (b) populate the cache for subsequent reads
         //
-        // We intentionally **do not** assert a specific cached value — the
+        // We intentionally **do not** assert a specific cached value: the
         // dev's real `~/.grok/config.toml` may legitimately have the marker
         // set during local testing, and we can't override `grok_home()`
-        // (it's `OnceLock`-cached, so any prior test that calls it locks the
-        // value in for the entire process). The `MarkerGuard` resets the
-        // cache after this test, so subsequent gate tests start clean.
+        // It's `OnceLock`-cached, so any prior test that calls it locks the value in for the entire process
+        // The `MarkerGuard` resets the cache after this test, so subsequent gate tests start clean
         let _g = MarkerGuard;
         reset_marker_cache_for_test();
         let _ = is_claude_import_marked();

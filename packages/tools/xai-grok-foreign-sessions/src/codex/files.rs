@@ -169,8 +169,7 @@ fn collect_candidates(
             continue;
         };
         let mut date_candidates = Vec::with_capacity(limit);
-        // Enumerate every direct rollout entry in the fixed date window so
-        // filesystem order cannot decide which files receive the head-read budget.
+        // Enumerate every direct rollout entry in the fixed date window so filesystem order cannot decide which files receive the head-read budget
         let complete = date_root.for_each_entry(|name| {
             let path = date_root.join(&name);
             let Some(id) = rollout_id(&path) else {

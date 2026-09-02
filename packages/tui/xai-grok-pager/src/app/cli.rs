@@ -135,6 +135,8 @@ pub enum Command {
     Models,
     /// List, search, or restore sessions
     Sessions(crate::sessions_cmd::SessionsArgs),
+    /// Print persisted token and cost usage for a session
+    Usage(crate::usage_cmd::UsageArgs),
     /// Fetch and install managed configuration
     Setup {
         /// Print the fetched configuration as JSON instead of installing it; writes nothing to ~/.grok.
@@ -791,6 +793,11 @@ pub struct PagerArgs {
         hide = true
     )]
     pub no_memory: bool,
+    /// Run a memory flush after the headless turn (or instead of a prompt when
+    /// resuming). Calls `x.ai/memory/flush` and waits for the flush LLM.
+    /// Headless only: `/flush` as `-p` text is not a reliable flush trigger.
+    #[arg(long = "memory-flush", hide = true)]
+    pub memory_flush: bool,
     /// Agent name or definition file path.
     #[arg(long = "agent", value_name = "NAME")]
     pub agent: Option<String>,
@@ -951,7 +958,7 @@ fn strip_cur_dir(path: PathBuf) -> PathBuf {
         .collect()
 }
 impl PagerArgs {
-    pub(crate) fn memory_enabled_override(&self) -> Option<bool> {
+    pub fn memory_enabled_override(&self) -> Option<bool> {
         if self.experimental_memory {
             Some(true)
         } else if self.no_memory {
@@ -1038,12 +1045,15 @@ impl PagerArgs {
         &self,
     ) -> xai_grok_shell::session::persistence::RecentSessionSelection {
         use xai_grok_shell::session::unified_list::HeadlessPolicy;
-        let policy =
-            if self.single.is_some() || self.prompt_json.is_some() || self.prompt_file.is_some() {
-                HeadlessPolicy::Include
-            } else {
-                HeadlessPolicy::Exclude
-            };
+        let policy = if self.single.is_some()
+            || self.prompt_json.is_some()
+            || self.prompt_file.is_some()
+            || self.memory_flush
+        {
+            HeadlessPolicy::Include
+        } else {
+            HeadlessPolicy::Exclude
+        };
         xai_grok_shell::session::persistence::RecentSessionSelection::from_headless_policy(policy)
     }
     /// Classify flags for sandbox profile lookup on an existing session.
@@ -1704,6 +1714,27 @@ mod tests {
         assert!(matches!(
             args.command,
             Some(Command::Logout { bedrock: true, .. })
+        ));
+    }
+    #[test]
+    fn usage_command_parses_session_and_optional_turn() {
+        let session_only = PagerArgs::try_parse_from(["grok", "usage", "sess-1"])
+            .expect("grok usage <session-id>");
+        assert!(matches!(
+            session_only.command,
+            Some(Command::Usage(crate::usage_cmd::UsageArgs {
+                ref session_id,
+                turn: None,
+            })) if session_id == "sess-1"
+        ));
+        let with_turn = PagerArgs::try_parse_from(["grok", "usage", "sess-1", "3"])
+            .expect("grok usage <session-id> <turn>");
+        assert!(matches!(
+            with_turn.command,
+            Some(Command::Usage(crate::usage_cmd::UsageArgs {
+                ref session_id,
+                turn: Some(3),
+            })) if session_id == "sess-1"
         ));
     }
     #[test]

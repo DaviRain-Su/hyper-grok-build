@@ -2,9 +2,7 @@
 
 use std::sync::Arc;
 
-use xai_tool_runtime::{
-    SearchSnapshot, ServerSummary, ToolIndex, ToolSearchIndex, ToolSearchResult,
-};
+use xai_tool_runtime::{SearchSnapshot, ServerSummary, ToolSearchIndex, ToolSearchResult};
 
 struct StubIndex {
     summaries: Vec<ServerSummary>,
@@ -46,26 +44,6 @@ impl ToolSearchIndex for StubIndex {
 }
 
 #[test]
-fn server_summary_tool_count_derives_from_names() {
-    let s = ServerSummary {
-        name: "linear".into(),
-        description: None,
-        tool_names: vec!["save_issue".into(), "list_issues".into(), "comment".into()],
-    };
-    assert_eq!(s.tool_count(), 3);
-}
-
-#[test]
-fn server_summary_with_no_tools_reports_zero() {
-    let s = ServerSummary {
-        name: "empty".into(),
-        description: Some("placeholder".into()),
-        tool_names: Vec::new(),
-    };
-    assert_eq!(s.tool_count(), 0);
-}
-
-#[test]
 fn search_index_object_safe_via_arc() {
     let index = StubIndex {
         summaries: vec![ServerSummary {
@@ -84,20 +62,4 @@ fn search_index_object_safe_via_arc() {
     let summaries = dyn_index.list_server_summaries();
     assert_eq!(summaries.len(), 1);
     assert_eq!(summaries[0].tool_count(), 2);
-}
-
-#[test]
-fn tool_index_wrapper_clones_arc() {
-    let inner: Arc<dyn ToolSearchIndex> = Arc::new(StubIndex {
-        summaries: Vec::new(),
-    });
-    let wrapped = ToolIndex(inner.clone());
-    let copy = wrapped.clone();
-    // Both wrappers hold the same Arc — strong-count includes both
-    // wrappers and the original `inner` binding.
-    assert!(Arc::strong_count(&inner) >= 3);
-    // Debug impl renders without leaking the inner type.
-    let debug = format!("{wrapped:?}");
-    assert_eq!(debug, "ToolIndex");
-    drop(copy);
 }

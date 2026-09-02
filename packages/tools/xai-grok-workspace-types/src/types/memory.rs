@@ -8,8 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// One entry returned from a memory search.
 ///
-/// Carries an optional `f32` `score`, which prevents a useful `Eq`
-/// derive (`f32` is `PartialEq` but not `Eq`).
+/// Carries an optional `f32` `score`, which prevents a useful `Eq` derive (`f32` is `PartialEq` but not `Eq`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MemoryChunk {
     /// Stable identifier (typically the memory entry's hash or path).

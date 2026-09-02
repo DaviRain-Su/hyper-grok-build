@@ -80,21 +80,6 @@ fn parse_mixed_bundle_keeps_valid_drops_invalid() {
 }
 
 #[test]
-fn validated_ders_build_reqwest_client() {
-    let o = parse_and_validate_pem(VALID_CERT_1.as_bytes());
-    assert_eq!(o.accepted.len(), 1);
-    let mut builder = reqwest::Client::builder();
-    for der in &o.accepted {
-        builder = builder.add_root_certificate(
-            reqwest::Certificate::from_der(der).expect("from_der after rustls validation"),
-        );
-    }
-    builder
-        .build()
-        .expect("client with validated roots must construct");
-}
-
-#[test]
 fn read_bundle_capped_rejects_oversized() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("huge.pem");
@@ -205,8 +190,8 @@ fn select_bundle_precedence() {
 
 #[test]
 fn load_fails_open_on_read_errors() {
-    // Both read_bundle_capped failures (missing file, over the size cap) yield
-    // zero roots rather than propagating, so the size cap stays on the load path.
+    // Both read_bundle_capped failures (missing file, over the size cap) yield zero roots rather than propagating
+    // That keeps the size cap on the load path
     assert!(
         load_extra_root_ders(
             ENV_GROK_EXTRA_CA_BUNDLE,

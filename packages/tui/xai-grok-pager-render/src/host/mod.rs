@@ -48,9 +48,9 @@ impl HostOs {
     }
 }
 
-/// WSL detection. The implementation lives in `xai-tty-utils` (the shared
-/// low-level crate) so crates that must not depend on this UI crate can reuse
-/// it; re-exported here so existing `host::is_wsl()` callers are unchanged.
+/// WSL detection.
+/// The implementation lives in `xai-tty-utils` (the shared low-level crate) so crates that must not depend on this UI crate can reuse it.
+/// The re-export keeps existing `host::is_wsl()` callers unchanged.
 pub use xai_tty_utils::is_wsl;
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, strum::Display)]
@@ -66,8 +66,7 @@ pub enum DisplayServer {
 }
 
 impl DisplayServer {
-    /// Detect the display server. Cached for process lifetime on Linux
-    /// (env vars don't change); compile-time constant on macOS/Windows.
+    /// Detect the display server. Cached for process lifetime on Linux (env vars don't change); compile-time constant on macOS/Windows.
     pub fn current() -> Self {
         static CACHE: OnceLock<DisplayServer> = OnceLock::new();
         *CACHE.get_or_init(|| {
@@ -127,8 +126,7 @@ mod unicode_env_tests {
     }
 }
 
-// All remaining tests here are Linux-only DisplayServer tests; WSL detection
-// tests live with the implementation in `xai-tty-utils`.
+// All remaining tests here are Linux-only DisplayServer tests; WSL detection tests live with the implementation in `xai-tty-utils`
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;

@@ -50,16 +50,14 @@ const MIN_CPU_WINDOW: Duration = Duration::from_millis(1);
 
 #[doc(hidden)]
 pub fn snapshot() -> ProcessMetrics {
-    // Clock and CPU read inside the lock: concurrent snapshots must
-    // partition time.
+    // Clock and CPU read inside the lock: concurrent snapshots must partition time
     let sample = {
         let mut baseline = CPU_BASELINE.lock();
         let now = Instant::now();
         let cpu = xai_tty_utils::sample_process_cpu();
 
         let mut window = None;
-        // Advance only when a window is derived: this series' emitted
-        // windows partition its time exactly.
+        // Advance only when a window is derived: this series' emitted windows partition its time exactly
         match (&*baseline, cpu.self_time) {
             (Some(prev), Some(cpu_time)) => {
                 let elapsed = now.saturating_duration_since(prev.taken_at);
