@@ -4,6 +4,37 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [1.0.16-r1] — 2026-09-02
+
+### Added
+- **Upstream sync** — Merged official `xai-org/grok-build` `main` at `72a61251`
+  (monorepo `SOURCE_REV` `a549186…`, official releases 1.0.13–1.0.16, ~70
+  upstream changes). Highlights: length-truncated responses auto-continue
+  (`SyntheticReason::LengthContinue` + length salvage with a remote setting),
+  reasoning effort is now a setting with per-effort model ids, prompt
+  suggestions are cache-first with a single startup settings fetch, turn
+  finalization is arbitrated on exact turn epochs, sampler prewarm + stream
+  span timing, PostToolUse hooks contribute feedback and context, MCP
+  2026-07-28 elicitation and bind-time MCP servers, managed MCP/plugin/
+  marketplace policy engine, enterprise model pinning via signed
+  requirements.toml, `grok usage <session-id>` per-turn token/cost history,
+  panel dock (gated) consolidating Subagents/Tasks/Watchers/Queued above the
+  prompt, ACP `session/set_config_option`, 1-hour get-output wait cap, /copy +
+  /export tip after repeated drag-copies, and security fixes for the native
+  Write/Edit deny-rule symlink bypass and the GROK_CHANNEL config.toml RCE.
+
+### Fixed
+- **Post-merge fork adaptation** — ported upstream changes that rename
+  detection could not map onto the flattened/moved fork files: sampler
+  `StreamSpanTiming`/`stream_classify` + `first_use_noted` in `client.rs`,
+  `PooledClient` API in `shared_http.rs`, `LengthContinue` in the flattened
+  `conversation.rs`, `usage_cmd`/`export_copy` module wiring; restored
+  upstream-added files lost mid-merge (`managed_policy/` module,
+  enterprise fixtures, message-delivery lifecycle); migrated fork-only
+  callers to upstream's `TurnOutcome::Completed { stop }`,
+  4-arg `handle_sampling_failure`, async `effective_tool_overrides()`,
+  `ModelEntryConfig::variants`, and `ToolResultItem::is_error`.
+
 ## [1.0.12-r2] — 2026-08-31
 
 ### Fixed
